@@ -1,0 +1,24 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "assignAutomerge": true,
+  "assigneesFromCodeOwners": true,
+  "reviewersFromCodeOwners": true,
+  "extends": [
+    "github>Netcracker/qubership-core-infra:renovate-core-config",
+    ":semanticCommitTypeAll(chore)"
+  ],
+  "packageRules": [
+    {
+      "description": "The Kubernetes libraries and controller-runtime move as a set: controller-runtime pins the k8s.io minor it was built against, and the Makefile derives the envtest control-plane version from k8s.io/api. Upgrading one alone gives a build that compiles against one version and tests against another.",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": [
+        "k8s.io/api",
+        "k8s.io/apimachinery",
+        "k8s.io/client-go",
+        "k8s.io/klog/v2",
+        "sigs.k8s.io/controller-runtime"
+      ],
+      "groupName": "kubernetes"
+    }
+  ]
+}
