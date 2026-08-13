@@ -10,7 +10,11 @@ image:
 # Deployments is a values change rather than a code change.
 mode: all
 
-replicaCount: 1
+# REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
+# the resource profile, not here — one source of truth, so the defaults cannot
+# drift away from the profiles. values.schema.json requires them, so installing
+# without `-f resource-profiles/<profile>.yaml` fails with a clear message
+# instead of rendering a Deployment with empty resources.
 
 # Leader election gates status writes only. The rate limit endpoint and its rule
 # store run on every replica, so scaling out does not depend on this setting.
@@ -51,13 +55,6 @@ serviceAccount:
   # Defaults to the chart's fullname when empty.
   name: ""
 
-resources:
-  requests:
-    cpu: 10m
-    memory: 64Mi
-  limits:
-    cpu: 500m
-    memory: 256Mi
 
 podAnnotations: {}
 nodeSelector: {}

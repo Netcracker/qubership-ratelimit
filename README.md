@@ -34,8 +34,18 @@ other replica answering checks from an empty store — limits that apply on some
 ```bash
 helm upgrade --install ratelimit helm-templates/ratelimit \
   --namespace <business-namespace> \
+  -f helm-templates/ratelimit/resource-profiles/dev.yaml \
   --set image.tag=<tag>
 ```
+
+The profile is not optional. `resource-profiles/` holds the four the platform deployer picks from — `dev`, `dev-ha`,
+`prod-nonha`, `prod` — and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT` and
+`REPLICAS`. `values.schema.json` requires all five, so an install without `-f` fails with
+`missing properties 'REPLICAS', 'CPU_REQUEST', ...` rather than rendering a Deployment with empty resources. The `-ha`
+and `prod` profiles differ from their siblings only by running two replicas.
+
+`MEMORY_LIMIT` is not only a cgroup ceiling: the platform's `memlimit` package derives `GOMEMLIMIT` from it at startup,
+so it governs when the Go heap starts collecting.
 
 The chart installs a `ServiceAccount`, a `Role` and `RoleBinding` pair, a `Deployment`, a `Service`, the CRD, and one
 `EnvoyFilter` per enabled gateway. It installs no `ClusterRole` and no `ClusterRoleBinding`.

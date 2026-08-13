@@ -30,7 +30,7 @@ ORIGINAL_REPLICAS=$(kubectl get deployment "${OPERATOR_SVC}" -n "${NAMESPACE}" -
 cleanup() {
   kubectl delete ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" --ignore-not-found
   helm upgrade "${RELEASE}" "${CHART}" -n "${NAMESPACE}" --reuse-values \
-    --set "replicaCount=${ORIGINAL_REPLICAS}" --wait --timeout 3m >/dev/null 2>&1 || true
+    --set "REPLICAS=${ORIGINAL_REPLICAS}" --wait --timeout 3m >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -53,7 +53,7 @@ apply_policy "${POLICY}" "${DOMAIN}"
 # 1. Two replicas, one leader
 # ---------------------------------------------------------------------------
 helm upgrade "${RELEASE}" "${CHART}" -n "${NAMESPACE}" --reuse-values \
-  --set replicaCount=2 --wait --timeout 3m >/dev/null
+  --set REPLICAS=2 --wait --timeout 3m >/dev/null
 kubectl rollout status "deployment/${OPERATOR_SVC}" -n "${NAMESPACE}" --timeout=120s
 
 READY=$(kubectl get deployment "${OPERATOR_SVC}" -n "${NAMESPACE}" -o jsonpath='{.status.readyReplicas}')
