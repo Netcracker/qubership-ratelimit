@@ -1,0 +1,225 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "$id": "https://netcracker.com/ratelimit-operator/values.schema.json",
+  "type": "object",
+  "title": "The ratelimit-operator schema.",
+  "description": "JSON Schema for ratelimit-operator.",
+  "required": [
+    "image",
+    "mode",
+    "rls",
+    "ISTIO_PUBLIC_GATEWAY_NAME",
+    "ISTIO_PRIVATE_GATEWAY_NAME",
+    "gateways"
+  ],
+  "properties": {
+    "nameOverride": {
+      "type": "string",
+      "title": "Chart name override",
+      "description": "Replaces the chart name in resource names and labels."
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "title": "Full name override",
+      "description": "Replaces the generated name of the Deployment, Service, ServiceAccount and RBAC pair. The Service name is part of the gRPC cluster address in the EnvoyFilter, so overriding it rewrites that address too."
+    },
+    "image": {
+      "type": "object",
+      "title": "Operator image",
+      "required": [
+        "repository",
+        "tag"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "title": "Image repository"
+        },
+        "tag": {
+          "type": "string",
+          "title": "Image tag"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "title": "Image pull policy",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "mode": {
+      "type": "string",
+      "title": "Components to run",
+      "description": "all runs the controller and the rate limit service in one Deployment. controller and rls exist for a future split; only all is exercised today.",
+      "enum": [
+        "all",
+        "controller",
+        "rls"
+      ],
+      "default": "all"
+    },
+    "replicaCount": {
+      "type": "integer",
+      "title": "Replica count",
+      "minimum": 1,
+      "default": 1
+    },
+    "leaderElect": {
+      "type": "boolean",
+      "title": "Leader election",
+      "description": "Gates status writes only. The rate limit endpoint and its rule store run on every replica.",
+      "default": true
+    },
+    "logLevel": {
+      "type": "string",
+      "title": "Log level",
+      "enum": [
+        "debug",
+        "info",
+        "error"
+      ],
+      "default": "info"
+    },
+    "rls": {
+      "type": "object",
+      "title": "Rate limit service",
+      "required": [
+        "port"
+      ],
+      "properties": {
+        "port": {
+          "type": "integer",
+          "title": "gRPC port",
+          "description": "Port of the Envoy rate limit service. 8081 is reserved for the health probes.",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 9000
+        },
+        "timeout": {
+          "type": "string",
+          "title": "Check timeout",
+          "description": "Envoy-side timeout for a rate limit check, as a protobuf duration: seconds with an optional fraction, e.g. 0.05s. Go-style values such as 50ms are rejected by Envoy.",
+          "pattern": "^[0-9]+(\\.[0-9]+)?s$",
+          "default": "0.05s"
+        },
+        "failClosed": {
+          "type": "boolean",
+          "title": "Fail closed",
+          "description": "true rejects traffic when the rate limit service is unreachable (failure_mode_deny). Keep false while the service is an allow-all stub.",
+          "default": false
+        }
+      }
+    },
+    "healthProbe": {
+      "type": "object",
+      "title": "Health probe endpoint",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8081
+        }
+      }
+    },
+    "ISTIO_PUBLIC_GATEWAY_NAME": {
+      "type": "string",
+      "title": "Public gateway name",
+      "description": "Name of the public Istio gateway. Shared deployment parameter: must equal ISTIO_PUBLIC_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "minLength": 1,
+      "default": "public-gateway"
+    },
+    "ISTIO_PRIVATE_GATEWAY_NAME": {
+      "type": "string",
+      "title": "Private gateway name",
+      "description": "Name of the private Istio gateway. Shared deployment parameter: must equal ISTIO_PRIVATE_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "minLength": 1,
+      "default": "private-gateway"
+    },
+    "gateways": {
+      "type": "object",
+      "title": "Rate limited gateways",
+      "description": "One EnvoyFilter is rendered per enabled gateway. The gateway names come from the ISTIO_*_GATEWAY_NAME parameters, not from here.",
+      "properties": {
+        "public": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render an EnvoyFilter for this gateway.",
+              "default": true
+            },
+            "domain": {
+              "type": "string",
+              "title": "Rate limit domain",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the operator log.",
+              "minLength": 1
+            },
+            "namespace": {
+              "type": "string",
+              "title": "Gateway namespace",
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to the release namespace, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+            }
+          }
+        },
+        "private": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render an EnvoyFilter for this gateway.",
+              "default": true
+            },
+            "domain": {
+              "type": "string",
+              "title": "Rate limit domain",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the operator log.",
+              "minLength": 1
+            },
+            "namespace": {
+              "type": "string",
+              "title": "Gateway namespace",
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to the release namespace, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+            }
+          }
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "default": true
+        },
+        "name": {
+          "type": "string",
+          "description": "Defaults to the chart's fullname when empty."
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "title": "Container resources"
+    },
+    "podAnnotations": {
+      "type": "object",
+      "title": "Extra pod annotations"
+    },
+    "nodeSelector": {
+      "type": "object",
+      "title": "Node selector"
+    },
+    "tolerations": {
+      "type": "array",
+      "title": "Tolerations"
+    },
+    "affinity": {
+      "type": "object",
+      "title": "Affinity"
+    }
+  }
+}

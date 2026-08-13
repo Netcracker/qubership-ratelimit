@@ -1,0 +1,11 @@
+apiVersion: ratelimit.netcracker.com/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: public-gateway
+  labels:
+    app.kubernetes.io/name: ratelimit-operator
+spec:
+  # Must equal the domain in the public gateway's rate limit filter, which the
+  # Helm chart renders from .Values.gateways[].domain. Nothing validates the
+  # match; a typo shows up as an "unknown rate limit domain" line in the operator log.
+  domain: gateway.public

@@ -1,0 +1,7 @@
+apiVersion: v2
+appVersion: "0.1.0"
+description: Rate limit operator and Envoy rate limit service for Istio ambient gateways
+name: ratelimit-operator
+type: application
+# The effective version is computed during Helm generation
+version: 0.0.1

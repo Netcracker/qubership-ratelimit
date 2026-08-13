@@ -1,0 +1,23 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: qubership-ratelimit-system
+rules:
+- apiGroups:
+  - ratelimit.netcracker.com
+  resources:
+  - ratelimitpolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ratelimit.netcracker.com
+  resources:
+  - ratelimitpolicies/status
+  verbs:
+  - get
+  - patch
+  - update

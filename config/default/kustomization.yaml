@@ -1,0 +1,11 @@
+# Adds namespace to all resources.
+namespace: qubership-ratelimit-system
+
+# Value of this field is prepended to the names of all resources, e.g. a
+# Deployment named "controller-manager" becomes "qubership-ratelimit-controller-manager".
+namePrefix: qubership-ratelimit-
+
+resources:
+  - ../crd
+  - ../rbac
+  - ../manager

@@ -1,0 +1,69 @@
+{{- $root := . -}}
+{{- $cluster := include "ratelimit-operator.rlsCluster" . -}}
+{{- $roles := dict
+      "public"  (dict "gatewayName" $root.Values.ISTIO_PUBLIC_GATEWAY_NAME  "config" $root.Values.gateways.public)
+      "private" (dict "gatewayName" $root.Values.ISTIO_PRIVATE_GATEWAY_NAME "config" $root.Values.gateways.private)
+-}}
+{{- range $role, $entry := $roles }}
+{{- $config := $entry.config | default dict }}
+{{- if $config.enabled }}
+{{- $gatewayName := required (printf "gateways.%s is enabled, so ISTIO_%s_GATEWAY_NAME must be set" $role (upper $role)) $entry.gatewayName }}
+{{- $namespace := $config.namespace | default $root.Release.Namespace }}
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: {{ printf "%s-%s" (include "ratelimit-operator.fullname" $root) $gatewayName | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "ratelimit-operator.labels" $root | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $gatewayName }}
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.ratelimit
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
+            domain: {{ $config.domain }}
+            failure_mode_deny: {{ $root.Values.rls.failClosed }}
+            timeout: {{ $root.Values.rls.timeout }}
+            rate_limit_service:
+              transport_api_version: V3
+              grpc_service:
+                envoy_grpc:
+                  cluster_name: {{ $cluster }}
+    - applyTo: VIRTUAL_HOST
+      match:
+        context: GATEWAY
+      patch:
+        operation: MERGE
+        value:
+          rate_limits:
+            - actions:
+                - request_headers:
+                    header_name: ":path"
+                    descriptor_key: path
+                - request_headers:
+                    header_name: "authorization"
+                    descriptor_key: token
+                    skip_if_absent: true
+                - request_headers:
+                    header_name: "x-request-id"
+                    descriptor_key: request_id
+                    skip_if_absent: true
+{{- end }}
+{{- end }}

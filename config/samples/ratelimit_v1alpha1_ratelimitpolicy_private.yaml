@@ -1,0 +1,8 @@
+apiVersion: ratelimit.netcracker.com/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: private-gateway
+  labels:
+    app.kubernetes.io/name: ratelimit-operator
+spec:
+  domain: gateway.private

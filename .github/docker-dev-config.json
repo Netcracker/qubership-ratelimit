@@ -1,0 +1,10 @@
+{
+    "components" : [
+      {
+        "name": "qubership-ratelimit-operator",
+        "file": "./Dockerfile",
+        "context": "."
+      }
+    ],
+    "platforms" : "linux/amd64,linux/arm64"
+  }

@@ -1,0 +1,65 @@
+# ============== IMAGE ============================
+image:
+  repository: ghcr.io/netcracker/ratelimit-operator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# ============== OPERATOR ============================
+# Components this Deployment runs: all, controller or rls. Controller and RLS
+# engine share one binary today; the flag exists so that splitting them into two
+# Deployments is a values change rather than a code change.
+mode: all
+
+replicaCount: 1
+
+# Leader election gates status writes only. The rate limit endpoint and its rule
+# store run on every replica, so scaling out does not depend on this setting.
+leaderElect: true
+
+# Passed as LOG_LEVEL and read through configloader by the platform logger.
+logLevel: info
+
+# ============== RATE LIMIT SERVICE ============================
+rls:
+  port: 9000
+  timeout: 0.05s
+  failClosed: false
+
+healthProbe:
+  port: 8081
+
+ISTIO_PUBLIC_GATEWAY_NAME: public-gateway
+ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
+
+# What this chart owns per gateway: whether to rate limit it, and under which
+# domain. The domain is the binding key — it must equal spec.domain of the
+# RateLimitPolicy that carries this gateway's rules. Nothing validates the match;
+# a typo shows up only as an "unknown rate limit domain" line in the operator log.
+#
+# namespace is optional and defaults to the release namespace.
+gateways:
+  public:
+    enabled: true
+    domain: gateway.public
+  private:
+    enabled: true
+    domain: gateway.private
+
+# ============== KUBERNETES ============================
+serviceAccount:
+  create: true
+  # Defaults to the chart's fullname when empty.
+  name: ""
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
