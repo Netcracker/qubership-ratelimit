@@ -36,4 +36,5 @@ jobs:
       # Matches k8s.io/api in go.mod, so the test control plane cannot drift from
       # the client libraries the service is built against.
       kube-version: '1.36.0'
+      sonar-project-key: ${{ vars.SONAR_PROJECT_KEY }}
     secrets: inherit
