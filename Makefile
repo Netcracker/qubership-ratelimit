@@ -93,6 +93,16 @@ test: manifests generate fmt vet setup-envtest ## Run all tests, including the e
 	@echo "Running tests with KUBEBUILDER_ASSETS=$$("$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)"
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $(TEST_PKGS) -coverprofile cover.out
 
+# The e2e suite drives real traffic through the gateways, so it needs a cluster
+# with Istio ambient, the gateways, and this chart already installed. It changes
+# no release: install first, then run.
+.PHONY: test-e2e
+test-e2e: ## Run the end-to-end suite against an installed release.
+	NAMESPACE="$(E2E_NAMESPACE)" bash tests/e2e/test-suite.sh '$(E2E_TEST)'
+
+E2E_NAMESPACE ?= core
+E2E_TEST ?= *
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter.
 	"$(GOLANGCI_LINT)" run

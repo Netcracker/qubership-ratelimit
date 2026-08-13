@@ -89,6 +89,24 @@ make lint               # golangci-lint
 make helm-lint          # helm lint against values.schema.json
 ```
 
+`make test-e2e` runs the suite in `tests/e2e/` against a cluster that already has Istio ambient, the two gateways,
+and this chart installed — it installs nothing and uninstalls nothing, so point it at a namespace where the release is
+already deployed:
+
+```bash
+make test-e2e E2E_NAMESPACE=core
+```
+
+It covers what no unit test can: that a policy event reaches the store in the running pod, that the gateway is
+configured with this release's Service and the agreed descriptors, that traffic over the limit is refused with 429 and
+allowed again when the window reopens, that the two gateways count independently, and that a check logs its domain and
+path and request id while never logging the `Authorization` value.
+
+The `leader` test is the exception to "changes nothing": the leader-election split cannot be observed with a single
+replica, so it scales the release to two, kills the leader, and asserts that rate limiting continues while the lease
+moves and that the new leader resumes status writes. It restores the original replica count through Helm — a
+`kubectl scale` would take field-manager ownership of `.spec.replicas` and make every later `helm upgrade` conflict.
+
 `make test` runs `internal/controller` against a real API server through envtest, which is where the CRD schema and
 the status subresource actually exist — the fake client the other tests use validates nothing. The first run downloads
 the envtest binaries into `bin/`, so it needs internet; `make test-unit` never does. Both derive their Kubernetes

@@ -1,0 +1,121 @@
+# End-to-end tests
+#
+# Stands up a kind cluster with the platform's own mesh — qubership-istio for
+# the distribution and qubership-core-mesh-config for the gateways — installs
+# the chart with an image built from the checked-out sources, and runs tests/e2e.
+
+name: E2E
+
+run-name: >
+  E2E —
+  ${{ github.event_name == 'push' && format('push [{0}]', github.event.head_commit.message) || '' }}
+  ${{ github.event_name == 'pull_request' && format('PR ({0}) [{1}]', github.head_ref, github.event.pull_request.title) || '' }}
+
+on:
+  push:
+    branches:
+      - main
+      - 'lts/**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+env:
+  GATEWAY_API_VERSION: v1.4.0
+  ISTIO_REPO: https://github.com/Netcracker/qubership-istio.git
+  ISTIO_REF: main
+  MESH_CONFIG_REPO: https://github.com/Netcracker/qubership-core-mesh-config.git
+  MESH_CONFIG_REF: main
+  # Gateways, chart and policies all live in one namespace — the deployment
+  # model the operator is built for.
+  E2E_NAMESPACE: ratelimit-e2e
+  IMAGE: ratelimit:e2e
+
+jobs:
+  e2e:
+    name: e2e (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build operator image
+        run: docker build -t "${IMAGE}" .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: ratelimit-e2e
+
+      # kind nodes cannot reach the local docker daemon, so the image has to be
+      # side-loaded. The chart's IfNotPresent policy then uses it as-is.
+      - name: Load the image into kind
+        run: kind load docker-image "${IMAGE}" --name ratelimit-e2e
+
+      - name: Install Gateway API CRDs
+        run: |
+          kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+
+      # The distribution under which the operator is expected to run, installed
+      # the same way cloud-core-local-dev installs it. --force-conflicts because
+      # istiod takes runtime ownership of validating-webhook fields.
+      - name: Install qubership-istio
+        run: |
+          git clone --depth 1 --branch "${ISTIO_REF}" "${ISTIO_REPO}" /tmp/qubership-istio
+          helm dependency update /tmp/qubership-istio/helm-templates/qubership-istio
+          kubectl create namespace istio-system
+          helm upgrade --install qubership-istio /tmp/qubership-istio/helm-templates/qubership-istio \
+            --namespace istio-system \
+            --set global.istioNamespace=istio-system \
+            --set MONITORING_ENABLED=false \
+            --force-conflicts \
+            --wait --timeout 10m
+          kubectl rollout status deployment/istiod -n istio-system --timeout=300s
+          kubectl rollout status daemonset/ztunnel -n istio-system --timeout=300s
+          kubectl rollout status daemonset/istio-cni-node -n istio-system --timeout=300s
+
+      - name: Install qubership-core-mesh-config
+        run: |
+          git clone --depth 1 --branch "${MESH_CONFIG_REF}" "${MESH_CONFIG_REPO}" /tmp/mesh-config
+          kubectl create namespace "${E2E_NAMESPACE}"
+          kubectl label namespace "${E2E_NAMESPACE}" istio.io/dataplane-mode=ambient --overwrite
+          kubectl label namespace "${E2E_NAMESPACE}" istio.io/use-waypoint=waypoint --overwrite
+
+          helm upgrade --install core-istio-mesh /tmp/mesh-config \
+            --namespace "${E2E_NAMESPACE}" \
+            -f /tmp/mesh-config/resource-profiles/dev.yaml \
+            --set SERVICE_MESH_TYPE=Istio \
+            --set MONITORING_ENABLED=false \
+            --set CPU_REQUEST=10m \
+            --set WAYPOINT_CPU_REQUEST=100m \
+            --wait --timeout 10m
+
+          for gw in public-gateway private-gateway; do
+            kubectl wait "gateways.gateway.networking.k8s.io/${gw}" -n "${E2E_NAMESPACE}" \
+              --for=condition=Programmed --timeout=300s
+            kubectl rollout status "deployment/${gw}-istio" -n "${E2E_NAMESPACE}" --timeout=300s
+          done
+
+      - name: Install the chart
+        run: |
+          helm upgrade --install ratelimit helm-templates/ratelimit \
+            --namespace "${E2E_NAMESPACE}" \
+            --set image.repository=ratelimit \
+            --set image.tag=e2e \
+            --wait --timeout 5m
+
+      - name: Run e2e tests
+        run: make test-e2e E2E_NAMESPACE="${E2E_NAMESPACE}"
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl get all,ratelimitpolicies,envoyfilters,gateways.gateway.networking.k8s.io,httproutes \
+            -n "${E2E_NAMESPACE}" -o wide || true
+          kubectl describe pods -n "${E2E_NAMESPACE}" || true
+          kubectl logs -n "${E2E_NAMESPACE}" -l app.kubernetes.io/name=ratelimit --tail=200 || true
+          kubectl get pods -n istio-system -o wide || true
+          kubectl logs -n istio-system -l app=istiod --tail=100 || true
