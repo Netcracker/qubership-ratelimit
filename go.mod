@@ -1,4 +1,4 @@
-module github.com/netcracker/qubership-ratelimit-operator
+module github.com/netcracker/qubership-ratelimit
 
 go 1.26.5
 

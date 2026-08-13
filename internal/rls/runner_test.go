@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/netcracker/qubership-ratelimit-operator/internal/store"
+	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 func freeAddr(t *testing.T) string {

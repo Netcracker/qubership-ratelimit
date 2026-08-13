@@ -26,10 +26,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit-operator/api/v1alpha1"
-	"github.com/netcracker/qubership-ratelimit-operator/internal/controller"
-	"github.com/netcracker/qubership-ratelimit-operator/internal/rls"
-	"github.com/netcracker/qubership-ratelimit-operator/internal/store"
+	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/internal/controller"
+	"github.com/netcracker/qubership-ratelimit/internal/rls"
+	"github.com/netcracker/qubership-ratelimit/internal/store"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -42,9 +42,9 @@ const (
 	modeRLS        = "rls"
 )
 
-// loggerName prefixes every log line this operator writes. Sub-loggers are
-// derived from it, e.g. ratelimit-operator/rls.
-const loggerName = "ratelimit-operator"
+// loggerName prefixes every log line this service writes. Sub-loggers are
+// derived from it, e.g. ratelimit/rls.
+const loggerName = "ratelimit"
 
 var (
 	scheme   = runtime.NewScheme()
@@ -93,7 +93,7 @@ func main() {
 	klog.SetLogger(logrLogger)
 
 	if err := run(mode, probeAddr, rlsAddr, enableLeaderElection, storeDebounce, drainTimeout); err != nil {
-		setupLog.Errorf("operator exited with an error: %v", err)
+		setupLog.Errorf("service exited with an error: %v", err)
 		os.Exit(1)
 	}
 }
@@ -191,7 +191,7 @@ func run(
 		return fmt.Errorf("add readiness check: %w", err)
 	}
 
-	setupLog.Infof("starting operator mode=%v namespace=%v leaderElection=%v",
+	setupLog.Infof("starting service mode=%v namespace=%v leaderElection=%v",
 		mode, watchNamespace, enableLeaderElection && runController)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		return fmt.Errorf("run manager: %w", err)

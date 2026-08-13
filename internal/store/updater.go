@@ -10,7 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit-operator/api/v1alpha1"
+	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
 // DefaultDebounce is how long the updater waits after the first event of a burst

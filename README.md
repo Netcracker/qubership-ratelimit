@@ -1,6 +1,6 @@
-# ratelimit-operator
+# ratelimit
 
-Rate limiting for an Istio ambient mesh with two ingress gateways. The gateways call this operator over the Envoy
+Rate limiting for an Istio ambient mesh with two ingress gateways. The gateways call this service over the Envoy
 rate limit service (RLS) protocol; the rules arrive as `RateLimitPolicy` custom resources.
 
 | Item                     | Value                                          |
@@ -15,7 +15,7 @@ rate limit service (RLS) protocol; the rules arrive as `RateLimitPolicy` custom 
 
 A policy binds to a gateway through a domain string that has to match on both sides: the gateway's rate limit filter
 carries it, and the CR names it. Nothing validates the match. A mismatch surfaces only as an
-`unknown rate limit domain` line in the operator log, so that line is the one to alert on.
+`unknown rate limit domain` line in the service log, so that line is the one to alert on.
 
 Controller and RLS engine share one binary and one Deployment. `--mode=all|controller|rls` selects the components, so
 splitting them later is a Helm change rather than a refactor. Only `all` is exercised today.
@@ -32,7 +32,7 @@ other replica answering checks from an empty store — limits that apply on some
 ## Install
 
 ```bash
-helm upgrade --install ratelimit helm-templates/ratelimit-operator \
+helm upgrade --install ratelimit helm-templates/ratelimit \
   --namespace <business-namespace> \
   --set image.tag=<tag>
 ```
@@ -75,7 +75,7 @@ has to follow the gateway.
 object. With several per-namespace releases, the releases race for its ownership and version. The chart annotates it
 with `helm.sh/resource-policy: keep` so that uninstalling one release does not take the CRD — and every other
 namespace's policies — with it. Settle CRD upgrade ownership with the platform team: this is a deploy-time concern, and
-the operator itself never touches the CRD object.
+the service itself never touches the CRD object.
 
 ## Develop
 
@@ -92,16 +92,16 @@ make helm-lint          # helm lint against values.schema.json
 `make test` runs `internal/controller` against a real API server through envtest, which is where the CRD schema and
 the status subresource actually exist — the fake client the other tests use validates nothing. The first run downloads
 the envtest binaries into `bin/`, so it needs internet; `make test-unit` never does. Both derive their Kubernetes
-version from `go.mod`, so the test control plane cannot drift from the client libraries the operator is built against.
+version from `go.mod`, so the test control plane cannot drift from the client libraries the service is built against.
 
-`helm-templates/ratelimit-operator/templates/crd-ratelimitpolicies.yaml` is generated. Edit the Go types and
+`helm-templates/ratelimit/templates/crd-ratelimitpolicies.yaml` is generated. Edit the Go types and
 run `make sync-helm-crds` instead of editing it.
 
-Run the operator against your current kubeconfig:
+Run the service against your current kubeconfig:
 
 ```bash
 CLOUD_NAMESPACE=<ns> make run
 ```
 
 `CLOUD_NAMESPACE` has no default. An unset value is a startup error, not a fallback to watching the cluster — it is
-what keeps the operator's RBAC a `Role`. It is read through `configloader`, so any property source the platform configures can supply it.
+what keeps the service's RBAC a `Role`. It is read through `configloader`, so any property source the platform configures can supply it.

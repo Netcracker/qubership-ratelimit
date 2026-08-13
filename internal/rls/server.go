@@ -9,7 +9,7 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/xrequestid"
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/ctxmanager"
 
-	"github.com/netcracker/qubership-ratelimit-operator/internal/store"
+	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 // Logger is the part of the platform logger the server needs.

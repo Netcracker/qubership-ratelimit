@@ -3,9 +3,9 @@ kind: RateLimitPolicy
 metadata:
   name: public-gateway
   labels:
-    app.kubernetes.io/name: ratelimit-operator
+    app.kubernetes.io/name: ratelimit
 spec:
   # Must equal the domain in the public gateway's rate limit filter, which the
   # Helm chart renders from .Values.gateways[].domain. Nothing validates the
-  # match; a typo shows up as an "unknown rate limit domain" line in the operator log.
+  # match; a typo shows up as an "unknown rate limit domain" line in the service log.
   domain: gateway.public

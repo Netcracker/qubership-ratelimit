@@ -1,10 +1,10 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ratelimit-operator.fullname" . }}
+  name: {{ include "ratelimit.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "ratelimit-operator.labels" . | nindent 4 }}
+    {{- include "ratelimit.labels" . | nindent 4 }}
 spec:
   type: ClusterIP
   ports:
@@ -14,4 +14,4 @@ spec:
       targetPort: grpc
       protocol: TCP
   selector:
-    {{- include "ratelimit-operator.selectorLabels" . | nindent 4 }}
+    {{- include "ratelimit.selectorLabels" . | nindent 4 }}

@@ -1,10 +1,10 @@
 # ============== IMAGE ============================
 image:
-  repository: ghcr.io/netcracker/ratelimit-operator
+  repository: ghcr.io/netcracker/ratelimit
   tag: latest
   pullPolicy: IfNotPresent
 
-# ============== OPERATOR ============================
+# ============== SERVICE ============================
 # Components this Deployment runs: all, controller or rls. Controller and RLS
 # engine share one binary today; the flag exists so that splitting them into two
 # Deployments is a values change rather than a code change.
@@ -34,7 +34,7 @@ ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
 # What this chart owns per gateway: whether to rate limit it, and under which
 # domain. The domain is the binding key — it must equal spec.domain of the
 # RateLimitPolicy that carries this gateway's rules. Nothing validates the match;
-# a typo shows up only as an "unknown rate limit domain" line in the operator log.
+# a typo shows up only as an "unknown rate limit domain" line in the service log.
 #
 # namespace is optional and defaults to the release namespace.
 gateways:

@@ -1,7 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 
-CHART_DIR ?= helm-templates/ratelimit-operator
+CHART_DIR ?= helm-templates/ratelimit
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -66,8 +66,7 @@ sync-helm-crds: manifests ## Regenerate the Helm CRD templates from config/crd/b
 	done
 	@echo "Synced $$(ls config/crd/bases/*.yaml | wc -l | tr -d ' ') Helm CRD template(s)"
 
-# Alias for the name used in the task description; sync-helm-crds is the name
-# dbaas-operator uses, and the one to prefer.
+# Alias for the name used in the task description
 .PHONY: helm-crd
 helm-crd: sync-helm-crds ## Alias for sync-helm-crds.
 
@@ -113,7 +112,7 @@ build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager ./cmd/
 
 .PHONY: run
-run: manifests generate fmt vet ## Run the operator from your host.
+run: manifests generate fmt vet ## Run the service from your host.
 	go run ./cmd/
 
 .PHONY: docker-build
@@ -128,10 +127,10 @@ PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support.
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name ratelimit-operator-builder
-	$(CONTAINER_TOOL) buildx use ratelimit-operator-builder
+	- $(CONTAINER_TOOL) buildx create --name ratelimit-builder
+	$(CONTAINER_TOOL) buildx use ratelimit-builder
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm ratelimit-operator-builder
+	- $(CONTAINER_TOOL) buildx rm ratelimit-builder
 	rm Dockerfile.cross
 
 ##@ Deployment
@@ -166,7 +165,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.21.0
 GOLANGCI_LINT_VERSION ?= v2.8.0
 
 # Both versions are derived from go.mod so that the envtest control plane cannot
-# drift from the client libraries the operator is built against.
+# drift from the client libraries the service is built against.
 # ENVTEST_VERSION is the controller-runtime release branch, e.g. release-0.24.
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
   [ -n "$$v" ] || { echo "Set ENVTEST_VERSION manually (controller-runtime replace has no tag)" >&2; exit 1; }; \

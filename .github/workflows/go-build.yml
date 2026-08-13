@@ -1,6 +1,6 @@
 # Go Build Workflow
 #
-# Builds and tests the operator, then builds its Docker image.
+# Builds and tests the service, then builds its Docker image.
 # Uses generic-go-build.yaml for the actual build process.
 #
 # Triggers:
@@ -34,6 +34,6 @@ jobs:
       # Without this the suite fails on a missing control plane rather than skipping.
       install-envtest: true
       # Matches k8s.io/api in go.mod, so the test control plane cannot drift from
-      # the client libraries the operator is built against.
+      # the client libraries the service is built against.
       kube-version: '1.36.0'
     secrets: inherit

@@ -1,18 +1,18 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "ratelimit-operator.fullname" . }}
+  name: {{ include "ratelimit.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "ratelimit-operator.labels" . | nindent 4 }}
+    {{- include "ratelimit.labels" . | nindent 4 }}
 rules:
-  # Leader election. The lease is always in the operator's own namespace, and it
+  # Leader election. The lease is always in the service's own namespace, and it
   # gates status writes only.
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
   # Leader election records who took the lease as an Event in this namespace.
-  # Without this the operator still works, but every handover logs an API
+  # Without this the service still works, but every handover logs an API
   # rejection that looks like a real failure.
   - apiGroups: [""]
     resources: [events]

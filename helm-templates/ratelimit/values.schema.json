@@ -1,9 +1,9 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema",
-  "$id": "https://netcracker.com/ratelimit-operator/values.schema.json",
+  "$id": "https://netcracker.com/ratelimit/values.schema.json",
   "type": "object",
-  "title": "The ratelimit-operator schema.",
-  "description": "JSON Schema for ratelimit-operator.",
+  "title": "The ratelimit schema.",
+  "description": "JSON Schema for ratelimit.",
   "required": [
     "image",
     "mode",
@@ -25,7 +25,7 @@
     },
     "image": {
       "type": "object",
-      "title": "Operator image",
+      "title": "Service image",
       "required": [
         "repository",
         "tag"
@@ -155,7 +155,7 @@
             "domain": {
               "type": "string",
               "title": "Rate limit domain",
-              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the operator log.",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the service log.",
               "minLength": 1
             },
             "namespace": {
@@ -176,7 +176,7 @@
             "domain": {
               "type": "string",
               "title": "Rate limit domain",
-              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the operator log.",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the service log.",
               "minLength": 1
             },
             "namespace": {

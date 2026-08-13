@@ -1,15 +1,15 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ratelimit-operator.fullname" . }}
+  name: {{ include "ratelimit.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "ratelimit-operator.labels" . | nindent 4 }}
+    {{- include "ratelimit.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "ratelimit-operator.selectorLabels" . | nindent 6 }}
+      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -21,25 +21,25 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "ratelimit-operator.labels" . | nindent 8 }}
+        {{- include "ratelimit.labels" . | nindent 8 }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "ratelimit-operator.serviceAccountName" . }}
+      serviceAccountName: {{ include "ratelimit.serviceAccountName" . }}
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: operator
+        - name: ratelimit
           image: '{{ .Values.image.repository }}:{{ .Values.image.tag }}'
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /usr/bin/entrypoint.sh
           args:
-            - /app/ratelimit-operator
+            - /app/ratelimit
             - --mode={{ .Values.mode }}
             - --rls-bind-address=:{{ .Values.rls.port }}
             - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
@@ -50,7 +50,7 @@ spec:
             - name: LOG_LEVEL
               value: '{{ lower .Values.logLevel }}'
             # The namespace this installation serves. It is what keeps the
-            # operator's RBAC a Role: unset is a startup error, not a fallback
+            # service's RBAC a Role: unset is a startup error, not a fallback
             # to watching the whole cluster.
             - name: CLOUD_NAMESPACE
               valueFrom:

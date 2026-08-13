@@ -15,7 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit-operator/api/v1alpha1"
+	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
 // RateLimitPolicyReconciler reconciles a RateLimitPolicy object.
@@ -24,8 +24,8 @@ type RateLimitPolicyReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=qubership-ratelimit-system,resources=ratelimitpolicies,verbs=get;list;watch
-// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=qubership-ratelimit-system,resources=ratelimitpolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies/status,verbs=get;update;patch
 
 // Reconcile records that the operator has seen the policy.
 func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

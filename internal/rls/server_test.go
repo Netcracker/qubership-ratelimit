@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/netcracker/qubership-ratelimit-operator/internal/store"
+	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 // rawToken is what the gateway puts in the token descriptor entry: a live
@@ -174,7 +174,7 @@ func TestShouldRateLimit_doesNotCountAnUnclaimedDomain(t *testing.T) {
 
 func TestSanitizePath_redactsTheQueryString(t *testing.T) {
 	// Envoy's :path carries the query, and a query routinely carries the very
-	// credential the operator must not log.
+	// credential the service must not log.
 	assert.Equal(t, "/api/v1/orders?[redacted]",
 		sanitizePath("/api/v1/orders?access_token=SECRET&api_key=ALSO-SECRET"))
 }

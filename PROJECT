@@ -8,7 +8,7 @@ layout:
 - go.kubebuilder.io/v4
 namespaced: true
 projectName: qubership-ratelimit
-repo: github.com/netcracker/qubership-ratelimit-operator
+repo: github.com/netcracker/qubership-ratelimit
 resources:
 - api:
     crdVersion: v1
@@ -17,6 +17,6 @@ resources:
   domain: netcracker.com
   group: ratelimit
   kind: RateLimitPolicy
-  path: github.com/netcracker/qubership-ratelimit-operator/api/v1alpha1
+  path: github.com/netcracker/qubership-ratelimit/api/v1alpha1
   version: v1alpha1
 version: "3"

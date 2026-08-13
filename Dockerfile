@@ -19,12 +19,12 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -a -o ratelimit-operator ./cmd/
+    go build -a -o ratelimit ./cmd/
 
 FROM ghcr.io/netcracker/qubership-core-base:2.3.7
 WORKDIR /app
-COPY --chown=10001:0 --chmod=555 --from=builder /app/ratelimit-operator /app/ratelimit-operator
+COPY --chown=10001:0 --chmod=555 --from=builder /app/ratelimit /app/ratelimit
 COPY --chown=10001:0 --chmod=444 --from=builder /app/application.yaml /app/application.yaml
 USER 10001:10001
 
-CMD ["/app/ratelimit-operator"]
+CMD ["/app/ratelimit"]

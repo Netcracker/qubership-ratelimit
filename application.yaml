@@ -1,5 +1,5 @@
 microservice:
-  name: ratelimit-operator
+  name: ratelimit
 
 logging:
   level:

@@ -1,5 +1,5 @@
 {{- $root := . -}}
-{{- $cluster := include "ratelimit-operator.rlsCluster" . -}}
+{{- $cluster := include "ratelimit.rlsCluster" . -}}
 {{- $roles := dict
       "public"  (dict "gatewayName" $root.Values.ISTIO_PUBLIC_GATEWAY_NAME  "config" $root.Values.gateways.public)
       "private" (dict "gatewayName" $root.Values.ISTIO_PRIVATE_GATEWAY_NAME "config" $root.Values.gateways.private)
@@ -13,10 +13,10 @@
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:
-  name: {{ printf "%s-%s" (include "ratelimit-operator.fullname" $root) $gatewayName | trunc 63 | trimSuffix "-" }}
+  name: {{ printf "%s-%s" (include "ratelimit.fullname" $root) $gatewayName | trunc 63 | trimSuffix "-" }}
   namespace: {{ $namespace }}
   labels:
-    {{- include "ratelimit-operator.labels" $root | nindent 4 }}
+    {{- include "ratelimit.labels" $root | nindent 4 }}
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
