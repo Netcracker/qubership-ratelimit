@@ -26,8 +26,6 @@ env:
   ISTIO_REF: main
   MESH_CONFIG_REPO: https://github.com/Netcracker/qubership-core-mesh-config.git
   MESH_CONFIG_REF: main
-  # Gateways, chart and policies all live in one namespace — the deployment
-  # model the operator is built for.
   E2E_NAMESPACE: ratelimit-e2e
   IMAGE: ratelimit:e2e
 
