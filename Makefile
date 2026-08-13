@@ -111,9 +111,17 @@ lint: golangci-lint ## Run golangci-lint linter.
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 	"$(GOLANGCI_LINT)" run --fix
 
+# Linted once per resource profile, because the chart is never installed without
+# one: the profile supplies REPLICAS and the resource requests and limits, and
+# values.schema.json requires them. Linting values.yaml alone would fail, and a
+# schema loose enough to pass would let a missing profile through to a
+# Deployment with empty resources.
 .PHONY: helm-lint
-helm-lint: ## Lint the Helm chart against values.schema.json.
-	helm lint $(CHART_DIR)
+helm-lint: ## Lint the Helm chart against every resource profile.
+	@for profile in $(CHART_DIR)/resource-profiles/*.yaml; do \
+		echo "--- lint with $$(basename "$$profile")"; \
+		helm lint $(CHART_DIR) -f "$$profile" || exit 1; \
+	done
 
 ##@ Build
 

@@ -97,8 +97,11 @@ jobs:
 
       - name: Install the chart
         run: |
+          # A profile is mandatory: values.yaml carries no resource keys, so the
+          # chart is always installed the way it is in production.
           helm upgrade --install ratelimit helm-templates/ratelimit \
             --namespace "${E2E_NAMESPACE}" \
+            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
             --set image.repository=ratelimit \
             --set image.tag=e2e \
             --wait --timeout 5m
