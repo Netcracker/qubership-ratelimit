@@ -14,6 +14,8 @@ package redis
 
 import (
 	"context"
+	// Blank import activates the go:embed directive below; nothing else of
+	// the package is used.
 	_ "embed"
 	"fmt"
 	"sort"

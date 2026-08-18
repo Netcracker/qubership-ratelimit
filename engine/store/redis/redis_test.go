@@ -228,20 +228,28 @@ func TestHighFrequencyStateExact(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET %s: %v", b.Key, err)
 		}
-		for part := range strings.SplitSeq(raw, ":") {
-			if part == "" || strings.ContainsAny(part, "eE.+") {
-				t.Fatalf("state of %s = %q is not an exact integer; tostring precision loss", b.Key, raw)
-			}
-		}
-		ts, err := strconv.ParseInt(strings.Split(raw, ":")[0], 10, 64)
-		if err != nil || ts < nowUS-2_000_000 || ts > nowUS+2_000_000 {
-			t.Fatalf("state of %s = %q does not parse to a timestamp near now (%d)", b.Key, raw, nowUS)
-		}
+		assertExactTimestampState(t, b.Key, raw, nowUS)
 	}
 
 	// The stored debt must be honored on the next decision, not forgiven.
 	if v, err = r.Decide(t.Context(), []store.Bucket{gcra}, 1); err != nil || !v[0].Allowed {
 		t.Fatalf("follow-up decide = %+v, %v; want allowed", v, err)
+	}
+}
+
+// assertExactTimestampState fails on tostring precision loss: every state
+// segment must be a plain integer, and the leading one must parse to a
+// microsecond timestamp near now.
+func assertExactTimestampState(t *testing.T, key, raw string, nowUS int64) {
+	t.Helper()
+	for part := range strings.SplitSeq(raw, ":") {
+		if part == "" || strings.ContainsAny(part, "eE.+") {
+			t.Fatalf("state of %s = %q is not an exact integer; tostring precision loss", key, raw)
+		}
+	}
+	ts, err := strconv.ParseInt(strings.Split(raw, ":")[0], 10, 64)
+	if err != nil || ts < nowUS-2_000_000 || ts > nowUS+2_000_000 {
+		t.Fatalf("state of %s = %q does not parse to a timestamp near now (%d)", key, raw, nowUS)
 	}
 }
 
