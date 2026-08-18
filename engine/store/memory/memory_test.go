@@ -18,6 +18,44 @@ func TestContract(t *testing.T) {
 	})
 }
 
+// TestRejectsBrokenBuckets covers the cheap guards behind the "windows passed
+// validation" contract: the fixture answers with an error, never a panic.
+func TestRejectsBrokenBuckets(t *testing.T) {
+	s := memory.New()
+	valid := algo.Window{Requests: 10, Period: time.Hour, Burst: 10}
+
+	cases := []struct {
+		name   string
+		bucket store.Bucket
+	}{
+		{"unknown algorithm", store.Bucket{Key: "g:{d}:a", Algorithm: 99, Window: valid}},
+		{"requests below one", store.Bucket{Key: "g:{d}:b", Algorithm: algo.GCRAID,
+			Window: algo.Window{Requests: 0, Period: time.Hour}}},
+		{"period below a microsecond", store.Bucket{Key: "g:{d}:c", Algorithm: algo.GCRAID,
+			Window: algo.Window{Requests: 1, Period: 0}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := s.Decide(t.Context(), []store.Bucket{c.bucket}, 1); err == nil {
+				t.Error("Decide accepted a bucket that never passed validation")
+			}
+		})
+	}
+}
+
+// TestPeekCostRules pins that Peek shares Decide's cost contract.
+func TestPeekCostRules(t *testing.T) {
+	s := memory.New()
+	b := store.Bucket{
+		Key:       "p:{d}:k",
+		Algorithm: algo.GCRAID,
+		Window:    algo.Window{Requests: 10, Period: time.Hour, Burst: 10},
+	}
+	if _, err := s.Peek(t.Context(), []store.Bucket{b}, 0); err == nil {
+		t.Error("Peek accepted cost 0")
+	}
+}
+
 // TestStateExpires covers the one property the suite cannot check quickly:
 // state of both algorithms is gone once its window has fully drained.
 func TestStateExpires(t *testing.T) {

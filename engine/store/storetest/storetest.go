@@ -27,6 +27,13 @@ const tolerance = 10 * time.Second
 
 const hour = time.Hour
 
+// Shared precondition messages: several subtests open with the same two
+// checks, and a repeated literal is a lint finding, not a style choice.
+const (
+	msgFreshRefused = "precondition failed: a fresh bucket refused the first request"
+	msgSpentNotHeld = "precondition failed: a one-request bucket admitted the second request"
+)
+
 // Run exercises the contract against one implementation. newStore is called
 // once per subtest and must return a ready store, registering cleanup on t.
 func Run(t *testing.T, newStore func(t *testing.T) store.Store) {
@@ -60,10 +67,10 @@ func chargesAllOrNothing(t *testing.T, f *fixture) {
 	both := []store.Bucket{tight, roomy}
 
 	if !f.decideAdmitted(both) {
-		t.Fatal("first request refused by fresh buckets")
+		t.Fatal(msgFreshRefused)
 	}
 	if f.decideAdmitted(both) {
-		t.Fatal("second request admitted past a one-request bucket")
+		t.Fatal(msgSpentNotHeld)
 	}
 	if got := f.peekOne(roomy).Remaining; got < 999 {
 		t.Errorf("roomy Remaining = %d after one admitted and one refused request: the refusal charged it", got)
@@ -79,7 +86,7 @@ func peekDoesNotCharge(t *testing.T, f *fixture) {
 		}
 	}
 	if !f.decideAdmitted([]store.Bucket{b}) {
-		t.Fatal("request refused by a fresh bucket")
+		t.Fatal(msgFreshRefused)
 	}
 	if got := f.peekOne(b).Remaining; got != 9 {
 		t.Errorf("Remaining = %d after one admitted request, want 9", got)
@@ -95,11 +102,11 @@ func refusalSpendsNothing(t *testing.T, f *fixture) {
 	one := []store.Bucket{b}
 
 	if !f.decideAdmitted(one) {
-		t.Fatal("first request refused by a fresh bucket")
+		t.Fatal(msgFreshRefused)
 	}
 	first := f.decideOne(one)
 	if first.Allowed {
-		t.Fatal("second request admitted past a one-request bucket")
+		t.Fatal(msgSpentNotHeld)
 	}
 	f.decideOne(one)
 	last := f.decideOne(one)
@@ -115,7 +122,7 @@ func shadowCountsWithoutVeto(t *testing.T, f *fixture) {
 	both := []store.Bucket{shadow, roomy}
 
 	if !f.decideAdmitted(both) {
-		t.Fatal("first request refused by fresh buckets")
+		t.Fatal(msgFreshRefused)
 	}
 	verdicts := f.decide(both, 1)
 	if !store.Admitted(both, verdicts) {
@@ -132,7 +139,7 @@ func shadowRefusalSpendsNothing(t *testing.T, f *fixture) {
 	both := []store.Bucket{shadow, roomy}
 
 	if !f.decideAdmitted(both) {
-		t.Fatal("first request refused by fresh buckets")
+		t.Fatal(msgFreshRefused)
 	}
 	first := f.decide(both, 1)[0]
 	if first.Allowed {
@@ -173,7 +180,7 @@ func rejectsNonPositiveCost(t *testing.T, f *fixture) {
 	// Charge one unit first: on a full bucket Remaining is capped at
 	// capacity, so an executed refund would be invisible.
 	if !f.decideAdmitted(one) {
-		t.Fatal("request refused by a fresh bucket")
+		t.Fatal(msgFreshRefused)
 	}
 	for _, cost := range []int64{0, -1} {
 		if _, err := f.s.Decide(f.t.Context(), one, cost); err == nil {
@@ -201,10 +208,10 @@ func resetClearsState(t *testing.T, f *fixture) {
 	one := []store.Bucket{b}
 
 	if !f.decideAdmitted(one) {
-		t.Fatal("first request refused by a fresh bucket")
+		t.Fatal(msgFreshRefused)
 	}
 	if f.decideAdmitted(one) {
-		t.Fatal("second request admitted past a one-request bucket")
+		t.Fatal(msgSpentNotHeld)
 	}
 	if err := f.s.Reset(f.t.Context(), []string{b.Key}); err != nil {
 		t.Fatalf("Reset: %v", err)

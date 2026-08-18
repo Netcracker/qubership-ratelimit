@@ -27,8 +27,16 @@ on:
 jobs:
   build:
     name: Build and test
+    # Waits for the engine job so its coverage artifact exists before the
+    # Sonar job downloads coverage-* artifacts.
+    needs: engine
     uses: Netcracker/qubership-core-infra/.github/workflows/generic-go-build.yaml@71206242f5967ac6691337913593f8623863f711 # v2.5.2
     with:
+      # Pinned to the root on purpose: module discovery would also run the
+      # workflow's envtest step for engine/, and that step hard-fails on a
+      # module without controller-runtime. The engine job below tests the
+      # engine module instead and ships its coverage as a coverage-* artifact,
+      # which the Sonar job picks up by glob.
       go-module-dir: .
       # internal/controller runs against a real API server through envtest.
       # Without this the suite fails on a missing control plane rather than skipping.
@@ -39,12 +47,13 @@ jobs:
       sonar-project-key: ${{ vars.SONAR_PROJECT_KEY }}
     secrets: inherit
 
-  # The engine is a separate Go module: the root job's ./... does not see it.
-  # A plain job rather than a second generic-go-build call — that workflow
-  # also builds a Docker image, which the engine does not have. No setup-go:
-  # GOTOOLCHAIN=auto fetches the version engine/go.mod declares.
+  # The engine is a separate Go module the root job's ./... does not see.
+  # This job tests it with the race detector and ships its coverage as a
+  # coverage-* artifact — the naming convention the generic workflow's Sonar
+  # job downloads by glob. No setup-go: GOTOOLCHAIN=auto fetches the version
+  # engine/go.mod declares.
   engine:
-    name: Engine module tests
+    name: Engine module tests (race)
     runs-on: ubuntu-latest
     # go test executes code from the PR; the job gets a read-only token and
     # checkout keeps no credentials on disk for that code to find.
@@ -58,4 +67,10 @@ jobs:
         working-directory: engine
         run: |
           go vet ./...
-          go test -race ./...
+          go test -race ./... -coverpkg=./... -coverprofile engine.coverage.out
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: coverage-engine
+          path: engine/engine.coverage.out
+          if-no-files-found: error

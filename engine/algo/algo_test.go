@@ -74,6 +74,8 @@ func TestRegisterRejectsBrokenDeclarations(t *testing.T) {
 	}{
 		{"unknown field", declaring{id: 200, name: "BadField", fields: []string{"Precision"}}},
 		{"mandatory field", declaring{id: 201, name: "BadMandatory", fields: []string{"Period"}}},
+		{"name taken", declaring{id: 202, name: "GCRA"}},
+		{"id taken", declaring{id: GCRAID, name: "UniqueEnough"}},
 	}
 
 	for _, c := range cases {
