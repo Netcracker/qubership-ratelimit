@@ -1,9 +1,6 @@
 package algo
 
-import (
-	"fmt"
-	"time"
-)
+import "fmt"
 
 func init() { Register(gcra{}) }
 
@@ -28,18 +25,32 @@ func (gcra) consumes() []string { return []string{"Burst"} }
 // would enforce as 500000/s — so the period must divide evenly instead.
 const exactEmissionFloor = 100
 
+// EmissionMicros returns the GCRA emission interval in whole microseconds,
+// rounded up so the enforced rate errs strict, never loose. This is the one
+// formula every store implementation and the server-side script derive the
+// interval from; validation keeps the rounding under 1% by requiring exact
+// divisibility near the resolution.
+func EmissionMicros(w Window) int64 {
+	return (PeriodMicros(w) + w.Requests - 1) / w.Requests
+}
+
+// TauMicros returns the GCRA bucket depth in whole microseconds — the same
+// single-source rule as EmissionMicros. Validation bounds it, so depth
+// arithmetic and duration conversions stay far from int64 overflow.
+func TauMicros(w Window) int64 {
+	return EmissionMicros(w) * w.Burst
+}
+
 func (gcra) validate(w Window) error {
 	if w.Burst < 1 {
 		return fmt.Errorf("burst must be at least 1 in a resolved window, got %d", w.Burst)
 	}
-	periodMicros := int64(w.Period / time.Microsecond)
+	periodMicros := PeriodMicros(w)
 	if w.Requests > periodMicros {
 		return fmt.Errorf("requests exceed GCRA resolution of one per microsecond: %d per %s",
 			w.Requests, w.Period)
 	}
-	// Rounded up, so the enforced rate errs strict. Must match evalGCRA in
-	// every store implementation.
-	emission := (periodMicros + w.Requests - 1) / w.Requests
+	emission := EmissionMicros(w)
 	if emission < exactEmissionFloor && periodMicros%w.Requests != 0 {
 		return fmt.Errorf(
 			"a rate this high must divide the period evenly at microsecond resolution: %d per %s does not",

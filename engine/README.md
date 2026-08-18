@@ -7,6 +7,9 @@ separate Go module so that the boundary is enforced by the toolchain rather than
 go test ./...
 ```
 
+The Redis store tests resolve their server in three steps: `REDIS_ADDR` when set, a disposable container the
+test binary starts itself when Docker is available, a skip otherwise.
+
 ## What lives here
 
 | Package | Responsibility |

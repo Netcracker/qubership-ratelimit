@@ -47,6 +47,13 @@ type Window struct {
 // mandatory are the fields every algorithm consumes by definition.
 var mandatory = map[string]bool{"Requests": true, "Period": true}
 
+// PeriodMicros returns the window period in whole microseconds — the unit all
+// counter math runs in. checkCommon guarantees whole seconds, so nothing is
+// truncated here.
+func PeriodMicros(w Window) int64 {
+	return int64(w.Period / time.Microsecond)
+}
+
 // Algorithm is what Go knows about a counting algorithm. Its methods are
 // unexported on purpose: algorithms are added by editing this package, never
 // from outside, and Check stays the only door into validation.

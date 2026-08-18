@@ -114,6 +114,27 @@ type Inspector interface {
 	Keys(ctx context.Context, prefix string) ([]string, error)
 }
 
+// GuardBuckets applies the cheap edge of the caller contract, shared by every
+// implementation: cost is positive, keys are unique within the decision, and
+// windows carry the fields whose absence would divide by zero downstream.
+// Full window semantics stay algo.Check's job at compile time.
+func GuardBuckets(buckets []Bucket, cost int64) error {
+	if cost < 1 {
+		return fmt.Errorf("store: cost must be at least 1, got %d", cost)
+	}
+	seen := make(map[string]struct{}, len(buckets))
+	for _, b := range buckets {
+		if _, dup := seen[b.Key]; dup {
+			return fmt.Errorf("store: duplicate bucket key %q in one decision", b.Key)
+		}
+		seen[b.Key] = struct{}{}
+		if b.Window.Requests < 1 || b.Window.Period < time.Microsecond {
+			return fmt.Errorf("store: bucket %q carries a window that did not pass validation", b.Key)
+		}
+	}
+	return nil
+}
+
 // Admitted reports whether verdicts add up to letting the request through. A
 // length mismatch is a broken Store implementation, not data, and the one
 // function deciding admission must not paper over it.

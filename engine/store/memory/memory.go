@@ -74,8 +74,8 @@ type outcome struct {
 // only when no enforcing bucket refused; a shadow bucket commits only when its
 // own verdict allowed.
 func (s *Store) Decide(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
-	if cost < 1 {
-		return nil, fmt.Errorf("memory: cost must be at least 1, got %d", cost)
+	if err := store.GuardBuckets(buckets, cost); err != nil {
+		return nil, err
 	}
 
 	s.mu.Lock()
@@ -108,8 +108,8 @@ func (s *Store) Decide(ctx context.Context, buckets []store.Bucket, cost int64) 
 // Peek runs the same evaluation as Decide at the given cost with the commit
 // pass switched off.
 func (s *Store) Peek(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
-	if cost < 1 {
-		return nil, fmt.Errorf("memory: cost must be at least 1, got %d", cost)
+	if err := store.GuardBuckets(buckets, cost); err != nil {
+		return nil, err
 	}
 
 	s.mu.Lock()
@@ -160,19 +160,8 @@ func (s *Store) Keys(ctx context.Context, prefix string) ([]string, error) {
 func (s *Store) evalAll(buckets []store.Bucket, cost int64) ([]outcome, error) {
 	nowUS := s.now().UnixMicro()
 
-	seen := make(map[string]struct{}, len(buckets))
 	outs := make([]outcome, len(buckets))
 	for i, b := range buckets {
-		if _, dup := seen[b.Key]; dup {
-			return nil, fmt.Errorf("memory: duplicate bucket key %q in one decision", b.Key)
-		}
-		seen[b.Key] = struct{}{}
-
-		// The cheap edge of the "windows passed algo.Check" contract: these
-		// two would divide by zero below, so they fail loudly instead.
-		if b.Window.Requests < 1 || b.Window.Period < time.Microsecond {
-			return nil, fmt.Errorf("memory: bucket %q carries a window that did not pass validation", b.Key)
-		}
 
 		e, ok := s.m[b.Key]
 		if ok && (e.deadline <= nowUS || e.algorithm != b.Algorithm) {
@@ -192,17 +181,13 @@ func (s *Store) evalAll(buckets []store.Bucket, cost int64) ([]outcome, error) {
 }
 
 // evalGCRA is the theoretical-arrival-time computation over integer
-// microseconds, the same formulation the server-side script will use. The
+// microseconds, the same formulation the server-side script uses. The
 // emission interval is at least one microsecond and the bucket depth is
 // bounded — both enforced by validation — so nothing here overflows and no
 // comparison needs a guard.
 func evalGCRA(e entry, exists bool, nowUS int64, w algo.Window, cost int64) outcome {
-	// Emission rounds up to a whole microsecond, so the enforced rate errs
-	// strict, never loose; validation keeps that rounding under 1% by
-	// requiring exact divisibility near the resolution. Must match
-	// gcra.validate.
-	emission := (int64(w.Period/time.Microsecond) + w.Requests - 1) / w.Requests
-	tau := emission * w.Burst
+	emission := algo.EmissionMicros(w)
+	tau := algo.TauMicros(w)
 
 	tat := nowUS
 	if exists && e.tat > nowUS {
@@ -242,7 +227,7 @@ func evalGCRA(e entry, exists bool, nowUS int64, w algo.Window, cost int64) outc
 // evalFixed counts against the epoch-aligned window that contains now, with
 // microsecond-precise boundaries.
 func evalFixed(e entry, exists bool, nowUS int64, w algo.Window, cost int64) outcome {
-	periodUS := int64(w.Period / time.Microsecond)
+	periodUS := algo.PeriodMicros(w)
 	start := nowUS - nowUS%periodUS
 
 	var count int64
