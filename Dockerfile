@@ -8,6 +8,9 @@ ENV GOTOOLCHAIN=auto
 WORKDIR /app
 COPY go.mod go.mod
 COPY go.sum go.sum
+# The engine module is replace-directed to ./engine; its go.mod must be
+# present before go mod download once the operator imports it.
+COPY engine/go.mod engine/go.mod
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 

@@ -38,3 +38,24 @@ jobs:
       kube-version: '1.36.0'
       sonar-project-key: ${{ vars.SONAR_PROJECT_KEY }}
     secrets: inherit
+
+  # The engine is a separate Go module: the root job's ./... does not see it.
+  # A plain job rather than a second generic-go-build call — that workflow
+  # also builds a Docker image, which the engine does not have. No setup-go:
+  # GOTOOLCHAIN=auto fetches the version engine/go.mod declares.
+  engine:
+    name: Engine module tests
+    runs-on: ubuntu-latest
+    # go test executes code from the PR; the job gets a read-only token and
+    # checkout keeps no credentials on disk for that code to find.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test engine module
+        working-directory: engine
+        run: |
+          go vet ./...
+          go test -race ./...
