@@ -303,28 +303,22 @@ func strictestIndex(buckets []store.Bucket, verdicts []store.Verdict, from, to i
 		if !allowed && verdicts[i].Allowed {
 			continue
 		}
-		if best < 0 {
-			best = i
-			continue
-		}
-		if allowed {
-			if verdicts[i].Remaining != verdicts[best].Remaining {
-				if verdicts[i].Remaining < verdicts[best].Remaining {
-					best = i
-				}
-				continue
-			}
-		} else {
-			if verdicts[i].RetryAfter != verdicts[best].RetryAfter {
-				if verdicts[i].RetryAfter > verdicts[best].RetryAfter {
-					best = i
-				}
-				continue
-			}
-		}
-		if buckets[i].Key < buckets[best].Key {
+		if best < 0 || stricter(buckets, verdicts, i, best, allowed) {
 			best = i
 		}
 	}
 	return best
+}
+
+// stricter reports whether bucket i binds harder than the current best: less
+// remaining on allow, a longer wait on refusal, the smaller key on a tie.
+func stricter(buckets []store.Bucket, verdicts []store.Verdict, i, best int, allowed bool) bool {
+	if allowed {
+		if verdicts[i].Remaining != verdicts[best].Remaining {
+			return verdicts[i].Remaining < verdicts[best].Remaining
+		}
+	} else if verdicts[i].RetryAfter != verdicts[best].RetryAfter {
+		return verdicts[i].RetryAfter > verdicts[best].RetryAfter
+	}
+	return buckets[i].Key < buckets[best].Key
 }

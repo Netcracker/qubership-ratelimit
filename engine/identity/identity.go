@@ -160,27 +160,7 @@ func walk(claims map[string]any, path []string) (any, bool) {
 // reason: an empty claim is absence, and absence keeps falling back.
 func coerce(v any, t model.ValueType) ([]string, SkipReason) {
 	if t == model.ValueStringArray {
-		arr, ok := v.([]any)
-		if !ok {
-			return nil, SkipBadType
-		}
-		if len(arr) > MaxArrayItems {
-			return nil, SkipTooManyItems
-		}
-		values := make([]string, 0, len(arr))
-		for _, item := range arr {
-			s, ok := item.(string)
-			if !ok {
-				return nil, SkipBadType
-			}
-			if len(s) > MaxValueBytes {
-				return nil, SkipTooLong
-			}
-			if s != "" {
-				values = append(values, s)
-			}
-		}
-		return values, ""
+		return coerceArray(v)
 	}
 
 	s, ok := v.(string)
@@ -194,4 +174,30 @@ func coerce(v any, t model.ValueType) ([]string, SkipReason) {
 		return nil, ""
 	}
 	return []string{s}, ""
+}
+
+// coerceArray keeps the non-empty strings of an array claim, refusing the
+// whole claim on a foreign element type or an out-of-bounds size.
+func coerceArray(v any) ([]string, SkipReason) {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, SkipBadType
+	}
+	if len(arr) > MaxArrayItems {
+		return nil, SkipTooManyItems
+	}
+	values := make([]string, 0, len(arr))
+	for _, item := range arr {
+		s, ok := item.(string)
+		if !ok {
+			return nil, SkipBadType
+		}
+		if len(s) > MaxValueBytes {
+			return nil, SkipTooLong
+		}
+		if s != "" {
+			values = append(values, s)
+		}
+	}
+	return values, ""
 }
