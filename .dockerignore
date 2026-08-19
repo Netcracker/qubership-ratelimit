@@ -6,9 +6,9 @@
 !**/*.go
 **/*_test.go
 
-# Re-include Go module files
-!go.mod
-!go.sum
+# Re-include Go module files, the nested engine module included
+!**/go.mod
+!**/go.sum
 
 # configloader's YAML property source reads this next to the binary.
 !application.yaml

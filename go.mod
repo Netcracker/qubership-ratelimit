@@ -89,3 +89,7 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.3 // indirect
 )
+
+// The engine module lives in this repository; the replace makes the first
+// import resolve to the local directory with no tags involved.
+replace github.com/netcracker/qubership-ratelimit/engine => ./engine
