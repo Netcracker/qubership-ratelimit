@@ -14,6 +14,7 @@ test binary starts itself when Docker is available, a skip otherwise.
 
 | Package | Responsibility |
 | --- | --- |
+| `engine` (root) | the facade: a snapshot bound to a store answers one request — `New`, `Decide`, the decision-budget backstop, and the token cache |
 | `model` | plain rule structures — blocks, routes, predicates, groups, windows |
 | `compile` | a set of policies plus one mapping becomes an immutable snapshot, or a list of validity problems |
 | `match` | one request becomes the list of counter buckets it must fit into |

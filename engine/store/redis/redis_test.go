@@ -28,7 +28,7 @@ const tolerance = 2 * time.Second
 // (the CI service, a cluster, anything explicit); a disposable container this
 // test binary starts itself when Docker is available; a skip otherwise. An
 // explicit address that stays unreachable is a failure, never a silent skip.
-func client(t *testing.T) goredis.UniversalClient {
+func client(t testing.TB) goredis.UniversalClient {
 	t.Helper()
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {

@@ -33,23 +33,23 @@ func TestBucketGoldenKeys(t *testing.T) {
 		{
 			"gcra minute by client",
 			gcra, algo.Window{Requests: 100, Period: time.Minute}, []string{"alice"},
-			"rl:v1:{gateway.public}:orders/api/per-user:gcra:60:alice",
+			"rl:v1:{gateway.public}:orders/api/per-user:gcra:60:alice:",
 		},
 		{
 			"fixed day by client and path",
 			fixed, algo.Window{Requests: 10000, Period: 24 * time.Hour}, []string{"alice", "/api/v1/orders"},
-			"rl:v1:{gateway.public}:orders/api/per-user:fixedwindow:86400:alice:%2Fapi%2Fv1%2Forders",
+			"rl:v1:{gateway.public}:orders/api/per-user:fixedwindow:86400:alice:%2Fapi%2Fv1%2Forders:",
 		},
 		{
-			"no axes, no axis segments",
+			"no axes: the terminated window key is its own subtree prefix",
 			gcra, algo.Window{Requests: 5000, Period: time.Minute}, nil,
-			"rl:v1:{gateway.public}:orders/api/per-user:gcra:60",
+			"rl:v1:{gateway.public}:orders/api/per-user:gcra:60:",
 		},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := Bucket(id, c.algo, c.w, c.axes); got != c.want {
+			if got := bucketOf(id, c.algo, c.w, c.axes); got != c.want {
 				t.Errorf("Bucket() = %q, want %q", got, c.want)
 			}
 		})
@@ -63,16 +63,17 @@ func TestEscapingStopsForgery(t *testing.T) {
 	gcra := mustAlgo(t, "GCRA")
 	w := algo.Window{Requests: 100, Period: time.Minute, Burst: 100}
 
-	forged := Bucket(id, gcra, w, []string{"evil}:{spoof", "b:c"})
+	forged := bucketOf(id, gcra, w, []string{"evil}:{spoof", "b:c"})
 	if strings.Count(forged, "{") != 1 || strings.Count(forged, "}") != 1 {
 		t.Errorf("axis value forged a hash tag: %q", forged)
 	}
-	if got, want := strings.Count(forged, ":"), strings.Count(Bucket(id, gcra, w, []string{"a", "b"}), ":"); got != want {
+	plain := bucketOf(id, gcra, w, []string{"a", "b"})
+	if got, want := strings.Count(forged, ":"), strings.Count(plain, ":"); got != want {
 		t.Errorf("axis value forged a segment: %q", forged)
 	}
 
 	// Escaping must keep distinct values distinct.
-	if Bucket(id, gcra, w, []string{"a:b"}) == Bucket(id, gcra, w, []string{"a%3Ab"}) {
+	if bucketOf(id, gcra, w, []string{"a:b"}) == bucketOf(id, gcra, w, []string{"a%3Ab"}) {
 		t.Error("escaping collapsed two distinct axis values into one key")
 	}
 }
@@ -86,6 +87,28 @@ func TestEmptyDomainPanics(t *testing.T) {
 	DomainPrefix("")
 }
 
+// TestBucketIsItsOwnPrefix pins the terminated-segment invariant: one string
+// addresses the exact bucket and safely scopes its subtree, and a client
+// prefix never matches a longer neighbor.
+func TestBucketIsItsOwnPrefix(t *testing.T) {
+	gcra := mustAlgo(t, "GCRA")
+	w := algo.Window{Requests: 100, Period: time.Minute, Burst: 100}
+
+	window := bucketOf(id, gcra, w, nil)
+	alice := bucketOf(id, gcra, w, []string{"alice"})
+	aliceByPath := bucketOf(id, gcra, w, []string{"alice", "/p"})
+
+	if !strings.HasPrefix(alice, window) || !strings.HasPrefix(aliceByPath, alice) {
+		t.Errorf("subtree prefixes broke: %q / %q / %q", window, alice, aliceByPath)
+	}
+	if strings.HasPrefix(bucketOf(id, gcra, w, []string{"alice2", "/p"}), alice) {
+		t.Error("the client prefix leaked onto a longer neighbor")
+	}
+	if !strings.HasPrefix(window, RulePrefix(id)) {
+		t.Error("the window key lost the rule prefix")
+	}
+}
+
 func TestPrefixHierarchy(t *testing.T) {
 	if got, want := RulePrefix(id), DomainPrefix(id.Domain); !strings.HasPrefix(got, want) {
 		t.Errorf("RulePrefix(%v) = %q lacks domain prefix %q", id, got, want)
@@ -97,7 +120,7 @@ func TestEveryBucketSharesTheRulePrefix(t *testing.T) {
 	prefix := RulePrefix(id)
 
 	for _, axes := range [][]string{nil, {"alice"}, {"alice", "acme"}} {
-		k := Bucket(id, gcra, algo.Window{Requests: 1, Period: time.Second}, axes)
+		k := bucketOf(id, gcra, algo.Window{Requests: 1, Period: time.Second}, axes)
 		if !strings.HasPrefix(k, prefix) {
 			t.Errorf("Bucket(%v) = %q lacks prefix %q", axes, k, prefix)
 		}
@@ -111,7 +134,7 @@ func TestIdentPartsAreEscaped(t *testing.T) {
 	w := algo.Window{Requests: 1, Period: time.Second, Burst: 1}
 	evil := Ident{Domain: "gateway.public", Policy: "orders", Block: "api/x", Rule: "r:{a}"}
 
-	k := Bucket(evil, gcra, w, []string{"alice"})
+	k := bucketOf(evil, gcra, w, []string{"alice"})
 	if strings.Count(k, "/") != 2 {
 		t.Errorf("block name forged a triple separator: %q", k)
 	}
@@ -124,7 +147,13 @@ func TestAxisOrderIsSignificant(t *testing.T) {
 	gcra := mustAlgo(t, "GCRA")
 	w := algo.Window{Requests: 1, Period: time.Second}
 
-	if Bucket(id, gcra, w, []string{"a", "b"}) == Bucket(id, gcra, w, []string{"b", "a"}) {
+	if bucketOf(id, gcra, w, []string{"a", "b"}) == bucketOf(id, gcra, w, []string{"b", "a"}) {
 		t.Error("axis order does not reach the key")
 	}
+}
+
+// bucketOf composes the two halves of key building the way the request path
+// does: the compiled rate prefix plus the runtime axes.
+func bucketOf(id Ident, a algo.Algorithm, w algo.Window, axes []string) string {
+	return Bucket(RatePrefix(id, a, w), axes)
 }

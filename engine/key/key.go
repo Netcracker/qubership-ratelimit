@@ -27,24 +27,40 @@ type Ident struct {
 	Rule   string
 }
 
-// Bucket returns the key of one window of one rule, keyed by axis values in
-// axis order. The hash tag lives in the domain prefix, so every bucket of a
-// decision shares one Redis Cluster slot and the store can commit the whole
-// decision as one atomic script; other stores see the braces as opaque bytes.
-// A bucket with no axes has no axis segments. Windows must have passed
-// algo.Check: building runs on the request path and does not revalidate, and
-// an unvalidated sub-second period would truncate into a colliding key. Axis
-// values are non-empty by construction: an absent axis means the rule did not
-// match and no bucket was built.
-func Bucket(id Ident, a algo.Algorithm, w algo.Window, axes []string) string {
+// RatePrefix returns the constant prefix of every bucket key of one rate:
+// domain, rule identity, algorithm, and window. Compilation builds it once;
+// the request path only appends axis values through Bucket.
+//
+// The window must have passed algo.Check: an unvalidated sub-second period
+// would truncate into a colliding prefix.
+func RatePrefix(id Ident, a algo.Algorithm, w algo.Window) string {
+	return RulePrefix(id) + strings.ToLower(a.Name()) + ":" +
+		strconv.FormatInt(int64(w.Period/time.Second), 10) + ":"
+}
+
+// Bucket completes a rate prefix with axis values in axis order. The hash
+// tag lives in the domain prefix, so every bucket of a decision shares one
+// Redis Cluster slot and the store can commit the whole decision as one
+// atomic script; other stores see the braces as opaque bytes.
+//
+// Every segment is terminated, the last one included, so a bucket key is also
+// the prefix of its own subtree: the same string addresses the exact bucket
+// and safely scopes scans and partial resets — leading axes cover the buckets
+// sharing them, and "alice" never matches "alice2", because the terminator is
+// part of the string.
+//
+// Axis values are non-empty by construction: an absent axis means the rule
+// did not match and no bucket was built.
+func Bucket(prefix string, axes []string) string {
+	if len(axes) == 0 {
+		return prefix
+	}
 	var b strings.Builder
-	b.WriteString(RulePrefix(id))
-	b.WriteString(strings.ToLower(a.Name()))
-	b.WriteByte(':')
-	b.WriteString(strconv.FormatInt(int64(w.Period/time.Second), 10))
+	b.Grow(len(prefix) + 16*len(axes))
+	b.WriteString(prefix)
 	for _, v := range axes {
-		b.WriteByte(':')
 		b.WriteString(escape(v))
+		b.WriteByte(':')
 	}
 	return b.String()
 }

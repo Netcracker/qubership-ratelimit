@@ -106,8 +106,8 @@ for i = 1, n do
     reset_charged[i] = boundary
     if count == 0 then reset_current[i] = 0 else reset_current[i] = boundary end
     if allowed[i] or exceeds[i] then retry[i] = -1 else retry[i] = boundary end
-    -- start is period-aligned and fits %.14g today, but the same %.0f rule as
-    -- for GCRA keeps the serialization exact by construction, not by luck.
+    -- The same %.0f rule as for GCRA: every stored number prints as an exact
+    -- integer, and no alignment assumption ever enters the serialization.
     next_state[i] = string.format('%.0f', start) .. ':' .. string.format('%.0f', count + cost)
     next_ttl_ms[i] = math.ceil(boundary / 1000)
   end

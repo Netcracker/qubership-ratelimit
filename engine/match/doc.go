@@ -1,4 +1,7 @@
-// Package match turns one request into the counter buckets it must fit into.
+// Package match turns one request into the counter buckets it must fit into,
+// in two phases: Match selects the targeted blocks from the path and method
+// alone, so the caller pays for identity extraction only when some block
+// wants the request; Evaluate then applies rules over the extracted keys.
 //
 // Blocks combine additively: a request caught by several must satisfy each of
 // them. Within a block the mode decides — every matching rule applies, or only
