@@ -112,7 +112,7 @@ func TestOneBlockingProblemInvalidatesTheWholePolicy(t *testing.T) {
 
 	snap, problems := Compile(domain, []model.Policy{broken, healthy}, nil)
 
-	if got := reasons(problems)[ReasonUnresolvedKeyReference]; got != 1 {
+	if reasons(problems)[ReasonUnresolvedKeyReference] != 1 {
 		t.Fatalf("problems = %v, want one UnresolvedKeyReference", problems)
 	}
 	if len(snap.Blocks) != 1 || snap.Blocks[0].Policy != healthyName {
@@ -600,50 +600,57 @@ func widePolicy(name string) model.Policy {
 		Blocks: []model.Block{{Name: "b", Rules: rules}}}
 }
 
-// TestDomainBudgetIsInformational pins the domain-level record: an oversized
-// set compiles whole — no policy is excluded — but not silently.
-func TestDomainBudgetIsInformational(t *testing.T) {
-	t.Run("buckets over the backstop", func(t *testing.T) {
-		policies := []model.Policy{widePolicy("p1"), widePolicy("p2"), widePolicy("p3")}
-		snap, problems := Compile("d", policies, nil)
-		if got := domainProblems(t, problems); len(got) != 1 {
-			t.Fatalf("problems = %v, want one domain bucket record for 192 > %d",
-				problems, model.MaxDomainDecisionBuckets)
-		}
-		if len(snap.Blocks) != 3 {
-			t.Fatalf("blocks = %d: an informational record must exclude nobody", len(snap.Blocks))
-		}
-	})
+// TestDomainBucketBudgetRecord pins the domain-level record for the bucket
+// bound: an oversized set compiles whole — no policy is excluded — but not
+// silently.
+func TestDomainBucketBudgetRecord(t *testing.T) {
+	policies := []model.Policy{widePolicy("p1"), widePolicy("p2"), widePolicy("p3")}
+	snap, problems := Compile("d", policies, nil)
+	if got := domainProblems(t, problems); len(got) != 1 {
+		t.Fatalf("problems = %v, want one domain bucket record for 192 > %d",
+			problems, model.MaxDomainDecisionBuckets)
+	}
+	if len(snap.Blocks) != 3 {
+		t.Fatalf("blocks = %d: an informational record must exclude nobody", len(snap.Blocks))
+	}
+}
 
-	t.Run("blocks over the scan bound", func(t *testing.T) {
-		// Bypass-only FirstMatch blocks carry no buckets: the block bound
-		// fires alone, proving the two bounds are independent.
-		policies := make([]model.Policy, 0, 5)
-		for pi := range 5 {
-			p := model.Policy{Name: fmt.Sprintf("p%d", pi), Domain: "d"}
-			for bi := range model.MaxBlocksPerPolicy {
-				p.Blocks = append(p.Blocks, model.Block{
-					Name: fmt.Sprintf("b%d", bi), Mode: model.ModeFirstMatch,
-					Rules: []model.Rule{{Name: "lift", Behavior: model.BehaviorBypass}},
-				})
-			}
-			policies = append(policies, p)
-		}
-		snap, problems := Compile("d", policies, nil)
-		got := domainProblems(t, problems)
-		if len(got) != 1 || !strings.Contains(got[0].Message, "blocks") {
-			t.Fatalf("problems = %v, want one domain block record for 320 > %d",
-				problems, model.MaxDomainBlocks)
-		}
-		if len(snap.Blocks) != 320 {
-			t.Fatalf("blocks = %d, want all 320 compiled", len(snap.Blocks))
-		}
-	})
+// bypassOnlyPolicy builds MaxBlocksPerPolicy FirstMatch blocks of one bypass
+// rule each: blocks without buckets, so the block bound can fire alone.
+func bypassOnlyPolicy(name string) model.Policy {
+	p := model.Policy{Name: name, Domain: "d"}
+	for bi := range model.MaxBlocksPerPolicy {
+		p.Blocks = append(p.Blocks, model.Block{
+			Name: fmt.Sprintf("b%d", bi), Mode: model.ModeFirstMatch,
+			Rules: []model.Rule{{Name: "lift", Behavior: model.BehaviorBypass}},
+		})
+	}
+	return p
+}
 
-	t.Run("within bounds stays silent", func(t *testing.T) {
-		_, problems := Compile("d", []model.Policy{widePolicy("p1"), widePolicy("p2")}, nil)
-		if got := domainProblems(t, problems); len(got) != 0 {
-			t.Fatalf("128 buckets and 2 blocks are within bounds; problems: %v", got)
-		}
-	})
+// TestDomainBlockBudgetRecord isolates the scan bound: bypass-only blocks
+// carry no buckets, proving the two domain bounds are independent.
+func TestDomainBlockBudgetRecord(t *testing.T) {
+	policies := make([]model.Policy, 0, 5)
+	for pi := range 5 {
+		policies = append(policies, bypassOnlyPolicy(fmt.Sprintf("p%d", pi)))
+	}
+	snap, problems := Compile("d", policies, nil)
+	got := domainProblems(t, problems)
+	if len(got) != 1 || !strings.Contains(got[0].Message, "blocks") {
+		t.Fatalf("problems = %v, want one domain block record for 320 > %d",
+			problems, model.MaxDomainBlocks)
+	}
+	if len(snap.Blocks) != 320 {
+		t.Fatalf("blocks = %d, want all 320 compiled", len(snap.Blocks))
+	}
+}
+
+// TestDomainWithinBoundsIsSilent keeps the record from firing on sets that
+// fit: exactly at the per-policy budget twice over is still inside.
+func TestDomainWithinBoundsIsSilent(t *testing.T) {
+	_, problems := Compile("d", []model.Policy{widePolicy("p1"), widePolicy("p2")}, nil)
+	if got := domainProblems(t, problems); len(got) != 0 {
+		t.Fatalf("128 buckets and 2 blocks are within bounds; problems: %v", got)
+	}
 }
