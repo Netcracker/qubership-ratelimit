@@ -1,65 +1,48 @@
-// Package store holds the rule set the RLS server reads on every check.
+// Package store holds the compiled snapshot the RLS server reads on every check,
+// and keeps it in step with the objects in the cache.
 //
-// The store is written by the updater on every RateLimitPolicy event and read
-// by the gRPC server on every request, so it is a whole-value swap behind an
-// atomic pointer: readers never take a lock and never observe a half-built map.
+// The store is written by the updater on every event and read by the gRPC server
+// on every request, so it is a whole-value swap behind an atomic pointer: readers
+// never take a lock and never observe a half-built snapshot. Applying a rule
+// change is therefore atomic per request — no request sees the old rules of one
+// domain next to the new extraction of another.
 package store
 
 import (
 	"sync/atomic"
+
+	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
-// RuleSet is an immutable snapshot of the domains that have a policy bound to
-// them.
-type RuleSet struct {
-	Domains map[string]struct{}
-}
-
-// NewRuleSet builds a RuleSet from the domains in effect. Duplicates collapse,
-// which is what makes two policies naming one domain a single entry.
-func NewRuleSet(domains []string) *RuleSet {
-	out := make(map[string]struct{}, len(domains))
-	for _, domain := range domains {
-		out[domain] = struct{}{}
-	}
-	return &RuleSet{Domains: out}
-}
-
-// Has reports whether a policy is bound to the domain.
-func (r *RuleSet) Has(domain string) bool {
-	_, ok := r.Domains[domain]
-	return ok
-}
-
-// Store holds the current RuleSet.
+// Store holds the current snapshot.
 type Store struct {
-	current atomic.Pointer[RuleSet]
+	current atomic.Pointer[policy.Snapshot]
 }
 
-// New returns a Store holding an empty rule set, so readers that run before the
-// first rebuild see "no domain is known" rather than a nil dereference.
+// New returns a Store holding an empty snapshot, so a reader that runs before the
+// first rebuild sees "no domain is known" rather than a nil dereference.
 func New() *Store {
 	s := &Store{}
-	s.current.Store(NewRuleSet(nil))
+	s.current.Store(policy.Empty())
 	return s
 }
 
 // Load returns the current snapshot. The result must be treated as read-only.
-func (s *Store) Load() *RuleSet {
+func (s *Store) Load() *policy.Snapshot {
 	return s.current.Load()
 }
 
 // Replace swaps in a new snapshot.
-func (s *Store) Replace(rs *RuleSet) {
-	if rs == nil {
-		rs = NewRuleSet(nil)
+func (s *Store) Replace(snapshot *policy.Snapshot) {
+	if snapshot == nil {
+		snapshot = policy.Empty()
 	}
-	s.current.Store(rs)
+	s.current.Store(snapshot)
 }
 
 // HasDomain reports whether any policy is bound to the domain. A false here on a
-// live request means the domain in the gateway's filter config does not match any
+// live request means the domain in the filter config of the gateway matches no
 // policy.
 func (s *Store) HasDomain(domain string) bool {
-	return s.Load().Has(domain)
+	return s.Load().Domain(domain) != nil
 }

@@ -1,0 +1,129 @@
+#
+# A production Azure API Management policy, translated. The identifiers, group
+# and role names, paths, and quotas are anonymized; the tiers and the mechanics
+# are the ones that were in production.
+#
+# The source has three tiers, told apart by the convention of their counter key:
+# G1M (group per minute), R1M (role per minute) and T1M (total per minute). The
+# tiers add up, so a member of a group calling createQuote has to fit the group
+# limit, the operation limit, and the total at once.
+#
+# Two things in the source need no expression here. Its increment-condition
+# excluded status 425 from the count, which is "a throttled call does not spend
+# quota" — a guarantee of every algorithm in the engine. And its
+# OrdinalIgnoreCase comparison is what group membership already does, because
+# members and the value tested against them are both lower-cased.
+#
+apiVersion: ratelimit.netcracker.com/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: quote-api-v1
+  labels:
+    app.kubernetes.io/name: ratelimit
+spec:
+  domain: gateway.public
+
+  # The source repeats these sixteen identifiers verbatim in two places. Here the
+  # list is written once.
+  groups:
+    - name: partner-group-1
+      clients:
+        - 00000000-0000-4000-8000-000000000001
+        - 00000000-0000-4000-8000-000000000002
+        - 00000000-0000-4000-8000-000000000003
+        - 00000000-0000-4000-8000-000000000004
+        - 00000000-0000-4000-8000-000000000005
+        - 00000000-0000-4000-8000-000000000006
+        - 00000000-0000-4000-8000-000000000007
+        - 00000000-0000-4000-8000-000000000008
+        - 00000000-0000-4000-8000-000000000009
+        - 00000000-0000-4000-8000-00000000000a
+        - 00000000-0000-4000-8000-00000000000b
+        - 00000000-0000-4000-8000-00000000000c
+        - 00000000-0000-4000-8000-00000000000d
+        - 00000000-0000-4000-8000-00000000000e
+        - 00000000-0000-4000-8000-00000000000f
+        - 00000000-0000-4000-8000-000000000010
+    - name: partner-group-2
+      clients:
+        - 00000000-0000-4000-8000-0000000000b1
+
+  limits:
+    # The API tier: groups, roles and the total. They add up in the source, which
+    # is mode All — the default.
+    - name: quote-api
+      target:
+        routes:
+          - path: {type: Prefix, value: /quote-api/v1}
+      rules:
+        # G1M:*:partner-group-1 — one bucket shared by the whole group, which is
+        # InGroup plus no axes.
+        - name: g1m-any-partner-group-1
+          when:
+            - {key: client, operator: InGroup, value: partner-group-1}
+          counters: []
+          rates:
+            - {requests: 300, period: 1m}
+
+        - name: g1m-any-partner-group-2
+          when:
+            - {key: client, operator: InGroup, value: partner-group-2}
+          counters: []
+          rates:
+            - {requests: 300, period: 1m}
+
+        # R1M — one bucket per role, read out of an array claim. The path of that
+        # claim inside the JWT is set by the RateLimitMapping of this domain, and
+        # this policy is invalid as a whole until that mapping declares roles.
+        - name: r1m-role-bot
+          when:
+            - {key: roles, operator: Contains, value: ROLE_Bot}
+          counters: []
+          rates:
+            - {requests: 120, period: 1m}
+
+        - name: r1m-role-customer
+          when:
+            - {key: roles, operator: Contains, value: ROLE_Customer}
+          counters: []
+          rates:
+            - {requests: 40, period: 1m}
+
+        - name: r1m-role-partner
+          when:
+            - {key: roles, operator: Contains, value: ROLE_Partner}
+          counters: []
+          rates:
+            - {requests: 120, period: 1m}
+
+        # T1M — the unconditional total of this API.
+        - name: t1m-total
+          counters: []
+          rates:
+            - {requests: 500, period: 1m}
+
+    # The operation tier: the narrow group limits on createQuote. The operationId
+    # of the source becomes a method and a path, which is worth checking against
+    # the OpenAPI spec of the API during a migration.
+    - name: quote-api-create
+      target:
+        routes:
+          - path: {type: Prefix, value: /quote-api/v1/quotes}
+            methods: [POST]
+      rules:
+        - name: g1m-create-partner-group-1
+          when:
+            - {key: client, operator: InGroup, value: partner-group-1}
+          counters: []
+          rates:
+            - {requests: 50, period: 1m}
+
+        - name: g1m-create-partner-group-2
+          when:
+            - {key: client, operator: InGroup, value: partner-group-2}
+          counters: []
+          rates:
+            - {requests: 90, period: 1m}
+
+    # The hourly windows of the source (G1H) are commented out there and are not
+    # translated. Each would be a second entry in the rates of its rule.

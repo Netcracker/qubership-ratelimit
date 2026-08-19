@@ -18,8 +18,15 @@ rules:
     resources: [events]
     verbs: [create, patch]
   - apiGroups: [ratelimit.netcracker.com]
-    resources: [ratelimitpolicies]
+    resources: [ratelimitpolicies, ratelimitmappings]
     verbs: [get, list, watch]
   - apiGroups: [ratelimit.netcracker.com]
-    resources: [ratelimitpolicies/status]
+    resources: [ratelimitpolicies/status, ratelimitmappings/status]
     verbs: [get, update, patch]
+  # The last-good spec of every object of a domain, so that a restart does not
+  # forget which generation is being enforced. Names are ratelimit-state-<domain>
+  # and the domains are only known at run time, so the rule cannot be narrowed to
+  # resourceNames.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, create, update, patch, delete]

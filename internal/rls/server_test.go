@@ -16,8 +16,34 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/internal/policy"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
+
+// storeFor builds a store holding the given domains. The rules themselves do not
+// matter here: this server only asks whether a domain is claimed.
+func storeFor(domains ...string) *store.Store {
+	input := policy.Input{}
+	for i, domain := range domains {
+		input.Policies = append(input.Policies, v1alpha1.RateLimitPolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "biz", Name: fmt.Sprintf("policy-%d", i)},
+			Spec: v1alpha1.RateLimitPolicySpec{
+				Domain: domain,
+				Limits: []v1alpha1.LimitBlock{{
+					Name:  "api",
+					Rules: []v1alpha1.Rule{{Name: "total", Rates: []v1alpha1.Rate{{Requests: 1, Period: "1s"}}}},
+				}},
+			},
+		})
+	}
+
+	ruleStore := store.New()
+	ruleStore.Replace(policy.Compile(input).Snapshot)
+	return ruleStore
+}
 
 // rawToken is what the gateway puts in the token descriptor entry: a live
 // credential that must never reach a log line.
@@ -73,8 +99,7 @@ func request(domain string, entries map[string]string) *envoyratelimit.RateLimit
 }
 
 func TestShouldRateLimit_answersOK(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet([]string{"gateway.public"}))
+	ruleStore := storeFor("gateway.public")
 	log, _ := recordingLogger()
 
 	resp, err := NewServer(ruleStore, log).ShouldRateLimit(
@@ -116,8 +141,7 @@ func TestShouldRateLimit_reportsAnUnknownDomain(t *testing.T) {
 
 func TestShouldRateLimit_saysNothingAboutAKnownDomain(t *testing.T) {
 	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet([]string{domain}))
+	ruleStore := storeFor(domain)
 	log, logged := recordingLogger()
 
 	_, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), request(domain, nil))
@@ -144,8 +168,7 @@ func TestShouldRateLimit_neverLogsTheToken(t *testing.T) {
 
 func TestShouldRateLimit_deniesTheSecondRequestInAWindow(t *testing.T) {
 	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet([]string{domain}))
+	ruleStore := storeFor(domain)
 	log, _ := recordingLogger()
 	server := NewServer(ruleStore, log)
 
@@ -228,8 +251,7 @@ func TestShouldRateLimit_putsTheRequestIDInTheLogContext(t *testing.T) {
 	// line matches the format every other Qubership service emits.
 	ctxmanager.Register([]ctxmanager.ContextProvider{xrequestid.XRequestIdProvider{}})
 	log, logged := recordingLogger()
-	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet([]string{"gateway.public"}))
+	ruleStore := storeFor("gateway.public")
 
 	_, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), request("gateway.public",
 		map[string]string{"path": "/api/v1/orders", "request_id": "corr-42", "token": rawToken}))

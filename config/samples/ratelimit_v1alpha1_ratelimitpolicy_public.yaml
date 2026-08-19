@@ -1,11 +1,101 @@
 apiVersion: ratelimit.netcracker.com/v1alpha1
 kind: RateLimitPolicy
 metadata:
-  name: public-gateway
+  name: order-management
   labels:
     app.kubernetes.io/name: ratelimit
 spec:
-  # Must equal the domain in the public gateway's rate limit filter, which the
-  # Helm chart renders from .Values.gateways[].domain. Nothing validates the
-  # match; a typo shows up as an "unknown rate limit domain" line in the service log.
+  # Must equal the domain in the rate limit filter of the public gateway, which
+  # the Helm chart renders from .Values.gateways[].domain. Nothing validates the
+  # match; a typo shows up as an "unknown rate limit domain" line in the service
+  # log, which is why that line is written on every check.
   domain: gateway.public
+
+  groups:
+    - name: mvno-group-1
+      clients: [mvno_acc1, mvno_acc2]
+
+  limits:
+    # A cascade: the first matching rule decides, so the order of the list is the
+    # meaning. Read it top down as "who is this caller".
+    - name: order-management
+      target:
+        routes:
+          - path: {type: Prefix, value: /api/v1/order-management/}
+            methods: [GET]
+          - path: {type: Template, value: "/api/v1/orders/{order_id}/items"}
+      mode: FirstMatch
+      rules:
+        # The scraper is exempt from this block and from nothing else: a Bypass
+        # rule bypasses its own block, so the ceilings below still apply.
+        - name: internal-bypass
+          when:
+            - {key: client, operator: Equals, value: prometheus}
+          behavior: Bypass
+
+        # Shadow tries a tighter limit over the live one: it counts and records
+        # metrics, never rejects, and does not end the cascade.
+        - name: mvno-group-1-trial
+          when:
+            - {key: client, operator: InGroup, value: mvno-group-1}
+          behavior: Shadow
+          rates:
+            - {requests: 50, period: 1m}
+
+        - name: mvno-group-1
+          when:
+            - {key: client, operator: InGroup, value: mvno-group-1}
+          # No axes: the group shares one bucket.
+          counters: []
+          rates:
+            - {requests: 100, period: 1m, algorithm: FixedWindow}
+            - {requests: 10000, period: 1d, algorithm: FixedWindow}
+
+        # roles is declared by the RateLimitMapping of this domain. Without that
+        # mapping this whole policy is invalid — not just this rule — and its
+        # status says so with Ready: False and MappingRequired.
+        - name: subscriber-per-user
+          when:
+            - {key: roles, operator: Contains, value: subscriber}
+          counters: [client]
+          rates:
+            - {requests: 1000, period: 1m, burst: 100}
+
+        # No predicate, so it matches every caller who has a client value. An
+        # anonymous caller has none, and a rule cannot key a bucket by an axis
+        # the request does not carry, so anonymous traffic falls through to the
+        # rule below.
+        - name: per-user
+          counters: [client]
+          rates:
+            - {requests: 100, period: 1m}
+
+        - name: anonymous
+          when:
+            - {key: client, operator: NotExists}
+          counters: []
+          rates:
+            - {requests: 100, period: 1m}
+
+    # A second block, so its verdict adds to the one above: a request that lands
+    # in both has to fit both.
+    - name: api-defaults
+      target:
+        routes:
+          - path: {type: Prefix, value: /api/}
+      rules:
+        # A smoothed minute next to a daily quota. Each window is an independent
+        # bucket, and each can reject on its own.
+        - name: per-user
+          counters: [client]
+          rates:
+            - {requests: 300, period: 1m}
+            - {requests: 20000, period: 1d, algorithm: FixedWindow}
+
+        # Two axes, so the bucket is per pair. Under a Prefix route the path axis
+        # is the raw request path, so its cardinality is as wide as the traffic;
+        # under a Template route it is the template itself.
+        - name: per-user-per-path
+          counters: [client, path]
+          rates:
+            - {requests: 60, period: 1m}

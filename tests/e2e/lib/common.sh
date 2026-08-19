@@ -87,8 +87,12 @@ wait_for_domain() {
     | grep -q "${domain}"
 }
 
+# A policy of one block with one unconditional rule: the whole domain shares one
+# bucket. The default of one request per second is what the traffic assertions
+# rely on, and FixedWindow rather than GCRA because a burst of four then has to
+# produce a rejection regardless of how the requests are spaced.
 apply_policy() {
-  local name="$1" domain="$2"
+  local name="$1" domain="$2" requests="${3:-1}" period="${4:-1s}"
   kubectl apply -f - <<EOF
 apiVersion: ratelimit.netcracker.com/v1alpha1
 kind: RateLimitPolicy
@@ -97,11 +101,53 @@ metadata:
   namespace: ${NAMESPACE}
 spec:
   domain: ${domain}
+  limits:
+    - name: everything
+      rules:
+        - name: total
+          rates:
+            - requests: ${requests}
+              period: ${period}
+              algorithm: FixedWindow
+EOF
+}
+
+apply_mapping() {
+  local domain="$1"
+  kubectl apply -f - <<EOF
+apiVersion: ratelimit.netcracker.com/v1alpha1
+kind: RateLimitMapping
+metadata:
+  name: ${domain}
+  namespace: ${NAMESPACE}
+spec:
+  domain: ${domain}
+  mappings:
+    - key: tenant
+      claim: org_id
+      fallbacks: [sub]
 EOF
 }
 
 policy_condition() {
-  local name="$1"
+  local name="$1" type="${2:-Accepted}"
   kubectl get ratelimitpolicy "${name}" -n "${NAMESPACE}" \
-    -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null
+    -o jsonpath="{.status.conditions[?(@.type==\"${type}\")].status}" 2>/dev/null
+}
+
+# Waits until the last-good state of a domain has been written.
+#
+# Ready on a policy does not imply it: a generation that is valid on its own
+# merits is reported Ready without the reconciler ever consulting the persisted
+# state. Only after the store updater has rebuilt and written does an edit that
+# breaks the policy have something to fall back to.
+wait_for_state() {
+  local domain="$1" i
+  for i in $(seq 1 20); do
+    if kubectl get configmap "ratelimit-state-${domain}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  fail "the last-good state of ${domain} was never written to ratelimit-state-${domain}"
 }

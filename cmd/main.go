@@ -29,6 +29,7 @@ import (
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
 	"github.com/netcracker/qubership-ratelimit/internal/rls"
+	"github.com/netcracker/qubership-ratelimit/internal/state"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 	// +kubebuilder:scaffold:imports
 )
@@ -45,6 +46,11 @@ const (
 // loggerName prefixes every log line this service writes. Sub-loggers are
 // derived from it, e.g. ratelimit/rls.
 const loggerName = "ratelimit"
+
+// managedBy marks the objects this operator creates for itself. It is a separate
+// constant from loggerName on purpose: one is a logging concern and the other is
+// object metadata, and renaming the log prefix must not relabel stored state.
+const managedBy = "ratelimit"
 
 var (
 	scheme   = runtime.NewScheme()
@@ -73,7 +79,7 @@ func main() {
 		"Enable leader election. Only status writes are leader-gated; the rate limit endpoint "+
 			"and its store run on every replica.")
 	flag.DurationVar(&storeDebounce, "store-debounce", store.DefaultDebounce,
-		"How long to collect RateLimitPolicy events before rebuilding the rule store.")
+		"How long to collect resource events before rebuilding the rule store.")
 	flag.DurationVar(&drainTimeout, "rls-drain-timeout", rls.DefaultDrainTimeout,
 		"How long in-flight rate limit checks may delay shutdown.")
 
@@ -118,7 +124,7 @@ func run(
 		return fmt.Errorf("unknown --mode %q, expected one of %q, %q, %q", mode, modeAll, modeController, modeRLS)
 	}
 
-	watchNamespace, err := getCloudNamespace()
+	namespace, err := getCloudNamespace()
 	if err != nil {
 		return err
 	}
@@ -134,7 +140,10 @@ func run(
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				&ratelimitv1alpha1.RateLimitPolicy{}: {
-					Namespaces: map[string]cache.Config{watchNamespace: {}},
+					Namespaces: map[string]cache.Config{namespace: {}},
+				},
+				&ratelimitv1alpha1.RateLimitMapping{}: {
+					Namespaces: map[string]cache.Config{namespace: {}},
 				},
 			},
 			ReaderFailOnMissingInformer: true,
@@ -144,12 +153,34 @@ func run(
 		return fmt.Errorf("create manager: %w", err)
 	}
 
+	// The last-good state lives in ConfigMaps read with an uncached client.
+	stateClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		return fmt.Errorf("create the state client: %w", err)
+	}
+	// Only what the operator can keep true. app.kubernetes.io/name is deliberately
+	// absent: the chart derives it from .Values.nameOverride, which this process
+	// cannot see, so setting it here would drift from every other object of the
+	// release the moment someone overrides the name. These ConfigMaps are internal
+	// state looked up by name, never by selector, so the label buys nothing.
+	lastGood := state.New(stateClient, namespace, map[string]string{
+		"app.kubernetes.io/managed-by": managedBy,
+	})
+
 	if runController {
 		if err := (&controller.RateLimitPolicyReconciler{
 			Client: mgr.GetClient(),
 			Scheme: mgr.GetScheme(),
+			State:  lastGood,
 		}).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("set up RateLimitPolicy controller: %w", err)
+		}
+		if err := (&controller.RateLimitMappingReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+			State:  lastGood,
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("set up RateLimitMapping controller: %w", err)
 		}
 	}
 	// +kubebuilder:scaffold:builder
@@ -162,6 +193,8 @@ func run(
 			Store:    ruleStore,
 			Debounce: storeDebounce,
 			Log:      newLogrLogger().WithName("store"),
+			State:    lastGood,
+			Elected:  mgr.Elected(),
 		}
 		if err := mgr.Add(updater); err != nil {
 			return fmt.Errorf("add store updater: %w", err)
@@ -192,7 +225,7 @@ func run(
 	}
 
 	setupLog.Infof("starting service mode=%v namespace=%v leaderElection=%v",
-		mode, watchNamespace, enableLeaderElection && runController)
+		mode, namespace, enableLeaderElection && runController)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		return fmt.Errorf("run manager: %w", err)
 	}

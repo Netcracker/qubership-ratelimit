@@ -16,6 +16,15 @@ resources:
   controller: true
   domain: netcracker.com
   group: ratelimit
+  kind: RateLimitMapping
+  path: github.com/netcracker/qubership-ratelimit/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: netcracker.com
+  group: ratelimit
   kind: RateLimitPolicy
   path: github.com/netcracker/qubership-ratelimit/api/v1alpha1
   version: v1alpha1

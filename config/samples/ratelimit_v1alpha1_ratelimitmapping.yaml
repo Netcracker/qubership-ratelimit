@@ -1,0 +1,30 @@
+apiVersion: ratelimit.netcracker.com/v1alpha1
+kind: RateLimitMapping
+metadata:
+  # The name has to equal spec.domain. That is what makes the mapping the
+  # singleton of its domain: object names are unique in a namespace, so a second
+  # mapping for gateway.public cannot be created and there is no "which one wins"
+  # to arbitrate.
+  name: gateway.public
+  labels:
+    app.kubernetes.io/name: ratelimit
+spec:
+  domain: gateway.public
+
+  mappings:
+    # An array claim: Contains and In apply to it, Equals does not, and it cannot
+    # key a bucket.
+    - {key: roles, claim: realm_access.roles, type: StringArray}
+
+    # A fallback chain: the first path that yields a value wins, so a token
+    # without org_id still produces a tenant.
+    - {key: tenant, claim: org_id, fallbacks: [sub], normalize: Lowercase}
+
+    # A claim whose own name contains dots is addressed segment by segment.
+    - {key: entitlements, claimPath: ["https://acme.com/entitlements"], type: StringArray}
+
+  # Shared groups: visible to every policy of this domain. A policy that defines
+  # a group of the same name shadows this one.
+  groups:
+    - name: partners
+      clients: [p1, p2, p3]

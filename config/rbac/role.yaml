@@ -6,8 +6,19 @@ metadata:
   namespace: ratelimit-system
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - patch
+  - update
+- apiGroups:
   - ratelimit.netcracker.com
   resources:
+  - ratelimitmappings
   - ratelimitpolicies
   verbs:
   - get
@@ -16,6 +27,7 @@ rules:
 - apiGroups:
   - ratelimit.netcracker.com
   resources:
+  - ratelimitmappings/status
   - ratelimitpolicies/status
   verbs:
   - get
