@@ -58,6 +58,9 @@ spec:
                     header_name: ":path"
                     descriptor_key: path
                 - request_headers:
+                    header_name: ":method"
+                    descriptor_key: method
+                - request_headers:
                     header_name: "authorization"
                     descriptor_key: token
                     skip_if_absent: true
