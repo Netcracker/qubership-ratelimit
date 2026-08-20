@@ -233,6 +233,12 @@ already deployed:
 make test-e2e E2E_NAMESPACE=core
 ```
 
+`tests/e2e/redis/` is the exception to "run everything": it asserts what only a
+shared counter store can do — that the operator selected Redis rather than
+falling back, that the counters carry the documented key, and that a spent budget
+survives the process that spent it. An install without `redis.addresses` is a
+valid install, so that suite skips rather than fails on one.
+
 It covers what no unit test can: that the installed CRD is the one carrying the current validation, that a policy event
 reaches the store in the running pod, that a mapping revives a policy that referenced its key, that an earlier
 generation keeps running while an edit is rejected and the state reaches its ConfigMap, that the gate refuses a mapping

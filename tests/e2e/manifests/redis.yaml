@@ -1,0 +1,78 @@
+# The shared counter store the suite points the release at.
+#
+# It holds counters and nothing else: every key expires with the window that
+# created it, so there is nothing here worth persisting and persistence is turned
+# off. A restart of this pod would be a restart of the limits, which is why the
+# redis suite restarts the operator rather than the store.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-redis
+  labels:
+    app: e2e-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: e2e-redis
+  template:
+    metadata:
+      labels:
+        app: e2e-redis
+    spec:
+      # The counter store never talks to the API server.
+      automountServiceAccountToken: false
+      containers:
+        - name: redis
+          image: redis:8-alpine
+          # No snapshots and no append-only file: the data is counters with a TTL,
+          # and writing them to disk buys nothing while costing IO on every window.
+          args: ["--save", "", "--appendonly", "no"]
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            # Redis wants a writable working directory even with persistence off.
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+              ephemeral-storage: 64Mi
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-redis
+  labels:
+    app: e2e-redis
+spec:
+  selector:
+    app: e2e-redis
+  ports:
+    - port: 6379
+      targetPort: redis
+      name: redis

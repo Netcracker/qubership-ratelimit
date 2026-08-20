@@ -93,6 +93,11 @@ jobs:
             kubectl rollout status "deployment/${gw}-istio" -n "${E2E_NAMESPACE}" --timeout=300s
           done
 
+      - name: Deploy the counter store
+        run: |
+          kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/redis.yaml
+          kubectl rollout status deployment/e2e-redis -n "${E2E_NAMESPACE}" --timeout=120s
+
       - name: Install the chart
         run: |
           # A profile is mandatory: values.yaml carries no resource keys, so the
@@ -103,6 +108,7 @@ jobs:
             --set logLevel=debug \
             --set image.repository=ratelimit \
             --set image.tag=e2e \
+            --set redis.addresses=e2e-redis:6379 \
             --wait --timeout 5m
 
       - name: Deploy the probe backend
