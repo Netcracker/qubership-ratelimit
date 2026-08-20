@@ -16,6 +16,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	engine "github.com/netcracker/qubership-ratelimit/engine"
+	"github.com/netcracker/qubership-ratelimit/engine/compile"
+	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
@@ -74,7 +77,7 @@ func request(domain string, entries map[string]string) *envoyratelimit.RateLimit
 
 func TestShouldRateLimit_answersOK(t *testing.T) {
 	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet([]string{"gateway.public"}))
+	ruleStore.Replace(ruleSetOf(t, "gateway.public"))
 	log, _ := recordingLogger()
 
 	resp, err := NewServer(ruleStore, log).ShouldRateLimit(
@@ -117,7 +120,7 @@ func TestShouldRateLimit_reportsAnUnknownDomain(t *testing.T) {
 func TestShouldRateLimit_saysNothingAboutAKnownDomain(t *testing.T) {
 	const domain = "gateway.public"
 	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet([]string{domain}))
+	ruleStore.Replace(ruleSetOf(t, domain))
 	log, logged := recordingLogger()
 
 	_, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), request(domain, nil))
@@ -145,7 +148,7 @@ func TestShouldRateLimit_neverLogsTheToken(t *testing.T) {
 func TestShouldRateLimit_deniesTheSecondRequestInAWindow(t *testing.T) {
 	const domain = "gateway.public"
 	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet([]string{domain}))
+	ruleStore.Replace(ruleSetOf(t, domain))
 	log, _ := recordingLogger()
 	server := NewServer(ruleStore, log)
 
@@ -229,7 +232,7 @@ func TestShouldRateLimit_putsTheRequestIDInTheLogContext(t *testing.T) {
 	ctxmanager.Register([]ctxmanager.ContextProvider{xrequestid.XRequestIdProvider{}})
 	log, logged := recordingLogger()
 	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet([]string{"gateway.public"}))
+	ruleStore.Replace(ruleSetOf(t, "gateway.public"))
 
 	_, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), request("gateway.public",
 		map[string]string{"path": "/api/v1/orders", "request_id": "corr-42", "token": rawToken}))
@@ -246,4 +249,17 @@ func TestSanitizeValue_stripsControlCharactersFromARequestID(t *testing.T) {
 	}))
 
 	assert.Equal(t, "idINFO forged", requestID)
+}
+
+// ruleSetOf builds a rule set of empty-snapshot engines over private
+// in-memory counters — the shape BuildRuleSet produces for the stub CRD.
+func ruleSetOf(t *testing.T, domains ...string) *store.RuleSet {
+	t.Helper()
+	engines := make(map[string]*engine.Engine, len(domains))
+	for _, d := range domains {
+		snap, problems := compile.Compile(d, nil, nil)
+		require.Empty(t, problems)
+		engines[d] = engine.New(snap, memory.New())
+	}
+	return store.NewRuleSet(engines)
 }
