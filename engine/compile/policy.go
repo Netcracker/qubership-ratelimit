@@ -193,42 +193,52 @@ func (c *policyCompiler) compileConditions(b model.Block, r model.Rule, blockKey
 		c.fail(b.Name, r.Name, ReasonInvalidSpec, "when exceeds the limit of %d", model.MaxConditionsPerRule)
 	}
 	for _, cond := range r.When {
-		compiled := Condition{Key: cond.Key, Operator: cond.Operator, Value: cond.Value}
-
-		if cond.Key == model.KeyPath || cond.Key == model.KeyMethod {
-			c.fail(b.Name, r.Name, ReasonInvalidSpec, "when key %q belongs to the target, not to when", cond.Key)
-			continue
+		if compiled, ok := c.compileCondition(b, r, cond, blockKeys); ok {
+			out.When = append(out.When, compiled)
 		}
-		isArray, known := blockKeys[cond.Key]
-		if !known {
-			c.fail(b.Name, r.Name, ReasonUnresolvedKeyReference,
-				"key %q is not in the effective set of the domain", cond.Key)
-			continue
-		}
-		if !c.operatorArity(b, r, cond) {
-			continue
-		}
-
-		switch cond.Operator {
-		case model.OperatorEquals:
-			if isArray {
-				c.fail(b.Name, r.Name, ReasonIncompatibleOperator,
-					"Equals cannot apply to the array-valued key %q", cond.Key)
-			}
-		case model.OperatorIn:
-			compiled.Values = toSet(cond.Values)
-		case model.OperatorInGroup:
-			clients, ok := c.groups[cond.Value]
-			if !ok {
-				c.fail(b.Name, r.Name, ReasonUnresolvedGroupReference,
-					"InGroup names %q, which no group declares", cond.Value)
-				continue
-			}
-			compiled.Values = toSet(clients)
-		case model.OperatorContains, model.OperatorExists, model.OperatorNotExists:
-		}
-		out.When = append(out.When, compiled)
 	}
+}
+
+// compileCondition validates one predicate against the block's key set and
+// bakes group and In sets into it.
+func (c *policyCompiler) compileCondition(
+	b model.Block, r model.Rule, cond model.Condition, blockKeys map[string]bool,
+) (Condition, bool) {
+	compiled := Condition{Key: cond.Key, Operator: cond.Operator, Value: cond.Value}
+
+	if cond.Key == model.KeyPath || cond.Key == model.KeyMethod {
+		c.fail(b.Name, r.Name, ReasonInvalidSpec, "when key %q belongs to the target, not to when", cond.Key)
+		return Condition{}, false
+	}
+	isArray, known := blockKeys[cond.Key]
+	if !known {
+		c.fail(b.Name, r.Name, ReasonUnresolvedKeyReference,
+			"key %q is not in the effective set of the domain", cond.Key)
+		return Condition{}, false
+	}
+	if !c.operatorArity(b, r, cond) {
+		return Condition{}, false
+	}
+
+	switch cond.Operator {
+	case model.OperatorEquals:
+		if isArray {
+			c.fail(b.Name, r.Name, ReasonIncompatibleOperator,
+				"Equals cannot apply to the array-valued key %q", cond.Key)
+		}
+	case model.OperatorIn:
+		compiled.Values = toSet(cond.Values)
+	case model.OperatorInGroup:
+		clients, ok := c.groups[cond.Value]
+		if !ok {
+			c.fail(b.Name, r.Name, ReasonUnresolvedGroupReference,
+				"InGroup names %q, which no group declares", cond.Value)
+			return Condition{}, false
+		}
+		compiled.Values = toSet(clients)
+	case model.OperatorContains, model.OperatorExists, model.OperatorNotExists:
+	}
+	return compiled, true
 }
 
 // operatorArity rejects a condition whose parameters do not fit its operator:

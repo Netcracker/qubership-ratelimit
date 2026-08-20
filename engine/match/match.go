@@ -193,6 +193,36 @@ func matchTemplate(segments []compile.Segment, path string) (map[string]string, 
 
 // evalBlock applies the block's mode over its rules.
 func evalBlock(block *compile.Block, ctx *blockCtx) []MatchedRule {
+	if block.Mode == model.ModeFirstMatch {
+		return evalFirstMatch(block, ctx)
+	}
+	return evalAll(block, ctx)
+}
+
+// evalFirstMatch walks the cascade. A shadow rule counts without stopping
+// it; bypass and enforce both end it — one by allowing, one by applying.
+func evalFirstMatch(block *compile.Block, ctx *blockCtx) []MatchedRule {
+	var out []MatchedRule
+	for i := range block.Rules {
+		rule := &block.Rules[i]
+		if !ruleMatches(rule, ctx) {
+			continue
+		}
+		if rule.Behavior == model.BehaviorBypass {
+			return out
+		}
+		out = append(out, matchedRule(block, rule, ctx))
+		if rule.Behavior != model.BehaviorShadow {
+			return out
+		}
+	}
+	return out
+}
+
+// evalAll applies every matching rule. A matching rule's replaces suppresses
+// the rules it names; for a bypass that is the whole effect — a targeted
+// exemption, never the whole block.
+func evalAll(block *compile.Block, ctx *blockCtx) []MatchedRule {
 	var out []MatchedRule
 	var suppressed map[string]struct{} // lazy: replaces is the rare case
 
@@ -201,30 +231,9 @@ func evalBlock(block *compile.Block, ctx *blockCtx) []MatchedRule {
 		if !ruleMatches(rule, ctx) {
 			continue
 		}
-		if block.Mode == model.ModeFirstMatch {
-			// A shadow rule counts without stopping the cascade; bypass and
-			// enforce both end it — one by allowing, one by applying.
-			if rule.Behavior == model.BehaviorBypass {
-				return out
-			}
+		if rule.Behavior != model.BehaviorBypass {
 			out = append(out, matchedRule(block, rule, ctx))
-			if rule.Behavior != model.BehaviorShadow {
-				return out
-			}
-			continue
 		}
-		if rule.Behavior == model.BehaviorBypass {
-			// Under All a bypass frees its matched requests from the rules
-			// it names — a targeted exemption, never the whole block.
-			for _, name := range rule.Replaces {
-				if suppressed == nil {
-					suppressed = map[string]struct{}{}
-				}
-				suppressed[name] = struct{}{}
-			}
-			continue
-		}
-		out = append(out, matchedRule(block, rule, ctx))
 		for _, name := range rule.Replaces {
 			if suppressed == nil {
 				suppressed = map[string]struct{}{}

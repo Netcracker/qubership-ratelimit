@@ -16,82 +16,87 @@
 --   allowed(0|1), cost_exceeds(0|1), remaining, retry_after_us (-1 when no
 --   retry hint applies), reset_after_us
 
-local t = redis.call('TIME')
+local call = redis.call
+local fmt = string.format
+local find = string.find
+local sub = string.sub
+local floor = math.floor
+local ceil = math.ceil
+local tonum = tonumber
+
+local t = call('TIME')
 local now = t[1] * 1000000 + t[2]
 
-local mode = ARGV[1]
-local cost = tonumber(ARGV[2])
+local decide = ARGV[1] == 'decide'
+local cost = tonum(ARGV[2])
 local n = #KEYS
 
-local allowed = {}
-local exceeds = {}
-local shadow = {}
-local remain_charged = {}
-local remain_current = {}
-local retry = {}
-local reset_charged = {}
-local reset_current = {}
-local next_state = {}
-local next_ttl_ms = {}
+local states = n > 0 and call('MGET', unpack(KEYS)) or {}
+
+-- The first pass writes the uncharged shape of every reply quintuple straight
+-- into out and keeps the charged shape as numbers on the side: rc/sc are the
+-- charged remaining and reset, sa/sb the next state (sa alone for GCRA, both
+-- for a fixed window), set only for buckets whose own verdict allows. The
+-- commit pass patches the reply and serializes state in one place, so refused
+-- decisions and peeks never pay for strings they would throw away.
+local out = {1}
+local rc, sc, sa, sb = {}, {}, {}, {}
 
 local admitted = 1
 
 for i = 1, n do
   local base = 2 + (i - 1) * 5
-  local alg = tonumber(ARGV[base + 1])
-  local p1 = tonumber(ARGV[base + 2])
-  local p2 = tonumber(ARGV[base + 3])
-  local p3 = tonumber(ARGV[base + 4])
-  shadow[i] = ARGV[base + 5] == '1'
+  local alg = tonum(ARGV[base + 1])
+  local p1 = tonum(ARGV[base + 2])
+  local p2 = tonum(ARGV[base + 3])
+  local p3 = tonum(ARGV[base + 4])
+  local shadow = ARGV[base + 5] == '1'
+  local state = states[i]
+  local o = 1 + (i - 1) * 5
 
-  local state = redis.call('GET', KEYS[i])
+  local allowed = false
 
   if alg == 1 then
     local emission, tau, burst = p1, p2, p3
     local tat = now
     if state then
-      local stored = tonumber(state)
+      local stored = tonum(state)
       if stored and stored > now then tat = stored end
     end
     local depth = tat - now
-    local current = math.floor((tau - depth) / emission)
+    local current = floor((tau - depth) / emission)
     if current < 0 then current = 0 end
-    remain_current[i] = current
-    reset_current[i] = depth
 
+    local exceeds = false
+    local retry = -1
     if cost > burst then
-      allowed[i] = false
-      exceeds[i] = true
-      retry[i] = -1
-      remain_charged[i] = 0
-      reset_charged[i] = depth
+      exceeds = true
     else
-      local increment = emission * cost
-      local new_tat = tat + increment
+      local new_tat = tat + emission * cost
       local diff = now - (new_tat - tau)
-      allowed[i] = diff >= 0
-      exceeds[i] = false
-      local rc = math.floor(diff / emission)
-      if rc < 0 then rc = 0 end
-      remain_charged[i] = rc
-      reset_charged[i] = new_tat - now
-      if allowed[i] then retry[i] = -1 else retry[i] = -diff end
-      -- Never tostring() a timestamp: Lua formats numbers as %.14g, and a
-      -- 16-digit microsecond value would lose its last digits -- roughly a
-      -- 100us quantum that silently forgives debt at high rates. %.0f prints
-      -- the integral double exactly.
-      next_state[i] = string.format('%.0f', new_tat)
-      next_ttl_ms[i] = math.ceil((new_tat - now) / 1000)
+      if diff >= 0 then
+        allowed = true
+        rc[i] = floor(diff / emission)
+        sc[i] = new_tat - now
+        sa[i] = new_tat
+      else
+        retry = -diff
+      end
     end
+    out[o + 1] = allowed and 1 or 0
+    out[o + 2] = exceeds and 1 or 0
+    out[o + 3] = current
+    out[o + 4] = retry
+    out[o + 5] = depth
   else
     local period, requests = p1, p2
     local start = now - (now % period)
     local count = 0
     if state then
-      local sep = string.find(state, ':', 1, true)
+      local sep = find(state, ':', 1, true)
       if sep then
-        local s = tonumber(string.sub(state, 1, sep - 1))
-        local c = tonumber(string.sub(state, sep + 1))
+        local s = tonum(sub(state, 1, sep - 1))
+        local c = tonum(sub(state, sep + 1))
         if s == start and c then count = c end
       end
     end
@@ -99,46 +104,50 @@ for i = 1, n do
     if left < 0 then left = 0 end
     local boundary = start + period - now
 
-    allowed[i] = cost <= left
-    exceeds[i] = cost > requests
-    remain_current[i] = left
-    remain_charged[i] = left - cost
-    reset_charged[i] = boundary
-    if count == 0 then reset_current[i] = 0 else reset_current[i] = boundary end
-    if allowed[i] or exceeds[i] then retry[i] = -1 else retry[i] = boundary end
-    -- The same %.0f rule as for GCRA: every stored number prints as an exact
-    -- integer, and no alignment assumption ever enters the serialization.
-    next_state[i] = string.format('%.0f', start) .. ':' .. string.format('%.0f', count + cost)
-    next_ttl_ms[i] = math.ceil(boundary / 1000)
+    allowed = cost <= left
+    local exceeds = cost > requests
+    if allowed then
+      rc[i] = left - cost
+      sc[i] = boundary
+      sa[i] = start
+      sb[i] = count + cost
+    end
+    out[o + 1] = allowed and 1 or 0
+    out[o + 2] = exceeds and 1 or 0
+    out[o + 3] = left
+    out[o + 4] = (allowed or exceeds) and -1 or boundary
+    out[o + 5] = count == 0 and 0 or boundary
   end
 
-  if not shadow[i] and not allowed[i] then
+  if not shadow and not allowed then
     admitted = 0
   end
 end
 
-if admitted == 1 and mode == 'decide' then
+out[1] = admitted
+
+if admitted == 1 and decide then
   for i = 1, n do
-    if allowed[i] and next_state[i] then
-      redis.call('SET', KEYS[i], next_state[i], 'PX', next_ttl_ms[i])
+    if sa[i] then
+      local o = 1 + (i - 1) * 5
+      out[o + 1] = 1
+      out[o + 2] = 0
+      out[o + 3] = rc[i]
+      out[o + 4] = -1
+      out[o + 5] = sc[i]
+      -- Never tostring() a timestamp: Lua formats numbers as %.14g, and a
+      -- 16-digit microsecond value would lose its last digits -- roughly a
+      -- 100us quantum that silently forgives debt at high rates. %.0f prints
+      -- every stored number of either algorithm as an exact integer.
+      local state
+      if sb[i] then
+        state = fmt('%.0f:%.0f', sa[i], sb[i])
+      else
+        state = fmt('%.0f', sa[i])
+      end
+      call('SET', KEYS[i], state, 'PX', ceil(sc[i] / 1000))
     end
   end
 end
 
-local out = {admitted}
-for i = 1, n do
-  if admitted == 1 and mode == 'decide' and allowed[i] then
-    out[#out + 1] = 1
-    out[#out + 1] = 0
-    out[#out + 1] = remain_charged[i]
-    out[#out + 1] = -1
-    out[#out + 1] = reset_charged[i]
-  else
-    out[#out + 1] = allowed[i] and 1 or 0
-    out[#out + 1] = exceeds[i] and 1 or 0
-    out[#out + 1] = remain_current[i]
-    out[#out + 1] = retry[i]
-    out[#out + 1] = reset_current[i]
-  end
-end
 return out
