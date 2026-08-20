@@ -6,48 +6,64 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
-	"github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
+	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
-// testEngines builds one empty-snapshot engine per domain over private
-// in-memory counters, mirroring what BuildRuleSet does for the stub CRD.
-func testEngines(t *testing.T, domains ...string) map[string]*engine.Engine {
+// ruleSetOf compiles the objects and binds each domain to a counter store, which
+// is what the updater does on every rebuild.
+func ruleSetOf(t *testing.T, objects ...*v1alpha1.RateLimitPolicy) *RuleSet {
 	t.Helper()
-	out := make(map[string]*engine.Engine, len(domains))
-	for _, d := range domains {
-		snap, problems := compile.Compile(d, nil, nil)
-		require.Empty(t, problems)
-		out[d] = engine.New(snap, memory.New())
+	input := policy.Input{}
+	for _, object := range objects {
+		input.Policies = append(input.Policies, *object)
 	}
-	return out
+	counters := memory.New()
+	engines := map[string]*engine.Engine{}
+	for domain, snapshot := range policy.Compile(input).Snapshots {
+		engines[domain] = engine.New(snapshot, counters)
+	}
+	return NewRuleSet(engines)
 }
 
 func TestNew_emptyStoreKnowsNoDomain(t *testing.T) {
 	s := New()
 
 	require.NotNil(t, s.Load())
-	assert.False(t, s.HasDomain("gateway.public"))
+	assert.False(t, s.Load().Has("gateway.public"))
 }
 
 func TestReplace_swapsSnapshot(t *testing.T) {
 	s := New()
 
-	s.Replace(NewRuleSet(testEngines(t, "gateway.private")))
+	s.Replace(ruleSetOf(t, policyObject("private", "gateway.private")))
 
-	assert.True(t, s.HasDomain("gateway.private"))
-	assert.False(t, s.HasDomain("gateway.public"))
+	assert.True(t, s.Load().Has("gateway.private"))
+	assert.False(t, s.Load().Has("gateway.public"))
 }
 
 func TestReplace_nilYieldsEmptySnapshot(t *testing.T) {
 	s := New()
-	s.Replace(NewRuleSet(testEngines(t, "gateway.private")))
+	s.Replace(ruleSetOf(t, policyObject("private", "gateway.private")))
 
 	s.Replace(nil)
 
 	require.NotNil(t, s.Load(), "a nil replacement must not leave readers with a nil snapshot")
-	assert.False(t, s.HasDomain("gateway.private"))
+	assert.False(t, s.Load().Has("gateway.private"))
+}
+
+func TestHasDomain_twoPoliciesNamingOneDomainAreOneDomain(t *testing.T) {
+	s := New()
+
+	s.Replace(ruleSetOf(t,
+		policyObject("alpha", "gateway.public"),
+		policyObject("zeta", "gateway.public"),
+	))
+
+	require.True(t, s.Load().Has("gateway.public"))
+	assert.Equal(t, 1, s.Load().Len(), "two policies naming one domain share one engine")
 }
 
 func TestNeedLeaderElection_updaterRunsOnEveryReplica(t *testing.T) {
@@ -57,13 +73,4 @@ func TestNeedLeaderElection_updaterRunsOnEveryReplica(t *testing.T) {
 	updater := &Updater{}
 
 	assert.False(t, updater.NeedLeaderElection())
-}
-
-func TestRuleSet_returnsTheDomainsOwnEngine(t *testing.T) {
-	engines := testEngines(t, "gateway.public", "gateway.private")
-	ruleSet := NewRuleSet(engines)
-
-	assert.Same(t, engines["gateway.public"], ruleSet.Engine("gateway.public"))
-	assert.Nil(t, ruleSet.Engine("gateway.absent"), "an unbound domain has no engine")
-	assert.Equal(t, 2, ruleSet.Len())
 }

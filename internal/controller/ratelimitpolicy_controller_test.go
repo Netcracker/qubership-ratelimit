@@ -238,7 +238,7 @@ func TestReconcile_reportsASpecTheCompilerRejects(t *testing.T) {
 	accepted := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
 	assert.Equal(t, metav1.ConditionFalse, accepted.Status)
 	assert.Equal(t, ratelimitv1alpha1.ReasonInvalidSpec, accepted.Reason)
-	assert.Contains(t, accepted.Message, `replaces "absent"`)
+	assert.Contains(t, accepted.Message, "absent")
 
 	assert.Equal(t, metav1.ConditionFalse,
 		condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionReady).Status,

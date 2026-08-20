@@ -29,7 +29,33 @@ logLevel: info
 rls:
   port: 9000
   timeout: 0.05s
+  # What an unreachable limiter means for the traffic of this gateway. It is a
+  # gateway decision rather than a service one, which is why it lives on the
+  # filter: false keeps the traffic flowing unlimited, true rejects it.
   failClosed: false
+  # Let Envoy render x-ratelimit-limit, x-ratelimit-remaining and
+  # x-ratelimit-reset from what the service returns. Rendering them in the
+  # service instead would put the same numbers in two places.
+  xRateLimitHeaders: DRAFT_VERSION_03
+
+# ============== COUNTER STORE ============================
+# Redis holds the counters, and that is what makes a limit a limit of the domain
+# rather than of each replica: with N replicas counting in their own memory, a
+# limit of 100 admits 100*N. An empty address list selects the in-process store,
+# which is correct at one replica and for a developer install.
+#
+# addresses is a comma-separated host:port list: one entry is a standalone server,
+# several are a cluster. Setting masterName selects Sentinel.
+redis:
+  addresses: ""
+  db: 0
+  username: ""
+  masterName: ""
+  # The password comes from a Secret rather than from values: values end up in
+  # the release, and the release is readable by anyone with get on Secrets in the
+  # namespace.
+  existingSecret: ""
+  passwordKey: password
 
 healthProbe:
   port: 8081

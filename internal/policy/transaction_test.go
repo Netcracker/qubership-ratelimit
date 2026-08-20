@@ -72,7 +72,7 @@ func TestCompile_aLastGoodGenerationKeepsRunning(t *testing.T) {
 	assert.Equal(t, int64(2), outcome.Generation)
 	assert.Equal(t, int64(1), outcome.ActiveGeneration, "generation 1 has to keep running")
 	assert.False(t, outcome.Ready())
-	assert.Len(t, result.Snapshot.Domain(testDomain).Blocks, 1)
+	assert.Len(t, result.Snapshots[testDomain].Blocks, 1)
 }
 
 func TestCompile_aLastGoodGenerationIsDroppedOnceTheLatestOneWorks(t *testing.T) {
@@ -116,7 +116,7 @@ func TestCompile_aRecreatedObjectDoesNotInheritStateOfItsNamesake(t *testing.T) 
 	})
 
 	assert.Zero(t, result.Policies[key("orders")].ActiveGeneration)
-	assert.Empty(t, result.Snapshot.Domain(testDomain).Blocks)
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
 }
 
 func TestCompile_theGateVetoesAMappingThatWouldStopRunningRules(t *testing.T) {
@@ -361,7 +361,7 @@ func TestCompile_deletingAMappingIsOutsideTheGate(t *testing.T) {
 
 	assert.Zero(t, result.Policies[key("orders")].ActiveGeneration)
 	assert.Equal(t, v1alpha1.ReasonMappingRequired, result.Policies[key("orders")].Reason)
-	assert.Empty(t, result.Snapshot.Domain(testDomain).Blocks)
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
 	assert.Nil(t, result.State[testDomain].Mapping, "the last-good mapping goes with the object")
 }
 

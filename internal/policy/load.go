@@ -9,12 +9,6 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
-// Empty returns a snapshot with no domains. It is what a reader sees before the
-// first rebuild.
-func Empty() *Snapshot {
-	return &Snapshot{domains: map[string]*Domain{}}
-}
-
 // Load reads every policy and mapping the reader can see.
 //
 // Both the updater and the reconciler compile from this same input, which is what

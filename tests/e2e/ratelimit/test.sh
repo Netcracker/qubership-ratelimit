@@ -79,25 +79,50 @@ done
 echo "OK: the gateway sends the path, method, token and request_id descriptors"
 
 # ---------------------------------------------------------------------------
-# 2. A policy without rules admits everything
+# 2. The declared limit is enforced
 # ---------------------------------------------------------------------------
-# The CRD carries only the domain today, which compiles into the documented
-# "no rules, everything allowed" snapshot: the whole burst must pass. The
-# refusal scenarios return together with the rule schema; until then a 429
-# here means the operator invented a limit nobody declared.
-CODES=$(curl_gw_burst 6 public-gateway "${PROBE_PATH}")
+# The policy declares one request per second for the whole domain, so a burst on
+# one connection must produce a refusal, and the first request of it must not be
+# refused — a 429 on the first would mean a window carried over from an earlier
+# test rather than a limit being applied to this one.
+CODES=$(curl_gw_burst 4 public-gateway "${PROBE_PATH}")
 echo "${CODES}"
 
-if echo "${CODES}" | grep -q "429"; then
-  fail "a request was refused although the policy declares no rules"
+FIRST=$(echo "${CODES}" | head -1)
+if [ "${FIRST}" = "429" ]; then
+  fail "the first request of a burst was refused; the window did not reset between tests"
 fi
-if echo "${CODES}" | grep -qvE "^(2[0-9][0-9]|404)$"; then
+if ! echo "${CODES}" | grep -q "429"; then
+  fail "no request in the burst was refused; the declared limit is not being enforced"
+fi
+if echo "${CODES}" | grep -qE "^(000|503)$"; then
   fail "a request did not reach a routing verdict (codes above)"
 fi
-echo "OK: the gateway admits the whole burst under a rule-less policy"
+echo "OK: the gateway refuses requests over the declared limit (429)"
 
 # ---------------------------------------------------------------------------
-# 3. What the operator logs about a check
+# 3. The window reopens
+# ---------------------------------------------------------------------------
+sleep 1.5
+CODE=$(curl_gw_code public-gateway "${PROBE_PATH}")
+if [ "${CODE}" = "429" ]; then
+  fail "still refused after the window should have reopened"
+fi
+echo "OK: traffic is allowed again once the window reopens"
+
+# ---------------------------------------------------------------------------
+# 4. Each gateway counts on its own
+# ---------------------------------------------------------------------------
+# The counting axis carries the domain, so exhausting the public gateway must not
+# refuse the private one. A shared counter would show up here and nowhere else.
+curl_gw_burst 3 public-gateway "${PROBE_PATH}" >/dev/null
+PRIVATE_CODE=$(curl_gw_code private-gateway "${PROBE_PATH}")
+if [ "${PRIVATE_CODE}" = "429" ]; then
+  fail "the private gateway was refused while only the public one was exhausted"
+fi
+echo "OK: the two gateways are limited independently"
+
+# 5. What the operator logs about a check
 # ---------------------------------------------------------------------------
 # The per-check line is Debug; the e2e install runs with logLevel=debug
 # precisely so this contract stays observable.

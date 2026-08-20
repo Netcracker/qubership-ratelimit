@@ -2,6 +2,8 @@ package redis_test
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -70,9 +72,21 @@ func disposableRedis() (addr, reason string) {
 			disposable.err = "docker is not in PATH"
 			return
 		}
+
+		// A published port lands on the machine running the daemon, which is not
+		// necessarily this one: DOCKER_HOST and docker contexts both point at
+		// remote daemons routinely. Binding such a container to the loopback of
+		// the daemon would publish it where no test can reach it, so the bind
+		// address follows where the daemon lives.
+		host := daemonHost()
+		bind := "127.0.0.1"
+		if host != "" {
+			bind = "0.0.0.0"
+		}
+
 		name := fmt.Sprintf("ratelimit-test-redis-%d-%d", os.Getpid(), time.Now().UnixNano())
 		if out, err := exec.Command("docker", "run", "-d", "--rm", "--name", name,
-			"-p", "127.0.0.1:0:6379", "redis:8-alpine").CombinedOutput(); err != nil {
+			"-p", bind+":0:6379", "redis:8-alpine").CombinedOutput(); err != nil {
 			disposable.err = fmt.Sprintf("docker run failed: %v: %s", err, strings.TrimSpace(string(out)))
 			return
 		}
@@ -82,9 +96,49 @@ func disposableRedis() (addr, reason string) {
 			disposable.err = fmt.Sprintf("docker port failed: %v", err)
 			return
 		}
-		disposable.addr = strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+
+		published := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
+		if host == "" {
+			disposable.addr = published
+			return
+		}
+		// docker port reports the bind address the daemon used, which is
+		// 0.0.0.0 here; only the port number is ours to keep.
+		_, port, err := net.SplitHostPort(published)
+		if err != nil {
+			disposable.err = fmt.Sprintf("docker port returned %q: %v", published, err)
+			return
+		}
+		disposable.addr = net.JoinHostPort(host, port)
 	})
 	return disposable.addr, disposable.err
+}
+
+// daemonHost returns the host the Docker daemon runs on, or "" when it is this
+// machine and a published port is therefore reachable as docker port reports it.
+func daemonHost() string {
+	endpoint := os.Getenv("DOCKER_HOST")
+	if endpoint == "" {
+		// DOCKER_HOST overrides the context, so the context is only consulted
+		// when it is unset.
+		if out, err := exec.Command("docker", "context", "inspect",
+			"--format", "{{.Endpoints.docker.Host}}").Output(); err == nil {
+			endpoint = strings.TrimSpace(string(out))
+		}
+	}
+
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	switch parsed.Scheme {
+	case "tcp", "ssh", "http", "https":
+		return parsed.Hostname()
+	default:
+		// A unix socket, a named pipe, or something unrecognized: treat the
+		// daemon as local rather than guessing at an address.
+		return ""
+	}
 }
 
 func TestMain(m *testing.M) {

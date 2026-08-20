@@ -3,7 +3,10 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -26,8 +29,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	goredis "github.com/redis/go-redis/v9"
+
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	enginestore "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
+	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
 	"github.com/netcracker/qubership-ratelimit/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/internal/state"
@@ -103,6 +110,45 @@ func main() {
 		setupLog.Errorf("service exited with an error: %v", err)
 		os.Exit(1)
 	}
+}
+
+// newCounterStore picks where the counters live, and returns the client whose
+// lifecycle the caller owns — the store never closes it.
+//
+// Redis is what makes a limit a limit of the domain rather than of each replica:
+// with N replicas counting in their own memory, a limit of 100 admits 100*N. The
+// in-process store is correct at one replica and for tests, and is what an empty
+// address list selects.
+//
+// The topology is the caller's business, which is why the engine takes a
+// UniversalClient: one address is a standalone server, several are a cluster, and
+// a master name selects Sentinel. The domain hash tag in the counter keys keeps
+// each decision on one Cluster slot, so the script is valid on all three.
+func newCounterStore() (enginestore.Store, io.Closer, string) {
+	addresses := configloader.GetOrDefaultString("redis.addresses", "")
+	if addresses == "" {
+		return memory.New(), nil, "in-process, counted per replica"
+	}
+
+	shared := goredis.NewUniversalClient(&goredis.UniversalOptions{
+		Addrs:      strings.Split(addresses, ","),
+		Username:   configloader.GetOrDefaultString("redis.username", ""),
+		Password:   configloader.GetOrDefaultString("redis.password", ""),
+		DB:         redisDatabase(),
+		MasterName: configloader.GetOrDefaultString("redis.masterName", ""),
+	})
+	return redisstore.New(shared), shared, "redis at " + addresses
+}
+
+// redisDatabase reads the database index.
+func redisDatabase() int {
+	raw := configloader.GetOrDefaultString("redis.db", "0")
+	database, err := strconv.Atoi(raw)
+	if err != nil {
+		setupLog.Errorf("REDIS_DB=%q is not a number, using database 0", raw)
+		return 0
+	}
+	return database
 }
 
 // getCloudNamespace returns the namespace the manager watches.
@@ -188,16 +234,23 @@ func run(
 
 	var rlsRunner *rls.Runner
 	if runRLS {
+		counters, closer, backend := newCounterStore()
+		if closer != nil {
+			defer func() {
+				if err := closer.Close(); err != nil {
+					setupLog.Errorf("failed to close the counter store: %v", err)
+				}
+			}()
+		}
+		setupLog.Infof("counter store selected backend=%v", backend)
+
 		ruleStore := store.New()
 		updater := &store.Updater{
-			Cache: mgr.GetCache(),
-			Store: ruleStore,
-			// In-memory counters: every replica counts alone. The Redis-backed
-			// store plugs in here through the same interface and turns the
-			// limits cluster-wide.
-			Counters: memory.New(),
+			Cache:    mgr.GetCache(),
+			Store:    ruleStore,
 			Debounce: storeDebounce,
 			Log:      newLogrLogger().WithName("store"),
+			Counters: counters,
 			State:    lastGood,
 			Elected:  mgr.Elected(),
 		}

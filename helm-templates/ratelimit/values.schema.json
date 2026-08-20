@@ -8,6 +8,7 @@
     "image",
     "mode",
     "rls",
+    "redis",
     "ISTIO_PUBLIC_GATEWAY_NAME",
     "ISTIO_PRIVATE_GATEWAY_NAME",
     "gateways",
@@ -109,6 +110,60 @@
           "title": "Fail closed",
           "description": "true rejects traffic when the rate limit service is unreachable (failure_mode_deny). Keep false while the service is an allow-all stub.",
           "default": false
+        },
+        "xRateLimitHeaders": {
+          "type": "string",
+          "title": "x-ratelimit response headers",
+          "description": "Lets Envoy render x-ratelimit-limit, x-ratelimit-remaining and x-ratelimit-reset from the statuses the service returns. OFF stops the gateway from sending them at all; retry-after is added by the service and is unaffected.",
+          "enum": [
+            "OFF",
+            "DRAFT_VERSION_03"
+          ],
+          "default": "DRAFT_VERSION_03"
+        }
+      }
+    },
+    "redis": {
+      "type": "object",
+      "title": "Counter store",
+      "description": "Redis holds the counters. An empty address list falls back to an in-process store, which counts per replica and is therefore correct at one replica only: with N replicas a limit of 100 admits 100*N.",
+      "required": [
+        "addresses"
+      ],
+      "properties": {
+        "addresses": {
+          "type": "string",
+          "title": "Redis addresses",
+          "description": "Comma-separated host:port list. One entry is a standalone server, several are a cluster; with masterName set they are Sentinel addresses. Empty selects the in-process store.",
+          "default": ""
+        },
+        "db": {
+          "type": "integer",
+          "title": "Database index",
+          "description": "Ignored by Redis Cluster, which has one database.",
+          "minimum": 0,
+          "default": 0
+        },
+        "username": {
+          "type": "string",
+          "title": "Username",
+          "description": "Leave empty for a server without ACL users."
+        },
+        "masterName": {
+          "type": "string",
+          "title": "Sentinel master name",
+          "description": "Set to select Sentinel; the addresses are then the sentinels."
+        },
+        "existingSecret": {
+          "type": "string",
+          "title": "Password secret",
+          "description": "Name of a Secret holding the password. The password is read from a Secret rather than from values, because values end up in the release and the release is readable by anyone with get on Secrets in the namespace."
+        },
+        "passwordKey": {
+          "type": "string",
+          "title": "Password key",
+          "description": "Key inside existingSecret.",
+          "default": "password"
         }
       }
     },

@@ -40,10 +40,12 @@ lease_holder_pod() {
     -o jsonpath='{.spec.holderIdentity}' 2>/dev/null | cut -d_ -f1
 }
 
-# A rule-less policy admits everything, so a clean burst is one the gateway
-# actually admitted: 2xx or 404 from the routed probe backend. 429 is a
-# refusal, 000 a transport error, and 5xx a gateway answering on its own —
-# none of them count. Passing traffic alone still cannot distinguish a healthy
+# What this suite measures is whether every replica answers, not whether a limit
+# bites, so its policy declares a limit far above any burst it sends. A clean
+# burst is then one the gateway actually admitted: 2xx or 404 from the routed
+# probe backend. 429 is a refusal, 000 a transport error, and 5xx a gateway
+# answering on its own — none of them count, and a 429 here would mean the limit
+# leaked into the measurement rather than the replicas failing. Passing traffic alone still cannot distinguish a healthy
 # endpoint from one the gateway failed open around; the log detectors below
 # supply that half of the proof.
 burst_is_clean() {
@@ -93,7 +95,9 @@ checks_logged_since() {
   echo "${total}"
 }
 
-apply_policy "${POLICY}" "${DOMAIN}"
+# One thousand a minute: far enough above a burst of four that a refusal here is
+# a fault rather than the limit doing its job.
+apply_policy "${POLICY}" "${DOMAIN}" 1000 1m
 
 # ---------------------------------------------------------------------------
 # 1. Two replicas, one leader
@@ -141,7 +145,7 @@ echo "OK: one replica holds the lease (${LEADER})"
 SINCE=$(now_rfc3339)
 sleep 1
 for attempt in $(seq 1 4); do
-  burst_is_clean || fail "burst ${attempt} was refused or failed under a rule-less policy"
+  burst_is_clean || fail "burst ${attempt} was refused or failed under a limit far above it"
   sleep 1.2
 done
 CHECKS=$(checks_logged_since "${SINCE}")

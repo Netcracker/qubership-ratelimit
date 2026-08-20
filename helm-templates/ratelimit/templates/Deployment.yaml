@@ -56,6 +56,28 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Where the counters live. Empty falls back to an in-process store,
+            # which counts per replica and is therefore correct at one replica
+            # only.
+            - name: REDIS_ADDRESSES
+              value: '{{ .Values.redis.addresses }}'
+            - name: REDIS_DB
+              value: '{{ .Values.redis.db }}'
+            {{- with .Values.redis.username }}
+            - name: REDIS_USERNAME
+              value: '{{ . }}'
+            {{- end }}
+            {{- with .Values.redis.masterName }}
+            - name: REDIS_MASTERNAME
+              value: '{{ . }}'
+            {{- end }}
+            {{- if .Values.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.passwordKey }}
+            {{- end }}
           ports:
             - name: grpc
               containerPort: {{ .Values.rls.port }}

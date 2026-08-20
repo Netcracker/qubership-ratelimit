@@ -89,21 +89,23 @@ const (
 	// ProblemCaptureShadowsMappedKey is informational: inside the block, a route
 	// capture takes precedence over the mapped key of the same name.
 	ProblemCaptureShadowsMappedKey = "CaptureShadowsMappedKey"
-)
 
-// Blocking reports whether a problem reason invalidates the generation that
-// carries it.
-func Blocking(reason string) bool {
-	switch reason {
-	case ProblemUnresolvedKeyReference,
-		ProblemUnresolvedGroupReference,
-		ProblemIncompatibleOperator,
-		ProblemInvalidCounterAxis:
-		return true
-	default:
-		return false
-	}
-}
+	// ProblemInvalidSpec marks a spec that is malformed rather than merely
+	// unresolvable. Blocking.
+	ProblemInvalidSpec = "InvalidSpec"
+
+	// ProblemInvalidWindow marks a rate the counting math cannot honor, such as
+	// one whose period does not divide evenly at the resolution it asks for.
+	// Blocking.
+	ProblemInvalidWindow = "InvalidWindow"
+
+	// ProblemDecisionBudgetExceeded and ProblemDomainBudgetExceeded mark a
+	// configuration that can collect more counter buckets in one request than the
+	// runtime admits. They are warnings: the rules compile, and the requests that
+	// overlap that widely are the ones refused.
+	ProblemDecisionBudgetExceeded = "DecisionBudgetExceeded"
+	ProblemDomainBudgetExceeded   = "DomainBudgetExceeded"
+)
 
 // Descriptor keys the engine produces on its own. A mapping cannot declare
 // them, and a predicate cannot match path, method or token: routes select paths
