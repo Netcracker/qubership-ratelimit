@@ -31,6 +31,7 @@ trap cleanup EXIT
 apply_policy "${PUBLIC_POLICY}" "${PUBLIC_DOMAIN}"
 apply_policy "${PRIVATE_POLICY}" "${PRIVATE_DOMAIN}"
 wait_for_domain "${PUBLIC_DOMAIN}"
+wait_for_gateway public-gateway "${PROBE_PATH}"
 
 # ---------------------------------------------------------------------------
 # 1. The gateway is configured to call this operator
@@ -90,8 +91,8 @@ echo "${CODES}"
 if echo "${CODES}" | grep -q "429"; then
   fail "a request was refused although the policy declares no rules"
 fi
-if echo "${CODES}" | grep -q "000"; then
-  fail "a request in the burst failed outright"
+if echo "${CODES}" | grep -qvE "^(2[0-9][0-9]|404)$"; then
+  fail "a request did not reach a routing verdict (codes above)"
 fi
 echo "OK: the gateway admits the whole burst under a rule-less policy"
 

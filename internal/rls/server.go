@@ -47,6 +47,12 @@ const (
 	// ?access_token=, ?api_key=, session ids.
 	queryRedacted = "?[redacted]"
 
+	// maxDescriptorsPerCheck bounds how many descriptors one check may carry:
+	// every descriptor is its own engine decision and its own store trip, and
+	// the gateway form sends exactly one. Sixteen leaves room for legitimate
+	// direct consumers without letting one call become an unbounded store scan.
+	maxDescriptorsPerCheck = 16
+
 	// maxLoggedValueLength bounds a logged descriptor value. The value is chosen
 	// by the caller, not by us, so an unbounded copy is an unbounded log record.
 	maxLoggedValueLength = 256
@@ -90,6 +96,16 @@ func (s *Server) ShouldRateLimit(
 	}
 
 	requests := engineRequests(req)
+	if len(requests) > maxDescriptorsPerCheck {
+		// A check carrying more descriptors than any sanctioned caller sends
+		// is a protocol violation, not unavailability: refusing keeps it off
+		// the fail-open path an abuser could otherwise ride through.
+		s.log.ErrorC(ctx, "rate limit check carries %v descriptors, over the limit of %v domain=%v path=%v",
+			len(requests), maxDescriptorsPerCheck, domain, path)
+		return &envoyratelimit.RateLimitResponse{
+			OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
+		}, nil
+	}
 	decisions := make([]engine.Decision, 0, len(requests))
 	allowed := true
 	for _, er := range requests {
@@ -104,6 +120,17 @@ func (s *Server) ShouldRateLimit(
 					domain, path, err)
 				return &envoyratelimit.RateLimitResponse{
 					OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
+				}, nil
+			}
+			if !allowed {
+				// An earlier descriptor already refused: the answer is known,
+				// and a store error on a later one must not launder that
+				// refusal into the fail-open path.
+				s.log.ErrorC(ctx, "rate limit store error after a refusal domain=%v path=%v error=%v",
+					domain, path, err)
+				return &envoyratelimit.RateLimitResponse{
+					OverallCode:          envoyratelimit.RateLimitResponse_OVER_LIMIT,
+					ResponseHeadersToAdd: responseHeaders(strictestDecision(decisions, false)),
 				}, nil
 			}
 			// A store error becomes a gRPC error, so Envoy's failure_mode_deny

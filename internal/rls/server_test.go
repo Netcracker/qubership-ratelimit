@@ -611,3 +611,73 @@ func TestShouldRateLimit_emptyDescriptorValueMeansAbsence(t *testing.T) {
 			"no client key means the per-client rule does not match")
 	}
 }
+
+func TestShouldRateLimit_tooManyDescriptorsDeny(t *testing.T) {
+	// More descriptors than any sanctioned caller sends is a protocol
+	// violation: an explicit refusal, never an error the fallback policy
+	// could wave through.
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, perClientOnePerHourPolicy()))
+	log, logged := recordingLogger()
+
+	descriptors := make([]map[string]string, 0, 17)
+	for i := range 17 {
+		descriptors = append(descriptors, map[string]string{"client": fmt.Sprintf("c%d", i)})
+	}
+	resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), requestWith(descriptors...))
+
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, logged(), "over the limit")
+}
+
+// failAfterStore delegates to an in-memory store until its call budget runs
+// out, then refuses every operation — a store that dies mid-check.
+type failAfterStore struct {
+	inner counters.Store
+	limit int
+	calls int
+}
+
+func (f *failAfterStore) Decide(ctx context.Context, buckets []counters.Bucket, cost int64) ([]counters.Verdict, error) {
+	f.calls++
+	if f.calls > f.limit {
+		return nil, errors.New("store is down")
+	}
+	return f.inner.Decide(ctx, buckets, cost)
+}
+
+func (f *failAfterStore) Peek(ctx context.Context, buckets []counters.Bucket, cost int64) ([]counters.Verdict, error) {
+	return f.inner.Peek(ctx, buckets, cost)
+}
+
+func (f *failAfterStore) Reset(ctx context.Context, keys []string) error {
+	return f.inner.Reset(ctx, keys)
+}
+
+func TestShouldRateLimit_storeErrorAfterRefusalStillDenies(t *testing.T) {
+	// One descriptor already refused when the store died on the next one: the
+	// answer is known, and returning an error instead would let fail-open
+	// launder a real refusal into an admission.
+	const domain = "gateway.public"
+	snap, problems := compile.Compile(domain, []model.Policy{perClientOnePerHourPolicy()}, nil)
+	require.Empty(t, problems)
+	ruleStore := store.New()
+	ruleStore.Replace(store.NewRuleSet(map[string]*engine.Engine{
+		domain: engine.New(snap, &failAfterStore{inner: memory.New(), limit: 2}),
+	}))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	first, err := server.ShouldRateLimit(context.Background(),
+		requestWith(map[string]string{"client": "alice"}))
+	require.NoError(t, err)
+	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode())
+
+	resp, err := server.ShouldRateLimit(context.Background(),
+		requestWith(map[string]string{"client": "alice"}, map[string]string{"client": "bob"}))
+
+	require.NoError(t, err, "a known refusal is an answer, not an error")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.NotEmpty(t, headerMap(resp)["retry-after"], "the refused decision's headers survive the store error")
+}

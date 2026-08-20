@@ -40,14 +40,16 @@ lease_holder_pod() {
     -o jsonpath='{.spec.holderIdentity}' 2>/dev/null | cut -d_ -f1
 }
 
-# A rule-less policy admits everything, so a clean burst is one with no 429
-# and no transport error. Passing traffic alone cannot distinguish a healthy
+# A rule-less policy admits everything, so a clean burst is one the gateway
+# actually admitted: 2xx for routed paths, 404 for the unrouted probe. 429 is
+# a refusal, 000 a transport error, and 5xx a gateway answering on its own —
+# none of them count. Passing traffic alone still cannot distinguish a healthy
 # endpoint from one the gateway failed open around; the log detectors below
 # supply that half of the proof.
 burst_is_clean() {
   local codes
   codes=$(curl_gw_burst 4 public-gateway "${PROBE_PATH}")
-  ! echo "${codes}" | grep -qE "429|000"
+  [ -n "${codes}" ] && ! echo "${codes}" | grep -qvE "^(2[0-9][0-9]|404)$"
 }
 
 # Greps every replica's log, not just one pod's: the follower is exactly the
@@ -62,6 +64,20 @@ unknown_domain_logged() {
     fi
   done
   return 1
+}
+
+# Every replica must log its own rebuild: the updater runs outside leader
+# election, and a follower without this line is exactly the leader-only-store
+# bug. Traffic cannot prove this — the gateway multiplexes checks over one
+# gRPC connection, so one replica may legitimately serve them all.
+replicas_rebuilt() {
+  local pod
+  for pod in $(kubectl get pods -n "${NAMESPACE}" \
+      -l "app.kubernetes.io/instance=${RELEASE}" -o name); do
+    kubectl logs -n "${NAMESPACE}" "${pod}" 2>/dev/null \
+      | grep -q "rate limit store rebuilt" || return 1
+  done
+  return 0
 }
 
 # Counts the per-check Debug lines across every replica: direct proof the
@@ -89,6 +105,21 @@ kubectl rollout status "deployment/${OPERATOR_SVC}" -n "${NAMESPACE}" --timeout=
 READY=$(kubectl get deployment "${OPERATOR_SVC}" -n "${NAMESPACE}" -o jsonpath='{.status.readyReplicas}')
 [ "${READY}" = "2" ] || fail "expected 2 ready replicas, got '${READY}'"
 echo "OK: two replicas are ready"
+
+# The burst assertions measure the operator, so the gateway must be past its
+# own startup first.
+wait_for_gateway public-gateway "${PROBE_PATH}"
+
+REBUILT=""
+for _ in $(seq 1 10); do
+  if replicas_rebuilt; then
+    REBUILT=yes
+    break
+  fi
+  sleep 2
+done
+[ -n "${REBUILT}" ] || fail "a replica never rebuilt its rule store; the updater is leader-gated"
+echo "OK: every replica rebuilt its rule store"
 
 LEADER=""
 for _ in $(seq 1 20); do
