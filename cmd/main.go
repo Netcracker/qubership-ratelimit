@@ -27,6 +27,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
 	"github.com/netcracker/qubership-ratelimit/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/internal/state"
@@ -189,8 +190,12 @@ func run(
 	if runRLS {
 		ruleStore := store.New()
 		updater := &store.Updater{
-			Cache:    mgr.GetCache(),
-			Store:    ruleStore,
+			Cache: mgr.GetCache(),
+			Store: ruleStore,
+			// In-memory counters: every replica counts alone. The Redis-backed
+			// store plugs in here through the same interface and turns the
+			// limits cluster-wide.
+			Counters: memory.New(),
 			Debounce: storeDebounce,
 			Log:      newLogrLogger().WithName("store"),
 			State:    lastGood,

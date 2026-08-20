@@ -33,7 +33,8 @@ func TestRunner_needsNoLeaderElection(t *testing.T) {
 
 func TestRunner_servesAndStopsGracefully(t *testing.T) {
 	log, _ := recordingLogger()
-	ruleStore := storeFor("gateway.public")
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetOf(t, "gateway.public"))
 
 	runner := &Runner{
 		Addr:         freeAddr(t),

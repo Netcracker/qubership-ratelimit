@@ -1,0 +1,84 @@
+# A routed probe backend. The mesh ships catch-all fallback routes that send
+# every unmatched path to a fallback service with no endpoints in this
+# environment, so an unrouted probe answers 503 no matter what the rate limit
+# decided. Routing the probe paths to a real backend makes the codes
+# terminal: admitted traffic answers from the backend, a refusal answers 429,
+# and 503 means the request fell through to the fallback.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-echo
+  labels:
+    app: e2e-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: e2e-echo
+  template:
+    metadata:
+      labels:
+        app: e2e-echo
+    spec:
+      # The probe backend never talks to the API server.
+      automountServiceAccountToken: false
+      containers:
+        - name: echo
+          image: registry.k8s.io/e2e-test-images/agnhost:2.53
+          args: ["netexec", "--http-port=8080"]
+          ports:
+            - containerPort: 8080
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+              ephemeral-storage: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: e2e-echo
+spec:
+  selector:
+    app: e2e-echo
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: e2e-echo
+spec:
+  parentRefs:
+    - name: public-gateway
+  rules:
+    - matches:
+        # PathPrefix matches whole path segments, so /e2e- would never match
+        # /e2e-leader; every probe path is listed explicitly instead.
+        - path:
+            type: PathPrefix
+            value: /e2e-leader
+        - path:
+            type: PathPrefix
+            value: /e2e-ratelimit
+        - path:
+            type: PathPrefix
+            value: /e2e
+      backendRefs:
+        - name: e2e-echo
+          port: 8080

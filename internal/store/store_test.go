@@ -6,17 +6,22 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
-	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	engine "github.com/netcracker/qubership-ratelimit/engine"
+	"github.com/netcracker/qubership-ratelimit/engine/compile"
+	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
-func snapshotOf(t *testing.T, objects ...*v1alpha1.RateLimitPolicy) *policy.Snapshot {
+// testEngines builds one empty-snapshot engine per domain over private
+// in-memory counters, mirroring what BuildRuleSet does for the stub CRD.
+func testEngines(t *testing.T, domains ...string) map[string]*engine.Engine {
 	t.Helper()
-	input := policy.Input{}
-	for _, object := range objects {
-		input.Policies = append(input.Policies, *object)
+	out := make(map[string]*engine.Engine, len(domains))
+	for _, d := range domains {
+		snap, problems := compile.Compile(d, nil, nil)
+		require.Empty(t, problems)
+		out[d] = engine.New(snap, memory.New())
 	}
-	return policy.Compile(input).Snapshot
+	return out
 }
 
 func TestNew_emptyStoreKnowsNoDomain(t *testing.T) {
@@ -29,7 +34,7 @@ func TestNew_emptyStoreKnowsNoDomain(t *testing.T) {
 func TestReplace_swapsSnapshot(t *testing.T) {
 	s := New()
 
-	s.Replace(snapshotOf(t, policyObject("private", "gateway.private")))
+	s.Replace(NewRuleSet(testEngines(t, "gateway.private")))
 
 	assert.True(t, s.HasDomain("gateway.private"))
 	assert.False(t, s.HasDomain("gateway.public"))
@@ -37,26 +42,12 @@ func TestReplace_swapsSnapshot(t *testing.T) {
 
 func TestReplace_nilYieldsEmptySnapshot(t *testing.T) {
 	s := New()
-	s.Replace(snapshotOf(t, policyObject("private", "gateway.private")))
+	s.Replace(NewRuleSet(testEngines(t, "gateway.private")))
 
 	s.Replace(nil)
 
 	require.NotNil(t, s.Load(), "a nil replacement must not leave readers with a nil snapshot")
 	assert.False(t, s.HasDomain("gateway.private"))
-}
-
-func TestHasDomain_twoPoliciesNamingOneDomainAreOneDomain(t *testing.T) {
-	s := New()
-
-	s.Replace(snapshotOf(t,
-		policyObject("alpha", "gateway.public"),
-		policyObject("zeta", "gateway.public"),
-	))
-
-	require.True(t, s.HasDomain("gateway.public"))
-	assert.Len(t, s.Load().Names(), 1)
-	assert.Len(t, s.Load().Domain("gateway.public").Blocks, 2,
-		"both policies contribute their blocks to the one domain")
 }
 
 func TestNeedLeaderElection_updaterRunsOnEveryReplica(t *testing.T) {
@@ -66,4 +57,13 @@ func TestNeedLeaderElection_updaterRunsOnEveryReplica(t *testing.T) {
 	updater := &Updater{}
 
 	assert.False(t, updater.NeedLeaderElection())
+}
+
+func TestRuleSet_returnsTheDomainsOwnEngine(t *testing.T) {
+	engines := testEngines(t, "gateway.public", "gateway.private")
+	ruleSet := NewRuleSet(engines)
+
+	assert.Same(t, engines["gateway.public"], ruleSet.Engine("gateway.public"))
+	assert.Nil(t, ruleSet.Engine("gateway.absent"), "an unbound domain has no engine")
+	assert.Equal(t, 2, ruleSet.Len())
 }
