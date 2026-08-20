@@ -47,7 +47,7 @@ spec:
             - --leader-elect
             {{- end }}
           env:
-            - name: LOG_LEVEL
+            - name: LOGGING_LEVEL_ROOT
               value: '{{ lower .Values.logLevel }}'
             # The namespace this installation serves. It is what keeps the
             # service's RBAC a Role: unset is a startup error, not a fallback

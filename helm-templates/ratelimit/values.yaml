@@ -20,7 +20,9 @@ mode: all
 # store run on every replica, so scaling out does not depend on this setting.
 leaderElect: true
 
-# Passed as LOG_LEVEL and read through configloader by the platform logger.
+# Passed as LOGGING_LEVEL_ROOT: the platform logger resolves its root level
+# from the logging.level.root property; LOG_LEVEL only applies before the
+# configloader is initialized.
 logLevel: info
 
 # ============== RATE LIMIT SERVICE ============================

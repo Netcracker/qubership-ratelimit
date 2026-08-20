@@ -1,8 +1,9 @@
-# A routed probe backend. Without it every probe path is unrouted, and this
-# gateway answers 503 for admitted traffic on such paths - indistinguishable
-# from a gateway that is still starting. With a real route the codes become
+# A routed probe backend. The mesh ships catch-all fallback routes that send
+# every unmatched path to a fallback service with no endpoints in this
+# environment, so an unrouted probe answers 503 no matter what the rate limit
+# decided. Routing the probe paths to a real backend makes the codes
 # terminal: admitted traffic answers from the backend, a refusal answers 429,
-# and 503 means the gateway itself.
+# and 503 means the request fell through to the fallback.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -46,9 +47,17 @@ spec:
     - name: public-gateway
   rules:
     - matches:
+        # PathPrefix matches whole path segments, so /e2e- would never match
+        # /e2e-leader; every probe path is listed explicitly instead.
         - path:
             type: PathPrefix
-            value: /e2e-
+            value: /e2e-leader
+        - path:
+            type: PathPrefix
+            value: /e2e-ratelimit
+        - path:
+            type: PathPrefix
+            value: /e2e
       backendRefs:
         - name: e2e-echo
           port: 8080
