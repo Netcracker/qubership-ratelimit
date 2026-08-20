@@ -20,6 +20,8 @@ spec:
       labels:
         app: e2e-echo
     spec:
+      # The probe backend never talks to the API server.
+      automountServiceAccountToken: false
       containers:
         - name: echo
           image: registry.k8s.io/e2e-test-images/agnhost:2.53
@@ -40,9 +42,11 @@ spec:
             requests:
               cpu: 10m
               memory: 32Mi
+              ephemeral-storage: 16Mi
             limits:
               cpu: 100m
               memory: 64Mi
+              ephemeral-storage: 64Mi
 ---
 apiVersion: v1
 kind: Service
