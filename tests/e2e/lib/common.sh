@@ -87,10 +87,10 @@ wait_for_domain() {
     | grep -q "${domain}"
 }
 
-# Waits until the gateway answers a probe with a terminal routing verdict —
-# 2xx for a routed path, 404 for an unrouted one. A fresh gateway pod answers
-# 503 until its listeners are programmed, and a burst against it would measure
-# the gateway's startup, not the operator.
+# Waits until the gateway answers a probe with a terminal verdict — 2xx or
+# 404 from the routed probe backend. A fresh gateway answers 503 until its
+# listeners, the route, and the backend are all programmed, and a burst
+# against it would measure the gateway's startup, not the operator.
 wait_for_gateway() {
   local gateway="${1:-public-gateway}" path="${2:-/e2e}" code="" i
   for i in $(seq 1 30); do

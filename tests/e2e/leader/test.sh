@@ -41,8 +41,8 @@ lease_holder_pod() {
 }
 
 # A rule-less policy admits everything, so a clean burst is one the gateway
-# actually admitted: 2xx for routed paths, 404 for the unrouted probe. 429 is
-# a refusal, 000 a transport error, and 5xx a gateway answering on its own —
+# actually admitted: 2xx or 404 from the routed probe backend. 429 is a
+# refusal, 000 a transport error, and 5xx a gateway answering on its own —
 # none of them count. Passing traffic alone still cannot distinguish a healthy
 # endpoint from one the gateway failed open around; the log detectors below
 # supply that half of the proof.
