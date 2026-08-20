@@ -49,7 +49,7 @@ lease_holder_pod() {
 burst_is_clean() {
   local codes
   codes=$(curl_gw_burst 4 public-gateway "${PROBE_PATH}")
-  [ -n "${codes}" ] && ! echo "${codes}" | grep -qvE "^(2[0-9][0-9]|404)$"
+  [[ -n "${codes}" ]] && ! echo "${codes}" | grep -qvE "^(2[0-9][0-9]|404)$"
 }
 
 # Greps every replica's log, not just one pod's: the follower is exactly the
@@ -118,7 +118,7 @@ for _ in $(seq 1 10); do
   fi
   sleep 2
 done
-[ -n "${REBUILT}" ] || fail "a replica never rebuilt its rule store; the updater is leader-gated"
+[[ -n "${REBUILT}" ]] || fail "a replica never rebuilt its rule store; the updater is leader-gated"
 echo "OK: every replica rebuilt its rule store"
 
 LEADER=""
@@ -145,7 +145,7 @@ for attempt in $(seq 1 4); do
   sleep 1.2
 done
 CHECKS=$(checks_logged_since "${SINCE}")
-[ "${CHECKS}" -ge 4 ] || fail "only ${CHECKS} checks reached the operator; the traffic bypassed it"
+[[ "${CHECKS}" -ge 4 ]] || fail "only ${CHECKS} checks reached the operator; the traffic bypassed it"
 if unknown_domain_logged "${SINCE}"; then
   fail "a replica answered from an empty store: 'unknown rate limit domain' logged"
 fi
@@ -168,11 +168,11 @@ done
 # Some requests land on the pod that is going away and are failed open by the
 # gateway, so the occasional dirty burst is expected; what must not happen is
 # the checks stopping altogether.
-if [ "${CLEAN}" -lt 6 ]; then
+if [[ "${CLEAN}" -lt 6 ]]; then
   fail "checks degraded while the leader was replaced (${CLEAN}/8 clean bursts)"
 fi
 CHECKS=$(checks_logged_since "${SINCE}")
-[ "${CHECKS}" -ge 8 ] || fail "only ${CHECKS} checks reached the operator during the handover"
+[[ "${CHECKS}" -ge 8 ]] || fail "only ${CHECKS} checks reached the operator during the handover"
 if unknown_domain_logged "${SINCE}"; then
   fail "a replica answered from an empty store during the handover"
 fi

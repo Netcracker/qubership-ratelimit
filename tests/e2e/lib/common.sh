@@ -92,11 +92,12 @@ wait_for_domain() {
 # listeners, the route, and the backend are all programmed, and a burst
 # against it would measure the gateway's startup, not the operator.
 wait_for_gateway() {
-  local gateway="${1:-public-gateway}" path="${2:-/e2e}" code="" i
-  for i in $(seq 1 30); do
+  local gateway="${1:-public-gateway}" path="${2:-/e2e}" code=""
+  for _ in $(seq 1 30); do
     code=$(curl_gw_code "${gateway}" "${path}")
     case "${code}" in
       2??|404) return 0 ;;
+      *) ;;
     esac
     sleep 2
   done
