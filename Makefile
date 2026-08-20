@@ -71,12 +71,14 @@ sync-helm-crds: manifests ## Regenerate the Helm CRD templates from config/crd/b
 helm-crd: sync-helm-crds ## Alias for sync-helm-crds.
 
 .PHONY: fmt
-fmt: ## Run go fmt against code.
+fmt: ## Run go fmt against code, the engine module included.
 	go fmt ./...
+	cd engine && go fmt ./...
 
 .PHONY: vet
-vet: ## Run go vet against code.
+vet: ## Run go vet against code, the engine module included.
 	go vet ./...
+	cd engine && go vet ./...
 
 # TEST_PKGS lists only packages that contain test files. Passing packages without
 # test files to "go test -coverprofile" makes Go invoke "covdata" to merge empty
@@ -84,12 +86,16 @@ vet: ## Run go vet against code.
 # anyway.
 TEST_PKGS = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...)
 
+.PHONY: test-engine
+test-engine: ## Run the engine module tests. Its own go.mod hides it from ./... of the root module.
+	cd engine && go vet ./... && go test -race ./...
+
 .PHONY: test-unit
-test-unit: fmt vet ## Run unit tests only — no envtest, no cluster, no network.
+test-unit: fmt vet test-engine ## Run unit tests only — no envtest, no cluster, no network.
 	go test $(filter-out %/internal/controller,$(TEST_PKGS)) -coverprofile cover-unit.out
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run all tests, including the envtest controller suite. Needs internet on the first run to fetch the envtest binaries.
+test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, including the envtest controller suite. Needs internet on the first run to fetch the envtest binaries.
 	@echo "Running tests with KUBEBUILDER_ASSETS=$$("$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)"
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $(TEST_PKGS) -coverprofile cover.out
 
@@ -104,12 +110,14 @@ E2E_NAMESPACE ?= core
 E2E_TEST ?= *
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter.
+lint: golangci-lint ## Run golangci-lint linter, the engine module included.
 	"$(GOLANGCI_LINT)" run
+	cd engine && "$(GOLANGCI_LINT)" run
 
 .PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
+lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes, the engine module included.
 	"$(GOLANGCI_LINT)" run --fix
+	cd engine && "$(GOLANGCI_LINT)" run --fix
 
 # Linted once per resource profile, because the chart is never installed without
 # one: the profile supplies REPLICAS and the resource requests and limits, and
