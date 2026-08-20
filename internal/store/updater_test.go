@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -42,23 +43,24 @@ func TestBuildRuleSet_groupsPoliciesByDomain(t *testing.T) {
 		).
 		Build()
 
-	ruleSet, err := BuildRuleSet(context.Background(), reader)
+	ruleSet, err := BuildRuleSet(context.Background(), reader, memory.New())
 	require.NoError(t, err)
 
 	// Two policies naming one domain collapse into a single entry.
 	assert.True(t, ruleSet.Has("gateway.public"))
 	assert.True(t, ruleSet.Has("gateway.private"))
 	assert.False(t, ruleSet.Has("gateway.absent"))
-	assert.Len(t, ruleSet.Domains, 2)
+	assert.NotNil(t, ruleSet.Engine("gateway.public"), "a bound domain carries a ready engine")
+	assert.Equal(t, 2, ruleSet.Len())
 }
 
 func TestBuildRuleSet_noPoliciesYieldsEmptyRuleSet(t *testing.T) {
 	reader := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 
-	ruleSet, err := BuildRuleSet(context.Background(), reader)
+	ruleSet, err := BuildRuleSet(context.Background(), reader, memory.New())
 	require.NoError(t, err)
 
-	assert.Empty(t, ruleSet.Domains)
+	assert.Equal(t, 0, ruleSet.Len())
 }
 
 func TestBuildRuleSet_skipsPolicyWithoutDomain(t *testing.T) {
@@ -70,8 +72,8 @@ func TestBuildRuleSet_skipsPolicyWithoutDomain(t *testing.T) {
 		WithObjects(policy("broken", "")).
 		Build()
 
-	ruleSet, err := BuildRuleSet(context.Background(), reader)
+	ruleSet, err := BuildRuleSet(context.Background(), reader, memory.New())
 	require.NoError(t, err)
 
-	assert.Empty(t, ruleSet.Domains)
+	assert.Equal(t, 0, ruleSet.Len())
 }

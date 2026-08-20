@@ -11,6 +11,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	engine "github.com/netcracker/qubership-ratelimit/engine"
+	"github.com/netcracker/qubership-ratelimit/engine/compile"
+	"github.com/netcracker/qubership-ratelimit/engine/model"
+	counters "github.com/netcracker/qubership-ratelimit/engine/store"
 )
 
 // DefaultDebounce is how long the updater waits after the first event of a burst
@@ -33,8 +37,12 @@ type InformerSource interface {
 // there would leave non-leader replicas answering checks from an empty store —
 // a failure that shows up as limits that apply on some pods and not others.
 type Updater struct {
-	Cache    InformerSource
-	Store    *Store
+	Cache InformerSource
+	Store *Store
+
+	// Counters is the shared counter store every compiled engine binds to.
+	Counters counters.Store
+
 	Debounce time.Duration
 	Log      logr.Logger
 }
@@ -110,7 +118,7 @@ func (u *Updater) Start(ctx context.Context) error {
 }
 
 func (u *Updater) rebuild(ctx context.Context) {
-	ruleSet, err := BuildRuleSet(ctx, u.Cache)
+	ruleSet, err := BuildRuleSet(ctx, u.Cache, u.Counters)
 	if err != nil {
 		// Keep the previous snapshot: stale rules are better than none, and the
 		// next event triggers another attempt.
@@ -119,24 +127,51 @@ func (u *Updater) rebuild(ctx context.Context) {
 	}
 	u.Store.Replace(ruleSet)
 
-	u.Log.Info("rate limit store rebuilt", "domains", len(ruleSet.Domains))
+	u.Log.Info("rate limit store rebuilt", "domains", ruleSet.Len())
 }
 
-// BuildRuleSet lists every RateLimitPolicy the reader can see and collects the
-// domains they bind to.
-func BuildRuleSet(ctx context.Context, reader client.Reader) (*RuleSet, error) {
+// BuildRuleSet lists every RateLimitPolicy the reader can see, groups the
+// policies by the domain they bind to, and compiles one engine per domain
+// over one shared counter store. The CRD carries no rules yet, so every group
+// stays empty and every engine runs the documented "no rules, everything
+// allowed" snapshot; the CRD-to-model conversion appends into the groups and
+// changes nothing else here. Unchanged domains should then keep their engine
+// across rebuilds, so a swap does not drop a warm token cache.
+func BuildRuleSet(ctx context.Context, reader client.Reader, cs counters.Store) (*RuleSet, error) {
 	var list ratelimitv1alpha1.RateLimitPolicyList
 	if err := reader.List(ctx, &list); err != nil {
 		return nil, fmt.Errorf("list RateLimitPolicy: %w", err)
 	}
 
-	domains := make([]string, 0, len(list.Items))
+	byDomain := make(map[string][]model.Policy, len(list.Items))
 	for i := range list.Items {
-		// The CRD requires a non-empty domain, so this only skips an object
-		// written by a client that bypassed validation.
-		if domain := list.Items[i].Spec.Domain; domain != "" {
-			domains = append(domains, domain)
+		domain := list.Items[i].Spec.Domain
+		if _, ok := byDomain[domain]; !ok {
+			byDomain[domain] = nil
+		}
+		// The CRD-to-model conversion appends the converted policy here once
+		// the schema carries rules.
+	}
+
+	engines := make(map[string]*engine.Engine, len(byDomain))
+	for domain, policies := range byDomain {
+		// The CRD constrains the domain, so a blocking problem here means an
+		// object written past validation; it gets no engine rather than a
+		// misbehaving one.
+		snap, problems := compile.Compile(domain, policies, nil)
+		if blocking(problems) {
+			continue
+		}
+		engines[domain] = engine.New(snap, cs)
+	}
+	return NewRuleSet(engines), nil
+}
+
+func blocking(problems []compile.Problem) bool {
+	for _, p := range problems {
+		if p.Blocking {
+			return true
 		}
 	}
-	return NewRuleSet(domains), nil
+	return false
 }

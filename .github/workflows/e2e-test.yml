@@ -100,9 +100,18 @@ jobs:
           helm upgrade --install ratelimit helm-templates/ratelimit \
             --namespace "${E2E_NAMESPACE}" \
             -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            --set logLevel=debug \
             --set image.repository=ratelimit \
             --set image.tag=e2e \
             --wait --timeout 5m
+
+      - name: Deploy the probe backend
+        run: |
+          # Routes the /e2e- probe paths to a real backend, so the suite gets
+          # terminal codes to assert on: admitted traffic answers from the
+          # backend, a refusal answers 429, and 503 means the gateway itself.
+          kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/echo.yaml
+          kubectl rollout status deployment/e2e-echo -n "${E2E_NAMESPACE}" --timeout=120s
 
       - name: Run e2e tests
         run: make test-e2e E2E_NAMESPACE="${E2E_NAMESPACE}"

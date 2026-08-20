@@ -14,6 +14,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
 // stubInformer records the handler the updater registers so a test can deliver
@@ -124,6 +126,7 @@ func startUpdater(t *testing.T, source *stubSource, ruleStore *Store) context.Ca
 	updater := &Updater{
 		Cache:    source,
 		Store:    ruleStore,
+		Counters: memory.New(),
 		Debounce: 10 * time.Millisecond,
 		Log:      logr.Discard(),
 	}
@@ -208,7 +211,7 @@ func TestUpdaterStart_reportsAMissingInformer(t *testing.T) {
 func TestUpdaterStart_reportsAFailedHandlerRegistration(t *testing.T) {
 	source := newStubSource(t)
 	source.informer.addError = errors.New("cannot add handler")
-	updater := &Updater{Cache: source, Store: New(), Log: logr.Discard()}
+	updater := &Updater{Cache: source, Store: New(), Counters: memory.New(), Log: logr.Discard()}
 
 	assert.Error(t, updater.Start(context.Background()))
 }

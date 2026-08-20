@@ -6,6 +6,7 @@ require (
 	github.com/envoyproxy/go-control-plane/envoy v1.36.0
 	github.com/go-logr/logr v1.4.4
 	github.com/netcracker/qubership-core-lib-go/v3 v3.13.5
+	github.com/netcracker/qubership-ratelimit/engine v0.0.0-00010101000000-000000000000
 	github.com/onsi/ginkgo/v2 v2.32.1
 	github.com/onsi/gomega v1.42.1
 	github.com/stretchr/testify v1.11.1
