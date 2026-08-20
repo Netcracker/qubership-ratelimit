@@ -21,6 +21,7 @@ import (
 
 // Logger is the part of the platform logger the server needs.
 type Logger interface {
+	DebugC(ctx context.Context, format string, args ...any)
 	InfoC(ctx context.Context, format string, args ...any)
 	ErrorC(ctx context.Context, format string, args ...any)
 }
@@ -88,64 +89,120 @@ func (s *Server) ShouldRateLimit(
 		return &envoyratelimit.RateLimitResponse{OverallCode: envoyratelimit.RateLimitResponse_OK}, nil
 	}
 
-	decision, err := eng.Decide(ctx, engineRequest(req))
-	if err != nil {
-		if errors.Is(err, engine.ErrTooManyBuckets) {
-			// The bucket-budget backstop reports a configuration violation,
-			// not unavailability: it denies regardless of the fallback policy,
-			// or an oversized policy set would turn the widest paths into
-			// unlimited ones.
-			s.log.ErrorC(ctx, "rate limit decision over the bucket budget domain=%v path=%v error=%v",
-				domain, path, err)
-			return &envoyratelimit.RateLimitResponse{
-				OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
-			}, nil
+	requests := engineRequests(req)
+	decisions := make([]engine.Decision, 0, len(requests))
+	allowed := true
+	for _, er := range requests {
+		decision, err := eng.Decide(ctx, er)
+		if err != nil {
+			if errors.Is(err, engine.ErrTooManyBuckets) {
+				// The bucket-budget backstop reports a configuration
+				// violation, not unavailability: it denies regardless of the
+				// fallback policy, or an oversized policy set would turn the
+				// widest paths into unlimited ones.
+				s.log.ErrorC(ctx, "rate limit decision over the bucket budget domain=%v path=%v error=%v",
+					domain, path, err)
+				return &envoyratelimit.RateLimitResponse{
+					OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
+				}, nil
+			}
+			// A store error becomes a gRPC error, so Envoy's failure_mode_deny
+			// stays the one switch deciding fail-open versus fail-closed.
+			s.log.ErrorC(ctx, "rate limit store error domain=%v path=%v error=%v", domain, path, err)
+			return nil, status.Error(codes.Unavailable, "rate limit store unavailable")
 		}
-		// A store error becomes a gRPC error, so Envoy's failure_mode_deny
-		// stays the one switch deciding fail-open versus fail-closed.
-		s.log.ErrorC(ctx, "rate limit store error domain=%v path=%v error=%v", domain, path, err)
-		return nil, status.Error(codes.Unavailable, "rate limit store unavailable")
+		allowed = allowed && decision.Allowed
+		decisions = append(decisions, decision)
 	}
 
 	code := envoyratelimit.RateLimitResponse_OK
-	if !decision.Allowed {
+	if !allowed {
 		code = envoyratelimit.RateLimitResponse_OVER_LIMIT
 	}
-	s.log.InfoC(ctx, "rate limit check domain=%v path=%v allowed=%v rules=%v",
-		domain, path, decision.Allowed, len(decision.Rules))
+	rules := 0
+	for _, d := range decisions {
+		rules += len(d.Rules)
+	}
+	s.log.DebugC(ctx, "rate limit check domain=%v path=%v allowed=%v rules=%v", domain, path, allowed, rules)
 
 	return &envoyratelimit.RateLimitResponse{
 		OverallCode:          code,
-		ResponseHeadersToAdd: responseHeaders(decision),
+		ResponseHeadersToAdd: responseHeaders(strictestDecision(decisions, allowed)),
 	}, nil
 }
 
-// engineRequest folds the flat descriptor entries into an engine request:
-// path, method, and token feed the built-in keys, request_id stays a log
-// correlation field, and any other entry arrives as a pre-extracted identity
-// key — the direct-consumer form of the protocol. hits_addend is the cost;
-// zero means the protocol default of one.
-func engineRequest(req *envoyratelimit.RateLimitRequest) engine.Request {
-	out := engine.Request{Cost: int64(req.GetHitsAddend())}
-	for _, descriptor := range req.GetDescriptors() {
+// engineRequests folds each descriptor into its own engine request — the
+// Envoy semantics: descriptors are decided independently, every one of them
+// charges its own counters per its own verdict, and the overall answer
+// refuses when any one of them does. A request without descriptors still
+// makes one empty-request decision, so whole-domain limits see direct
+// consumers too.
+//
+// Within a descriptor, path, method, and token feed the built-in keys,
+// request_id stays a log correlation field, and any other entry arrives as a
+// pre-extracted identity key — the direct-consumer form of the protocol. An
+// empty value means absence, mirroring the identity layer. hits_addend is
+// the cost of every decision; zero means the protocol default of one.
+func engineRequests(req *envoyratelimit.RateLimitRequest) []engine.Request {
+	cost := int64(req.GetHitsAddend())
+	descriptors := req.GetDescriptors()
+	if len(descriptors) == 0 {
+		return []engine.Request{{Cost: cost}}
+	}
+	out := make([]engine.Request, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		er := engine.Request{Cost: cost}
 		for _, entry := range descriptor.GetEntries() {
+			value := entry.GetValue()
+			if value == "" {
+				continue
+			}
 			switch entry.GetKey() {
 			case descriptorKeyPath:
-				out.Path = entry.GetValue()
+				er.Path = value
 			case descriptorKeyMethod:
-				out.Method = entry.GetValue()
+				er.Method = value
 			case descriptorKeyToken:
-				out.Token = entry.GetValue()
+				er.Token = value
 			case descriptorKeyRequestID:
 			default:
-				if out.Keys == nil {
-					out.Keys = map[string][]string{}
+				if er.Keys == nil {
+					er.Keys = map[string][]string{}
 				}
-				out.Keys[entry.GetKey()] = append(out.Keys[entry.GetKey()], entry.GetValue())
+				er.Keys[entry.GetKey()] = append(er.Keys[entry.GetKey()], value)
 			}
 		}
+		out = append(out, er)
 	}
 	return out
+}
+
+// strictestDecision picks the decision whose numbers the response carries:
+// among refusals, the longest wait; among admitted ones, the least remaining.
+// Decisions without matched counting rules carry no headers and lose every
+// comparison; when none carries headers, the response carries none either.
+func strictestDecision(decisions []engine.Decision, allowed bool) engine.Decision {
+	var best engine.Decision
+	for _, d := range decisions {
+		if d.Headers == nil || d.Allowed != allowed {
+			continue
+		}
+		if best.Headers == nil {
+			best = d
+			continue
+		}
+		if allowed {
+			if d.Headers.Remaining < best.Headers.Remaining {
+				best = d
+			}
+		} else if d.Headers.RetryAfter > best.Headers.RetryAfter {
+			best = d
+		}
+	}
+	if best.Headers == nil {
+		best.Allowed = allowed
+	}
+	return best
 }
 
 // responseHeaders turns the strictest-rule numbers into the x-ratelimit-*

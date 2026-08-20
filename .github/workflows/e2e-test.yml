@@ -100,6 +100,7 @@ jobs:
           helm upgrade --install ratelimit helm-templates/ratelimit \
             --namespace "${E2E_NAMESPACE}" \
             -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            --set logLevel=debug \
             --set image.repository=ratelimit \
             --set image.tag=e2e \
             --wait --timeout 5m

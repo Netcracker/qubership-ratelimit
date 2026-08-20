@@ -40,11 +40,41 @@ lease_holder_pod() {
     -o jsonpath='{.spec.holderIdentity}' 2>/dev/null | cut -d_ -f1
 }
 
-# A burst that contains a 429 proves the endpoint answered: with failClosed
-# false an unreachable operator would let every request through instead, so the
-# absence of 429 is exactly how an outage would look here.
-burst_has_429() {
-  curl_gw_burst 4 public-gateway "${PROBE_PATH}" | grep -q 429
+# A rule-less policy admits everything, so a clean burst is one with no 429
+# and no transport error. Passing traffic alone cannot distinguish a healthy
+# endpoint from one the gateway failed open around; the log detectors below
+# supply that half of the proof.
+burst_is_clean() {
+  local codes
+  codes=$(curl_gw_burst 4 public-gateway "${PROBE_PATH}")
+  ! echo "${codes}" | grep -qE "429|000"
+}
+
+# Greps every replica's log, not just one pod's: the follower is exactly the
+# replica an empty-store bug would live in.
+unknown_domain_logged() {
+  local since="$1" pod
+  for pod in $(kubectl get pods -n "${NAMESPACE}" \
+      -l "app.kubernetes.io/instance=${RELEASE}" -o name); do
+    if kubectl logs -n "${NAMESPACE}" "${pod}" --since-time="${since}" 2>/dev/null \
+        | grep -q "unknown rate limit domain"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Counts the per-check Debug lines across every replica: direct proof the
+# checks reached the operator instead of being failed open around it.
+checks_logged_since() {
+  local since="$1" total=0 pod count
+  for pod in $(kubectl get pods -n "${NAMESPACE}" \
+      -l "app.kubernetes.io/instance=${RELEASE}" -o name); do
+    count=$(kubectl logs -n "${NAMESPACE}" "${pod}" --since-time="${since}" 2>/dev/null \
+      | grep -c "rate limit check") || count=0
+    total=$((total + count))
+  done
+  echo "${total}"
 }
 
 apply_policy "${POLICY}" "${DOMAIN}"
@@ -74,34 +104,48 @@ echo "OK: one replica holds the lease (${LEADER})"
 # ---------------------------------------------------------------------------
 # 2. Both replicas answer checks, not just the leader
 # ---------------------------------------------------------------------------
-# Every pod serves the Service, so a burst reaching either of them must still be
-# limited. A store filled only on the leader would show up as bursts that pass
-# unlimited whenever they land on the follower.
+# Every pod serves the Service. A store filled only on the leader betrays
+# itself in the follower's log: a replica with an empty store reports
+# "unknown rate limit domain" on every check it serves.
+SINCE=$(now_rfc3339)
+sleep 1
 for attempt in $(seq 1 4); do
-  burst_has_429 || fail "burst ${attempt} was not limited; a replica is answering from an empty store"
+  burst_is_clean || fail "burst ${attempt} was refused or failed under a rule-less policy"
   sleep 1.2
 done
-echo "OK: bursts are limited regardless of which replica serves them"
+CHECKS=$(checks_logged_since "${SINCE}")
+[ "${CHECKS}" -ge 4 ] || fail "only ${CHECKS} checks reached the operator; the traffic bypassed it"
+if unknown_domain_logged "${SINCE}"; then
+  fail "a replica answered from an empty store: 'unknown rate limit domain' logged"
+fi
+echo "OK: every replica answers from a populated store (${CHECKS} checks logged)"
 
 # ---------------------------------------------------------------------------
-# 3. Killing the leader does not stop rate limiting
+# 3. Killing the leader does not stop the checks
 # ---------------------------------------------------------------------------
+SINCE=$(now_rfc3339)
+sleep 1
 kubectl delete pod "${LEADER}" -n "${NAMESPACE}" --wait=false
 
-LIMITED=0
+CLEAN=0
 for _ in $(seq 1 8); do
-  if burst_has_429; then
-    LIMITED=$((LIMITED + 1))
+  if burst_is_clean; then
+    CLEAN=$((CLEAN + 1))
   fi
   sleep 1.2
 done
 # Some requests land on the pod that is going away and are failed open by the
-# gateway, so not every burst is guaranteed to be limited; what must not happen
-# is rate limiting stopping altogether.
-if [ "${LIMITED}" -lt 6 ]; then
-  fail "rate limiting stopped while the leader was replaced (${LIMITED}/8 bursts limited)"
+# gateway, so the occasional dirty burst is expected; what must not happen is
+# the checks stopping altogether.
+if [ "${CLEAN}" -lt 6 ]; then
+  fail "checks degraded while the leader was replaced (${CLEAN}/8 clean bursts)"
 fi
-echo "OK: rate limiting continues while the leader is replaced (${LIMITED}/8 bursts limited)"
+CHECKS=$(checks_logged_since "${SINCE}")
+[ "${CHECKS}" -ge 8 ] || fail "only ${CHECKS} checks reached the operator during the handover"
+if unknown_domain_logged "${SINCE}"; then
+  fail "a replica answered from an empty store during the handover"
+fi
+echo "OK: checks continue while the leader is replaced (${CLEAN}/8 clean bursts, ${CHECKS} checks logged)"
 
 # ---------------------------------------------------------------------------
 # 4. The lease moves to the surviving replica

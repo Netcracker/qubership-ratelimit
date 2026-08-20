@@ -6,6 +6,7 @@
 package store
 
 import (
+	"maps"
 	"sync/atomic"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
@@ -19,8 +20,11 @@ type RuleSet struct {
 	engines map[string]*engine.Engine
 }
 
-// NewRuleSet builds a RuleSet over ready engines keyed by domain.
+// NewRuleSet builds a RuleSet over ready engines keyed by domain. The map is
+// cloned, not aliased: the snapshot must stay immutable even when the caller
+// keeps writing to its map after Replace.
 func NewRuleSet(engines map[string]*engine.Engine) *RuleSet {
+	engines = maps.Clone(engines)
 	if engines == nil {
 		engines = map[string]*engine.Engine{}
 	}
