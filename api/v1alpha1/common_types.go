@@ -54,6 +54,13 @@ const (
 	// because it would stop rules that are running.
 	ReasonRejectedByPolicies = "RejectedByPolicies"
 
+	// ReasonRejectedByDomainBudget marks a policy generation the domain gate
+	// refused: together with the active specs of its neighbors it would push
+	// the domain over the reference bounds the runtime backstop enforces. The
+	// spec is structurally fine on its own — Accepted stays true — and the
+	// last-good generation keeps running where there is one.
+	ReasonRejectedByDomainBudget = "RejectedByDomainBudget"
+
 	// ReasonReconciling marks an object whose generation has been seen but not
 	// yet compiled into a snapshot.
 	ReasonReconciling = "Reconciling"

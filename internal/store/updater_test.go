@@ -148,12 +148,26 @@ func TestRebuild_logsTheDomainBudgetWarning(t *testing.T) {
 		logged = append(logged, prefix+args)
 	}, funcr.Options{})
 
-	fakeClient, _ := fakeReader(t, wide("p1"), wide("p2"), wide("p3"))
+	// The seats are inherited from the persisted state: the domain gate never
+	// evicts a running policy, so the oversized set survives into the snapshot
+	// and the warning is its only trace.
+	objects := []*v1alpha1.RateLimitPolicy{wide("p1"), wide("p2"), wide("p3")}
+	bundle := policy.Bundle{}
+	for _, object := range objects {
+		bundle.Policies = append(bundle.Policies, policy.PolicyState{
+			Name:           object.Name,
+			GoodGeneration: object.Generation,
+			GoodSpec:       *object.Spec.DeepCopy(),
+		})
+	}
+
+	fakeClient, _ := fakeReader(t, objects[0], objects[1], objects[2])
 	updater := &Updater{
 		Cache:    readerOnly{fakeClient},
 		Store:    New(),
 		Counters: memory.New(),
 		Log:      sink,
+		bundles:  map[string]policy.Bundle{"gateway.public": bundle},
 	}
 
 	updater.rebuild(context.Background())

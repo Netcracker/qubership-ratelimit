@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -345,4 +346,46 @@ func TestReconcile_aBudgetBlockedPolicyClearsAcceptedToo(t *testing.T) {
 
 	require.NotEmpty(t, stored.Status.RuleProblems)
 	assert.Equal(t, ratelimitv1alpha1.ProblemDecisionBudgetExceeded, stored.Status.RuleProblems[0].Reason)
+}
+
+func TestReconcile_aGateRejectedPolicyKeepsAcceptedTrue(t *testing.T) {
+	// The domain gate refuses the youngest of three maximal policies, but that
+	// is a property of the neighborhood, not of the spec: Accepted must stay
+	// true while Ready names the gate.
+	wideRules := func() []ratelimitv1alpha1.Rule {
+		rules := make([]ratelimitv1alpha1.Rule, 0, 16)
+		for i := range 16 {
+			rules = append(rules, ratelimitv1alpha1.Rule{
+				Name: fmt.Sprintf("r%d", i),
+				Rates: []ratelimitv1alpha1.Rate{
+					{Requests: 100, Period: "1m"},
+					{Requests: 100, Period: "1h"},
+					{Requests: 100, Period: "30s"},
+					{Requests: 100, Period: "10s"},
+				},
+			})
+		}
+		return rules
+	}
+	elder := func(name string, hour int) *ratelimitv1alpha1.RateLimitPolicy {
+		object := testPolicy(1, wideRules()...)
+		object.Name = name
+		object.CreationTimestamp = metav1.NewTime(time.Date(2026, 1, 1, hour, 0, 0, 0, time.UTC))
+		return object
+	}
+	youngest := testPolicy(1, wideRules()...)
+	youngest.CreationTimestamp = metav1.NewTime(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+	reconciler, fakeClient := newReconciler(t, elder("first", 1), elder("second", 2), youngest)
+
+	_, err := reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+
+	stored := fetch(t, fakeClient)
+	accepted := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
+	assert.Equal(t, metav1.ConditionTrue, accepted.Status, "the spec is structurally fine on its own")
+
+	ready := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, ratelimitv1alpha1.ReasonRejectedByDomainBudget, ready.Reason)
+	assert.Zero(t, stored.Status.ActiveGeneration, "with no seat, nothing of this policy runs")
 }
