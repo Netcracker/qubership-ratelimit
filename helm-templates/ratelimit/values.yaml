@@ -33,10 +33,13 @@ rls:
   # gateway decision rather than a service one, which is why it lives on the
   # filter: false keeps the traffic flowing unlimited, true rejects it.
   failClosed: false
-  # Let Envoy render x-ratelimit-limit, x-ratelimit-remaining and
-  # x-ratelimit-reset from what the service returns. Rendering them in the
-  # service instead would put the same numbers in two places.
-  xRateLimitHeaders: DRAFT_VERSION_03
+  # The service supplies x-ratelimit-limit, x-ratelimit-remaining,
+  # x-ratelimit-reset and retry-after itself, as ready response headers.
+  # DRAFT_VERSION_03 would additionally let Envoy render X-RateLimit-* from
+  # per-descriptor statuses — which the service does not populate — so OFF is
+  # the honest default: the flag currently changes nothing, and the headers
+  # keep coming from the one place that computes them.
+  xRateLimitHeaders: "OFF"
 
 # ============== COUNTER STORE ============================
 # Redis holds the counters, and that is what makes a limit a limit of the domain

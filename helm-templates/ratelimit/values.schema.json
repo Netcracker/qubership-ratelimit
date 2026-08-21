@@ -114,7 +114,7 @@
         "xRateLimitHeaders": {
           "type": "string",
           "title": "x-ratelimit response headers",
-          "description": "Lets Envoy render x-ratelimit-limit, x-ratelimit-remaining and x-ratelimit-reset from the statuses the service returns. OFF stops the gateway from sending them at all; retry-after is added by the service and is unaffected.",
+          "description": "The service supplies the x-ratelimit-* and retry-after headers itself. DRAFT_VERSION_03 additionally lets Envoy render X-RateLimit-* from per-descriptor statuses, which the service does not populate, so OFF is the default.",
           "enum": [
             "OFF",
             "DRAFT_VERSION_03"
