@@ -99,12 +99,16 @@ const (
 	// Blocking.
 	ProblemInvalidWindow = "InvalidWindow"
 
-	// ProblemDecisionBudgetExceeded and ProblemDomainBudgetExceeded mark a
-	// configuration that can collect more counter buckets in one request than the
-	// runtime admits. They are warnings: the rules compile, and the requests that
-	// overlap that widely are the ones refused.
+	// ProblemDecisionBudgetExceeded marks a policy whose worst-case request
+	// would collect more counter buckets than one decision may carry. Blocking:
+	// the generation stays out of the snapshot, like any other blocking problem.
 	ProblemDecisionBudgetExceeded = "DecisionBudgetExceeded"
-	ProblemDomainBudgetExceeded   = "DomainBudgetExceeded"
+
+	// ProblemDomainBudgetExceeded marks a domain whose policies together exceed
+	// the reference bounds. Informational: no single policy is at fault, so none
+	// is excluded, and the requests that overlap that widely are refused by the
+	// runtime backstop.
+	ProblemDomainBudgetExceeded = "DomainBudgetExceeded"
 )
 
 // Descriptor keys the engine produces on its own. A mapping cannot declare

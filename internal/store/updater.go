@@ -38,6 +38,10 @@ type StateStore interface {
 	Load(ctx context.Context, domains []string) (map[string]policy.Bundle, error)
 	Save(ctx context.Context, domain string, bundle policy.Bundle) error
 	Delete(ctx context.Context, domain string) error
+
+	// ListDomains names every domain with persisted state, so a new leader can
+	// drop the state of domains retired while somebody else held the lease.
+	ListDomains(ctx context.Context) ([]string, error)
 }
 
 // Updater keeps the Store in sync with the objects in the cache.
@@ -75,6 +79,16 @@ type Updater struct {
 	// lease, or one that failed, must not be remembered as done or it would never
 	// be retried.
 	persisted map[string]policy.Bundle
+
+	// domains are the compiled domains of the previous rebuild, reused whole for
+	// domains whose bundle did not change. Engine and snapshot travel together
+	// because the engine was built from that snapshot, and the management API
+	// reports the snapshot as what is being enforced.
+	domains map[string]Domain
+
+	// reconciledStale is set once this leader has swept the persisted state for
+	// domains that retired before it took the lease.
+	reconciledStale bool
 }
 
 // NeedLeaderElection reports false: every replica serves rate limit checks, so
@@ -179,13 +193,20 @@ func (u *Updater) rebuild(ctx context.Context) {
 
 	result := policy.Compile(input)
 
+	for domain, warnings := range result.Warnings {
+		for _, warning := range warnings {
+			u.Log.Info("domain over its reference bounds", "domain", domain, "warning", warning)
+		}
+	}
+
 	// Write-ahead: the state describes what the snapshot about to be installed
 	// enforces, so persisting it first makes a crash in between recoverable — the
 	// next start converges to a state that was valid when it was written.
 	u.persist(ctx, result.State)
+	previous := u.bundles
 	u.bundles = result.State
 
-	u.Store.Replace(u.ruleSet(result))
+	u.Store.Replace(u.ruleSet(result, previous))
 
 	blocks, rules, problems := 0, 0, 0
 	for _, snapshot := range result.Snapshots {
@@ -222,17 +243,28 @@ func (u *Updater) rebuild(ctx context.Context) {
 	)
 }
 
-// ruleSet binds each compiled domain to the shared counter store.
+// ruleSet binds each compiled domain to the shared counter store, reusing the
+// engine of any domain whose bundle did not change.
 //
-// The engines are rebuilt rather than updated in place, which drops their token
-// caches with them. That is the honest trade: a cache keyed by a token holds
-// decisions made under the old rules, and carrying it across a rule change would
-// let a request be judged by rules no longer in effect.
-func (u *Updater) ruleSet(result *policy.Result) *RuleSet {
+// The snapshot is a pure function of the bundle, so an unchanged bundle means
+// unchanged rules — and a reused domain keeps its engine's warm token cache. The
+// cache holds extraction results, themselves a pure function of the token and
+// the snapshot's extraction plan, so nothing stale survives the reuse; a domain
+// whose rules did change gets a fresh engine, and the old cache retires with the
+// old one.
+//
+// The pair is reused rather than just the engine, so the snapshot the management
+// API reports is always the one the engine beside it was built from.
+func (u *Updater) ruleSet(result *policy.Result, previous map[string]policy.Bundle) *RuleSet {
 	domains := make(map[string]Domain, len(result.Snapshots))
 	for domain, snapshot := range result.Snapshots {
+		if prev, ok := u.domains[domain]; ok && unchanged(previous[domain], result.State[domain]) {
+			domains[domain] = prev
+			continue
+		}
 		domains[domain] = Domain{Engine: engine.New(snapshot, u.Counters), Snapshot: snapshot}
 	}
+	u.domains = domains
 	return NewRuleSet(domains)
 }
 
@@ -271,6 +303,7 @@ func (u *Updater) persist(ctx context.Context, bundles map[string]policy.Bundle)
 	if u.persisted == nil {
 		u.persisted = make(map[string]policy.Bundle, len(bundles))
 	}
+	u.sweepStale(ctx, bundles)
 
 	for domain, bundle := range bundles {
 		if unchanged(u.persisted[domain], bundle) {
@@ -296,6 +329,33 @@ func (u *Updater) persist(ctx context.Context, bundles map[string]policy.Bundle)
 			continue
 		}
 		delete(u.persisted, domain)
+	}
+}
+
+// sweepStale drops the persisted state of domains that retired before this
+// replica took the lease. The regular delete loop only sees what this process
+// persisted itself, so without the sweep a leader handover would leave the
+// ConfigMap of an already retired domain behind forever.
+func (u *Updater) sweepStale(ctx context.Context, bundles map[string]policy.Bundle) {
+	if u.reconciledStale {
+		return
+	}
+	known, err := u.State.ListDomains(ctx)
+	if err != nil {
+		// Leaving the flag unset retries the sweep on the next rebuild.
+		u.Log.Error(err, "failed to list the persisted rate limit state")
+		return
+	}
+	u.reconciledStale = true
+	for _, domain := range known {
+		if _, alive := bundles[domain]; alive {
+			continue
+		}
+		if err := u.State.Delete(ctx, domain); err != nil {
+			u.Log.Error(err, "failed to drop the rate limit state of a retired domain", "domain", domain)
+			u.reconciledStale = false
+			continue
+		}
 	}
 }
 

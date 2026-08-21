@@ -2,14 +2,18 @@ package state
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -29,7 +33,8 @@ func newStore(t *testing.T, objects ...client.Object) (*Store, client.Client) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	return New(fakeClient, testNamespace,
-		map[string]string{"app.kubernetes.io/managed-by": "ratelimit"}), fakeClient
+		map[string]string{"app.kubernetes.io/managed-by": "ratelimit"},
+		logr.Discard(), events.NewFakeRecorder(4)), fakeClient
 }
 
 func testBundle() policy.Bundle {
@@ -103,16 +108,31 @@ func TestLoad_aDomainWithNoStateIsAColdStart(t *testing.T) {
 	assert.Empty(t, loaded)
 }
 
-func TestLoad_reportsAConfigMapThatIsNotABundle(t *testing.T) {
+func TestLoad_skipsACorruptBundleAndKeepsTheRest(t *testing.T) {
+	// One corrupt cache entry costs its own domain the fallback, not the whole
+	// namespace: every other domain keeps its last-good state.
 	store, _ := newStore(t, &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: Name(testDomain)},
 		BinaryData: map[string][]byte{DataKey: []byte("not gzip")},
 	})
+	require.NoError(t, store.Save(context.Background(), "gateway.private", testBundle()))
 
-	_, err := store.Load(context.Background(), []string{testDomain})
+	loaded, err := store.Load(context.Background(), []string{testDomain, "gateway.private"})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), testDomain)
+	require.NoError(t, err)
+	assert.NotContains(t, loaded, testDomain, "the corrupt domain has no fallback")
+	assert.Contains(t, loaded, "gateway.private", "the intact domain keeps its state")
+}
+
+func TestListDomains_namesEveryPersistedDomain(t *testing.T) {
+	store, _ := newStore(t)
+	require.NoError(t, store.Save(context.Background(), "gateway.private", testBundle()))
+	require.NoError(t, store.Save(context.Background(), testDomain, testBundle()))
+
+	domains, err := store.ListDomains(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gateway.private", testDomain}, domains)
 }
 
 func TestLoad_skipsAConfigMapWithoutTheStateEntry(t *testing.T) {
@@ -152,4 +172,43 @@ func TestName_isDerivedFromTheDomain(t *testing.T) {
 	// The name has to be derivable, because it is how a replica finds the state of
 	// a domain without listing every ConfigMap of the namespace.
 	assert.Equal(t, "ratelimit-state-gateway.public", Name("gateway.public"))
+}
+
+func TestSave_overflowRaisesTheWarningEvent(t *testing.T) {
+	// A bundle too large to persist costs the domain its restart fallback; the
+	// Warning event on the ConfigMap is how that becomes visible before the
+	// restart that would otherwise discover it.
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	recorder := events.NewFakeRecorder(4)
+	store := New(fake.NewClientBuilder().WithScheme(scheme).Build(), testNamespace,
+		nil, logr.Discard(), recorder)
+
+	err := store.Save(context.Background(), testDomain, oversizedBundle())
+
+	require.ErrorIs(t, err, policy.ErrBundleOverflow)
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "PersistenceOverflow")
+	default:
+		t.Fatal("no event was recorded for the overflow")
+	}
+}
+
+// oversizedBundle will not fit the ConfigMap even compressed: its client lists
+// are hex chains, which gzip cannot fold away the way it folds repetition.
+func oversizedBundle() policy.Bundle {
+	seed := sha256.Sum256([]byte("state"))
+	clients := make([]string, 0, 28*1024)
+	for range 28 * 1024 {
+		seed = sha256.Sum256(seed[:])
+		clients = append(clients, hex.EncodeToString(seed[:]))
+	}
+	return policy.Bundle{Policies: []policy.PolicyState{{
+		Name: "wide", UID: "uid-wide", GoodGeneration: 1,
+		GoodSpec: v1alpha1.RateLimitPolicySpec{
+			Domain: testDomain,
+			Groups: []v1alpha1.ClientGroup{{Name: "all", Clients: clients}},
+		},
+	}}}
 }

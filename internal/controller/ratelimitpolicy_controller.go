@@ -34,7 +34,7 @@ type RateLimitPolicyReconciler struct {
 
 // +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies;ratelimitmappings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups="",namespace=ratelimit-system,resources=configmaps,verbs=get;create;update;patch;delete
+// +kubebuilder:rbac:groups="",namespace=ratelimit-system,resources=configmaps,verbs=get;list;create;update;patch;delete
 
 // Reconcile compiles the domain of the policy and reports what the compiler said
 // about this object.

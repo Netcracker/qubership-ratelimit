@@ -4,11 +4,17 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
+
+// ErrBundleOverflow reports a bundle too large to persist. Callers use it to
+// tell a lost fallback apart from a transport failure: the former deserves a
+// Warning event, the latter a retry.
+var ErrBundleOverflow = errors.New("domain state over the size limit")
 
 // MaxBundleSize bounds one encoded bundle. A ConfigMap holds about a mebibyte,
 // and the encoded state has to leave room for the rest of the object.
@@ -103,8 +109,8 @@ func EncodeBundle(bundle Bundle) ([]byte, error) {
 
 	if compressed.Len() > MaxBundleSize {
 		return nil, fmt.Errorf(
-			"domain state is %d bytes, over the %d byte limit: the objects of this domain cannot keep a last-good spec across a restart",
-			compressed.Len(), MaxBundleSize)
+			"domain state is %d bytes, over the %d byte limit: the objects of this domain cannot keep a last-good spec across a restart: %w",
+			compressed.Len(), MaxBundleSize, ErrBundleOverflow)
 	}
 	return compressed.Bytes(), nil
 }

@@ -41,7 +41,8 @@ spec:
             domain: {{ $config.domain }}
             failure_mode_deny: {{ $root.Values.rls.failClosed }}
             timeout: {{ $root.Values.rls.timeout }}
-            enable_x_ratelimit_headers: {{ $root.Values.rls.xRateLimitHeaders }}
+            {{- /* Quoted: bare OFF is a YAML boolean, and the field is a string enum. */}}
+            enable_x_ratelimit_headers: {{ $root.Values.rls.xRateLimitHeaders | quote }}
             rate_limit_service:
               transport_api_version: V3
               grpc_service:

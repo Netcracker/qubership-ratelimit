@@ -34,8 +34,10 @@ rules:
   # The last-good spec of every object of a domain, so that a restart does not
   # forget which generation is being enforced. Names are ratelimit-state-<domain>
   # and the domains are only known at run time, so the rule cannot be narrowed to
-  # resourceNames. The decision audit selection lives in a ConfigMap of this
-  # namespace too, so that every replica streams the same rules.
+  # resourceNames. list is label-scoped discovery: a new leader sweeps the state
+  # of domains that retired while somebody else held the lease. The decision
+  # audit selection lives in a ConfigMap of this namespace too, so that every
+  # replica streams the same rules.
   - apiGroups: [""]
     resources: [configmaps]
-    verbs: [get, create, update, patch, delete]
+    verbs: [get, list, create, update, patch, delete]
