@@ -174,29 +174,37 @@ func compileDomain(
 	// The engine is handed the generation of each object that is in effect and
 	// nothing else. It decides what those specs compile to, and drops any that
 	// still do not hold together — the same atomicity rule, enforced once.
+	// Between choosing and compiling stands the domain gate: a candidate that
+	// would push the whole domain over its reference bounds yields to its own
+	// last-good generation instead of taking a neighbor down.
+	slots := admitPolicies(domain, policies, previous, env)
+
 	chosen := make([]model.Policy, 0, len(policies))
 	outcomes := make(map[string]PolicyOutcome, len(policies))
 	for _, object := range policies {
-		latest := try(domain, object.Name, object.Generation, &object.Spec, env)
-		picked, running := choose(latest, lastGoodPolicy(domain, object, previous, env))
+		s := slots[object.Name]
 
 		outcome := PolicyOutcome{
-			Outcome:  Outcome{Generation: object.Generation, Err: structural(latest.problems)},
-			Problems: ruleProblems(latest.problems),
+			Outcome:  Outcome{Generation: object.Generation, Err: structural(s.latest.problems)},
+			Problems: ruleProblems(s.latest.problems),
 		}
-		if running {
-			outcome.ActiveGeneration = picked.generation
-			chosen = append(chosen, modelPolicy(object.Name, picked.spec))
+		if s.running {
+			outcome.ActiveGeneration = s.final.generation
+			chosen = append(chosen, modelPolicy(object.Name, s.final.spec))
 
 			bundle.Policies = append(bundle.Policies, PolicyState{
 				Name:           object.Name,
 				UID:            string(object.UID),
-				GoodGeneration: picked.generation,
-				GoodSpec:       *picked.spec.DeepCopy(),
+				GoodGeneration: s.final.generation,
+				GoodSpec:       *s.final.spec.DeepCopy(),
 			})
 		}
 		if !outcome.Ready() {
-			outcome.Reason = readyReason(latest.problems, env != nil)
+			if s.rejected {
+				outcome.Reason = v1alpha1.ReasonRejectedByDomainBudget
+			} else {
+				outcome.Reason = readyReason(s.latest.problems, env != nil)
+			}
 		}
 		outcomes[object.Name] = outcome
 	}
@@ -335,6 +343,120 @@ func gate(
 		rejectedBy = append(rejectedBy, rejection)
 	}
 	return rejectedBy
+}
+
+// slot is what the domain gate decided about one policy: the attempt that
+// runs, whether anything runs at all, and whether the gate refused the latest
+// generation.
+type slot struct {
+	latest   attempt
+	final    attempt
+	running  bool
+	rejected bool
+}
+
+// admitPolicies picks the spec of every policy under the domain bounds.
+//
+// A policy whose latest generation already holds its seat — it is the
+// persisted active one — is not a candidate and is never re-litigated: seats
+// were gated when they were admitted, and re-judging them would let a new
+// edit evict a neighbor. Everything else is a candidate: a new generation, or
+// a policy with no seat at all. Candidates are judged one at a time against
+// the seats of everyone plus the candidates already admitted, oldest object
+// first (creationTimestamp, then name): on a cold start with no seats that
+// order is what makes the outcome a function of the set, and in steady state
+// it never matters because a candidate that fits is admitted regardless.
+//
+// A refused candidate falls back to its own seat — the last-good generation
+// keeps running — or, seatless, runs nothing. The judge is the engine: the
+// trial compilation of the exact resulting set either carries the
+// domain-budget record or it does not, so neither the bounds nor the formula
+// exist twice. A seat set inherited over the bounds (state written before the
+// gate existed) stays as it is — seats are not evicted — and the runtime
+// backstop keeps the store safe while the warning says so.
+func admitPolicies(
+	domain string,
+	policies []*v1alpha1.RateLimitPolicy,
+	previous Bundle,
+	env *model.Mapping,
+) map[string]*slot {
+	slots := make(map[string]*slot, len(policies))
+	view := make(map[string]attempt, len(policies))
+	var candidates []*v1alpha1.RateLimitPolicy
+
+	for _, object := range policies {
+		s := &slot{latest: try(domain, object.Name, object.Generation, &object.Spec, env)}
+		slots[object.Name] = s
+
+		state := previous.policy(object.Name, string(object.UID))
+		if state != nil && state.GoodGeneration == object.Generation {
+			// The latest generation is the seated one; nothing new to judge.
+			s.final, s.running = choose(s.latest, attempt{})
+			if s.running {
+				view[object.Name] = s.final
+			}
+			continue
+		}
+		if state != nil {
+			seat := lastGoodPolicy(domain, object, previous, env)
+			if seat.runnable() {
+				view[object.Name] = seat
+			}
+		}
+		candidates = append(candidates, object)
+	}
+
+	sort.SliceStable(candidates, func(a, b int) bool {
+		first, second := candidates[a], candidates[b]
+		if !first.CreationTimestamp.Equal(&second.CreationTimestamp) {
+			return first.CreationTimestamp.Before(&second.CreationTimestamp)
+		}
+		return first.Name < second.Name
+	})
+
+	for _, object := range candidates {
+		s := slots[object.Name]
+		seat, seated := view[object.Name]
+
+		if s.latest.runnable() {
+			if fitsDomain(domain, view, object.Name, s.latest, env) {
+				s.final, s.running = s.latest, true
+				view[object.Name] = s.latest
+				continue
+			}
+			s.rejected = true
+		}
+		s.final, s.running = seat, seated
+	}
+	return slots
+}
+
+// fitsDomain asks the engine whether the view, with one policy replaced by the
+// given attempt, stays inside the domain bounds.
+func fitsDomain(
+	domain string,
+	view map[string]attempt,
+	name string,
+	candidate attempt,
+	env *model.Mapping,
+) bool {
+	set := make([]model.Policy, 0, len(view)+1)
+	for member, seated := range view {
+		if member == name {
+			continue
+		}
+		set = append(set, modelPolicy(member, seated.spec))
+	}
+	set = append(set, modelPolicy(name, candidate.spec))
+
+	_, problems := enginecompile.Compile(domain, set, env)
+	for _, problem := range problems {
+		if problem.Policy == "" && !problem.Blocking &&
+			problem.Reason == enginecompile.ReasonDomainBudgetExceeded {
+			return false
+		}
+	}
+	return true
 }
 
 // attempt is one spec put to the engine against one mapping.
