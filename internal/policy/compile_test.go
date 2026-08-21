@@ -220,32 +220,55 @@ func TestCompile_aMappingWhoseNameIsNotItsDomainIsIgnored(t *testing.T) {
 }
 
 func TestCompile_surfacesTheDomainBudgetWarning(t *testing.T) {
-	// Three policies, each exactly at the per-policy budget, together exceed the
-	// domain bounds. Nobody is excluded — no single policy is at fault — but the
-	// compilation must say so, or the first sign would be refused requests.
-	wide := func(name string) v1alpha1.RateLimitPolicy {
-		rules := make([]v1alpha1.Rule, 0, 16)
-		for i := range 16 {
-			rules = append(rules, v1alpha1.Rule{
-				Name: fmt.Sprintf("r%d", i),
-				Rates: []v1alpha1.Rate{
-					{Requests: 100, Period: "1m"},
-					{Requests: 100, Period: "1h"},
-					{Requests: 100, Period: "30s"},
-					{Requests: 100, Period: "10s"},
-				},
-			})
-		}
-		return policyObject(name, v1alpha1.LimitBlock{Name: "b", Rules: rules})
+	// A seat set inherited over the bounds — state written before the gate
+	// existed — is not evicted: no single policy is at fault, everyone keeps
+	// running, and the warning is what says the backstop is within reach.
+	policies := []v1alpha1.RateLimitPolicy{
+		widePolicy64("p1"), widePolicy64("p2"), widePolicy64("p3"),
 	}
-
-	result := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{wide("p1"), wide("p2"), wide("p3")}})
+	result := Compile(Input{Policies: policies, State: map[string]Bundle{
+		testDomain: seatedBundle(policies...),
+	}})
 
 	require.NotEmpty(t, result.Warnings[testDomain], "the domain-level record must not be dropped")
 	for name, outcome := range result.Policies {
 		assert.True(t, outcome.Ready(), "policy %s must stay enforced: %+v", name, outcome)
 	}
 	assert.Len(t, result.Snapshots[testDomain].Blocks, 3)
+}
+
+// widePolicy64 sits exactly at the per-policy budget: one block of 16 rules,
+// four windows each.
+func widePolicy64(name string) v1alpha1.RateLimitPolicy {
+	rules := make([]v1alpha1.Rule, 0, 16)
+	for i := range 16 {
+		rules = append(rules, v1alpha1.Rule{
+			Name: fmt.Sprintf("r%d", i),
+			Rates: []v1alpha1.Rate{
+				{Requests: 100, Period: "1m"},
+				{Requests: 100, Period: "1h"},
+				{Requests: 100, Period: "30s"},
+				{Requests: 100, Period: "10s"},
+			},
+		})
+	}
+	return policyObject(name, v1alpha1.LimitBlock{Name: "b", Rules: rules})
+}
+
+// seatedBundle seats every given policy at its current generation, the way a
+// previous rebuild would have persisted it.
+func seatedBundle(policies ...v1alpha1.RateLimitPolicy) Bundle {
+	bundle := Bundle{}
+	for i := range policies {
+		object := &policies[i]
+		bundle.Policies = append(bundle.Policies, PolicyState{
+			Name:           object.Name,
+			UID:            string(object.UID),
+			GoodGeneration: object.Generation,
+			GoodSpec:       *object.Spec.DeepCopy(),
+		})
+	}
+	return bundle
 }
 
 func TestCompile_aBudgetBlockedPolicyReadsAsInvalidSpec(t *testing.T) {
