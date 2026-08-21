@@ -44,6 +44,10 @@ jobs:
       # Matches k8s.io/api in go.mod, so the test control plane cannot drift from
       # the client libraries the service is built against.
       kube-version: '1.36.0'
+      # Pull requests build a single native platform: the image is validation
+      # only there, and the two cross-compilations otherwise contend for the
+      # runner's cores. Pushes keep the full multi-arch config.
+      docker-config-file: ${{ github.event_name == 'pull_request' && 'docker-dev-config-pr.json' || 'docker-dev-config.json' }}
       sonar-project-key: ${{ vars.SONAR_PROJECT_KEY }}
     secrets: inherit
 
