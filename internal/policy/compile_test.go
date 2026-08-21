@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -216,4 +217,59 @@ func TestCompile_aMappingWhoseNameIsNotItsDomainIsIgnored(t *testing.T) {
 
 	assert.Empty(t, result.Snapshots)
 	require.Error(t, result.Mappings[key("something-else")].Err)
+}
+
+func TestCompile_surfacesTheDomainBudgetWarning(t *testing.T) {
+	// Three policies, each exactly at the per-policy budget, together exceed the
+	// domain bounds. Nobody is excluded — no single policy is at fault — but the
+	// compilation must say so, or the first sign would be refused requests.
+	wide := func(name string) v1alpha1.RateLimitPolicy {
+		rules := make([]v1alpha1.Rule, 0, 16)
+		for i := range 16 {
+			rules = append(rules, v1alpha1.Rule{
+				Name: fmt.Sprintf("r%d", i),
+				Rates: []v1alpha1.Rate{
+					{Requests: 100, Period: "1m"},
+					{Requests: 100, Period: "1h"},
+					{Requests: 100, Period: "30s"},
+					{Requests: 100, Period: "10s"},
+				},
+			})
+		}
+		return policyObject(name, v1alpha1.LimitBlock{Name: "b", Rules: rules})
+	}
+
+	result := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{wide("p1"), wide("p2"), wide("p3")}})
+
+	require.NotEmpty(t, result.Warnings[testDomain], "the domain-level record must not be dropped")
+	for name, outcome := range result.Policies {
+		assert.True(t, outcome.Ready(), "policy %s must stay enforced: %+v", name, outcome)
+	}
+	assert.Len(t, result.Snapshots[testDomain].Blocks, 3)
+}
+
+func TestCompile_aBudgetBlockedPolicyReadsAsInvalidSpec(t *testing.T) {
+	// One policy over the per-policy budget is blocked whole, and the fix is in
+	// its own spec: pointing the author at references would mislead.
+	rules := make([]v1alpha1.Rule, 0, 17)
+	for i := range 17 {
+		rules = append(rules, v1alpha1.Rule{
+			Name: fmt.Sprintf("r%d", i),
+			Rates: []v1alpha1.Rate{
+				{Requests: 100, Period: "1m"},
+				{Requests: 100, Period: "1h"},
+				{Requests: 100, Period: "30s"},
+				{Requests: 100, Period: "10s"},
+			},
+		})
+	}
+	object := policyObject("wide", v1alpha1.LimitBlock{Name: "b", Rules: rules})
+
+	result := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{object}})
+
+	outcome := result.Policies[key("wide")]
+	assert.False(t, outcome.Ready())
+	assert.Zero(t, outcome.ActiveGeneration, "a budget-blocked policy enforces nothing")
+	assert.Equal(t, v1alpha1.ReasonInvalidSpec, outcome.Reason)
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
 }

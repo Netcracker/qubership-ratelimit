@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -281,6 +282,17 @@ func (s *stubState) Save(_ context.Context, domain string, bundle policy.Bundle)
 	}
 	s.saved[domain] = bundle
 	return nil
+}
+
+func (s *stubState) ListDomains(_ context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.saved))
+	for domain := range s.saved {
+		out = append(out, domain)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (s *stubState) Delete(_ context.Context, domain string) error {

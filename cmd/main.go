@@ -208,11 +208,11 @@ func run(
 	// Only what the operator can keep true. app.kubernetes.io/name is deliberately
 	// absent: the chart derives it from .Values.nameOverride, which this process
 	// cannot see, so setting it here would drift from every other object of the
-	// release the moment someone overrides the name. These ConfigMaps are internal
-	// state looked up by name, never by selector, so the label buys nothing.
+	// release the moment someone overrides the name. The domain label the store
+	// adds is what a new leader sweeps retired domains by.
 	lastGood := state.New(stateClient, namespace, map[string]string{
 		"app.kubernetes.io/managed-by": managedBy,
-	})
+	}, newLogrLogger().WithName("state"), mgr.GetEventRecorder("ratelimit"))
 
 	if runController {
 		if err := (&controller.RateLimitPolicyReconciler{

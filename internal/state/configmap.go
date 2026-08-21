@@ -12,12 +12,16 @@ package state
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"sort"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
@@ -42,13 +46,22 @@ type Store struct {
 	client    client.Client
 	namespace string
 	labels    map[string]string
+	log       logr.Logger
+	recorder  events.EventRecorder
 }
 
 // New returns a Store writing into the given namespace. The client has to be an
 // uncached one: caching ConfigMaps would need an informer over every ConfigMap of
-// the namespace, for objects that are read once per process lifetime.
-func New(uncached client.Client, namespace string, labels map[string]string) *Store {
-	return &Store{client: uncached, namespace: namespace, labels: labels}
+// the namespace, for objects that are read once per process lifetime. The
+// recorder may be nil; without it an overflow is only logged.
+func New(
+	uncached client.Client,
+	namespace string,
+	labels map[string]string,
+	log logr.Logger,
+	recorder events.EventRecorder,
+) *Store {
+	return &Store{client: uncached, namespace: namespace, labels: labels, log: log, recorder: recorder}
 }
 
 // Name is the ConfigMap holding the state of a domain.
@@ -81,7 +94,11 @@ func (s *Store) Load(ctx context.Context, domains []string) (map[string]policy.B
 		}
 		bundle, err := policy.DecodeBundle(raw)
 		if err != nil {
-			return nil, fmt.Errorf("read state of domain %q: %w", domain, err)
+			// One corrupt cache entry costs its own domain the fallback, not
+			// the whole namespace: the other domains' state is intact and
+			// there is no reason to forget it.
+			s.log.Error(err, "skipping an unreadable state entry", "domain", domain)
+			continue
 		}
 		bundles[domain] = bundle
 	}
@@ -89,9 +106,17 @@ func (s *Store) Load(ctx context.Context, domains []string) (map[string]policy.B
 }
 
 // Save writes the state of one domain, creating the ConfigMap when it is missing.
+//
+// An oversized bundle raises a Warning event on the ConfigMap: the objects of
+// the domain lose their last-good spec across a restart, and whoever
+// investigates that starts at the ConfigMap that should have held it.
 func (s *Store) Save(ctx context.Context, domain string, bundle policy.Bundle) error {
 	encoded, err := policy.EncodeBundle(bundle)
 	if err != nil {
+		if errors.Is(err, policy.ErrBundleOverflow) && s.recorder != nil {
+			s.recorder.Eventf(s.reference(domain), nil, corev1.EventTypeWarning,
+				"PersistenceOverflow", "Save", "%s", err.Error())
+		}
 		return err
 	}
 
@@ -134,6 +159,30 @@ func (s *Store) Delete(ctx context.Context, domain string) error {
 		return fmt.Errorf("delete state of domain %q: %w", domain, err)
 	}
 	return nil
+}
+
+// ListDomains names every domain with persisted state, found by the domain
+// label. It is how a new leader discovers the ConfigMaps of domains retired
+// while somebody else held the lease.
+func (s *Store) ListDomains(ctx context.Context) ([]string, error) {
+	var list corev1.ConfigMapList
+	if err := s.client.List(ctx, &list,
+		client.InNamespace(s.namespace), client.HasLabels{domainLabel}); err != nil {
+		return nil, fmt.Errorf("list persisted domains: %w", err)
+	}
+	domains := make([]string, 0, len(list.Items))
+	for i := range list.Items {
+		domains = append(domains, list.Items[i].Labels[domainLabel])
+	}
+	sort.Strings(domains)
+	return domains, nil
+}
+
+// reference names the ConfigMap of a domain for an event, without reading it.
+func (s *Store) reference(domain string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: s.namespace, Name: Name(domain)},
+	}
 }
 
 func (s *Store) labelsFor(domain string) map[string]string {

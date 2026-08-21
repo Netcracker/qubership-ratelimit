@@ -4,12 +4,14 @@ import (
 	"context"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -29,7 +31,8 @@ func newStore(t *testing.T, objects ...client.Object) (*Store, client.Client) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 	return New(fakeClient, testNamespace,
-		map[string]string{"app.kubernetes.io/managed-by": "ratelimit"}), fakeClient
+		map[string]string{"app.kubernetes.io/managed-by": "ratelimit"},
+		logr.Discard(), events.NewFakeRecorder(4)), fakeClient
 }
 
 func testBundle() policy.Bundle {
@@ -103,16 +106,31 @@ func TestLoad_aDomainWithNoStateIsAColdStart(t *testing.T) {
 	assert.Empty(t, loaded)
 }
 
-func TestLoad_reportsAConfigMapThatIsNotABundle(t *testing.T) {
+func TestLoad_skipsACorruptBundleAndKeepsTheRest(t *testing.T) {
+	// One corrupt cache entry costs its own domain the fallback, not the whole
+	// namespace: every other domain keeps its last-good state.
 	store, _ := newStore(t, &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: Name(testDomain)},
 		BinaryData: map[string][]byte{DataKey: []byte("not gzip")},
 	})
+	require.NoError(t, store.Save(context.Background(), "gateway.private", testBundle()))
 
-	_, err := store.Load(context.Background(), []string{testDomain})
+	loaded, err := store.Load(context.Background(), []string{testDomain, "gateway.private"})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), testDomain)
+	require.NoError(t, err)
+	assert.NotContains(t, loaded, testDomain, "the corrupt domain has no fallback")
+	assert.Contains(t, loaded, "gateway.private", "the intact domain keeps its state")
+}
+
+func TestListDomains_namesEveryPersistedDomain(t *testing.T) {
+	store, _ := newStore(t)
+	require.NoError(t, store.Save(context.Background(), "gateway.private", testBundle()))
+	require.NoError(t, store.Save(context.Background(), testDomain, testBundle()))
+
+	domains, err := store.ListDomains(context.Background())
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gateway.private", testDomain}, domains)
 }
 
 func TestLoad_skipsAConfigMapWithoutTheStateEntry(t *testing.T) {

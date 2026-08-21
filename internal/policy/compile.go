@@ -97,6 +97,12 @@ type Result struct {
 	// generations these snapshots were built from, so writing it before swapping
 	// them leaves a crash in between recoverable.
 	State map[string]Bundle
+
+	// Warnings are the domain-level informational records of the compilation,
+	// keyed by domain — the domain-budget note among them. They exclude nobody
+	// and block nothing, but dropping them would silence the one signal that
+	// says the runtime backstop is within reach.
+	Warnings map[string][]string
 }
 
 // Compile turns the objects of a namespace into one snapshot per domain.
@@ -110,6 +116,7 @@ func Compile(in Input) *Result {
 		Policies:  make(map[client.ObjectKey]PolicyOutcome, len(in.Policies)),
 		Mappings:  make(map[client.ObjectKey]MappingOutcome, len(in.Mappings)),
 		State:     make(map[string]Bundle),
+		Warnings:  make(map[string][]string),
 	}
 
 	mappings, policies := index(in)
@@ -195,6 +202,11 @@ func compileDomain(
 	}
 
 	snapshot, problems := enginecompile.Compile(domain, chosen, env)
+	for _, problem := range problems {
+		if problem.Policy == "" && !problem.Blocking {
+			result.Warnings[domain] = append(result.Warnings[domain], problem.Message)
+		}
+	}
 	for _, object := range policies {
 		outcome := outcomes[object.Name]
 		outcome.Blocks, outcome.Rules = contribution(snapshot, object.Name)
@@ -457,7 +469,11 @@ func readyReason(problems []enginecompile.Problem, declared bool) string {
 		return v1alpha1.ReasonReconciling
 	}
 	switch problem.Reason {
-	case enginecompile.ReasonInvalidSpec, enginecompile.ReasonInvalidWindow:
+	case enginecompile.ReasonInvalidSpec, enginecompile.ReasonInvalidWindow,
+		enginecompile.ReasonDecisionBudgetExceeded:
+		// The budget is a structural property of the spec itself: no reference
+		// and no neighbor is involved, so reporting it as a reference problem
+		// would point the author at the wrong fix.
 		return v1alpha1.ReasonInvalidSpec
 	case enginecompile.ReasonUnresolvedKeyReference, enginecompile.ReasonUnresolvedGroupReference:
 		if !declared {
