@@ -2,6 +2,8 @@ package state
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -170,4 +172,43 @@ func TestName_isDerivedFromTheDomain(t *testing.T) {
 	// The name has to be derivable, because it is how a replica finds the state of
 	// a domain without listing every ConfigMap of the namespace.
 	assert.Equal(t, "ratelimit-state-gateway.public", Name("gateway.public"))
+}
+
+func TestSave_overflowRaisesTheWarningEvent(t *testing.T) {
+	// A bundle too large to persist costs the domain its restart fallback; the
+	// Warning event on the ConfigMap is how that becomes visible before the
+	// restart that would otherwise discover it.
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	recorder := events.NewFakeRecorder(4)
+	store := New(fake.NewClientBuilder().WithScheme(scheme).Build(), testNamespace,
+		nil, logr.Discard(), recorder)
+
+	err := store.Save(context.Background(), testDomain, oversizedBundle())
+
+	require.ErrorIs(t, err, policy.ErrBundleOverflow)
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "PersistenceOverflow")
+	default:
+		t.Fatal("no event was recorded for the overflow")
+	}
+}
+
+// oversizedBundle will not fit the ConfigMap even compressed: its client lists
+// are hex chains, which gzip cannot fold away the way it folds repetition.
+func oversizedBundle() policy.Bundle {
+	seed := sha256.Sum256([]byte("state"))
+	clients := make([]string, 0, 28*1024)
+	for range 28 * 1024 {
+		seed = sha256.Sum256(seed[:])
+		clients = append(clients, hex.EncodeToString(seed[:]))
+	}
+	return policy.Bundle{Policies: []policy.PolicyState{{
+		Name: "wide", UID: "uid-wide", GoodGeneration: 1,
+		GoodSpec: v1alpha1.RateLimitPolicySpec{
+			Domain: testDomain,
+			Groups: []v1alpha1.ClientGroup{{Name: "all", Clients: clients}},
+		},
+	}}}
 }

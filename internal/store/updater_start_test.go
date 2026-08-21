@@ -244,13 +244,15 @@ func TestUpdaterStart_rebuildsOnAMappingEvent(t *testing.T) {
 // stubState records what the updater persisted, so a test can assert on the
 // write-ahead order and on the leader gate.
 type stubState struct {
-	mu           sync.Mutex
-	loaded       []string
-	saved        map[string]policy.Bundle
-	deleted      []string
-	failing      bool
-	saveFailures int
-	attempts     int
+	mu            sync.Mutex
+	loaded        []string
+	saved         map[string]policy.Bundle
+	deleted       []string
+	failing       bool
+	listFailing   bool
+	deleteFailing bool
+	saveFailures  int
+	attempts      int
 }
 
 func newStubState() *stubState {
@@ -287,6 +289,9 @@ func (s *stubState) Save(_ context.Context, domain string, bundle policy.Bundle)
 func (s *stubState) ListDomains(_ context.Context) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.listFailing {
+		return nil, errors.New("cannot list the state")
+	}
 	out := make([]string, 0, len(s.saved))
 	for domain := range s.saved {
 		out = append(out, domain)
@@ -298,6 +303,9 @@ func (s *stubState) ListDomains(_ context.Context) ([]string, error) {
 func (s *stubState) Delete(_ context.Context, domain string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.deleteFailing {
+		return errors.New("cannot delete the state")
+	}
 	s.deleted = append(s.deleted, domain)
 	delete(s.saved, domain)
 	return nil
