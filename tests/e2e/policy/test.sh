@@ -205,6 +205,26 @@ echo "OK: adding a mapping revives the policy that referenced its key"
 # back to, and the test would be asserting on a race rather than on the feature.
 wait_for_state "${DOMAIN}"
 echo "OK: the good generation reached ratelimit-state-${DOMAIN}"
+
+# The ConfigMap existing is not the precondition this step needs. It can be left
+# over from an earlier run — the operator only drops the state of a retired
+# domain on a replica that persisted it, so a leader handover strands one — and
+# waiting on a stale object means breaking the policy before its own good
+# generation was ever recorded. The object's status is the precise signal: a
+# generation is active once activeGeneration has caught up with observedGeneration.
+GOOD=""
+for i in $(seq 1 20); do
+  GOOD=$(kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" \
+    -o jsonpath='{.status.activeGeneration}' 2>/dev/null || true)
+  SEEN=$(kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" \
+    -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+  [ -n "${GOOD}" ] && [ "${GOOD}" != "0" ] && [ "${GOOD}" = "${SEEN}" ] && break
+  sleep 3
+done
+[ -n "${GOOD}" ] && [ "${GOOD}" != "0" ] && [ "${GOOD}" = "${SEEN}" ] \
+  || fail "the policy never reached an active generation to fall back to (observed=${SEEN}, active=${GOOD})"
+echo "OK: generation ${GOOD} is active and can be fallen back to"
+
 kubectl patch ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" --type=merge -p \
   '{"spec":{"limits":[{"name":"api","rules":[{"name":"per-plan","when":[{"key":"plan","operator":"Exists"}],"rates":[{"requests":10,"period":"1m"}]}]}]}}'
 

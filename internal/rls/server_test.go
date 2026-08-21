@@ -274,13 +274,13 @@ func TestSanitizeValue_stripsControlCharactersFromARequestID(t *testing.T) {
 // in-memory counters — the shape BuildRuleSet produces for the stub CRD.
 func ruleSetOf(t *testing.T, domains ...string) *store.RuleSet {
 	t.Helper()
-	engines := make(map[string]*engine.Engine, len(domains))
+	built := make(map[string]store.Domain, len(domains))
 	for _, d := range domains {
 		snap, problems := compile.Compile(d, nil, nil)
 		require.Empty(t, problems)
-		engines[d] = engine.New(snap, memory.New())
+		built[d] = store.Domain{Engine: engine.New(snap, memory.New()), Snapshot: snap}
 	}
-	return store.NewRuleSet(engines)
+	return store.NewRuleSet(built)
 }
 
 // onePerHourPolicy admits a single request per hour for the whole domain: the
@@ -303,7 +303,9 @@ func ruleSetWith(t *testing.T, policies ...model.Policy) *store.RuleSet {
 	for _, p := range problems {
 		require.False(t, p.Blocking, "blocking compile problem: %+v", p)
 	}
-	return store.NewRuleSet(map[string]*engine.Engine{domain: engine.New(snap, memory.New())})
+	return store.NewRuleSet(map[string]store.Domain{
+		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
+	})
 }
 
 func headerMap(resp *envoyratelimit.RateLimitResponse) map[string]string {
@@ -494,8 +496,8 @@ func TestShouldRateLimit_storeErrorBecomesAGRPCError(t *testing.T) {
 	snap, problems := compile.Compile(domain, []model.Policy{onePerHourPolicy()}, nil)
 	require.Empty(t, problems)
 	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet(map[string]*engine.Engine{
-		domain: engine.New(snap, failingCounters{}),
+	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
+		domain: {Engine: engine.New(snap, failingCounters{}), Snapshot: snap},
 	}))
 	log, logged := recordingLogger()
 
@@ -663,8 +665,8 @@ func TestShouldRateLimit_storeErrorAfterRefusalStillDenies(t *testing.T) {
 	snap, problems := compile.Compile(domain, []model.Policy{perClientOnePerHourPolicy()}, nil)
 	require.Empty(t, problems)
 	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet(map[string]*engine.Engine{
-		domain: engine.New(snap, &failAfterStore{inner: memory.New(), limit: 2}),
+	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
+		domain: {Engine: engine.New(snap, &failAfterStore{inner: memory.New(), limit: 2}), Snapshot: snap},
 	}))
 	log, _ := recordingLogger()
 	server := NewServer(ruleStore, log)

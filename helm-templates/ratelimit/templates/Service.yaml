@@ -1,3 +1,4 @@
+{{- $mgmt := (include "ratelimit.management" . | fromYaml) -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -13,5 +14,14 @@ spec:
       port: {{ .Values.rls.port }}
       targetPort: grpc
       protocol: TCP
+    {{- if $mgmt.enabled }}
+    # The management API. A ClusterIP port is how a UI or an engineer reaches
+    # it; no gateway routes to it, which is what keeps it off the data path.
+    - name: management
+      appProtocol: http
+      port: {{ $mgmt.port }}
+      targetPort: management
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "ratelimit.selectorLabels" . | nindent 4 }}

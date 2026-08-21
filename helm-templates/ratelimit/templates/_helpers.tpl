@@ -39,3 +39,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "ratelimit.rlsCluster" -}}
 {{- printf "outbound|%v||%s.%s.svc.cluster.local" .Values.rls.port (include "ratelimit.fullname" .) .Release.Namespace -}}
 {{- end -}}
+
+{{/*
+The management API settings, with the chart's defaults filled in.
+
+A release upgraded with --reuse-values carries the values of the previous
+release and nothing else, so .Values.management is nil on any install made
+before this key existed and every reference to it fails the render. Reading the
+settings through here means such an upgrade gets the chart's defaults instead of
+an error.
+*/}}
+{{- define "ratelimit.management" -}}
+{{- $defaults := dict "enabled" true "port" 8082 "corsOrigins" (list) "createClientRoles" true -}}
+{{- merge (deepCopy (.Values.management | default dict)) $defaults | toYaml -}}
+{{- end -}}

@@ -11,10 +11,18 @@ rules:
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
     verbs: [get, list, watch, create, update, patch, delete]
-  # Leader election records who took the lease as an Event in this namespace.
-  # Without this the service still works, but every handover logs an API
-  # rejection that looks like a real failure.
+  # Leader election records who took the lease as an Event in this namespace,
+  # and the management API records each counter reset as one on the policy that
+  # owns the rule. Without these the service still works, but every handover
+  # and every reset logs an API rejection that looks like a real failure.
+  #
+  # Both API groups are granted because both are used: leader election writes
+  # through the legacy core events API, and the management audit trail writes
+  # through events.k8s.io.
   - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [events.k8s.io]
     resources: [events]
     verbs: [create, patch]
   - apiGroups: [ratelimit.netcracker.com]
@@ -26,7 +34,8 @@ rules:
   # The last-good spec of every object of a domain, so that a restart does not
   # forget which generation is being enforced. Names are ratelimit-state-<domain>
   # and the domains are only known at run time, so the rule cannot be narrowed to
-  # resourceNames.
+  # resourceNames. The decision audit selection lives in a ConfigMap of this
+  # namespace too, so that every replica streams the same rules.
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, create, update, patch, delete]

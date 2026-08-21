@@ -21,11 +21,11 @@ func ruleSetOf(t *testing.T, objects ...*v1alpha1.RateLimitPolicy) *RuleSet {
 		input.Policies = append(input.Policies, *object)
 	}
 	counters := memory.New()
-	engines := map[string]*engine.Engine{}
+	domains := map[string]Domain{}
 	for domain, snapshot := range policy.Compile(input).Snapshots {
-		engines[domain] = engine.New(snapshot, counters)
+		domains[domain] = Domain{Engine: engine.New(snapshot, counters), Snapshot: snapshot}
 	}
-	return NewRuleSet(engines)
+	return NewRuleSet(domains)
 }
 
 func TestNew_emptyStoreKnowsNoDomain(t *testing.T) {

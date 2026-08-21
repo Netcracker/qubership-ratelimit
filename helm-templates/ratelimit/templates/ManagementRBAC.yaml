@@ -1,0 +1,72 @@
+{{- $mgmt := (include "ratelimit.management" . | fromYaml) -}}
+{{- if $mgmt.enabled }}
+# The management API delegates both halves of access control to the cluster.
+#
+# Authentication is a TokenReview and authorization is a SubjectAccessReview, so
+# this operator keeps no accounts of its own: whoever the cluster already knows
+# — an engineer's kubeconfig, a pipeline's ServiceAccount, a UI's — presents the
+# same kind of credential, and RBAC decides what they may do. Both reviews are
+# cluster-scoped resources, which is why this is a ClusterRole and not a Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ratelimit.fullname" . }}-auth-delegator
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ratelimit.fullname" . }}-auth-delegator
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ratelimit.fullname" . }}-auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ratelimit.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if $mgmt.createClientRoles }}
+---
+# The two roles a client of the management API is granted. They are created but
+# never bound: who may read the rate limit state, and who may lift a limit, is a
+# decision for whoever runs the cluster, not for this chart.
+#
+# Access is expressed as non-resource URLs because the endpoints are not
+# Kubernetes resources. The split falls out of the HTTP method, which is the
+# same line the API itself draws: GET reads, POST and PUT change something.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ratelimit.fullname" . }}-viewer
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+rules:
+  # The effective rules, the live counters, and which keys are being limited.
+  # Reading changes nothing: the counters are inspected without being charged.
+  - nonResourceURLs: ["/ratelimit/v1", "/ratelimit/v1/*"]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "ratelimit.fullname" . }}-operator
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+rules:
+  # Everything the viewer may do, plus the mutations: resetting counters, which
+  # lifts a live rate limit, and selecting the rules whose decisions stream.
+  # Every mutation is audited under the caller's own name.
+  - nonResourceURLs: ["/ratelimit/v1", "/ratelimit/v1/*"]
+    verbs: [get, post, put]
+{{- end }}
+{{- end }}

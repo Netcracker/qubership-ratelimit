@@ -229,11 +229,11 @@ func (u *Updater) rebuild(ctx context.Context) {
 // decisions made under the old rules, and carrying it across a rule change would
 // let a request be judged by rules no longer in effect.
 func (u *Updater) ruleSet(result *policy.Result) *RuleSet {
-	engines := make(map[string]*engine.Engine, len(result.Snapshots))
+	domains := make(map[string]Domain, len(result.Snapshots))
 	for domain, snapshot := range result.Snapshots {
-		engines[domain] = engine.New(snapshot, u.Counters)
+		domains[domain] = Domain{Engine: engine.New(snapshot, u.Counters), Snapshot: snapshot}
 	}
-	return NewRuleSet(engines)
+	return NewRuleSet(domains)
 }
 
 // lastGood returns the state this rebuild starts from: whatever was persisted on
