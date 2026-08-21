@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -196,4 +198,47 @@ func TestPersist_retriesTheSweepWhenADeleteFails(t *testing.T) {
 	updater.persist(context.Background(), map[string]policy.Bundle{})
 
 	assert.False(t, updater.reconciledStale, "a failed delete leaves the sweep to the next rebuild")
+}
+
+func TestReady_isFalseUntilTheStoreHasRules(t *testing.T) {
+	// The gRPC listener comes up before the first rebuild, and an empty store
+	// admits everything. A replica that reported ready in that state would join
+	// the Service endpoints with no limits at all.
+	updater := &Updater{}
+
+	assert.False(t, updater.Ready())
+}
+
+func TestReady_isTrueOnceTheStoreHasBeenBuilt(t *testing.T) {
+	// One rebuild is enough: the store then reflects the namespace, whether or
+	// not any policy in it compiled.
+	source := newStubSource(t, policyObject("public", "gateway.public"))
+	updater := &Updater{Cache: source, Store: New(), Log: logr.Discard(), Counters: memory.New()}
+	require.False(t, updater.Ready())
+
+	updater.rebuild(context.Background())
+
+	assert.True(t, updater.Ready())
+}
+
+func TestReady_staysFalseWhenTheNamespaceCannotBeRead(t *testing.T) {
+	// A rebuild that could not list the objects leaves the previous snapshot in
+	// place — which on the first one is an empty store, and an empty store
+	// admits everything. Reporting ready there is what would put a replica with
+	// no rules into the Service endpoints.
+	source := newStubSource(t)
+	source.Reader = failingReader{}
+	updater := &Updater{Cache: source, Store: New(), Log: logr.Discard(), Counters: memory.New()}
+
+	updater.rebuild(context.Background())
+
+	assert.False(t, updater.Ready())
+}
+
+// failingReader is a client.Reader whose List always fails, standing in for an
+// API server this replica cannot reach.
+type failingReader struct{ client.Reader }
+
+func (failingReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("the API server is unavailable")
 }

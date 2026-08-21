@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -363,6 +365,7 @@ func run(options runOptions) error {
 	// +kubebuilder:scaffold:builder
 
 	var rlsRunner *rls.Runner
+	var ruleUpdater *store.Updater
 	if runRLS {
 		backend := newCounterStore()
 		if backend.closer != nil {
@@ -387,6 +390,7 @@ func run(options runOptions) error {
 		if err := mgr.Add(updater); err != nil {
 			return fmt.Errorf("add store updater: %w", err)
 		}
+		ruleUpdater = updater
 
 		// The decision audit stream: a switchboard this replica reads on every
 		// decision, and the shared selection every replica converges on.
@@ -438,9 +442,21 @@ func run(options runOptions) error {
 	}
 	readyCheck := healthz.Ping
 	if rlsRunner != nil {
-		// Readiness follows the gRPC listener so a replica leaves the Service
-		// endpoints the moment it stops answering checks.
-		readyCheck = rlsRunner.Healthz
+		// Readiness follows the gRPC listener, so a replica leaves the Service
+		// endpoints the moment it stops answering checks — and the rule store,
+		// so it does not join them before it has rules. The listener comes up
+		// first, and a replica answering from an empty store admits everything:
+		// joining the endpoints in that state turns the limits off for a share
+		// of the traffic on every rollout.
+		readyCheck = func(req *http.Request) error {
+			if err := rlsRunner.Healthz(req); err != nil {
+				return err
+			}
+			if ruleUpdater != nil && !ruleUpdater.Ready() {
+				return errors.New("the rate limit store has not been built yet")
+			}
+			return nil
+		}
 	}
 	if err := mgr.AddReadyzCheck("readyz", readyCheck); err != nil {
 		return fmt.Errorf("add readiness check: %w", err)

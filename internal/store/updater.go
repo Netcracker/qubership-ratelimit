@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -89,7 +90,20 @@ type Updater struct {
 	// reconciledStale is set once this leader has swept the persisted state for
 	// domains that retired before it took the lease.
 	reconciledStale bool
+
+	// built reports whether the store has been filled at least once.
+	built atomic.Bool
 }
+
+// Ready reports whether this replica has rules to decide with.
+//
+// It gates readiness, because the gRPC listener comes up before the first
+// rebuild finishes: for the half second in between, the replica is reachable
+// and its store is empty, and an empty store admits everything. A replica that
+// joined the Service endpoints in that state would turn every limit off for a
+// share of the traffic on each rollout — silently, since admitting is what an
+// unclaimed domain is supposed to do.
+func (u *Updater) Ready() bool { return u.built.Load() }
 
 // NeedLeaderElection reports false: every replica serves rate limit checks, so
 // every replica needs a populated store.
@@ -207,6 +221,7 @@ func (u *Updater) rebuild(ctx context.Context) {
 	u.bundles = result.State
 
 	u.Store.Replace(u.ruleSet(result, previous))
+	u.built.Store(true)
 
 	blocks, rules, problems := 0, 0, 0
 	for _, snapshot := range result.Snapshots {
