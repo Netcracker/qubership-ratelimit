@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -309,4 +310,39 @@ func TestTruncateMessage_staysWithinWhatTheAPIServerAccepts(t *testing.T) {
 
 	assert.Len(t, got, maxMessageLength)
 	assert.True(t, len(got) > 3 && got[len(got)-3:] == "...")
+}
+
+func TestReconcile_aBudgetBlockedPolicyClearsAcceptedToo(t *testing.T) {
+	// The decision budget is a structural property of the spec itself, so both
+	// conditions fall together; Accepted=True next to Ready=False/InvalidSpec
+	// would tell the author the spec is fine and broken at once.
+	rules := make([]ratelimitv1alpha1.Rule, 0, 17)
+	for i := range 17 {
+		rules = append(rules, ratelimitv1alpha1.Rule{
+			Name: fmt.Sprintf("r%d", i),
+			Rates: []ratelimitv1alpha1.Rate{
+				{Requests: 100, Period: "1m"},
+				{Requests: 100, Period: "1h"},
+				{Requests: 100, Period: "30s"},
+				{Requests: 100, Period: "10s"},
+			},
+		})
+	}
+	reconciler, fakeClient := newReconciler(t, testPolicy(1, rules...))
+
+	_, err := reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+
+	stored := fetch(t, fakeClient)
+	accepted := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
+	assert.Equal(t, metav1.ConditionFalse, accepted.Status)
+	assert.Equal(t, ratelimitv1alpha1.ReasonInvalidSpec, accepted.Reason)
+
+	ready := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, ratelimitv1alpha1.ReasonInvalidSpec, ready.Reason)
+	assert.Zero(t, stored.Status.ActiveGeneration, "a budget-blocked generation enforces nothing")
+
+	require.NotEmpty(t, stored.Status.RuleProblems)
+	assert.Equal(t, ratelimitv1alpha1.ProblemDecisionBudgetExceeded, stored.Status.RuleProblems[0].Reason)
 }

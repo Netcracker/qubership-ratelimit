@@ -441,10 +441,16 @@ func domainError(problems []enginecompile.Problem) error {
 }
 
 // structural reports a spec that is malformed rather than merely unresolvable,
-// which is what separates Accepted from Ready.
+// which is what separates Accepted from Ready. The decision budget and the
+// window math belong here too: both are defects of the spec alone — no
+// reference and no neighbor is involved — and leaving Accepted true for them
+// would contradict the Ready reason that already says InvalidSpec.
 func structural(problems []enginecompile.Problem) error {
 	for _, problem := range problems {
-		if problem.Reason == enginecompile.ReasonInvalidSpec {
+		switch problem.Reason {
+		case enginecompile.ReasonInvalidSpec,
+			enginecompile.ReasonInvalidWindow,
+			enginecompile.ReasonDecisionBudgetExceeded:
 			return errors.New(problem.Message)
 		}
 	}
