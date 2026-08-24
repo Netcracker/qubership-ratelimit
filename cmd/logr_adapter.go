@@ -22,6 +22,9 @@ func newLogrLogger() logr.Logger {
 
 // Init takes the call-depth information logr offers a sink. The platform
 // logger derives its own caller information, so there is nothing to keep.
+// Init receives the call-depth information logr offers a sink. The platform
+// logger derives its own caller information, so there is nothing to keep and
+// nothing to do here.
 func (a *logrAdapter) Init(_ logr.RuntimeInfo) {}
 
 func (a *logrAdapter) Enabled(level int) bool {

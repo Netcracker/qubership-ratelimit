@@ -353,6 +353,28 @@ type resetTarget struct {
 // in that order, so a selection skipping one addresses no prefix and could
 // only be honored by scanning and filtering every counter of the rule.
 func resolveTarget(snapshot *compile.Snapshot, policy, block, rule string, axes map[string]string) (resetTarget, error) {
+	id := ruleID(policy, block, rule)
+
+	target := findRule(snapshot, policy, block, rule)
+	if target.rule == nil {
+		return resetTarget{}, rejectf(
+			"No rule %q is being enforced for domain %q. "+
+				"A rule missing here but present in a policy object means the policy was rejected or is running on an earlier spec.",
+			id, snapshot.Domain)
+	}
+
+	ordered, named, err := resolveAxes(id, target.rule.Counters, axes)
+	if err != nil {
+		return resetTarget{}, err
+	}
+	target.axes = ordered
+	target.named = named
+	return target, nil
+}
+
+// findRule locates one rule of the snapshot by its triple, returning a target
+// whose rule is nil when the rule set does not carry it.
+func findRule(snapshot *compile.Snapshot, policy, block, rule string) resetTarget {
 	var target resetTarget
 	for i := range snapshot.Blocks {
 		candidate := &snapshot.Blocks[i]
@@ -366,45 +388,45 @@ func resolveTarget(snapshot *compile.Snapshot, policy, block, rule string, axes 
 			}
 		}
 	}
-	if target.rule == nil {
-		return resetTarget{}, rejectf(
-			"No rule %q is being enforced for domain %q. "+
-				"A rule missing here but present in a policy object means the policy was rejected or is running on an earlier spec.",
-			ruleID(policy, block, rule), snapshot.Domain)
-	}
+	return target
+}
 
-	declared := target.rule.Counters
+// resolveAxes checks the selection against the axes the rule declares and puts
+// the values in key order.
+//
+// The values come back both ordered, which is how a key is built, and keyed by
+// name, which is what the audit record and the response report.
+func resolveAxes(id string, declared []string, axes map[string]string) ([]string, map[string]string, error) {
 	for name := range axes {
 		if !slices.Contains(declared, name) {
-			return resetTarget{}, rejectf(
-				"Rule %q does not count by axis %q. It counts by: %v.",
-				ruleID(policy, block, rule), name, declared)
+			return nil, nil, rejectf(
+				"Rule %q does not count by axis %q. It counts by: %v.", id, name, declared)
 		}
 	}
 	if len(axes) > len(declared) {
-		return resetTarget{}, rejectf(
-			"Rule %q counts by %d axes, and the request names %d.",
-			ruleID(policy, block, rule), len(declared), len(axes))
+		return nil, nil, rejectf(
+			"Rule %q counts by %d axes, and the request names %d.", id, len(declared), len(axes))
 	}
 
-	target.axes = make([]string, 0, len(axes))
-	target.named = make(map[string]string, len(axes))
-	for _, name := range declared[:len(axes)] {
+	leading := declared[:len(axes)]
+	ordered := make([]string, 0, len(axes))
+	named := make(map[string]string, len(axes))
+	for _, name := range leading {
 		value, ok := axes[name]
 		if !ok {
-			return resetTarget{}, rejectf(
+			return nil, nil, rejectf(
 				"Axis values must name a leading run of the rule's axes, in order. "+
 					"Rule %q counts by %v, so selecting %d of them means naming %v.",
-				ruleID(policy, block, rule), declared, len(axes), declared[:len(axes)])
+				id, declared, len(axes), leading)
 		}
 		if value == "" {
-			return resetTarget{}, rejectf(
+			return nil, nil, rejectf(
 				"Axis %q has an empty value, which addresses no counter.", name)
 		}
-		target.axes = append(target.axes, value)
-		target.named[name] = value
+		ordered = append(ordered, value)
+		named[name] = value
 	}
-	return target, nil
+	return ordered, named, nil
 }
 
 // dropCounters drops the counter state the target selects and reports the
