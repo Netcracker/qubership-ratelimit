@@ -15,6 +15,9 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	// Sets GOMEMLIMIT from the container's memory limit at init, so the Go heap
+	// starts collecting before the cgroup runs out and the kernel kills the pod.
+	// It works by being imported and nothing calls into it.
 	_ "github.com/netcracker/qubership-core-lib-go/v3/memlimit"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
@@ -295,12 +298,18 @@ func getCloudNamespace() (string, error) {
 	return namespace, nil
 }
 
+// run wires the process together and hands it to the manager.
+//
+// Each component is set up by its own function, and each of those decides for
+// itself whether this mode wants it. That keeps the shape of the process
+// readable here — namespace, manager, controllers, endpoint, probes — instead
+// of interleaving three modes' worth of conditionals.
 func run(options runOptions) error {
-	mode := options.mode
-	runController := mode == modeAll || mode == modeController
-	runRLS := mode == modeAll || mode == modeRLS
+	runController := options.mode == modeAll || options.mode == modeController
+	runRLS := options.mode == modeAll || options.mode == modeRLS
 	if !runController && !runRLS {
-		return fmt.Errorf("unknown --mode %q, expected one of %q, %q, %q", mode, modeAll, modeController, modeRLS)
+		return fmt.Errorf("unknown --mode %q, expected one of %q, %q, %q",
+			options.mode, modeAll, modeController, modeRLS)
 	}
 
 	namespace, err := getCloudNamespace()
@@ -308,6 +317,54 @@ func run(options runOptions) error {
 		return err
 	}
 
+	mgr, err := newManager(options, namespace, runController)
+	if err != nil {
+		return err
+	}
+
+	// The last-good state lives in ConfigMaps read with an uncached client.
+	stateClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		return fmt.Errorf("create the state client: %w", err)
+	}
+	// Only what the operator can keep true. app.kubernetes.io/name is deliberately
+	// absent: the chart derives it from .Values.nameOverride, which this process
+	// cannot see, so setting it here would drift from every other object of the
+	// release the moment someone overrides the name. The domain label the store
+	// adds is what a new leader sweeps retired domains by.
+	lastGood := state.New(stateClient, namespace, map[string]string{
+		"app.kubernetes.io/managed-by": managedBy,
+	}, newLogrLogger().WithName("state"), mgr.GetEventRecorder("ratelimit"))
+
+	if err := addControllers(mgr, lastGood, runController); err != nil {
+		return err
+	}
+	// +kubebuilder:scaffold:builder
+
+	limiter, err := addRateLimitEndpoint(mgr, options, namespace, stateClient, lastGood, runRLS)
+	if err != nil {
+		return err
+	}
+	// The counter store client outlives every runnable that uses it, so it is
+	// released here rather than where it was built.
+	defer closeCounterStore(limiter.closer)
+
+	if err := addProbes(mgr, limiter); err != nil {
+		return err
+	}
+
+	setupLog.Infof("starting service mode=%v namespace=%v leaderElection=%v",
+		options.mode, namespace, options.enableLeaderElection && runController)
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		return fmt.Errorf("run manager: %w", err)
+	}
+	return nil
+}
+
+// newManager builds the controller-runtime manager. The cache is scoped to the
+// one namespace this installation serves, which is what keeps the operator's
+// RBAC a Role rather than a ClusterRole.
+func newManager(options runOptions, namespace string, runController bool) (ctrl.Manager, error) {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"}, // disabled for now
@@ -329,130 +386,153 @@ func run(options runOptions) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("create manager: %w", err)
+		return nil, fmt.Errorf("create manager: %w", err)
+	}
+	return mgr, nil
+}
+
+// addControllers registers the reconcilers that write object status. They are
+// the only leader-gated part of the process.
+func addControllers(mgr ctrl.Manager, lastGood *state.Store, enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	if err := (&controller.RateLimitPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		State:  lastGood,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up RateLimitPolicy controller: %w", err)
+	}
+	if err := (&controller.RateLimitMappingReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		State:  lastGood,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("set up RateLimitMapping controller: %w", err)
+	}
+	return nil
+}
+
+// rateLimitEndpoint is what serving rate limit checks adds to the process: the
+// gRPC runner and the store updater feeding it, plus the counter store client
+// whose lifetime the caller owns.
+type rateLimitEndpoint struct {
+	runner  *rls.Runner
+	updater *store.Updater
+	closer  io.Closer
+}
+
+// addRateLimitEndpoint registers the decision path: the counter store, the rule
+// store and its updater, the decision audit stream, the management API, and the
+// gRPC server itself.
+func addRateLimitEndpoint(
+	mgr ctrl.Manager,
+	options runOptions,
+	namespace string,
+	stateClient client.Client,
+	lastGood *state.Store,
+	enabled bool,
+) (rateLimitEndpoint, error) {
+	if !enabled {
+		return rateLimitEndpoint{}, nil
 	}
 
-	// The last-good state lives in ConfigMaps read with an uncached client.
-	stateClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
-	if err != nil {
-		return fmt.Errorf("create the state client: %w", err)
+	backend := newCounterStore()
+	endpoint := rateLimitEndpoint{closer: backend.closer}
+	setupLog.Infof("counter store selected backend=%v", backend.description)
+
+	ruleStore := store.New()
+	endpoint.updater = &store.Updater{
+		Cache:    mgr.GetCache(),
+		Store:    ruleStore,
+		Debounce: options.storeDebounce,
+		Log:      newLogrLogger().WithName("store"),
+		Counters: backend.store,
+		State:    lastGood,
+		Elected:  mgr.Elected(),
 	}
-	// Only what the operator can keep true. app.kubernetes.io/name is deliberately
-	// absent: the chart derives it from .Values.nameOverride, which this process
-	// cannot see, so setting it here would drift from every other object of the
-	// release the moment someone overrides the name. The domain label the store
-	// adds is what a new leader sweeps retired domains by.
-	lastGood := state.New(stateClient, namespace, map[string]string{
-		"app.kubernetes.io/managed-by": managedBy,
-	}, newLogrLogger().WithName("state"), mgr.GetEventRecorder("ratelimit"))
-
-	if runController {
-		if err := (&controller.RateLimitPolicyReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-			State:  lastGood,
-		}).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("set up RateLimitPolicy controller: %w", err)
-		}
-		if err := (&controller.RateLimitMappingReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-			State:  lastGood,
-		}).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("set up RateLimitMapping controller: %w", err)
-		}
+	if err := mgr.Add(endpoint.updater); err != nil {
+		return endpoint, fmt.Errorf("add store updater: %w", err)
 	}
-	// +kubebuilder:scaffold:builder
 
-	var rlsRunner *rls.Runner
-	var ruleUpdater *store.Updater
-	if runRLS {
-		backend := newCounterStore()
-		if backend.closer != nil {
-			defer func() {
-				if err := backend.closer.Close(); err != nil {
-					setupLog.Errorf("failed to close the counter store: %v", err)
-				}
-			}()
-		}
-		setupLog.Infof("counter store selected backend=%v", backend.description)
+	// The decision audit stream: a switchboard this replica reads on every
+	// decision, and the shared selection every replica converges on.
+	switchboard := auditstream.NewSwitchboard()
+	hub := auditstream.NewHub()
+	selection := &auditstream.Store{
+		Client:    stateClient,
+		Namespace: namespace,
+		Labels:    map[string]string{"app.kubernetes.io/managed-by": managedBy},
+	}
+	if err := mgr.Add(&auditstream.Refresher{
+		Store:       selection,
+		Switchboard: switchboard,
+		Log:         newLogrLogger().WithName("audit"),
+	}); err != nil {
+		return endpoint, fmt.Errorf("add the decision audit refresher: %w", err)
+	}
 
-		ruleStore := store.New()
-		updater := &store.Updater{
-			Cache:    mgr.GetCache(),
-			Store:    ruleStore,
-			Debounce: options.storeDebounce,
-			Log:      newLogrLogger().WithName("store"),
-			Counters: backend.store,
-			State:    lastGood,
-			Elected:  mgr.Elected(),
-		}
-		if err := mgr.Add(updater); err != nil {
-			return fmt.Errorf("add store updater: %w", err)
-		}
-		ruleUpdater = updater
-
-		// The decision audit stream: a switchboard this replica reads on every
-		// decision, and the shared selection every replica converges on.
-		switchboard := auditstream.NewSwitchboard()
-		hub := auditstream.NewHub()
-		selection := &auditstream.Store{
-			Client:    stateClient,
-			Namespace: namespace,
-			Labels:    map[string]string{"app.kubernetes.io/managed-by": managedBy},
-		}
-		if err := mgr.Add(&auditstream.Refresher{
-			Store:       selection,
-			Switchboard: switchboard,
-			Log:         newLogrLogger().WithName("audit"),
+	if options.managementAddr != "" {
+		if err := addManagementAPI(mgr, managementOptions{
+			addr:        options.managementAddr,
+			corsOrigins: options.corsOrigins,
+			namespace:   namespace,
+			rules:       ruleStore,
+			counters:    backend.store,
+			scope:       backend.scope,
+			switchboard: switchboard,
+			selection:   selection,
+			hub:         hub,
 		}); err != nil {
-			return fmt.Errorf("add the decision audit refresher: %w", err)
-		}
-
-		if options.managementAddr != "" {
-			if err := addManagementAPI(mgr, managementOptions{
-				addr:        options.managementAddr,
-				corsOrigins: options.corsOrigins,
-				namespace:   namespace,
-				rules:       ruleStore,
-				counters:    backend.store,
-				scope:       backend.scope,
-				switchboard: switchboard,
-				selection:   selection,
-				hub:         hub,
-			}); err != nil {
-				return err
-			}
-		}
-
-		rlsRunner = &rls.Runner{
-			Addr: options.rlsAddr,
-			Server: rls.NewServer(ruleStore, logging.GetLogger(loggerName+"/rls"),
-				rls.WithDecisionAudit(switchboard, hub, replicaName())),
-			DrainTimeout: options.drainTimeout,
-			Log:          newLogrLogger().WithName("rls"),
-		}
-		if err := mgr.Add(rlsRunner); err != nil {
-			return fmt.Errorf("add rls server: %w", err)
+			return endpoint, err
 		}
 	}
 
+	endpoint.runner = &rls.Runner{
+		Addr: options.rlsAddr,
+		Server: rls.NewServer(ruleStore, logging.GetLogger(loggerName+"/rls"),
+			rls.WithDecisionAudit(switchboard, hub, replicaName())),
+		DrainTimeout: options.drainTimeout,
+		Log:          newLogrLogger().WithName("rls"),
+	}
+	if err := mgr.Add(endpoint.runner); err != nil {
+		return endpoint, fmt.Errorf("add rls server: %w", err)
+	}
+	return endpoint, nil
+}
+
+// closeCounterStore releases the counter store client at shutdown. A process
+// that never built one passes nil.
+func closeCounterStore(closer io.Closer) {
+	if closer == nil {
+		return
+	}
+	if err := closer.Close(); err != nil {
+		setupLog.Errorf("failed to close the counter store: %v", err)
+	}
+}
+
+// addProbes wires liveness and readiness.
+//
+// Readiness follows the gRPC listener, so a replica leaves the Service
+// endpoints the moment it stops answering checks — and the rule store, so it
+// does not join them before it has rules. The listener comes up first, and a
+// replica answering from an empty store admits everything: joining the
+// endpoints in that state turns the limits off for a share of the traffic on
+// every rollout.
+func addProbes(mgr ctrl.Manager, limiter rateLimitEndpoint) error {
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add liveness check: %w", err)
 	}
+
 	readyCheck := healthz.Ping
-	if rlsRunner != nil {
-		// Readiness follows the gRPC listener, so a replica leaves the Service
-		// endpoints the moment it stops answering checks — and the rule store,
-		// so it does not join them before it has rules. The listener comes up
-		// first, and a replica answering from an empty store admits everything:
-		// joining the endpoints in that state turns the limits off for a share
-		// of the traffic on every rollout.
+	if limiter.runner != nil {
 		readyCheck = func(req *http.Request) error {
-			if err := rlsRunner.Healthz(req); err != nil {
+			if err := limiter.runner.Healthz(req); err != nil {
 				return err
 			}
-			if ruleUpdater != nil && !ruleUpdater.Ready() {
+			if limiter.updater != nil && !limiter.updater.Ready() {
 				return errors.New("the rate limit store has not been built yet")
 			}
 			return nil
@@ -460,12 +540,6 @@ func run(options runOptions) error {
 	}
 	if err := mgr.AddReadyzCheck("readyz", readyCheck); err != nil {
 		return fmt.Errorf("add readiness check: %w", err)
-	}
-
-	setupLog.Infof("starting service mode=%v namespace=%v leaderElection=%v",
-		mode, namespace, options.enableLeaderElection && runController)
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		return fmt.Errorf("run manager: %w", err)
 	}
 	return nil
 }

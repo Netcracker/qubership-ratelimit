@@ -84,11 +84,11 @@ apply_policy "${POLICY}" "${DOMAIN}"
 ACCEPTED=""
 for i in $(seq 1 24); do
   ACCEPTED=$(policy_condition "${POLICY}")
-  [ "${ACCEPTED}" = "True" ] && break
+  [[ "${ACCEPTED}" = "True" ]] && break
   echo "Waiting for the policy to be accepted (attempt ${i}/24)..."
   sleep 5
 done
-if [ "${ACCEPTED}" != "True" ]; then
+if [[ "${ACCEPTED}" != "True" ]]; then
   kubectl get ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" -o yaml
   fail "policy not accepted; is a reconciler holding the lease?"
 fi
@@ -98,13 +98,13 @@ echo "OK: the reconciler accepts a policy"
 # not left over from an earlier generation.
 GENERATION=$(kubectl get ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" -o jsonpath='{.metadata.generation}')
 OBSERVED=$(kubectl get ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" -o jsonpath='{.status.observedGeneration}')
-if [ "${OBSERVED}" != "${GENERATION}" ]; then
+if [[ "${OBSERVED}" != "${GENERATION}" ]]; then
   fail "observedGeneration ${OBSERVED} does not match generation ${GENERATION}"
 fi
 echo "OK: status tracks the current generation"
 
 READY=$(policy_condition "${POLICY}" Ready)
-if [ "${READY}" != "True" ]; then
+if [[ "${READY}" != "True" ]]; then
   kubectl get ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" -o yaml
   fail "the policy compiled but is not Ready"
 fi
@@ -145,10 +145,10 @@ PROBLEM=""
 for i in $(seq 1 20); do
   PROBLEM=$(kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" \
     -o jsonpath='{.status.ruleProblems[0].reason}' 2>/dev/null || true)
-  [ -n "${PROBLEM}" ] && break
+  [[ -n "${PROBLEM}" ]] && break
   sleep 3
 done
-if [ "${PROBLEM}" != "UnresolvedKeyReference" ]; then
+if [[ "${PROBLEM}" != "UnresolvedKeyReference" ]]; then
   kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" -o yaml
   fail "expected UnresolvedKeyReference in ruleProblems, got '${PROBLEM}'"
 fi
@@ -156,12 +156,12 @@ echo "OK: a rule referencing an unknown key is reported as a problem"
 
 # A blocking problem invalidates the whole generation: enforced as written or not
 # at all. Ready has to say so, and nothing may be active.
-if [ "$(policy_condition "${POLICY}-dead-rule" Ready)" != "False" ]; then
+if [[ "$(policy_condition "${POLICY}-dead-rule" Ready)" != "False" ]]; then
   fail "a blocking problem left Ready true; the generation must not be enforced"
 fi
 ACTIVE=$(kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" \
   -o jsonpath='{.status.activeGeneration}' 2>/dev/null || true)
-if [ -n "${ACTIVE}" ] && [ "${ACTIVE}" != "0" ]; then
+if [[ -n "${ACTIVE}" ]] && [[ "${ACTIVE}" != "0" ]]; then
   fail "activeGeneration is ${ACTIVE}; a policy with no valid generation enforces nothing"
 fi
 echo "OK: a blocking problem keeps the whole generation out"
@@ -185,10 +185,10 @@ echo "OK: the mapping publishes its effective keys"
 REVIVED=""
 for i in $(seq 1 20); do
   REVIVED=$(policy_condition "${POLICY}-dead-rule" Ready)
-  [ "${REVIVED}" = "True" ] && break
+  [[ "${REVIVED}" = "True" ]] && break
   sleep 3
 done
-if [ "${REVIVED}" != "True" ]; then
+if [[ "${REVIVED}" != "True" ]]; then
   kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" -o yaml
   fail "the policy stayed invalid after the mapping appeared; the mapping watch is not wired"
 fi
@@ -218,10 +218,10 @@ for i in $(seq 1 20); do
     -o jsonpath='{.status.activeGeneration}' 2>/dev/null || true)
   SEEN=$(kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" \
     -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
-  [ -n "${GOOD}" ] && [ "${GOOD}" != "0" ] && [ "${GOOD}" = "${SEEN}" ] && break
+  [[ -n "${GOOD}" ]] && [[ "${GOOD}" != "0" ]] && [[ "${GOOD}" = "${SEEN}" ]] && break
   sleep 3
 done
-[ -n "${GOOD}" ] && [ "${GOOD}" != "0" ] && [ "${GOOD}" = "${SEEN}" ] \
+[[ -n "${GOOD}" ]] && [[ "${GOOD}" != "0" ]] && [[ "${GOOD}" = "${SEEN}" ]] \
   || fail "the policy never reached an active generation to fall back to (observed=${SEEN}, active=${GOOD})"
 echo "OK: generation ${GOOD} is active and can be fallen back to"
 
@@ -234,10 +234,10 @@ for i in $(seq 1 20); do
     -o jsonpath='{.status.activeGeneration}' 2>/dev/null || true)
   OBSERVED=$(kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" \
     -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
-  [ -n "${STUCK}" ] && [ "${STUCK}" != "0" ] && [ "${STUCK}" != "${OBSERVED}" ] && break
+  [[ -n "${STUCK}" ]] && [[ "${STUCK}" != "0" ]] && [[ "${STUCK}" != "${OBSERVED}" ]] && break
   sleep 3
 done
-if [ -z "${STUCK}" ] || [ "${STUCK}" = "0" ] || [ "${STUCK}" = "${OBSERVED}" ]; then
+if [[ -z "${STUCK}" ]] || [[ "${STUCK}" = "0" ]] || [[ "${STUCK}" = "${OBSERVED}" ]]; then
   kubectl get ratelimitpolicy "${POLICY}-dead-rule" -n "${NAMESPACE}" -o yaml
   fail "expected an earlier generation to stay active (observed=${OBSERVED}, active=${STUCK})"
 fi
@@ -255,16 +255,16 @@ VETOED=""
 for i in $(seq 1 20); do
   VETOED=$(kubectl get ratelimitmapping "${DOMAIN}" -n "${NAMESPACE}" \
     -o jsonpath='{.status.rejectedBy[0].policy}' 2>/dev/null || true)
-  [ -n "${VETOED}" ] && break
+  [[ -n "${VETOED}" ]] && break
   sleep 3
 done
-if [ -z "${VETOED}" ]; then
+if [[ -z "${VETOED}" ]]; then
   kubectl get ratelimitmapping "${DOMAIN}" -n "${NAMESPACE}" -o yaml
   fail "the mapping change was accepted even though it would stop a running rule"
 fi
 MAPPING_READY=$(kubectl get ratelimitmapping "${DOMAIN}" -n "${NAMESPACE}" \
   -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')
-if [ "${MAPPING_READY}" != "RejectedByPolicies" ]; then
+if [[ "${MAPPING_READY}" != "RejectedByPolicies" ]]; then
   fail "expected Ready reason RejectedByPolicies, got '${MAPPING_READY}'"
 fi
 kubectl get ratelimitmapping "${DOMAIN}" -n "${NAMESPACE}" \
@@ -284,10 +284,10 @@ kubectl delete ratelimitpolicy "${POLICY}" -n "${NAMESPACE}"
 REBUILT=""
 for i in $(seq 1 15); do
   REBUILT=$(operator_logs_since "${SINCE}" | grep "rate limit store rebuilt" || true)
-  [ -n "${REBUILT}" ] && break
+  [[ -n "${REBUILT}" ]] && break
   sleep 2
 done
-if [ -z "${REBUILT}" ]; then
+if [[ -z "${REBUILT}" ]]; then
   fail "no store rebuild logged after the policy was deleted"
 fi
 echo "OK: deleting a policy rebuilds the store (${REBUILT##*] })"

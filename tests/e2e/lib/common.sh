@@ -35,7 +35,7 @@ curl_gw_code() {
   local pf_pid=$!
   sleep 2
   local code
-  if [ -n "${extra_header}" ]; then
+  if [[ -n "${extra_header}" ]]; then
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H "${extra_header}" "http://127.0.0.1:${port}${path}" || echo "000")
   else
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${port}${path}" || echo "000")
@@ -59,7 +59,7 @@ curl_gw_burst() {
   sleep 3
   local i
   for i in $(seq 1 "${count}"); do
-    if [ -n "${header}" ]; then
+    if [[ -n "${header}" ]]; then
       curl -s -o /dev/null -w '%{http_code}\n' -m 10 -H "${header}" "http://127.0.0.1:${port}${path}" || echo "000"
     else
       curl -s -o /dev/null -w '%{http_code}\n' -m 10 "http://127.0.0.1:${port}${path}" || echo "000"
@@ -144,6 +144,9 @@ spec:
       claim: org_id
       fallbacks: [sub]
 EOF
+  # Unlike the printing helpers above, a failure here means the fixture never
+  # reached the cluster, so the status is passed on rather than replaced.
+  return $?
 }
 
 policy_condition() {

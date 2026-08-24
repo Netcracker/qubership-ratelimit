@@ -21,7 +21,7 @@ COPY . .
 # Cross-compilation is handled natively by Go via TARGETOS/TARGETARCH, which BuildKit sets automatically.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
     go build -o ratelimit ./cmd/
 
 FROM ghcr.io/netcracker/qubership-core-base:2.3.7

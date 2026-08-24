@@ -93,7 +93,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 		badRequest(w, r, "The request body is not valid JSON for this endpoint: "+err.Error())
 		return false
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if decoder.Decode(&struct{}{}) != io.EOF {
 		badRequest(w, r, "The request body carries more than one JSON value.")
 		return false
 	}

@@ -155,22 +155,19 @@ func queryCounters(
 	return result, nil
 }
 
-// scanBuckets enumerates the keys of every rate the query selects.
-func scanBuckets(
-	ctx context.Context,
-	snapshot *compile.Snapshot,
-	inspector counters.Inspector,
-	query counterQuery,
-) ([]bucketRef, bool, error) {
-	var refs []bucketRef
-	seen := make(map[string]struct{})
+// selectedRule is one rule the query asked for, with the block that owns it —
+// a rule's identity is the triple, so the block travels with it.
+type selectedRule struct {
+	block *compile.Block
+	rule  *compile.Rule
+}
 
+// selectRules flattens the snapshot down to the rules the query names.
+func selectRules(snapshot *compile.Snapshot, query counterQuery) []selectedRule {
+	var selected []selectedRule
 	for i := range snapshot.Blocks {
 		block := &snapshot.Blocks[i]
-		if query.policy != "" && block.Policy != query.policy {
-			continue
-		}
-		if query.block != "" && block.Name != query.block {
+		if !query.matchesBlock(block) {
 			continue
 		}
 		for j := range block.Rules {
@@ -178,31 +175,71 @@ func scanBuckets(
 			if query.rule != "" && rule.Name != query.rule {
 				continue
 			}
-			for k := range rule.Rates {
-				rate := &rule.Rates[k]
-				keys, err := inspector.Keys(ctx, rate.Prefix)
-				if err != nil {
-					return nil, false, fmt.Errorf("list the keys of %s: %w",
-						ruleID(block.Policy, block.Name, rule.Name), err)
-				}
-				for _, k := range keys {
-					// Two rates of one rule that resolve to the same algorithm
-					// and period share a prefix. Peek rejects a duplicate key
-					// in one call, and rightly so, but a listing must not fail
-					// over a rule that merely repeats itself.
-					if _, duplicate := seen[k]; duplicate {
-						continue
-					}
-					seen[k] = struct{}{}
-					refs = append(refs, bucketRef{key: k, block: block, rule: rule, rate: rate})
-					if len(refs) >= maxScannedKeys {
-						return refs, true, nil
-					}
+			selected = append(selected, selectedRule{block: block, rule: rule})
+		}
+	}
+	return selected
+}
+
+// matchesBlock reports whether the block survives the policy and block filters.
+func (q counterQuery) matchesBlock(block *compile.Block) bool {
+	if q.policy != "" && block.Policy != q.policy {
+		return false
+	}
+	if q.block != "" && block.Name != q.block {
+		return false
+	}
+	return true
+}
+
+// bucketCollector gathers scanned keys, dropping duplicates and stopping at the
+// scan cap.
+type bucketCollector struct {
+	refs []bucketRef
+	seen map[string]struct{}
+}
+
+// add records one key and reports whether there is room for another.
+//
+// Duplicates are dropped rather than rejected: two rates of one rule that
+// resolve to the same algorithm and period share a prefix, and Peek refuses a
+// repeated key in one call — rightly, since evaluating it twice would lose a
+// charge — but a listing must not fail over a rule that merely repeats itself.
+func (c *bucketCollector) add(bucketKey string, selected selectedRule, rate *compile.Rate) bool {
+	if _, duplicate := c.seen[bucketKey]; !duplicate {
+		c.seen[bucketKey] = struct{}{}
+		c.refs = append(c.refs, bucketRef{
+			key: bucketKey, block: selected.block, rule: selected.rule, rate: rate,
+		})
+	}
+	return len(c.refs) < maxScannedKeys
+}
+
+// scanBuckets enumerates the keys of every rate the query selects.
+func scanBuckets(
+	ctx context.Context,
+	snapshot *compile.Snapshot,
+	inspector counters.Inspector,
+	query counterQuery,
+) ([]bucketRef, bool, error) {
+	collector := &bucketCollector{seen: make(map[string]struct{})}
+
+	for _, selected := range selectRules(snapshot, query) {
+		for i := range selected.rule.Rates {
+			rate := &selected.rule.Rates[i]
+			keys, err := inspector.Keys(ctx, rate.Prefix)
+			if err != nil {
+				return nil, false, fmt.Errorf("list the keys of %s: %w",
+					ruleID(selected.block.Policy, selected.block.Name, selected.rule.Name), err)
+			}
+			for _, bucketKey := range keys {
+				if !collector.add(bucketKey, selected, rate) {
+					return collector.refs, true, nil
 				}
 			}
 		}
 	}
-	return refs, false, nil
+	return collector.refs, false, nil
 }
 
 // paginate cuts the page the cursor asks for, reporting whether more follows.
