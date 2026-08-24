@@ -317,6 +317,14 @@ func (s *stubState) attempted() int {
 	return s.attempts
 }
 
+// loadedDomains reports what Load was asked for. The updater calls Load from
+// its own goroutine, so a test that reads the field directly races it.
+func (s *stubState) loadedDomains() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.loaded...)
+}
+
 func (s *stubState) savedDomains() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -392,7 +400,7 @@ func TestUpdaterStart_aNonLeaderReadsTheStateButNeverWritesIt(t *testing.T) {
 	// A channel that is never closed is a replica that never wins the lease.
 	startUpdaterWithState(t, source, New(), state, make(chan struct{}))
 
-	require.Eventually(t, func() bool { return len(state.loaded) > 0 },
+	require.Eventually(t, func() bool { return len(state.loadedDomains()) > 0 },
 		2*time.Second, 5*time.Millisecond)
 	assert.Empty(t, state.savedDomains())
 }

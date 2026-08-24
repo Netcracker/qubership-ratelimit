@@ -382,26 +382,32 @@ func TestTokenCacheConcurrentChurn(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for g := range 8 {
-		wg.Go(func() {
-			for i := range 200 {
-				n := (g + i) % len(subs)
-				d, err := e.Decide(t.Context(), engine.Request{Path: "/x", Method: "GET", Token: tokens[n]})
-				if err != nil {
-					t.Errorf("Decide: %v", err)
-					return
-				}
-				want := 0
-				if subs[n] == "alice" {
-					want = 1
-				}
-				if len(d.Rules) != want {
-					t.Errorf("%s: %d applied rules, want %d", subs[n], len(d.Rules), want)
-					return
-				}
-			}
-		})
+		wg.Go(func() { churnTokenCache(t, e, subs, tokens, g) })
 	}
 	wg.Wait()
+}
+
+// churnTokenCache drives one goroutine's share of the churn: 200 decisions
+// rotating through the tokens, each asserting it saw its own token's identity
+// rather than a neighbor's.
+func churnTokenCache(t *testing.T, e *engine.Engine, subs, tokens []string, g int) {
+	t.Helper()
+	for i := range 200 {
+		n := (g + i) % len(subs)
+		d, err := e.Decide(t.Context(), engine.Request{Path: "/x", Method: "GET", Token: tokens[n]})
+		if err != nil {
+			t.Errorf("Decide: %v", err)
+			return
+		}
+		want := 0
+		if subs[n] == "alice" {
+			want = 1
+		}
+		if len(d.Rules) != want {
+			t.Errorf("%s: %d applied rules, want %d", subs[n], len(d.Rules), want)
+			return
+		}
+	}
 }
 
 // TestOversizedTokenBypassesTheCache pins the order of defenses: the token
