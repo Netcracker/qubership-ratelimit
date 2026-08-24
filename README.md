@@ -9,14 +9,12 @@ limit service (RLS) protocol; the rules arrive as `RateLimitPolicy` custom resou
 | Kinds            | `RateLimitPolicy` (rules), `RateLimitMapping` (identity keys and groups)  |
 | gRPC RLS port    | 9000                                                                     |
 | Health probes    | 8081                                                                     |
-| Management API   | 8082 — `/ratelimit/v1`, authenticated, never routed from a gateway       |
 | Scope            | namespaced — one installation, one namespace                              |
 
 **What is built today**: the two resources and their validation, the lifecycle around them — atomic generations,
-last-good fallback, and the transaction gate on a mapping update — the decision engine that enforces the compiled rules,
-and the management API that operates them. Counters live in Redis when `redis.addresses` is set, which is what makes a
-limit a limit of the domain rather than of each replica; without it each replica counts in its own memory and a limit of
-100 admits 100 per replica.
+last-good fallback, and the transaction gate on a mapping update — and the decision engine that enforces the compiled
+rules. Counters live in Redis when `redis.addresses` is set, which is what makes a limit a limit of the domain rather
+than of each replica; without it each replica counts in its own memory and a limit of 100 admits 100 per replica.
 
 **What is not built**: the gateways do not verify the tokens they forward. The identity-keyed rules below extract claims
 from the `authorization` header without checking a signature, so a limit keyed on `client` or `tenant` is only as
@@ -160,107 +158,6 @@ Symmetry of responsibility: a broken policy punishes only itself, and a broken m
 mapping is outside the gate — it is a deliberate administrative act, the domain falls back to its built-in keys, and the
 policies depending on it lose validity. RBAC is the guard against doing it by accident, not the controller.
 
-## The management API
-
-Rate limits need an operator interface, and the one that matters during an incident is the ability to lift a limit from
-a client right now — before the window closes, without a restart, without editing the policy everyone else is subject
-to. That endpoint is the reason this operator exists rather than a ready-made gateway limiter.
-
-```bash
-kubectl port-forward -n <namespace> svc/ratelimit 8082:8082
-TOKEN=$(kubectl create token <service-account> -n <namespace>)
-
-# What is being enforced right now, and by which axes
-curl -H "Authorization: Bearer $TOKEN" localhost:8082/ratelimit/v1/domains/gateway.public/rules
-
-# Who is currently being refused
-curl -H "Authorization: Bearer $TOKEN" \
-  'localhost:8082/ratelimit/v1/domains/gateway.public/counters?limited=true'
-
-# Lift the limit from one client
-curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"ruleId":"tenant-tiers/tiers/per-tenant","axes":{"tenant":"acme"}}' \
-  localhost:8082/ratelimit/v1/domains/gateway.public/counters/reset
-```
-
-A reset without `axes` clears the rule for every client it counts. With `axes` it clears one, and the axis names come
-from the rule listing — a client never has to know the counter key schema. The values must name a *leading* run of the
-rule's axes: they are concatenated into the key in that order, so a selection that skips one addresses nothing.
-
-The response says how far the reset reached. With Redis it is `"scope":"shared"` and every replica is affected at once;
-with the in-process counter store it is `"scope":"replica"` and the other replicas keep refusing, which is worth knowing
-before you tell someone their limit is lifted.
-
-### It is not on the data path
-
-The API listens on its own port, and no `EnvoyFilter` routes a gateway to it. That separation is the point rather than
-an accident of the layout: these endpoints turn limits off, so reaching them from the data path would let the traffic
-being limited lift its own limits.
-
-Access is delegated to the cluster. Every request carries a Kubernetes bearer token, which is checked with a
-`TokenReview` and then authorized with a `SubjectAccessReview`, so this operator keeps no accounts of its own and RBAC
-decides who may do what. The chart creates two unbound `ClusterRole`s to grant:
-
-| Role                  | May                                                            |
-|-----------------------|----------------------------------------------------------------|
-| `ratelimit-viewer`    | read rules, counters, and which keys are limited                |
-| `ratelimit-operator`  | the above, plus reset counters and select audit rules           |
-
-The split is the HTTP method, which is the same line the API draws: `GET` reads, `POST` and `PUT` change something.
-
-The base path is `/ratelimit/v1` and deliberately not `/api/v1/...`. Kubernetes binds the `system:discovery`
-`ClusterRole` to the group `system:authenticated`, and it grants `get` on `/api/*` — so an API served under `/api` is
-readable by every identity in the cluster no matter what these roles say. Authorization here is a `SubjectAccessReview`
-against the request path, which makes the prefix a security boundary. A unit test and an e2e check both pin it.
-
-### Every mutation is attributable
-
-A reset lifts a live rate limit, so each one is recorded twice: as a structured line in the operator log, and as a
-Kubernetes `Event` on the policy that owns the rule.
-
-```
-kubectl describe ratelimitpolicy tenant-tiers
-...
-  Normal  ResetCounters  Reset 1 counter of rule tenant-tiers/tiers/per-tenant for tenant=acme,
-                         requested by system:serviceaccount:core:oncall
-```
-
-The log line is the record that always happens; the `Event` is the one people find, and it gives a UI a history to read
-without this operator storing one. Rejected attempts are logged too — someone trying to lift a limit they could not name
-is worth seeing.
-
-### Watching decisions as they happen
-
-For the question logs cannot answer — *why was this particular request refused* — a rule can be put on a decision audit
-stream:
-
-```bash
-curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"rules":[{"domain":"gateway.public","ruleId":"tenant-tiers/tiers/per-tenant"}]}' \
-  localhost:8082/ratelimit/v1/audit
-
-curl -N -H "Authorization: Bearer $TOKEN" localhost:8082/ratelimit/v1/audit/stream
-```
-
-```
-event: decision
-data: {"time":"...","domain":"gateway.public","ruleId":"tenant-tiers/tiers/per-tenant",
-       "verdict":"refused","limit":100,"remaining":0,"retryAfterSeconds":41.2,
-       "path":"/api/v1/orders","method":"GET","requestId":"...","replica":"ratelimit-0"}
-```
-
-Nothing streams until a rule is selected, and selecting one is deliberate: at gateway speed this is a record per request
-per matching rule, on every replica. The selection lives in a ConfigMap rather than in one process, so every replica
-streams the same rules and the choice survives a restart; replicas pick up a change within ten seconds.
-
-Two limits are worth knowing before reading the output. A stream carries the decisions of the **one replica** that
-answered the connection, so a busy rule looks slower than it is — the `replica` field is there to make that legible. And
-a record names the rule and the verdict but not the counter's axis values: those live inside the engine's bucket keys,
-and the decision it returns does not carry them. To follow one client, read the counter listing for the values and the
-stream for the timing.
-
-Send `{"rules":[]}` to turn it back off.
-
 ## Install
 
 ```bash
@@ -280,13 +177,8 @@ differ from their siblings only by running two replicas.
 so it governs when the Go heap starts collecting.
 
 The chart installs a `ServiceAccount`, a `Role` and `RoleBinding` pair, a `Deployment`, a `Service`, both CRDs, and one
-`EnvoyFilter` per enabled gateway. The `Role` also carries `configmaps` in its own namespace, for the last-good state
-described above and for the audit selection.
-
-Cluster-scoped objects arrive with the management API and only with it. `TokenReview` and `SubjectAccessReview` are
-cluster-scoped resources, so delegating authentication and authorization needs a `ClusterRole` and a binding; the two
-client roles are cluster-scoped for the same reason. Set `management.enabled=false` and the chart installs none of
-them.
+`EnvoyFilter` per enabled gateway. It installs no `ClusterRole` and no `ClusterRoleBinding`. The `Role` also carries
+`configmaps` in its own namespace, for the last-good state described above.
 
 The gateway names are not this chart's to choose. They are deployment parameters shared with
 `qubership-core-mesh-config`, the chart that creates the `Gateway` objects, and the deployer injects the same set into

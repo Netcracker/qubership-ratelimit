@@ -40,9 +40,7 @@ import (
 	enginestore "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
-	auditstream "github.com/netcracker/qubership-ratelimit/internal/audit"
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
-	"github.com/netcracker/qubership-ratelimit/internal/management"
 	"github.com/netcracker/qubership-ratelimit/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/internal/state"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
@@ -82,8 +80,6 @@ func main() {
 	var mode string
 	var probeAddr string
 	var rlsAddr string
-	var managementAddr string
-	var corsOrigins string
 	var enableLeaderElection bool
 	var storeDebounce time.Duration
 	var drainTimeout time.Duration
@@ -92,11 +88,6 @@ func main() {
 		"Components to run: all, controller (status writes only) or rls (rate limit endpoint only).")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&rlsAddr, "rls-bind-address", ":9000", "The address the rate limit gRPC endpoint binds to.")
-	flag.StringVar(&managementAddr, "management-bind-address", ":8082",
-		"The address the management API binds to. Empty disables it. Never route a gateway to this address: "+
-			"its endpoints reset counters and lift limits.")
-	flag.StringVar(&corsOrigins, "management-cors-origins", "",
-		"Comma-separated origins a browser UI may call the management API from. Empty allows none.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election. Only status writes are leader-gated; the rate limit endpoint "+
 			"and its store run on every replica.")
@@ -124,8 +115,6 @@ func main() {
 		mode:                 mode,
 		probeAddr:            probeAddr,
 		rlsAddr:              rlsAddr,
-		managementAddr:       managementAddr,
-		corsOrigins:          splitList(corsOrigins),
 		enableLeaderElection: enableLeaderElection,
 		storeDebounce:        storeDebounce,
 		drainTimeout:         drainTimeout,
@@ -139,40 +128,13 @@ func main() {
 // runOptions collects what the flags decided. It replaces a parameter list
 // that had grown past the point where a caller could tell two strings apart.
 type runOptions struct {
-	mode           string
-	probeAddr      string
-	rlsAddr        string
-	managementAddr string
-	corsOrigins    []string
+	mode      string
+	probeAddr string
+	rlsAddr   string
 
 	enableLeaderElection bool
 	storeDebounce        time.Duration
 	drainTimeout         time.Duration
-}
-
-// splitList parses a comma-separated flag, dropping empty entries so that a
-// trailing comma does not become an origin that matches nothing.
-func splitList(raw string) []string {
-	var out []string
-	for item := range strings.SplitSeq(raw, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
-}
-
-// replicaName is what this pod calls itself on the decision audit stream. The
-// downward API supplies it; outside a cluster the hostname is close enough.
-func replicaName() string {
-	if name := configloader.GetOrDefaultString("pod.name", ""); name != "" {
-		return name
-	}
-	host, err := os.Hostname()
-	if err != nil {
-		return "unknown"
-	}
-	return host
 }
 
 // newCounterStore picks where the counters live, and returns the client whose
@@ -193,7 +155,6 @@ func newCounterStore() counterBackend {
 		return counterBackend{
 			store:       memory.New(),
 			description: "in-process, counted per replica",
-			scope:       management.ScopeReplica,
 		}
 	}
 
@@ -208,19 +169,16 @@ func newCounterStore() counterBackend {
 		store:       redisstore.New(shared),
 		closer:      shared,
 		description: "redis at " + addresses,
-		scope:       management.ScopeShared,
 	}
 }
 
 // counterBackend is the chosen counter store and what the rest of the process
 // needs to know about it: the client whose lifecycle the caller owns, a
-// description for the startup line, and how far a reset through the management
-// API reaches.
+// description for the startup line.
 type counterBackend struct {
 	store       enginestore.Store
 	closer      io.Closer
 	description string
-	scope       management.CounterScope
 }
 
 // redisDatabase reads the database index.
@@ -232,61 +190,6 @@ func redisDatabase() int {
 		return 0
 	}
 	return database
-}
-
-// managementOptions is what the management API needs from the process around
-// it.
-type managementOptions struct {
-	addr        string
-	corsOrigins []string
-	namespace   string
-
-	rules    *store.Store
-	counters enginestore.Store
-	scope    management.CounterScope
-
-	switchboard *auditstream.Switchboard
-	selection   *auditstream.Store
-	hub         *auditstream.Hub
-}
-
-// addManagementAPI builds the control interface and registers it with the
-// manager.
-//
-// It fails the process when it cannot be built rather than starting without
-// it. A silently missing control interface is the worst of the three outcomes:
-// the operator looks healthy, and the endpoint an engineer reaches for during
-// an incident is not there.
-func addManagementAPI(mgr ctrl.Manager, options managementOptions) error {
-	auth, err := management.NewKubeAuth(mgr.GetConfig(), management.DefaultAuthCacheTTL)
-	if err != nil {
-		return fmt.Errorf("set up management authentication: %w", err)
-	}
-
-	api := &management.API{
-		Rules:    options.rules,
-		Counters: options.counters,
-		Scope:    options.scope,
-		Auditor: &management.KubeAuditor{
-			Log:       newLogrLogger().WithName("management"),
-			Recorder:  mgr.GetEventRecorder(loggerName + "-management"),
-			Namespace: options.namespace,
-		},
-		Switchboard: options.switchboard,
-		Selection:   options.selection,
-		Hub:         options.hub,
-		Replica:     replicaName(),
-		Log:         newLogrLogger().WithName("management"),
-	}
-
-	if err := mgr.Add(&management.Runner{
-		Addr:    options.addr,
-		Handler: api.Handler(auth, auth, options.corsOrigins),
-		Log:     newLogrLogger().WithName("management"),
-	}); err != nil {
-		return fmt.Errorf("add the management API: %w", err)
-	}
-	return nil
 }
 
 // getCloudNamespace returns the namespace the manager watches.
@@ -341,7 +244,7 @@ func run(options runOptions) error {
 	}
 	// +kubebuilder:scaffold:builder
 
-	limiter, err := addRateLimitEndpoint(mgr, options, namespace, stateClient, lastGood, runRLS)
+	limiter, err := addRateLimitEndpoint(mgr, options, lastGood, runRLS)
 	if err != nil {
 		return err
 	}
@@ -429,8 +332,6 @@ type rateLimitEndpoint struct {
 func addRateLimitEndpoint(
 	mgr ctrl.Manager,
 	options runOptions,
-	namespace string,
-	stateClient client.Client,
 	lastGood *state.Store,
 	enabled bool,
 ) (rateLimitEndpoint, error) {
@@ -456,43 +357,9 @@ func addRateLimitEndpoint(
 		return endpoint, fmt.Errorf("add store updater: %w", err)
 	}
 
-	// The decision audit stream: a switchboard this replica reads on every
-	// decision, and the shared selection every replica converges on.
-	switchboard := auditstream.NewSwitchboard()
-	hub := auditstream.NewHub()
-	selection := &auditstream.Store{
-		Client:    stateClient,
-		Namespace: namespace,
-		Labels:    map[string]string{"app.kubernetes.io/managed-by": managedBy},
-	}
-	if err := mgr.Add(&auditstream.Refresher{
-		Store:       selection,
-		Switchboard: switchboard,
-		Log:         newLogrLogger().WithName("audit"),
-	}); err != nil {
-		return endpoint, fmt.Errorf("add the decision audit refresher: %w", err)
-	}
-
-	if options.managementAddr != "" {
-		if err := addManagementAPI(mgr, managementOptions{
-			addr:        options.managementAddr,
-			corsOrigins: options.corsOrigins,
-			namespace:   namespace,
-			rules:       ruleStore,
-			counters:    backend.store,
-			scope:       backend.scope,
-			switchboard: switchboard,
-			selection:   selection,
-			hub:         hub,
-		}); err != nil {
-			return endpoint, err
-		}
-	}
-
 	endpoint.runner = &rls.Runner{
-		Addr: options.rlsAddr,
-		Server: rls.NewServer(ruleStore, logging.GetLogger(loggerName+"/rls"),
-			rls.WithDecisionAudit(switchboard, hub, replicaName())),
+		Addr:         options.rlsAddr,
+		Server:       rls.NewServer(ruleStore, logging.GetLogger(loggerName+"/rls")),
 		DrainTimeout: options.drainTimeout,
 		Log:          newLogrLogger().WithName("rls"),
 	}

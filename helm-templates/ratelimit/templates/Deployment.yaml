@@ -1,4 +1,3 @@
-{{- $mgmt := (include "ratelimit.management" . | fromYaml) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,15 +43,6 @@ spec:
             - --mode={{ .Values.mode }}
             - --rls-bind-address=:{{ .Values.rls.port }}
             - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
-            {{- if $mgmt.enabled }}
-            - --management-bind-address=:{{ $mgmt.port }}
-            {{- with $mgmt.corsOrigins }}
-            - --management-cors-origins={{ join "," . }}
-            {{- end }}
-            {{- else }}
-            # An empty address disables the management API outright.
-            - --management-bind-address=
-            {{- end }}
             {{- if .Values.leaderElect }}
             - --leader-elect
             {{- end }}
@@ -66,12 +56,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # Each replica decides its own share of the traffic, so the decision
-            # audit stream names the pod its records came from.
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
             # Where the counters live. Empty falls back to an in-process store,
             # which counts per replica and is therefore correct at one replica
             # only.
@@ -101,14 +85,6 @@ spec:
             - name: probes
               containerPort: {{ .Values.healthProbe.port }}
               protocol: TCP
-            {{- if $mgmt.enabled }}
-            # The control interface. It is deliberately absent from the
-            # EnvoyFilter: these endpoints lift limits, so the traffic being
-            # limited must not be able to reach them.
-            - name: management
-              containerPort: {{ $mgmt.port }}
-              protocol: TCP
-            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

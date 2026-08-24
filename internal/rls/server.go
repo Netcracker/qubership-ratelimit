@@ -16,7 +16,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
-	auditstream "github.com/netcracker/qubership-ratelimit/internal/audit"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
@@ -67,37 +66,11 @@ type Server struct {
 
 	store *store.Store
 	log   Logger
-
-	// audit and hub carry the decision audit stream. Both are nil unless the
-	// process runs the management API, and the stream stays silent until an
-	// operator selects a rule through it.
-	audit   *auditstream.Switchboard
-	hub     *auditstream.Hub
-	replica string
-}
-
-// Option adjusts a Server at construction.
-type Option func(*Server)
-
-// WithDecisionAudit attaches the decision audit stream. The switchboard says
-// which rules are streamed and the hub fans the records out; replica names
-// this pod, so a reader watching one connection can tell whose decisions they
-// are seeing.
-func WithDecisionAudit(switchboard *auditstream.Switchboard, hub *auditstream.Hub, replica string) Option {
-	return func(s *Server) {
-		s.audit = switchboard
-		s.hub = hub
-		s.replica = replica
-	}
 }
 
 // NewServer returns a Server reading its rule set from the given store.
-func NewServer(s *store.Store, log Logger, opts ...Option) *Server {
-	server := &Server{store: s, log: log}
-	for _, apply := range opts {
-		apply(server)
-	}
-	return server
+func NewServer(s *store.Store, log Logger) *Server {
+	return &Server{store: s, log: log}
 }
 
 // ShouldRateLimit decides whether the request may pass.
@@ -178,9 +151,6 @@ func (s *Server) ShouldRateLimit(
 		rules += len(d.Rules)
 	}
 	s.log.DebugC(ctx, "rate limit check domain=%v path=%v allowed=%v rules=%v", domain, path, allowed, rules)
-	// The method comes from a descriptor, so it is caller-controlled and gets
-	// the same treatment as the path before it reaches a log line or a record.
-	s.publishDecisionAudit(ctx, domain, path, sanitizeValue(methodOf(requests)), requestID, decisions)
 
 	return &envoyratelimit.RateLimitResponse{
 		OverallCode:          code,
@@ -232,102 +202,6 @@ func engineRequests(req *envoyratelimit.RateLimitRequest) []engine.Request {
 		out = append(out, er)
 	}
 	return out
-}
-
-// publishDecisionAudit emits one record per applied rule an operator has
-// selected for the decision audit stream.
-//
-// The guards in front are the feature's whole cost model. Nothing selected
-// means one atomic load per check, which is what lets this sit on a path that
-// runs at gateway speed; a selected rule then costs a record per matching
-// request, which is the firehose the operator asked for deliberately.
-//
-// A record names the rule and what it decided, never the identity behind the
-// counter: the axis values are inside the engine's bucket keys, and a
-// RuleOutcome does not carry them. Someone tracing one client's refusals reads
-// the counter listing for the values and this stream for the timing.
-func (s *Server) publishDecisionAudit(
-	ctx context.Context,
-	domain, path, method, requestID string,
-	decisions []engine.Decision,
-) {
-	if s.audit == nil || !s.audit.Any() {
-		return
-	}
-
-	// One timestamp for the whole check: every rule below decided the same
-	// request, so stamping them individually would suggest an ordering that
-	// does not exist.
-	checked := auditedRequest{
-		time: time.Now(), domain: domain, path: path, method: method, requestID: requestID,
-	}
-	for _, decision := range decisions {
-		for _, rule := range decision.Rules {
-			if !s.audit.Enabled(domain, rule.Policy, rule.Block, rule.Rule) {
-				continue
-			}
-			s.emitDecisionRecord(ctx, s.auditRecord(checked, rule))
-		}
-	}
-}
-
-// auditedRequest is the request-level context every record of one check shares.
-type auditedRequest struct {
-	time      time.Time
-	domain    string
-	path      string
-	method    string
-	requestID string
-}
-
-// auditRecord renders one applied rule's decision.
-func (s *Server) auditRecord(checked auditedRequest, rule engine.RuleOutcome) auditstream.Record {
-	record := auditstream.Record{
-		Time:      checked.time,
-		Domain:    checked.domain,
-		RuleID:    rule.Policy + "/" + rule.Block + "/" + rule.Rule,
-		Verdict:   auditstream.VerdictAllowed,
-		Shadow:    rule.Shadow,
-		Limit:     rule.Limit,
-		Remaining: rule.Remaining,
-		Path:      checked.path,
-		Method:    checked.method,
-		RequestID: checked.requestID,
-		Replica:   s.replica,
-	}
-	if !rule.Allowed {
-		record.Verdict = auditstream.VerdictRefused
-		if rule.RetryAfter > 0 {
-			record.RetryAfterSeconds = rule.RetryAfter.Seconds()
-		}
-	}
-	return record
-}
-
-// emitDecisionRecord sends one record to whoever is watching, and to the log.
-//
-// The log carries the stream too, so a selection made while nobody is watching
-// still leaves a trace to read afterwards.
-func (s *Server) emitDecisionRecord(ctx context.Context, record auditstream.Record) {
-	if s.hub != nil {
-		s.hub.Publish(record)
-	}
-	s.log.InfoC(ctx,
-		"rate limit decision audit domain=%v rule=%v verdict=%v shadow=%v limit=%v remaining=%v path=%v method=%v",
-		record.Domain, record.RuleID, record.Verdict, record.Shadow,
-		record.Limit, record.Remaining, record.Path, record.Method)
-}
-
-// methodOf returns the method the check reported, for the audit record. Every
-// descriptor of one check describes the same HTTP request, so the first one
-// that carries a method speaks for all of them.
-func methodOf(requests []engine.Request) string {
-	for _, request := range requests {
-		if request.Method != "" {
-			return request.Method
-		}
-	}
-	return ""
 }
 
 // strictestDecision picks the decision whose numbers the response carries:
