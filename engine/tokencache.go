@@ -91,7 +91,13 @@ func (e *Engine) cachedExtract(token string) (map[string][]string, []identity.Sk
 	}
 	h := sha256.Sum256([]byte(token))
 	if entry, ok := e.cache.lookup(h); ok {
+		if e.stats != nil {
+			e.stats.hits.Add(1)
+		}
 		return maps.Clone(entry.keys), slices.Clone(entry.skips)
+	}
+	if e.stats != nil {
+		e.stats.misses.Add(1)
 	}
 	keys, skips := identity.Extract(e.snap.Extraction, token)
 	e.cache.store(h, cacheEntry{keys: maps.Clone(keys), skips: slices.Clone(skips)})

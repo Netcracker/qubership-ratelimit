@@ -654,3 +654,19 @@ func TestDomainWithinBoundsIsSilent(t *testing.T) {
 		t.Fatalf("128 buckets and 2 blocks are within bounds; problems: %v", got)
 	}
 }
+
+// TestSnapshotExposesTheBudgetFacts pins the capacity numbers a snapshot
+// carries for an embedder's metrics: the domain worst case and its per-policy
+// breakdown, computed by the same formula the budget records use.
+func TestSnapshotExposesTheBudgetFacts(t *testing.T) {
+	snap, _ := Compile("d", []model.Policy{widePolicy("p1"), widePolicy("p2")}, nil)
+	if snap.DecisionBuckets != 128 {
+		t.Errorf("DecisionBuckets = %d, want 128", snap.DecisionBuckets)
+	}
+	if got := snap.PolicyBuckets["p1"]; got != 64 {
+		t.Errorf("PolicyBuckets[p1] = %d, want 64", got)
+	}
+	if len(snap.PolicyBuckets) != 2 {
+		t.Errorf("PolicyBuckets = %v, want two policies", snap.PolicyBuckets)
+	}
+}

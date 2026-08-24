@@ -80,6 +80,14 @@ type Snapshot struct {
 	// Extraction drives identity: built-in client first unless overridden,
 	// then mapped keys in authored order.
 	Extraction []KeyExtraction
+
+	// DecisionBuckets is the worst case one request can collect across the
+	// domain — the number the domain budget record compares against
+	// model.MaxDomainDecisionBuckets — and PolicyBuckets breaks it down by
+	// policy. Both are facts for an embedder's capacity metrics; the formula
+	// itself stays in this package.
+	DecisionBuckets int
+	PolicyBuckets   map[string]int
 }
 
 // Block is a compiled limits entry, carrying its policy for counter identity.
@@ -206,7 +214,10 @@ func Compile(domain string, policies []model.Policy, mapping *model.Mapping) (*S
 		snap.Blocks = append(snap.Blocks, blocks...)
 	}
 
-	if n := decisionBuckets(snap.Blocks); n > model.MaxDomainDecisionBuckets {
+	snap.DecisionBuckets = decisionBuckets(snap.Blocks)
+	snap.PolicyBuckets = policyBuckets(snap.Blocks)
+
+	if n := snap.DecisionBuckets; n > model.MaxDomainDecisionBuckets {
 		problems = append(problems, Problem{
 			Reason: ReasonDomainBudgetExceeded,
 			Message: fmt.Sprintf(

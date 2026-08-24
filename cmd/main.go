@@ -34,12 +34,14 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	engine "github.com/netcracker/qubership-ratelimit/engine"
 	enginestore "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
 	auditstream "github.com/netcracker/qubership-ratelimit/internal/audit"
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
 	"github.com/netcracker/qubership-ratelimit/internal/management"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/internal/state"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
@@ -78,6 +80,7 @@ func init() {
 func main() {
 	var mode string
 	var probeAddr string
+	var metricsAddr string
 	var rlsAddr string
 	var managementAddr string
 	var corsOrigins string
@@ -88,6 +91,8 @@ func main() {
 	flag.StringVar(&mode, "mode", modeAll,
 		"Components to run: all, controller (status writes only) or rls (rate limit endpoint only).")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
+		"The address the Prometheus metrics endpoint binds to. \"0\" disables it.")
 	flag.StringVar(&rlsAddr, "rls-bind-address", ":9000", "The address the rate limit gRPC endpoint binds to.")
 	flag.StringVar(&managementAddr, "management-bind-address", ":8082",
 		"The address the management API binds to. Empty disables it. Never route a gateway to this address: "+
@@ -120,6 +125,7 @@ func main() {
 	options := runOptions{
 		mode:                 mode,
 		probeAddr:            probeAddr,
+		metricsAddr:          metricsAddr,
 		rlsAddr:              rlsAddr,
 		managementAddr:       managementAddr,
 		corsOrigins:          splitList(corsOrigins),
@@ -138,6 +144,7 @@ func main() {
 type runOptions struct {
 	mode           string
 	probeAddr      string
+	metricsAddr    string
 	rlsAddr        string
 	managementAddr string
 	corsOrigins    []string
@@ -218,6 +225,24 @@ type counterBackend struct {
 	closer      io.Closer
 	description string
 	scope       management.CounterScope
+}
+
+// nearLimitRatio reads the near-limit margin for the metrics. The property
+// key spells every hump as its own segment because the configloader turns
+// each underscore of METRICS_NEAR_LIMIT_RATIO into a dot; a camelCase key
+// would never see the variable.
+func nearLimitRatio() float64 {
+	raw := configloader.GetOrDefaultString("metrics.near.limit.ratio", "")
+	if raw == "" {
+		return rls.DefaultNearLimitRatio
+	}
+	ratio, err := strconv.ParseFloat(raw, 64)
+	if err != nil || ratio <= 0 || ratio >= 1 {
+		setupLog.Errorf("METRICS_NEAR_LIMIT_RATIO=%q is not a ratio in (0, 1), using %v",
+			raw, rls.DefaultNearLimitRatio)
+		return rls.DefaultNearLimitRatio
+	}
+	return ratio
 }
 
 // redisDatabase reads the database index.
@@ -310,7 +335,7 @@ func run(options runOptions) error {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: "0"}, // disabled for now
+		Metrics:                metricsserver.Options{BindAddress: options.metricsAddr},
 		HealthProbeBindAddress: options.probeAddr,
 		// Only status writes are leader-gated. In rls mode nothing is, so the
 		// process does not compete for a lease it would never use.
@@ -377,15 +402,19 @@ func run(options runOptions) error {
 		}
 		setupLog.Infof("counter store selected backend=%v", backend.description)
 
+		cacheStats := &engine.CacheStats{}
+		metrics.RegisterCacheStats(cacheStats)
+
 		ruleStore := store.New()
 		updater := &store.Updater{
-			Cache:    mgr.GetCache(),
-			Store:    ruleStore,
-			Debounce: options.storeDebounce,
-			Log:      newLogrLogger().WithName("store"),
-			Counters: backend.store,
-			State:    lastGood,
-			Elected:  mgr.Elected(),
+			Cache:      mgr.GetCache(),
+			Store:      ruleStore,
+			Debounce:   options.storeDebounce,
+			Log:        newLogrLogger().WithName("store"),
+			Counters:   backend.store,
+			CacheStats: cacheStats,
+			State:      lastGood,
+			Elected:    mgr.Elected(),
 		}
 		if err := mgr.Add(updater); err != nil {
 			return fmt.Errorf("add store updater: %w", err)
@@ -428,7 +457,8 @@ func run(options runOptions) error {
 		rlsRunner = &rls.Runner{
 			Addr: options.rlsAddr,
 			Server: rls.NewServer(ruleStore, logging.GetLogger(loggerName+"/rls"),
-				rls.WithDecisionAudit(switchboard, hub, replicaName())),
+				rls.WithDecisionAudit(switchboard, hub, replicaName()),
+				rls.WithNearLimitRatio(nearLimitRatio())),
 			DrainTimeout: options.drainTimeout,
 			Log:          newLogrLogger().WithName("rls"),
 		}

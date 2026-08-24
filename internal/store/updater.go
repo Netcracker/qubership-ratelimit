@@ -3,7 +3,9 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	counters "github.com/netcracker/qubership-ratelimit/engine/store"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
@@ -59,6 +62,10 @@ type Updater struct {
 
 	// Counters is the store the engines count in, shared by every domain.
 	Counters counters.Store
+
+	// CacheStats, when set, is shared by every engine this updater builds, so
+	// the token-cache counters survive snapshot swaps.
+	CacheStats *engine.CacheStats
 
 	// State persists what is being enforced. Every replica reads it once, at
 	// startup, so a replica that comes up while an edit is rejected enforces the
@@ -200,6 +207,7 @@ func (u *Updater) rebuild(ctx context.Context) {
 	if err != nil {
 		// Keep the previous snapshot: stale rules are better than none, and the
 		// next event triggers another attempt.
+		metrics.SnapshotRebuilds.WithLabelValues("error").Inc()
 		u.Log.Error(err, "failed to rebuild the rate limit store, keeping the previous snapshot")
 		return
 	}
@@ -222,6 +230,10 @@ func (u *Updater) rebuild(ctx context.Context) {
 
 	u.Store.Replace(u.ruleSet(result, previous))
 	u.built.Store(true)
+	metrics.SnapshotRebuilds.WithLabelValues("ok").Inc()
+	metrics.SnapshotTimestamp.SetToCurrentTime()
+	metrics.PublishState(stateView(result))
+	metrics.PruneStale(activeSet(result))
 
 	blocks, rules, problems := 0, 0, 0
 	for _, snapshot := range result.Snapshots {
@@ -277,10 +289,83 @@ func (u *Updater) ruleSet(result *policy.Result, previous map[string]policy.Bund
 			domains[domain] = prev
 			continue
 		}
-		domains[domain] = Domain{Engine: engine.New(snapshot, u.Counters), Snapshot: snapshot}
+		opts := []engine.Option{}
+		if u.CacheStats != nil {
+			opts = append(opts, engine.WithCacheStats(u.CacheStats))
+		}
+		// The store is wrapped per domain so the roundtrip series carries the
+		// domain label without parsing bucket keys on the hot path.
+		instrumented := metrics.InstrumentStore(domain, u.Counters)
+		domains[domain] = Domain{Engine: engine.New(snapshot, instrumented, opts...), Snapshot: snapshot}
 	}
 	u.domains = domains
 	return NewRuleSet(domains)
+}
+
+// activeSet lists the label values the new snapshot can produce, for the
+// series pruner: domains, rule triples, and identity keys. Whatever is not
+// here belongs to a renamed or deleted object and its series are leftovers.
+func activeSet(result *policy.Result) *metrics.ActiveSet {
+	active := &metrics.ActiveSet{
+		Domains: make(map[string]struct{}, len(result.Snapshots)),
+		Rules:   map[string]struct{}{},
+		Keys:    map[string]struct{}{},
+	}
+	for domain, snapshot := range result.Snapshots {
+		active.Domains[domain] = struct{}{}
+		for _, key := range snapshot.EffectiveKeys {
+			active.Keys[key] = struct{}{}
+		}
+		for i := range snapshot.Blocks {
+			block := &snapshot.Blocks[i]
+			for _, rule := range block.Rules {
+				active.Rules[metrics.RuleID(block.Policy, block.Name, rule.Name)] = struct{}{}
+			}
+		}
+	}
+	return active
+}
+
+// stateView distills a compilation into the scrape-time status series: who is
+// ready and why not, what is enforced, and how much of the domain budgets is
+// spent.
+func stateView(result *policy.Result) *metrics.StateView {
+	view := &metrics.StateView{}
+
+	buckets := map[string]int{}
+	for _, snapshot := range result.Snapshots {
+		view.Domains = append(view.Domains, metrics.DomainView{
+			Domain:          snapshot.Domain,
+			Blocks:          len(snapshot.Blocks),
+			DecisionBuckets: snapshot.DecisionBuckets,
+		})
+		// Policy names are unique within the namespace, so one map serves
+		// every domain.
+		maps.Copy(buckets, snapshot.PolicyBuckets)
+	}
+
+	for key, outcome := range result.Policies {
+		lag := outcome.Generation
+		if outcome.ActiveGeneration > 0 {
+			lag = outcome.Generation - outcome.ActiveGeneration
+		}
+		view.Policies = append(view.Policies, metrics.PolicyView{
+			Policy:        key.String(),
+			Ready:         outcome.Ready(),
+			Reason:        outcome.Reason,
+			Enforced:      outcome.ActiveGeneration != 0,
+			GenerationLag: lag,
+			RuleProblems:  len(outcome.Problems),
+			Buckets:       buckets[key.Name],
+		})
+	}
+	for key, outcome := range result.Mappings {
+		view.Mappings = append(view.Mappings, metrics.MappingView{
+			Mapping: key.String(),
+			Ready:   outcome.Ready(),
+		})
+	}
+	return view
 }
 
 // lastGood returns the state this rebuild starts from: whatever was persisted on
@@ -329,6 +414,11 @@ func (u *Updater) persist(ctx context.Context, bundles map[string]policy.Bundle)
 			// costs a restart its fallback; refusing to apply the rules costs the
 			// gateway its limits. The domain stays out of the persisted set, so
 			// the next rebuild tries again.
+			reason := "other"
+			if errors.Is(err, policy.ErrBundleOverflow) {
+				reason = "overflow"
+			}
+			metrics.StatePersistErrors.WithLabelValues(reason).Inc()
 			u.Log.Error(err, "failed to persist the rate limit state of a domain", "domain", domain)
 			continue
 		}
@@ -340,6 +430,7 @@ func (u *Updater) persist(ctx context.Context, bundles map[string]policy.Bundle)
 			continue
 		}
 		if err := u.State.Delete(ctx, domain); err != nil {
+			metrics.StatePersistErrors.WithLabelValues("delete").Inc()
 			u.Log.Error(err, "failed to drop the rate limit state of a retired domain", "domain", domain)
 			continue
 		}
@@ -367,6 +458,7 @@ func (u *Updater) sweepStale(ctx context.Context, bundles map[string]policy.Bund
 			continue
 		}
 		if err := u.State.Delete(ctx, domain); err != nil {
+			metrics.StatePersistErrors.WithLabelValues("delete").Inc()
 			u.Log.Error(err, "failed to drop the rate limit state of a retired domain", "domain", domain)
 			u.reconciledStale = false
 			continue

@@ -69,20 +69,41 @@ func compilePolicy(domain string, p model.Policy, env *environment) ([]Block, []
 func decisionBuckets(blocks []Block) int {
 	total := 0
 	for _, b := range blocks {
-		always, widest := 0, 0
-		for _, r := range b.Rules {
-			switch {
-			case b.Mode != model.ModeFirstMatch:
-				always += len(r.Rates)
-			case r.Behavior == model.BehaviorShadow:
-				always += len(r.Rates)
-			default:
-				widest = max(widest, len(r.Rates))
-			}
-		}
-		total += always + widest
+		total += blockDecisionBuckets(b)
 	}
 	return total
+}
+
+// blockDecisionBuckets is one block's contribution to the worst case: All
+// sums every counting rule, FirstMatch settles on its widest counting rule
+// after every shadow rule.
+func blockDecisionBuckets(b Block) int {
+	always, widest := 0, 0
+	for _, r := range b.Rules {
+		switch {
+		case b.Mode != model.ModeFirstMatch:
+			always += len(r.Rates)
+		case r.Behavior == model.BehaviorShadow:
+			always += len(r.Rates)
+		default:
+			widest = max(widest, len(r.Rates))
+		}
+	}
+	return always + widest
+}
+
+// policyBuckets breaks decisionBuckets down by policy. The formula is
+// per-block additive, so a policy's worst case is the sum over its own
+// blocks.
+func policyBuckets(blocks []Block) map[string]int {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make(map[string]int, 4)
+	for _, b := range blocks {
+		out[b.Policy] += blockDecisionBuckets(b)
+	}
+	return out
 }
 
 func (c *policyCompiler) fail(block, rule string, reason Reason, format string, args ...any) {

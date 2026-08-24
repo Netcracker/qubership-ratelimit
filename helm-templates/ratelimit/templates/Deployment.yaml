@@ -44,6 +44,7 @@ spec:
             - --mode={{ .Values.mode }}
             - --rls-bind-address=:{{ .Values.rls.port }}
             - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
             {{- if $mgmt.enabled }}
             - --management-bind-address=:{{ $mgmt.port }}
             {{- with $mgmt.corsOrigins }}
@@ -75,6 +76,8 @@ spec:
             # Where the counters live. Empty falls back to an in-process store,
             # which counts per replica and is therefore correct at one replica
             # only.
+            - name: METRICS_NEAR_LIMIT_RATIO
+              value: '{{ .Values.metrics.nearLimitRatio }}'
             - name: REDIS_ADDRESSES
               value: '{{ .Values.redis.addresses }}'
             - name: REDIS_DB
@@ -100,6 +103,9 @@ spec:
               protocol: TCP
             - name: probes
               containerPort: {{ .Values.healthProbe.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
               protocol: TCP
             {{- if $mgmt.enabled }}
             # The control interface. It is deliberately absent from the

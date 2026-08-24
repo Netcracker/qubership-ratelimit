@@ -179,6 +179,33 @@
         }
       }
     },
+    "metrics": {
+      "type": "object",
+      "title": "Prometheus metrics endpoint",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8080
+        },
+        "nearLimitRatio": {
+          "$ref": "#/definitions/numberOrString",
+          "description": "Share of a rule's limit consumed before an admission counts as near-limit; a ratio in (0, 1).",
+          "default": "0.9"
+        }
+      }
+    },
+    "MONITORING_ENABLED": {
+      "$id": "#/properties/MONITORING_ENABLED",
+      "type": "boolean",
+      "title": "The MONITORING_ENABLED schema",
+      "description": "Set to true to import dashboards to Grafana and configure integration with Prometheus. Requires Platform System Monitor CRDs to be deployed to target k8s/openshift cluster",
+      "examples": [
+        true,
+        false
+      ]
+    },
     "management": {
       "type": "object",
       "title": "Management API",
@@ -303,30 +330,65 @@
       "title": "Affinity"
     },
     "REPLICAS": {
-      "type": "integer",
-      "title": "Replica count",
-      "description": "Every replica answers rate limit checks; only status writes are leader-gated, so scaling out needs no other change.",
-      "minimum": 1
+      "$id": "#/properties/REPLICAS",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The REPLICAS schema",
+      "internal": true,
+      "envSpecific": true
     },
     "CPU_REQUEST": {
-      "type": "string",
-      "title": "CPU request",
-      "description": "Set by the resource profile."
+      "$id": "#/properties/CPU_REQUEST",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The CPU_REQUEST schema",
+      "internal": true,
+      "envSpecific": true
     },
     "MEMORY_REQUEST": {
+      "$id": "#/properties/MEMORY_REQUEST",
       "type": "string",
-      "title": "Memory request",
-      "description": "Set by the resource profile."
+      "title": "The MEMORY_REQUEST schema",
+      "description": "Defines minimum amount of memory the container will use to start",
+      "examples": [
+        "256Mi"
+      ],
+      "internal": true,
+      "envSpecific": true
     },
     "CPU_LIMIT": {
-      "type": "string",
-      "title": "CPU limit",
-      "description": "Set by the resource profile."
+      "$id": "#/properties/CPU_LIMIT",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The CPU_LIMIT schema",
+      "internal": true,
+      "envSpecific": true
     },
     "MEMORY_LIMIT": {
+      "$id": "#/properties/MEMORY_LIMIT",
       "type": "string",
-      "title": "Memory limit",
-      "description": "Set by the resource profile. GOMEMLIMIT is derived from it, so it governs the Go heap and not only the cgroup ceiling."
+      "title": "The MEMORY_LIMIT schema",
+      "internal": true,
+      "envSpecific": true
+    }
+  },
+  "definitions": {
+    "integerOrString": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "numberOrString": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
     }
   }
 }
