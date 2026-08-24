@@ -22,7 +22,7 @@ const domain = "gateway.public"
 // newEngine compiles the specification's cascade example — a FirstMatch
 // cascade with Bypass and Shadow steps plus an additive total block — over a
 // fresh in-memory store.
-func newEngine(t *testing.T) *engine.Engine {
+func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 	t.Helper()
 	p := model.Policy{
 		Name:   "quote-api",
@@ -60,7 +60,7 @@ func newEngine(t *testing.T) *engine.Engine {
 	if len(problems) != 0 {
 		t.Fatalf("compile problems: %v", problems)
 	}
-	return engine.New(snap, memory.New())
+	return engine.New(snap, memory.New(), opts...)
 }
 
 func token(t *testing.T, sub string) string {
@@ -422,5 +422,22 @@ func TestOversizedTokenBypassesTheCache(t *testing.T) {
 	}
 	if len(d.Skips) != 1 || d.Skips[0].Reason != identity.SkipDecodeFailed {
 		t.Fatalf("skips = %v, want one decode_failed", d.Skips)
+	}
+}
+
+// TestCacheStatsCountEligibleLookups pins what the shared counters mean: a
+// hit avoided an extraction, a miss paid for one, and a tokenless request is
+// neither — the ratio must read as cache effectiveness, not traffic shape.
+func TestCacheStatsCountEligibleLookups(t *testing.T) {
+	stats := &engine.CacheStats{}
+	e := newEngine(t, engine.WithCacheStats(stats))
+
+	decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, "alice")})
+	decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, "alice")})
+	decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET"})
+	decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, "bob")})
+
+	if hits, misses := stats.Hits(), stats.Misses(); hits != 1 || misses != 2 {
+		t.Errorf("hits = %d, misses = %d, want 1 and 2", hits, misses)
 	}
 }

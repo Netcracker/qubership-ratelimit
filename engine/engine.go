@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sync/atomic"
 	"time"
 
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -30,11 +31,13 @@ type Engine struct {
 	snap  *compile.Snapshot
 	store store.Store
 	cache *tokenCache
+	stats *CacheStats
 }
 
 // options collects construction-time settings before anything is allocated.
 type options struct {
 	tokenCache int
+	stats      *CacheStats
 }
 
 // Option adjusts an Engine at construction.
@@ -51,6 +54,28 @@ func WithTokenCache(capacity int) Option {
 	return func(o *options) { o.tokenCache = capacity }
 }
 
+// CacheStats counts token-cache lookups: a hit avoided an extraction, a miss
+// paid for one. Only cache-eligible lookups count — a request without a
+// token, or one the cache refuses by contract, is neither — so the ratio
+// reads as cache effectiveness, not traffic shape. One value is meant to be
+// shared across engines: snapshots swap and engines retire, the counters
+// keep growing, which is what makes them usable as monotonic counters.
+type CacheStats struct {
+	hits   atomic.Uint64
+	misses atomic.Uint64
+}
+
+// Hits is the number of extractions the cache avoided.
+func (s *CacheStats) Hits() uint64 { return s.hits.Load() }
+
+// Misses is the number of extractions performed for cache-eligible tokens.
+func (s *CacheStats) Misses() uint64 { return s.misses.Load() }
+
+// WithCacheStats attaches shared token-cache counters; see CacheStats.
+func WithCacheStats(stats *CacheStats) Option {
+	return func(o *options) { o.stats = stats }
+}
+
 // New builds an engine over a compiled snapshot. The snapshot comes from
 // compile.Compile and is treated as read-only. Identity extraction is cached
 // per token (see WithTokenCache); the cache retires with the engine value on
@@ -60,7 +85,7 @@ func New(snap *compile.Snapshot, s store.Store, opts ...Option) *Engine {
 	for _, apply := range opts {
 		apply(&o)
 	}
-	e := &Engine{snap: snap, store: s}
+	e := &Engine{snap: snap, store: s, stats: o.stats}
 	if o.tokenCache > 0 {
 		e.cache = newTokenCache(o.tokenCache)
 	}

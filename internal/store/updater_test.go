@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,14 +21,14 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
 // fakeReader builds a reader over the given objects.
-func fakeReader(t *testing.T, objects ...client.Object) (client.Client, *runtime.Scheme) {
+func fakeReader(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
-	scheme := testScheme(t)
-	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(), scheme
+	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objects...).Build()
 }
 
 // readerOnly satisfies InformerSource for tests that drive rebuild directly:
@@ -161,7 +162,7 @@ func TestRebuild_logsTheDomainBudgetWarning(t *testing.T) {
 		})
 	}
 
-	fakeClient, _ := fakeReader(t, objects[0], objects[1], objects[2])
+	fakeClient := fakeReader(t, objects[0], objects[1], objects[2])
 	updater := &Updater{
 		Cache:    readerOnly{fakeClient},
 		Store:    New(),
@@ -255,4 +256,76 @@ type failingReader struct{ client.Reader }
 
 func (failingReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
 	return errors.New("the API server is unavailable")
+}
+
+func TestStateView_distillsTheCompilation(t *testing.T) {
+	healthy := policyWith("healthy", 10)
+	broken := policyWith("broken", 10)
+	broken.Spec.Limits[0].Rules[0].Rates[0].Period = "bogus"
+
+	result := policy.Compile(policy.Input{
+		Policies: []v1alpha1.RateLimitPolicy{healthy, broken},
+		Mappings: []v1alpha1.RateLimitMapping{*mappingObject("gateway.public")},
+	})
+	view := stateView(result)
+
+	require.Len(t, view.Domains, 1)
+	assert.Equal(t, "gateway.public", view.Domains[0].Domain)
+	assert.Equal(t, 1, view.Domains[0].Blocks)
+	assert.Equal(t, 1, view.Domains[0].DecisionBuckets)
+
+	policies := map[string]metrics.PolicyView{}
+	for _, p := range view.Policies {
+		policies[p.Policy] = p
+	}
+	require.Len(t, policies, 2)
+
+	ok := policies["biz/healthy"]
+	assert.True(t, ok.Ready)
+	assert.True(t, ok.Enforced)
+	assert.Empty(t, ok.Reason)
+	assert.Zero(t, ok.GenerationLag)
+	assert.Equal(t, 1, ok.Buckets)
+
+	bad := policies["biz/broken"]
+	assert.False(t, bad.Ready)
+	assert.False(t, bad.Enforced, "an invalid spec with no last-good enforces nothing")
+	assert.NotEmpty(t, bad.Reason)
+	assert.Equal(t, int64(1), bad.GenerationLag, "with nothing enforced the whole generation trails")
+	assert.Zero(t, bad.Buckets, "an excluded policy holds no share of the budget")
+
+	require.Len(t, view.Mappings, 1)
+	assert.Equal(t, "biz/gateway.public", view.Mappings[0].Mapping)
+	assert.True(t, view.Mappings[0].Ready)
+}
+
+func TestPersist_countsAFailedDelete(t *testing.T) {
+	state := newStubState()
+	state.saved["gateway.retired"] = policy.Bundle{}
+	state.deleteFailing = true
+	updater := &Updater{State: state}
+
+	before := testutil.ToFloat64(metrics.StatePersistErrors.WithLabelValues("delete"))
+	updater.persist(context.Background(), map[string]policy.Bundle{})
+
+	got := testutil.ToFloat64(metrics.StatePersistErrors.WithLabelValues("delete"))
+	assert.Equal(t, before+1, got,
+		"a ConfigMap that cannot be dropped retries forever and must be visible")
+}
+
+func TestRebuild_prunesTheSeriesOfARenamedRule(t *testing.T) {
+	// The rebuild is where the pruner learns the active set: a series left by
+	// a renamed rule must not survive the swap.
+	metrics.Decisions.WithLabelValues("gateway.public", "gone/b/old", "ok").Inc()
+
+	fakeClient := fakeReader(t, policyObject("survivor", "gateway.public"))
+	updater := &Updater{
+		Cache:    readerOnly{fakeClient},
+		Store:    New(),
+		Counters: memory.New(),
+	}
+	updater.rebuild(context.Background())
+
+	assert.Zero(t, testutil.ToFloat64(
+		metrics.Decisions.WithLabelValues("gateway.public", "gone/b/old", "ok")))
 }

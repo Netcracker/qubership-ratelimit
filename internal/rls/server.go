@@ -17,6 +17,7 @@ import (
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	auditstream "github.com/netcracker/qubership-ratelimit/internal/audit"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
@@ -58,6 +59,16 @@ const (
 	// by the caller, not by us, so an unbounded copy is an unbounded log record.
 	maxLoggedValueLength = 256
 	valueTruncated       = "[truncated]"
+
+	// DefaultNearLimitRatio is the margin behind the near-limit series: an
+	// admission counts as near when the rule has consumed this share of its
+	// limit.
+	DefaultNearLimitRatio = 0.9
+
+	// refusalLogPerSecond bounds the refusal log. Refusals arrive at traffic
+	// speed by definition, so the log keeps a trace of them without becoming
+	// a second copy of the traffic.
+	refusalLogPerSecond = 10
 )
 
 // Server answers Envoy rate limit checks by deciding through the domain's
@@ -74,6 +85,18 @@ type Server struct {
 	audit   *auditstream.Switchboard
 	hub     *auditstream.Hub
 	replica string
+
+	nearLimitRatio float64
+
+	// refusalLog samples the ordinary over-limit lines, violationLog the
+	// configuration-violation errors, unknownLog the unknown-domain reports,
+	// and storeLog the store failures. Separate budgets on purpose: a storm
+	// on any one of them must not drown the others — a store outage hiding
+	// the line that says the bucket backstop fired would be the worst trade.
+	refusalLog   logSampler
+	violationLog logSampler
+	unknownLog   logSampler
+	storeLog     logSampler
 }
 
 // Option adjusts a Server at construction.
@@ -91,9 +114,23 @@ func WithDecisionAudit(switchboard *auditstream.Switchboard, hub *auditstream.Hu
 	}
 }
 
+// WithNearLimitRatio sets the near-limit margin; see DefaultNearLimitRatio.
+// Values outside (0, 1) keep the default.
+func WithNearLimitRatio(ratio float64) Option {
+	return func(s *Server) {
+		if ratio > 0 && ratio < 1 {
+			s.nearLimitRatio = ratio
+		}
+	}
+}
+
 // NewServer returns a Server reading its rule set from the given store.
 func NewServer(s *store.Store, log Logger, opts ...Option) *Server {
-	server := &Server{store: s, log: log}
+	server := &Server{store: s, log: log, nearLimitRatio: DefaultNearLimitRatio}
+	server.refusalLog.limit = refusalLogPerSecond
+	server.violationLog.limit = refusalLogPerSecond
+	server.unknownLog.limit = refusalLogPerSecond
+	server.storeLog.limit = refusalLogPerSecond
 	for _, apply := range opts {
 		apply(server)
 	}
@@ -112,22 +149,35 @@ func (s *Server) ShouldRateLimit(
 		xrequestid.X_REQUEST_ID_HEADER_NAME: requestID,
 	})
 
+	start := time.Now()
 	eng := s.store.Engine(domain)
 	if eng == nil {
 		// A domain no policy claims means the gateway's filter config and the
 		// CRs have drifted apart; nothing else detects it. No policy also
-		// means no limit to enforce, so the traffic passes.
-		s.log.InfoC(ctx, "unknown rate limit domain: no RateLimitPolicy is bound to it domain=%v path=%v",
-			domain, path)
+		// means no limit to enforce, so the traffic passes. The series have no
+		// domain label — the name is caller-controlled — so the sampled log
+		// line here is where the name lives.
+		metrics.UnknownDomainChecks.Inc()
+		metrics.Checks.WithLabelValues(metrics.UnknownDomain, metrics.VerdictOK).Inc()
+		metrics.CheckDuration.WithLabelValues(metrics.UnknownDomain).Observe(time.Since(start).Seconds())
+		if ok, dropped := s.unknownLog.admit(start.Unix()); ok {
+			s.log.InfoC(ctx, "unknown rate limit domain: no RateLimitPolicy is bound to it domain=%v path=%v suppressed=%v",
+				domain, path, dropped)
+		}
 		return &envoyratelimit.RateLimitResponse{OverallCode: envoyratelimit.RateLimitResponse_OK}, nil
 	}
+	defer func() {
+		metrics.CheckDuration.WithLabelValues(domain).Observe(time.Since(start).Seconds())
+	}()
 
 	requests := engineRequests(req)
 	if len(requests) > maxDescriptorsPerCheck {
 		// A check carrying more descriptors than any sanctioned caller sends
 		// is a protocol violation, not unavailability: refusing keeps it off
 		// the fail-open path an abuser could otherwise ride through.
-		s.log.ErrorC(ctx, "rate limit check carries %v descriptors, over the limit of %v domain=%v path=%v",
+		metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyDescriptors).Inc()
+		metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit).Inc()
+		s.logViolation(ctx, "rate limit check carries %v descriptors, over the limit of %v domain=%v path=%v",
 			len(requests), maxDescriptorsPerCheck, domain, path)
 		return &envoyratelimit.RateLimitResponse{
 			OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
@@ -143,7 +193,9 @@ func (s *Server) ShouldRateLimit(
 				// violation, not unavailability: it denies regardless of the
 				// fallback policy, or an oversized policy set would turn the
 				// widest paths into unlimited ones.
-				s.log.ErrorC(ctx, "rate limit decision over the bucket budget domain=%v path=%v error=%v",
+				metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyBuckets).Inc()
+				metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit).Inc()
+				s.logViolation(ctx, "rate limit decision over the bucket budget domain=%v path=%v error=%v",
 					domain, path, err)
 				return &envoyratelimit.RateLimitResponse{
 					OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
@@ -153,7 +205,8 @@ func (s *Server) ShouldRateLimit(
 				// An earlier descriptor already refused: the answer is known,
 				// and a store error on a later one must not launder that
 				// refusal into the fail-open path.
-				s.log.ErrorC(ctx, "rate limit store error after a refusal domain=%v path=%v error=%v",
+				metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit).Inc()
+				s.logStoreError(ctx, "rate limit store error after a refusal domain=%v path=%v error=%v",
 					domain, path, err)
 				return &envoyratelimit.RateLimitResponse{
 					OverallCode:          envoyratelimit.RateLimitResponse_OVER_LIMIT,
@@ -161,12 +214,16 @@ func (s *Server) ShouldRateLimit(
 				}, nil
 			}
 			// A store error becomes a gRPC error, so Envoy's failure_mode_deny
-			// stays the one switch deciding fail-open versus fail-closed.
-			s.log.ErrorC(ctx, "rate limit store error domain=%v path=%v error=%v", domain, path, err)
+			// stays the one switch deciding fail-open versus fail-closed. The
+			// unavailable verdict is the size of that exposure window; the
+			// store decorator has already counted the error itself.
+			metrics.Checks.WithLabelValues(domain, metrics.VerdictUnavailable).Inc()
+			s.logStoreError(ctx, "rate limit store error domain=%v path=%v error=%v", domain, path, err)
 			return nil, status.Error(codes.Unavailable, "rate limit store unavailable")
 		}
 		allowed = allowed && decision.Allowed
 		decisions = append(decisions, decision)
+		s.observeDecision(domain, decision)
 	}
 
 	code := envoyratelimit.RateLimitResponse_OK
@@ -176,6 +233,17 @@ func (s *Server) ShouldRateLimit(
 	rules := 0
 	for _, d := range decisions {
 		rules += len(d.Rules)
+	}
+	verdict := metrics.VerdictOK
+	if !allowed {
+		verdict = metrics.VerdictOverLimit
+	}
+	metrics.Checks.WithLabelValues(domain, verdict).Inc()
+	if rules == 0 {
+		metrics.UnmatchedChecks.WithLabelValues(domain).Inc()
+	}
+	if !allowed {
+		s.logRefusal(ctx, domain, path)
 	}
 	s.log.DebugC(ctx, "rate limit check domain=%v path=%v allowed=%v rules=%v", domain, path, allowed, rules)
 	// The method comes from a descriptor, so it is caller-controlled and gets
@@ -316,6 +384,81 @@ func (s *Server) emitDecisionRecord(ctx context.Context, record auditstream.Reco
 		"rate limit decision audit domain=%v rule=%v verdict=%v shadow=%v limit=%v remaining=%v path=%v method=%v",
 		record.Domain, record.RuleID, record.Verdict, record.Shadow,
 		record.Limit, record.Remaining, record.Path, record.Method)
+}
+
+// observeDecision feeds the per-rule and extraction series of one decision.
+// The rule label is the policy/block/rule triple, the same id the decision
+// audit stream uses.
+func (s *Server) observeDecision(domain string, decision engine.Decision) {
+	for _, rule := range decision.Rules {
+		id := metrics.RuleID(rule.Policy, rule.Block, rule.Rule)
+		outcome := metrics.OutcomeOK
+		if !rule.Allowed {
+			outcome = metrics.OutcomeOverLimit
+			if rule.Shadow {
+				outcome = metrics.OutcomeShadowOverLimit
+			}
+		}
+		metrics.Decisions.WithLabelValues(domain, id, outcome).Inc()
+		// Shadow rules stay out: the series is the precursor of client-visible
+		// refusals, and a dry run near its experimental limit is not one. The
+		// dry run's own readout is outcome=shadow_over_limit.
+		if rule.Allowed && !rule.Shadow && nearLimit(rule, s.nearLimitRatio) {
+			metrics.NearLimit.WithLabelValues(domain, id).Inc()
+		}
+	}
+	for _, skip := range decision.Skips {
+		metrics.ExtractionSkips.WithLabelValues(skip.Key, string(skip.Reason)).Inc()
+	}
+	for _, key := range decision.ExtractedKeys {
+		metrics.Extractions.WithLabelValues(key).Inc()
+	}
+}
+
+// nearLimit reports whether an admission landed inside the margin: with a
+// ratio of 0.9, remaining at or under a tenth of the limit. The epsilon
+// absorbs the binary-fraction error of the ratio arithmetic — without it,
+// 100*(1-0.9) lands just under 10 and the exact-boundary request slips out
+// of the margin. It scales with the limit because the float grid does too:
+// an absolute epsilon drowns below the grid step once the limit is large,
+// while a relative one stays far under a single request for any real limit.
+func nearLimit(rule engine.RuleOutcome, ratio float64) bool {
+	limit := float64(rule.Limit)
+	return rule.Limit > 0 && float64(rule.Remaining) <= limit*(1-ratio)+limit*1e-12
+}
+
+// logRefusal keeps a sampled trace of ordinary over-limit refusals — the
+// limits doing their job, at traffic speed, which is why the budget exists.
+func (s *Server) logRefusal(ctx context.Context, domain, path string) {
+	ok, dropped := s.refusalLog.admit(time.Now().Unix())
+	if !ok {
+		return
+	}
+	s.log.InfoC(ctx, "rate limit refused domain=%v path=%v suppressed=%v", domain, path, dropped)
+}
+
+// logViolation keeps a sampled trace of configuration-violation refusals.
+// Both violations repeat at traffic speed by nature — an over-budget domain
+// refuses every wide request — so the line is sampled like any refusal;
+// the refusals_total series stays complete.
+func (s *Server) logViolation(ctx context.Context, format string, args ...any) {
+	ok, dropped := s.violationLog.admit(time.Now().Unix())
+	if !ok {
+		return
+	}
+	s.log.ErrorC(ctx, format+" suppressed=%v", append(args, dropped)...)
+}
+
+// logStoreError keeps a sampled trace of store failures. During an outage
+// every check produces one at traffic speed — the moment the log matters
+// most is the moment it would drown itself; store_errors_total and the
+// unavailable verdict stay complete whatever the budget.
+func (s *Server) logStoreError(ctx context.Context, format string, args ...any) {
+	ok, dropped := s.storeLog.admit(time.Now().Unix())
+	if !ok {
+		return
+	}
+	s.log.ErrorC(ctx, format+" suppressed=%v", append(args, dropped)...)
 }
 
 // methodOf returns the method the check reported, for the audit record. Every

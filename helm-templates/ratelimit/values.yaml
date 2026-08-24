@@ -18,6 +18,10 @@ mode: all
 # drift away from the profiles. values.schema.json requires them, so installing
 # without `-f resource-profiles/<profile>.yaml` fails with a clear message
 # instead of rendering a Deployment with empty resources.
+#
+# Every replica answers rate limit checks; only status writes are leader-gated,
+# so scaling REPLICAS out needs no other change. GOMEMLIMIT is derived from
+# MEMORY_LIMIT, so it governs the Go heap and not only the cgroup ceiling.
 
 # Leader election gates status writes only. The rate limit endpoint and its rule
 # store run on every replica, so scaling out does not depend on this setting.
@@ -65,6 +69,24 @@ redis:
 
 healthProbe:
   port: 8081
+
+# ============== METRICS ============================
+# The Prometheus endpoint: decisions and their latencies, budget headroom,
+# extraction health, and per-policy status. Plain HTTP, cluster-internal.
+metrics:
+  port: 8080
+  # An admission counts as near-limit once the rule has consumed this share of
+  # its limit. Quoted so YAML cannot reshape the number before the service
+  # parses it.
+  nearLimitRatio: "0.9"
+
+# ============== MONITORING DELIVERY ============================
+# The scrape target and the Grafana dashboard, delivered as custom resources:
+# a PodMonitor for the platform's Prometheus and a GrafanaDashboard for
+# grafana-operator v4. The deployer sets this platform parameter; off by
+# default because both need their operators' CRDs — installing them into a
+# cluster without monitoring fails the release.
+MONITORING_ENABLED: false
 
 # ============== MANAGEMENT API ============================
 # The control interface: reset counters, read what is being enforced, and turn
