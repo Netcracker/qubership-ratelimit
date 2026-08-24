@@ -34,7 +34,16 @@ READ_SA="${POLICY}-viewer"
 RESET_SA="${POLICY}-operator"
 PORT=18082
 
+AUDIT_BEFORE=""
+
+restore_audit() {
+  [[ -n "${AUDIT_BEFORE}" ]] || return 0
+  api PUT /audit "${TOKEN:-}" "${AUDIT_BEFORE}" >/dev/null 2>&1 || true
+  return 0
+}
+
 cleanup() {
+  restore_audit
   kubectl delete ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete sa "${READ_SA}" "${RESET_SA}" -n "${NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete clusterrolebinding "${RESET_SA}" --ignore-not-found >/dev/null 2>&1 || true
@@ -86,7 +95,9 @@ api_code() {
 
 # field reads one top-level field out of a JSON body.
 field() {
-  python3 -c "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null || echo ""
+  local name="$1"
+  python3 -c "import json,sys; print(json.load(sys.stdin).get(sys.argv[1],''))" \
+    "${name}" 2>/dev/null || echo ""
 }
 
 # ---------------------------------------------------------------------------
@@ -256,10 +267,20 @@ echo "OK: a reset naming a rule or axis that does not exist is refused"
 # ---------------------------------------------------------------------------
 # 9. The decision audit stream is off until a rule is selected
 # ---------------------------------------------------------------------------
-# At gateway speed a record per decision is a firehose, so the shipped state is
-# silence and the selection is shared by every replica rather than held in one.
+# At gateway speed a record per decision is a firehose, so nothing streams until
+# a rule is selected, and the selection is shared by every replica rather than
+# held in one.
+#
+# That sharing is why the starting state is established rather than assumed: on
+# a cluster somebody else is using, a rule may legitimately be streaming already.
+# The shipped default is covered by a unit test; what matters here is that the
+# switch works against a real API server.
+AUDIT_BEFORE=$(api GET /audit "${TOKEN}" \
+  | python3 -c "import json,sys; print(json.dumps({'rules': json.load(sys.stdin).get('rules', [])}))")
+api PUT /audit "${TOKEN}" '{"rules":[]}' >/dev/null
+
 SELECTED=$(api GET /audit "${TOKEN}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['rules']))")
-[[ "${SELECTED}" = "0" ]] || fail "the decision audit stream is on before anyone selected a rule"
+[[ "${SELECTED}" = "0" ]] || fail "the stream is still on after clearing the selection"
 
 api PUT /audit "${TOKEN}" \
   "{\"rules\":[{\"domain\":\"${DOMAIN}\",\"ruleId\":\"${RULE}\"}]}" >/dev/null
