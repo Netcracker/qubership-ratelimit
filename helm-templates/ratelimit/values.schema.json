@@ -206,37 +206,6 @@
         false
       ]
     },
-    "management": {
-      "type": "object",
-      "title": "Management API",
-      "description": "The control interface: counter resets, reads of the enforced rule set, and the decision audit stream. It listens on its own port and is never routed to from a gateway.",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        },
-        "port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535,
-          "default": 8082
-        },
-        "corsOrigins": {
-          "type": "array",
-          "description": "Origins a browser UI may call the management API from. Empty allows none.",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        },
-        "createClientRoles": {
-          "type": "boolean",
-          "description": "Create the viewer and operator ClusterRoles for clients of the API. They are created unbound.",
-          "default": true
-        }
-      },
-      "additionalProperties": false
-    },
     "ISTIO_PUBLIC_GATEWAY_NAME": {
       "type": "string",
       "title": "Public gateway name",

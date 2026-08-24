@@ -88,32 +88,6 @@ metrics:
 # cluster without monitoring fails the release.
 MONITORING_ENABLED: false
 
-# ============== MANAGEMENT API ============================
-# The control interface: reset counters, read what is being enforced, and turn
-# the decision audit stream on for a rule.
-#
-# It listens on its own port and no gateway is ever routed to it. That is the
-# point rather than an accident of the layout: these endpoints lift limits, so
-# exposing them on the data path would let the traffic being limited switch its
-# own limits off.
-#
-# Every call is authenticated against the API server with a TokenReview and
-# authorized by RBAC with a SubjectAccessReview, and every mutation is recorded
-# under the caller's own name.
-management:
-  enabled: true
-  port: 8082
-
-  # Origins a browser UI may call this API from. Empty allows none, which is the
-  # right default for an API that can lift a rate limit: a page served from
-  # anywhere else cannot read a response.
-  corsOrigins: []
-
-  # Create the two ClusterRoles a client is granted — one read-only, one that
-  # may also reset counters. They are created unbound: who gets them is a
-  # decision for whoever runs the cluster.
-  createClientRoles: true
-
 ISTIO_PUBLIC_GATEWAY_NAME: public-gateway
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
 
