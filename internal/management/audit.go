@@ -86,12 +86,16 @@ func (a *KubeAuditor) Record(_ context.Context, event AuditEvent) {
 		event.Time = time.Now()
 	}
 
+	// The rule, the domain, and the axes came in on the request, and the reason
+	// quotes them back. An audit trail the audited party can forge with a
+	// newline is worth nothing, so every one of them is bounded and stripped of
+	// control characters before it is recorded.
 	fields := []any{
 		"action", event.Action,
-		"subject", event.Subject.String(),
+		"subject", logSafe(event.Subject.String()),
 		"outcome", event.Outcome,
-		"domain", event.Domain,
-		"rule", event.RuleID,
+		"domain", logSafe(event.Domain),
+		"rule", logSafe(event.RuleID),
 		"keys", event.Keys,
 		"requestId", event.RequestID,
 		"time", event.Time.UTC().Format(time.RFC3339),
@@ -103,7 +107,7 @@ func (a *KubeAuditor) Record(_ context.Context, event AuditEvent) {
 		fields = append(fields, "axes", formatAxes(event.Axes))
 	}
 	if event.Reason != "" {
-		fields = append(fields, "reason", event.Reason)
+		fields = append(fields, "reason", logSafe(event.Reason))
 	}
 	a.Log.Info("rate limit management mutation", fields...)
 
@@ -126,11 +130,11 @@ func (a *KubeAuditor) recordEvent(event AuditEvent) {
 	object := &v1alpha1.RateLimitPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: policy, Namespace: a.Namespace},
 	}
-	message := "Reset " + plural(event.Keys, "counter") + " of rule " + event.RuleID
+	message := "Reset " + plural(event.Keys, "counter") + " of rule " + logSafe(event.RuleID)
 	if len(event.Axes) > 0 {
 		message += " for " + formatAxes(event.Axes)
 	}
-	message += ", requested by " + event.Subject.String()
+	message += ", requested by " + logSafe(event.Subject.String())
 
 	// The new events API separates the action taken from the reason it is
 	// filed under, so the audit action supplies both halves rather than being
@@ -155,12 +159,14 @@ func formatAxes(axes map[string]string) string {
 	}
 	sort.Strings(names)
 
+	// Axis values are claim values out of client tokens, so both halves of every
+	// pair are attacker-chosen strings.
 	var out strings.Builder
 	for i, name := range names {
 		if i > 0 {
 			out.WriteString(", ")
 		}
-		out.WriteString(name + "=" + axes[name])
+		out.WriteString(logSafe(name) + "=" + logSafe(axes[name]))
 	}
 	return out.String()
 }

@@ -12,6 +12,7 @@ operator_pod() {
   kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=ratelimit \
     --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].metadata.name}'
+  return 0
 }
 
 # Log lines the operator wrote after the given RFC3339 timestamp. Every
@@ -20,10 +21,12 @@ operator_pod() {
 operator_logs_since() {
   local since="$1"
   kubectl logs -n "${NAMESPACE}" "$(operator_pod)" --since-time="${since}" 2>/dev/null
+  return 0
 }
 
 now_rfc3339() {
   date -u +%Y-%m-%dT%H:%M:%SZ
+  return 0
 }
 
 # One request through a gateway, printing only the HTTP status code. A fresh
@@ -35,7 +38,7 @@ curl_gw_code() {
   local pf_pid=$!
   sleep 2
   local code
-  if [ -n "${extra_header}" ]; then
+  if [[ -n "${extra_header}" ]]; then
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H "${extra_header}" "http://127.0.0.1:${port}${path}" || echo "000")
   else
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${port}${path}" || echo "000")
@@ -43,6 +46,7 @@ curl_gw_code() {
   kill "${pf_pid}" 2>/dev/null || true
   wait "${pf_pid}" 2>/dev/null || true
   echo "${code}"
+  return 0
 }
 
 # Sends n requests over one port-forward and prints one status code per line.
@@ -59,7 +63,7 @@ curl_gw_burst() {
   sleep 3
   local i
   for i in $(seq 1 "${count}"); do
-    if [ -n "${header}" ]; then
+    if [[ -n "${header}" ]]; then
       curl -s -o /dev/null -w '%{http_code}\n' -m 10 -H "${header}" "http://127.0.0.1:${port}${path}" || echo "000"
     else
       curl -s -o /dev/null -w '%{http_code}\n' -m 10 "http://127.0.0.1:${port}${path}" || echo "000"
@@ -67,6 +71,7 @@ curl_gw_burst() {
   done
   kill "${pf_pid}" 2>/dev/null || true
   wait "${pf_pid}" 2>/dev/null || true
+  return 0
 }
 
 # Waits until the operator has a policy bound to the domain, so traffic
@@ -85,6 +90,7 @@ wait_for_domain() {
   # asking the API server whether the policy is there at all.
   kubectl get ratelimitpolicies -n "${NAMESPACE}" -o jsonpath='{.items[*].spec.domain}' \
     | grep -q "${domain}"
+  return $?
 }
 
 # Waits until the gateway answers a probe with a terminal verdict — 2xx or
@@ -127,6 +133,7 @@ spec:
               period: ${period}
               algorithm: FixedWindow
 EOF
+  return $?
 }
 
 apply_mapping() {
@@ -144,12 +151,16 @@ spec:
       claim: org_id
       fallbacks: [sub]
 EOF
+  # Unlike the printing helpers above, a failure here means the fixture never
+  # reached the cluster, so the status is passed on rather than replaced.
+  return $?
 }
 
 policy_condition() {
   local name="$1" type="${2:-Accepted}"
   kubectl get ratelimitpolicy "${name}" -n "${NAMESPACE}" \
     -o jsonpath="{.status.conditions[?(@.type==\"${type}\")].status}" 2>/dev/null
+  return 0
 }
 
 # Waits until the last-good state of a domain has been written.

@@ -323,43 +323,67 @@ func (s *Server) publishDecisionAudit(
 		return
 	}
 
-	now := time.Now()
+	// One timestamp for the whole check: every rule below decided the same
+	// request, so stamping them individually would suggest an ordering that
+	// does not exist.
+	checked := auditedRequest{
+		time: time.Now(), domain: domain, path: path, method: method, requestID: requestID,
+	}
 	for _, decision := range decisions {
 		for _, rule := range decision.Rules {
 			if !s.audit.Enabled(domain, rule.Policy, rule.Block, rule.Rule) {
 				continue
 			}
-			record := auditstream.Record{
-				Time:      now,
-				Domain:    domain,
-				RuleID:    rule.Policy + "/" + rule.Block + "/" + rule.Rule,
-				Verdict:   auditstream.VerdictAllowed,
-				Shadow:    rule.Shadow,
-				Limit:     rule.Limit,
-				Remaining: rule.Remaining,
-				Path:      path,
-				Method:    method,
-				RequestID: requestID,
-				Replica:   s.replica,
-			}
-			if !rule.Allowed {
-				record.Verdict = auditstream.VerdictRefused
-				if rule.RetryAfter > 0 {
-					record.RetryAfterSeconds = rule.RetryAfter.Seconds()
-				}
-			}
-
-			if s.hub != nil {
-				s.hub.Publish(record)
-			}
-			// The log carries the stream too, so a selection made while
-			// nobody is watching still leaves a trace to read afterwards.
-			s.log.InfoC(ctx,
-				"rate limit decision audit domain=%v rule=%v verdict=%v shadow=%v limit=%v remaining=%v path=%v method=%v",
-				record.Domain, record.RuleID, record.Verdict, record.Shadow,
-				record.Limit, record.Remaining, record.Path, record.Method)
+			s.emitDecisionRecord(ctx, s.auditRecord(checked, rule))
 		}
 	}
+}
+
+// auditedRequest is the request-level context every record of one check shares.
+type auditedRequest struct {
+	time      time.Time
+	domain    string
+	path      string
+	method    string
+	requestID string
+}
+
+// auditRecord renders one applied rule's decision.
+func (s *Server) auditRecord(checked auditedRequest, rule engine.RuleOutcome) auditstream.Record {
+	record := auditstream.Record{
+		Time:      checked.time,
+		Domain:    checked.domain,
+		RuleID:    rule.Policy + "/" + rule.Block + "/" + rule.Rule,
+		Verdict:   auditstream.VerdictAllowed,
+		Shadow:    rule.Shadow,
+		Limit:     rule.Limit,
+		Remaining: rule.Remaining,
+		Path:      checked.path,
+		Method:    checked.method,
+		RequestID: checked.requestID,
+		Replica:   s.replica,
+	}
+	if !rule.Allowed {
+		record.Verdict = auditstream.VerdictRefused
+		if rule.RetryAfter > 0 {
+			record.RetryAfterSeconds = rule.RetryAfter.Seconds()
+		}
+	}
+	return record
+}
+
+// emitDecisionRecord sends one record to whoever is watching, and to the log.
+//
+// The log carries the stream too, so a selection made while nobody is watching
+// still leaves a trace to read afterwards.
+func (s *Server) emitDecisionRecord(ctx context.Context, record auditstream.Record) {
+	if s.hub != nil {
+		s.hub.Publish(record)
+	}
+	s.log.InfoC(ctx,
+		"rate limit decision audit domain=%v rule=%v verdict=%v shadow=%v limit=%v remaining=%v path=%v method=%v",
+		record.Domain, record.RuleID, record.Verdict, record.Shadow,
+		record.Limit, record.Remaining, record.Path, record.Method)
 }
 
 // observeDecision feeds the per-rule and extraction series of one decision.

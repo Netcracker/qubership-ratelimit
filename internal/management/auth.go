@@ -253,7 +253,7 @@ func withAuth(authn Authenticator, authz Authorizer, log logr.Logger, next http.
 		allowed, reason, err := authz.Authorize(ctx, subject, verb, r.URL.Path)
 		if err != nil {
 			log.Error(err, "management authorization failed",
-				"subject", subject.Name, "requestId", requestIDOf(r))
+				"subject", logSafe(subject.Name), "requestId", requestIDOf(r))
 			internalError(w, r, "check the permissions with the API server")
 			return
 		}
@@ -261,8 +261,8 @@ func withAuth(authn Authenticator, authz Authorizer, log logr.Logger, next http.
 			// The reason names cluster RBAC, so it goes to the log rather than
 			// to a caller who has just failed to prove who they are.
 			log.Info("management request denied",
-				"subject", subject.Name, "verb", verb, "path", r.URL.Path,
-				"reason", reason, "requestId", requestIDOf(r))
+				"subject", logSafe(subject.Name), "verb", logSafe(verb), "path", logSafe(r.URL.Path),
+				"reason", logSafe(reason), "requestId", requestIDOf(r))
 			writeProblem(w, r, http.StatusForbidden, CodeForbidden,
 				fmt.Sprintf("User %q may not %s this endpoint.", subject.Name, verb))
 			return

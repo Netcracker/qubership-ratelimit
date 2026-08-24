@@ -20,7 +20,11 @@ func newLogrLogger() logr.Logger {
 	return logr.New(&logrAdapter{logger: logging.GetLogger(loggerName), name: loggerName})
 }
 
-func (a *logrAdapter) Init(_ logr.RuntimeInfo) {}
+// Init receives the call-depth information logr offers a sink.
+func (a *logrAdapter) Init(_ logr.RuntimeInfo) {
+	// Deliberately empty: the platform logger works out its own caller
+	// information, so there is nothing here worth keeping.
+}
 
 func (a *logrAdapter) Enabled(level int) bool {
 	if level > 0 {

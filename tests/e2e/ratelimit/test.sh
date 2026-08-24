@@ -54,11 +54,11 @@ for _ in $(seq 1 12); do
           | .typed_config.http_filters[]?
           | select(.name == "envoy.filters.http.ratelimit")
           | .typed_config.rate_limit_service.grpc_service.envoy_grpc.cluster_name ] | .[0] // empty' 2>/dev/null)
-  [ -n "${CLUSTER}" ] && break
+  [[ -n "${CLUSTER}" ]] && break
   sleep 5
 done
 EXPECTED="outbound|9000||${OPERATOR_SVC}.${NAMESPACE}.svc.cluster.local"
-if [ "${CLUSTER}" != "${EXPECTED}" ]; then
+if [[ "${CLUSTER}" != "${EXPECTED}" ]]; then
   fail "gateway rate limit cluster: expected '${EXPECTED}', got '${CLUSTER}'"
 fi
 echo "OK: the gateway calls this release's Service"
@@ -89,7 +89,7 @@ CODES=$(curl_gw_burst 4 public-gateway "${PROBE_PATH}")
 echo "${CODES}"
 
 FIRST=$(echo "${CODES}" | head -1)
-if [ "${FIRST}" = "429" ]; then
+if [[ "${FIRST}" = "429" ]]; then
   fail "the first request of a burst was refused; the window did not reset between tests"
 fi
 if ! echo "${CODES}" | grep -q "429"; then
@@ -105,7 +105,7 @@ echo "OK: the gateway refuses requests over the declared limit (429)"
 # ---------------------------------------------------------------------------
 sleep 1.5
 CODE=$(curl_gw_code public-gateway "${PROBE_PATH}")
-if [ "${CODE}" = "429" ]; then
+if [[ "${CODE}" = "429" ]]; then
   fail "still refused after the window should have reopened"
 fi
 echo "OK: traffic is allowed again once the window reopens"
@@ -117,7 +117,7 @@ echo "OK: traffic is allowed again once the window reopens"
 # refuse the private one. A shared counter would show up here and nowhere else.
 curl_gw_burst 3 public-gateway "${PROBE_PATH}" >/dev/null
 PRIVATE_CODE=$(curl_gw_code private-gateway "${PROBE_PATH}")
-if [ "${PRIVATE_CODE}" = "429" ]; then
+if [[ "${PRIVATE_CODE}" = "429" ]]; then
   fail "the private gateway was refused while only the public one was exhausted"
 fi
 echo "OK: the two gateways are limited independently"
@@ -137,10 +137,10 @@ curl_gw_code public-gateway "${PROBE_PATH}" "Authorization: Bearer ${SECRET}" >/
 LOGS=""
 for _ in $(seq 1 10); do
   LOGS=$(operator_logs_since "${SINCE}" | grep "rate limit check" || true)
-  [ -n "${LOGS}" ] && break
+  [[ -n "${LOGS}" ]] && break
   sleep 2
 done
-[ -n "${LOGS}" ] || fail "the operator logged no rate limit check for the traffic just sent"
+[[ -n "${LOGS}" ]] || fail "the operator logged no rate limit check for the traffic just sent"
 
 echo "${LOGS}" | grep -q "domain=${PUBLIC_DOMAIN}" \
   || fail "the check was not logged against ${PUBLIC_DOMAIN}"

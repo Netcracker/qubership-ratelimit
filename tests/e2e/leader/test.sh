@@ -23,7 +23,7 @@ PROBE_PATH=/e2e-leader
 
 RELEASE=$(kubectl get deployment "${OPERATOR_SVC}" -n "${NAMESPACE}" \
   -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}')
-[ -n "${RELEASE}" ] || fail "cannot determine the Helm release owning ${OPERATOR_SVC}"
+[[ -n "${RELEASE}" ]] || fail "cannot determine the Helm release owning ${OPERATOR_SVC}"
 CHART="${REPO_ROOT}/helm-templates/ratelimit"
 ORIGINAL_REPLICAS=$(kubectl get deployment "${OPERATOR_SVC}" -n "${NAMESPACE}" -o jsonpath='{.spec.replicas}')
 
@@ -107,7 +107,7 @@ helm upgrade "${RELEASE}" "${CHART}" -n "${NAMESPACE}" --reuse-values \
 kubectl rollout status "deployment/${OPERATOR_SVC}" -n "${NAMESPACE}" --timeout=120s
 
 READY=$(kubectl get deployment "${OPERATOR_SVC}" -n "${NAMESPACE}" -o jsonpath='{.status.readyReplicas}')
-[ "${READY}" = "2" ] || fail "expected 2 ready replicas, got '${READY}'"
+[[ "${READY}" = "2" ]] || fail "expected 2 ready replicas, got '${READY}'"
 echo "OK: two replicas are ready"
 
 # The burst assertions measure the operator, so the gateway must be past its
@@ -128,10 +128,10 @@ echo "OK: every replica rebuilt its rule store"
 LEADER=""
 for _ in $(seq 1 20); do
   LEADER=$(lease_holder_pod)
-  [ -n "${LEADER}" ] && break
+  [[ -n "${LEADER}" ]] && break
   sleep 3
 done
-[ -n "${LEADER}" ] || fail "no leader acquired the lease"
+[[ -n "${LEADER}" ]] || fail "no leader acquired the lease"
 kubectl get pod "${LEADER}" -n "${NAMESPACE}" >/dev/null \
   || fail "the lease names a pod that does not exist: ${LEADER}"
 echo "OK: one replica holds the lease (${LEADER})"
@@ -188,10 +188,10 @@ echo "OK: checks continue while the leader is replaced (${CLEAN}/8 clean bursts,
 NEW_LEADER=""
 for _ in $(seq 1 30); do
   NEW_LEADER=$(lease_holder_pod)
-  [ -n "${NEW_LEADER}" ] && [ "${NEW_LEADER}" != "${LEADER}" ] && break
+  [[ -n "${NEW_LEADER}" ]] && [[ "${NEW_LEADER}" != "${LEADER}" ]] && break
   sleep 3
 done
-if [ -z "${NEW_LEADER}" ] || [ "${NEW_LEADER}" = "${LEADER}" ]; then
+if [[ -z "${NEW_LEADER}" ]] || [[ "${NEW_LEADER}" = "${LEADER}" ]]; then
   fail "the lease did not move off the killed leader (still '${NEW_LEADER}')"
 fi
 echo "OK: the lease moved to ${NEW_LEADER}"
@@ -209,13 +209,13 @@ kubectl annotate ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" \
 ACCEPTED=""
 for _ in $(seq 1 24); do
   ACCEPTED=$(policy_condition "${POLICY}")
-  [ "${ACCEPTED}" = "True" ] && break
+  [[ "${ACCEPTED}" = "True" ]] && break
   sleep 5
 done
-[ "${ACCEPTED}" = "True" ] || fail "the new leader did not accept a policy after the handover"
+[[ "${ACCEPTED}" = "True" ]] || fail "the new leader did not accept a policy after the handover"
 
 GENERATION=$(kubectl get ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" -o jsonpath='{.metadata.generation}')
 OBSERVED=$(kubectl get ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" -o jsonpath='{.status.observedGeneration}')
-[ "${OBSERVED}" = "${GENERATION}" ] \
+[[ "${OBSERVED}" = "${GENERATION}" ]] \
   || fail "observedGeneration ${OBSERVED} does not match generation ${GENERATION} after the handover"
 echo "OK: the new leader writes policy status"

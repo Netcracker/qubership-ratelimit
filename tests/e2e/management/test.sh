@@ -34,11 +34,20 @@ READ_SA="${POLICY}-viewer"
 RESET_SA="${POLICY}-operator"
 PORT=18082
 
+AUDIT_BEFORE=""
+
+restore_audit() {
+  [[ -n "${AUDIT_BEFORE}" ]] || return 0
+  api PUT /audit "${TOKEN:-}" "${AUDIT_BEFORE}" >/dev/null 2>&1 || true
+  return 0
+}
+
 cleanup() {
+  restore_audit
   kubectl delete ratelimitpolicy "${POLICY}" -n "${NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete sa "${READ_SA}" "${RESET_SA}" -n "${NAMESPACE}" --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete clusterrolebinding "${RESET_SA}" --ignore-not-found >/dev/null 2>&1 || true
-  if [ -n "${PF_PID:-}" ]; then
+  if [[ -n "${PF_PID:-}" ]]; then
     kill "${PF_PID}" 2>/dev/null || true
     wait "${PF_PID}" 2>/dev/null || true
   fi
@@ -53,7 +62,7 @@ trap cleanup EXIT
 MANAGEMENT_PORT=$(kubectl get svc "${OPERATOR_SVC}" -n "${NAMESPACE}" \
   -o jsonpath='{.spec.ports[?(@.name=="management")].port}' 2>/dev/null || true)
 
-if [ -z "${MANAGEMENT_PORT}" ]; then
+if [[ -z "${MANAGEMENT_PORT}" ]]; then
   echo "SKIP: this release does not expose the management API"
   exit 0
 fi
@@ -70,8 +79,8 @@ BASE="http://127.0.0.1:${PORT}/ratelimit/v1"
 api() {
   local method="$1" path="$2" token="${3:-}" body="${4:-}"
   local args=(-s -X "${method}" -m 20)
-  [ -n "${token}" ] && args+=(-H "Authorization: Bearer ${token}")
-  [ -n "${body}" ] && args+=(-H 'Content-Type: application/json' -d "${body}")
+  [[ -n "${token}" ]] && args+=(-H "Authorization: Bearer ${token}")
+  [[ -n "${body}" ]] && args+=(-H 'Content-Type: application/json' -d "${body}")
   curl "${args[@]}" "${BASE}${path}"
 }
 
@@ -79,24 +88,26 @@ api() {
 api_code() {
   local method="$1" path="$2" token="${3:-}" body="${4:-}"
   local args=(-s -o /dev/null -w '%{http_code}' -X "${method}" -m 20)
-  [ -n "${token}" ] && args+=(-H "Authorization: Bearer ${token}")
-  [ -n "${body}" ] && args+=(-H 'Content-Type: application/json' -d "${body}")
+  [[ -n "${token}" ]] && args+=(-H "Authorization: Bearer ${token}")
+  [[ -n "${body}" ]] && args+=(-H 'Content-Type: application/json' -d "${body}")
   curl "${args[@]}" "${BASE}${path}" || echo "000"
 }
 
 # field reads one top-level field out of a JSON body.
 field() {
-  python3 -c "import json,sys; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null || echo ""
+  local name="$1"
+  python3 -c "import json,sys; print(json.load(sys.stdin).get(sys.argv[1],''))" \
+    "${name}" 2>/dev/null || echo ""
 }
 
 # ---------------------------------------------------------------------------
 # 1. Nothing is reachable without a credential the cluster recognizes
 # ---------------------------------------------------------------------------
 CODE=$(api_code GET /domains)
-[ "${CODE}" = "401" ] || fail "an unauthenticated read answered ${CODE}, expected 401"
+[[ "${CODE}" = "401" ]] || fail "an unauthenticated read answered ${CODE}, expected 401"
 
 CODE=$(api_code GET /domains "not-a-real-token")
-[ "${CODE}" = "401" ] || fail "a forged token answered ${CODE}, expected 401"
+[[ "${CODE}" = "401" ]] || fail "a forged token answered ${CODE}, expected 401"
 echo "OK: the API refuses a request without a token the cluster recognizes"
 
 # ---------------------------------------------------------------------------
@@ -109,7 +120,7 @@ kubectl create sa "${READ_SA}" -n "${NAMESPACE}" >/dev/null 2>&1 || true
 UNGRANTED=$(kubectl create token "${READ_SA}" -n "${NAMESPACE}" --duration=10m)
 
 CODE=$(api_code GET /domains "${UNGRANTED}")
-[ "${CODE}" = "403" ] \
+[[ "${CODE}" = "403" ]] \
   || fail "an authenticated account with no grant read the API (got ${CODE}); check the base path against system:discovery"
 echo "OK: an authenticated identity without a grant is refused"
 
@@ -126,10 +137,10 @@ TOKEN=$(kubectl create token "${RESET_SA}" -n "${NAMESPACE}" --duration=30m)
 # be refused.
 for _ in $(seq 1 15); do
   CODE=$(api_code GET /domains "${TOKEN}")
-  [ "${CODE}" = "200" ] && break
+  [[ "${CODE}" = "200" ]] && break
   sleep 2
 done
-[ "${CODE}" = "200" ] || fail "the granted account was refused (got ${CODE})"
+[[ "${CODE}" = "200" ]] || fail "the granted account was refused (got ${CODE})"
 echo "OK: the granted identity reads the domain list"
 
 # ---------------------------------------------------------------------------
@@ -174,7 +185,7 @@ echo "${RULES}" | grep -q '"axes":\["path"\]' \
 echo "OK: the rule listing reports ${RULE} and its axes"
 
 CODE=$(api_code GET "/domains/gateway.typo/rules" "${TOKEN}")
-[ "${CODE}" = "404" ] || fail "an unbound domain answered ${CODE}, expected 404"
+[[ "${CODE}" = "404" ]] || fail "an unbound domain answered ${CODE}, expected 404"
 echo "OK: an unbound domain is reported as not found"
 
 # ---------------------------------------------------------------------------
@@ -190,7 +201,7 @@ done
 
 LIMITED=$(api GET "/domains/${DOMAIN}/counters?ruleId=${RULE}&limited=true" "${TOKEN}")
 COUNT=$(echo "${LIMITED}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
-[ "${COUNT}" = "2" ] \
+[[ "${COUNT}" = "2" ]] \
   || fail "expected both paths to be limited, the API reports ${COUNT}"
 echo "${LIMITED}" | grep -q "\"path\":\"${PROBE_PATH}\"" \
   || fail "the counter listing does not report the axis value of ${PROBE_PATH}"
@@ -203,7 +214,7 @@ for _ in $(seq 1 3); do
 done
 AFTER=$(api GET "/domains/${DOMAIN}/counters?ruleId=${RULE}&limited=true" "${TOKEN}" \
   | python3 -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
-[ "${AFTER}" = "2" ] || fail "reading the counters changed them"
+[[ "${AFTER}" = "2" ]] || fail "reading the counters changed them"
 echo "OK: reading the counters charges nothing"
 
 # ---------------------------------------------------------------------------
@@ -212,14 +223,14 @@ echo "OK: reading the counters charges nothing"
 RESET=$(api POST "/domains/${DOMAIN}/counters/reset" "${TOKEN}" \
   "{\"ruleId\":\"${RULE}\",\"axes\":{\"path\":\"${PROBE_PATH}\"}}")
 RESET_COUNT=$(echo "${RESET}" | field resetCount)
-[ "${RESET_COUNT}" = "1" ] \
+[[ "${RESET_COUNT}" = "1" ]] \
   || fail "the reset reports ${RESET_COUNT} counters dropped, expected 1: ${RESET}"
 
 CODE=$(curl_gw_code public-gateway "${PROBE_PATH}")
-[ "${CODE}" != "429" ] \
+[[ "${CODE}" != "429" ]] \
   || fail "the reset path is still refused (got ${CODE}); the reset did not reach the counter store"
 CODE=$(curl_gw_code public-gateway "${OTHER_PATH}")
-[ "${CODE}" = "429" ] \
+[[ "${CODE}" = "429" ]] \
   || fail "the path that was not reset is admitted (got ${CODE}); the reset was too wide"
 echo "OK: the reset admits ${PROBE_PATH} again and leaves ${OTHER_PATH} limited"
 
@@ -233,7 +244,7 @@ api POST "/domains/${DOMAIN}/counters/reset" "${TOKEN}" \
 sleep 2
 
 AUDIT=$(operator_logs_since "${SINCE}" | grep -a "management mutation" | tail -1)
-[ -n "${AUDIT}" ] || fail "the reset left no audit record in the operator log"
+[[ -n "${AUDIT}" ]] || fail "the reset left no audit record in the operator log"
 echo "${AUDIT}" | grep -q "system:serviceaccount:${NAMESPACE}:${RESET_SA}" \
   || fail "the audit record does not name the caller: ${AUDIT}"
 echo "${AUDIT}" | grep -q "rule=${RULE}" \
@@ -245,21 +256,31 @@ echo "OK: the reset is audited under the caller's own name"
 # ---------------------------------------------------------------------------
 CODE=$(api_code POST "/domains/${DOMAIN}/counters/reset" "${TOKEN}" \
   "{\"ruleId\":\"${POLICY}/probe/typo\"}")
-[ "${CODE}" = "400" ] || fail "a reset of an unknown rule answered ${CODE}, expected 400"
+[[ "${CODE}" = "400" ]] || fail "a reset of an unknown rule answered ${CODE}, expected 400"
 
 # An axis the rule does not count by is the other half of the same mistake.
 CODE=$(api_code POST "/domains/${DOMAIN}/counters/reset" "${TOKEN}" \
   "{\"ruleId\":\"${RULE}\",\"axes\":{\"tenant\":\"acme\"}}")
-[ "${CODE}" = "400" ] || fail "a reset naming an undeclared axis answered ${CODE}, expected 400"
+[[ "${CODE}" = "400" ]] || fail "a reset naming an undeclared axis answered ${CODE}, expected 400"
 echo "OK: a reset naming a rule or axis that does not exist is refused"
 
 # ---------------------------------------------------------------------------
 # 9. The decision audit stream is off until a rule is selected
 # ---------------------------------------------------------------------------
-# At gateway speed a record per decision is a firehose, so the shipped state is
-# silence and the selection is shared by every replica rather than held in one.
+# At gateway speed a record per decision is a firehose, so nothing streams until
+# a rule is selected, and the selection is shared by every replica rather than
+# held in one.
+#
+# That sharing is why the starting state is established rather than assumed: on
+# a cluster somebody else is using, a rule may legitimately be streaming already.
+# The shipped default is covered by a unit test; what matters here is that the
+# switch works against a real API server.
+AUDIT_BEFORE=$(api GET /audit "${TOKEN}" \
+  | python3 -c "import json,sys; print(json.dumps({'rules': json.load(sys.stdin).get('rules', [])}))")
+api PUT /audit "${TOKEN}" '{"rules":[]}' >/dev/null
+
 SELECTED=$(api GET /audit "${TOKEN}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['rules']))")
-[ "${SELECTED}" = "0" ] || fail "the decision audit stream is on before anyone selected a rule"
+[[ "${SELECTED}" = "0" ]] || fail "the stream is still on after clearing the selection"
 
 api PUT /audit "${TOKEN}" \
   "{\"rules\":[{\"domain\":\"${DOMAIN}\",\"ruleId\":\"${RULE}\"}]}" >/dev/null
@@ -271,7 +292,7 @@ echo "OK: selecting a rule is stored where every replica reads it"
 
 CODE=$(api_code PUT /audit "${TOKEN}" \
   "{\"rules\":[{\"domain\":\"${DOMAIN}\",\"ruleId\":\"${POLICY}/probe/typo\"}]}")
-[ "${CODE}" = "400" ] || fail "selecting a rule nobody enforces answered ${CODE}, expected 400"
+[[ "${CODE}" = "400" ]] || fail "selecting a rule nobody enforces answered ${CODE}, expected 400"
 
 api PUT /audit "${TOKEN}" '{"rules":[]}' >/dev/null
 echo "OK: the selection is validated and can be turned back off"
@@ -288,13 +309,13 @@ VIEW_TOKEN=$(kubectl create token "${READ_SA}" -n "${NAMESPACE}" --duration=10m)
 
 for _ in $(seq 1 15); do
   CODE=$(api_code GET /domains "${VIEW_TOKEN}")
-  [ "${CODE}" = "200" ] && break
+  [[ "${CODE}" = "200" ]] && break
   sleep 2
 done
-[ "${CODE}" = "200" ] || fail "the viewer role cannot read (got ${CODE})"
+[[ "${CODE}" = "200" ]] || fail "the viewer role cannot read (got ${CODE})"
 
 CODE=$(api_code POST "/domains/${DOMAIN}/counters/reset" "${VIEW_TOKEN}" \
   "{\"ruleId\":\"${RULE}\"}")
-[ "${CODE}" = "403" ] || fail "the viewer role reset a counter (got ${CODE}), expected 403"
+[[ "${CODE}" = "403" ]] || fail "the viewer role reset a counter (got ${CODE}), expected 403"
 kubectl delete clusterrolebinding "${READ_SA}" --ignore-not-found >/dev/null 2>&1 || true
 echo "OK: the viewer role reads but cannot reset"

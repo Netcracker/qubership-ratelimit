@@ -35,7 +35,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: ratelimit
-          image: '{{ .Values.image.repository }}:{{ .Values.image.tag }}'
+          image: '{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}'
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /usr/bin/entrypoint.sh
@@ -138,9 +138,14 @@ spec:
             requests:
               cpu: '{{ .Values.CPU_REQUEST }}'
               memory: '{{ .Values.MEMORY_REQUEST }}'
+              # Bounded here rather than in a resource profile: the process
+              # writes no files, so its ephemeral storage is the container log
+              # and nothing else, and that does not vary by install size.
+              ephemeral-storage: 64Mi
             limits:
               cpu: '{{ .Values.CPU_LIMIT }}'
               memory: '{{ .Values.MEMORY_LIMIT }}'
+              ephemeral-storage: 256Mi
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -235,39 +235,65 @@ func (u *Updater) rebuild(ctx context.Context) {
 	metrics.PublishState(stateView(result))
 	metrics.PruneStale(activeSet(result))
 
-	blocks, rules, problems := 0, 0, 0
+	u.Log.Info("rate limit store rebuilt", summarize(result).fields()...)
+}
+
+// rebuildSummary is what one rebuild reports about itself: the size of the rule
+// set it installed, and how much of the namespace did not make it in.
+type rebuildSummary struct {
+	domains      int
+	blocks       int
+	rules        int
+	ruleProblems int
+
+	policiesNotReady   int
+	policiesOnLastGood int
+	mappingsVetoed     int
+}
+
+// summarize counts the compiled result for the line a rebuild logs.
+func summarize(result *policy.Result) rebuildSummary {
+	summary := rebuildSummary{domains: len(result.Snapshots)}
+
 	for _, snapshot := range result.Snapshots {
-		blocks += len(snapshot.Blocks)
+		summary.blocks += len(snapshot.Blocks)
 		for i := range snapshot.Blocks {
-			rules += len(snapshot.Blocks[i].Rules)
+			summary.rules += len(snapshot.Blocks[i].Rules)
 		}
 	}
-	notReady, onLastGood := 0, 0
 	for _, outcome := range result.Policies {
-		problems += len(outcome.Problems)
-		if !outcome.Ready() {
-			notReady++
-			if outcome.ActiveGeneration != 0 {
-				onLastGood++
-			}
+		summary.ruleProblems += len(outcome.Problems)
+		if outcome.Ready() {
+			continue
+		}
+		summary.policiesNotReady++
+		// A policy that is not ready but has an active generation is running on
+		// its last-good spec rather than running nothing.
+		if outcome.ActiveGeneration != 0 {
+			summary.policiesOnLastGood++
 		}
 	}
-	vetoed := 0
 	for _, outcome := range result.Mappings {
 		if len(outcome.RejectedBy) > 0 {
-			vetoed++
+			summary.mappingsVetoed++
 		}
 	}
+	return summary
+}
 
-	u.Log.Info("rate limit store rebuilt",
-		"domains", len(result.Snapshots),
-		"blocks", blocks,
-		"rules", rules,
-		"ruleProblems", problems,
-		"policiesNotReady", notReady,
-		"policiesOnLastGood", onLastGood,
-		"mappingsVetoed", vetoed,
-	)
+// fields renders the summary for the logger. The order is the order the line
+// has always had: the e2e suite reads this line, and so does anyone who has
+// learned to skim it.
+func (s rebuildSummary) fields() []any {
+	return []any{
+		"domains", s.domains,
+		"blocks", s.blocks,
+		"rules", s.rules,
+		"ruleProblems", s.ruleProblems,
+		"policiesNotReady", s.policiesNotReady,
+		"policiesOnLastGood", s.policiesOnLastGood,
+		"mappingsVetoed", s.mappingsVetoed,
+	}
 }
 
 // ruleSet binds each compiled domain to the shared counter store, reusing the

@@ -35,7 +35,10 @@ spec:
           type: RuntimeDefault
       containers:
         - name: manager
-          image: controller:latest
+          # kustomize overwrites this in every real deployment. It still
+          # carries a fixed tag: "latest" moves under a running workload, so
+          # two pods of one rollout can end up on different builds.
+          image: controller:0.1.0
           command:
             - /usr/bin/entrypoint.sh
           args:

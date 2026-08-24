@@ -308,18 +308,7 @@ func (c *policyCompiler) compileCounters(b model.Block, r model.Rule, blockKeys 
 }
 
 func (c *policyCompiler) compileRates(b model.Block, r model.Rule, behavior model.Behavior) []Rate {
-	if behavior == model.BehaviorBypass {
-		if len(r.Rates) > 0 {
-			c.fail(b.Name, r.Name, ReasonInvalidSpec, "a Bypass rule carries no rates")
-		}
-		return nil
-	}
-	if len(r.Rates) == 0 {
-		c.fail(b.Name, r.Name, ReasonInvalidSpec, "a counting rule carries at least one rates entry")
-		return nil
-	}
-	if len(r.Rates) > model.MaxRatesPerRule {
-		c.fail(b.Name, r.Name, ReasonInvalidSpec, "rates exceed the limit of %d", model.MaxRatesPerRule)
+	if !c.ratesCompilable(b, r, behavior) {
 		return nil
 	}
 
@@ -333,27 +322,62 @@ func (c *policyCompiler) compileRates(b model.Block, r model.Rule, behavior mode
 		}
 		periods[rate.Period] = struct{}{}
 
-		name := rate.Algorithm
-		if name == "" {
-			name = "GCRA"
+		if compiled, ok := c.compileRate(b, r, rate, ident); ok {
+			out = append(out, compiled)
 		}
-		a, ok := algo.ByName(name)
-		if !ok {
-			c.fail(b.Name, r.Name, ReasonInvalidSpec, "unknown algorithm %q; known: %v", rate.Algorithm, algo.Names())
-			continue
-		}
-
-		w := algo.Window{Requests: rate.Requests, Period: rate.Period, Burst: rate.Burst}
-		if a.ID() == algo.GCRAID && w.Burst == 0 {
-			w.Burst = w.Requests // the documented default: a full bucket
-		}
-		if err := algo.Check(a, w); err != nil {
-			c.fail(b.Name, r.Name, ReasonInvalidWindow, "window %s/%s: %v", name, rate.Period, err)
-			continue
-		}
-		out = append(out, Rate{Algorithm: a, Window: w, Prefix: key.RatePrefix(ident, a, w)})
 	}
 	return out
+}
+
+// ratesCompilable reports whether the rule's rates array is worth walking. A
+// Bypass rule legitimately has none; the other answers are rejections, and each
+// reports itself before returning.
+func (c *policyCompiler) ratesCompilable(b model.Block, r model.Rule, behavior model.Behavior) bool {
+	if behavior == model.BehaviorBypass {
+		if len(r.Rates) > 0 {
+			c.fail(b.Name, r.Name, ReasonInvalidSpec, "a Bypass rule carries no rates")
+		}
+		return false
+	}
+	if len(r.Rates) == 0 {
+		c.fail(b.Name, r.Name, ReasonInvalidSpec, "a counting rule carries at least one rates entry")
+		return false
+	}
+	if len(r.Rates) > model.MaxRatesPerRule {
+		c.fail(b.Name, r.Name, ReasonInvalidSpec, "rates exceed the limit of %d", model.MaxRatesPerRule)
+		return false
+	}
+	return true
+}
+
+// compileRate resolves one rates entry to its algorithm and checked window.
+// The bool is false when the entry was rejected, which it has already
+// reported.
+func (c *policyCompiler) compileRate(
+	b model.Block,
+	r model.Rule,
+	rate model.Rate,
+	ident key.Ident,
+) (Rate, bool) {
+	name := rate.Algorithm
+	if name == "" {
+		name = "GCRA"
+	}
+	a, ok := algo.ByName(name)
+	if !ok {
+		c.fail(b.Name, r.Name, ReasonInvalidSpec, "unknown algorithm %q; known: %v", rate.Algorithm, algo.Names())
+		return Rate{}, false
+	}
+
+	w := algo.Window{Requests: rate.Requests, Period: rate.Period, Burst: rate.Burst}
+	if a.ID() == algo.GCRAID && w.Burst == 0 {
+		w.Burst = w.Requests // the documented default: a full bucket
+	}
+	if err := algo.Check(a, w); err != nil {
+		c.fail(b.Name, r.Name, ReasonInvalidWindow, "window %s/%s: %v", name, rate.Period, err)
+		return Rate{}, false
+	}
+	return Rate{Algorithm: a, Window: w, Prefix: key.RatePrefix(ident, a, w)}, true
 }
 
 func toSet(values []string) map[string]struct{} {

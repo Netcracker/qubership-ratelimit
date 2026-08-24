@@ -33,7 +33,8 @@ export NAMESPACE="${NAMESPACE:-core}"
 export SUITE_DIR REPO_ROOT
 
 fail() {
-  echo -e "${RED_COLOR}Test error: $1${RESET_COLOR}" >&2
+  local message="$1"
+  echo -e "${RED_COLOR}Test error: ${message}${RESET_COLOR}" >&2
   false
 }
 export -f fail
@@ -54,7 +55,7 @@ kubectl get gateways.gateway.networking.k8s.io public-gateway -n "${NAMESPACE}" 
 # it from the cluster instead of assuming a release name.
 OPERATOR_SVC=$(kubectl get svc -n "${NAMESPACE}" -l app.kubernetes.io/name=ratelimit \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-[ -n "${OPERATOR_SVC}" ] \
+[[ -n "${OPERATOR_SVC}" ]] \
   || fail "no ratelimit Service in ${NAMESPACE}; install the chart before running the suite"
 kubectl rollout status "deployment/${OPERATOR_SVC}" -n "${NAMESPACE}" --timeout=120s >/dev/null \
   || fail "the ratelimit deployment is not ready"
@@ -63,15 +64,16 @@ export OPERATOR_SVC
 echo -e "${GREEN_COLOR}Testing ${OPERATOR_SVC} in ${NAMESPACE}${RESET_COLOR}"
 
 run_test() {
-  local test_script="${SUITE_DIR}/$1/test.sh"
-  SCRIPT_DIR="${SUITE_DIR}/$1"
+  local suite="$1"
+  local test_script="${SUITE_DIR}/${suite}/test.sh"
+  SCRIPT_DIR="${SUITE_DIR}/${suite}"
   export SCRIPT_DIR
 
-  echo -e "${GREEN_COLOR}Run tests: $1${RESET_COLOR}"
+  echo -e "${GREEN_COLOR}Run tests: ${suite}${RESET_COLOR}"
   if "${test_script}"; then
-    echo -e "${GREEN_COLOR}Tests passed: $1${RESET_COLOR}"
+    echo -e "${GREEN_COLOR}Tests passed: ${suite}${RESET_COLOR}"
   else
-    echo -e "${RED_COLOR}Tests failed: $1${RESET_COLOR}"
+    echo -e "${RED_COLOR}Tests failed: ${suite}${RESET_COLOR}"
     exit 1
   fi
 }
@@ -79,11 +81,11 @@ run_test() {
 TEST_FILTER=${1:-*}
 FOUND=0
 while read -r test_name; do
-  [ -f "${SUITE_DIR}/${test_name}/test.sh" ] || continue
+  [[ -f "${SUITE_DIR}/${test_name}/test.sh" ]] || continue
   FOUND=1
   run_test "${test_name}"
 done < <(find "${SUITE_DIR}" -maxdepth 1 -mindepth 1 -name "${TEST_FILTER}" -type d -exec basename {} \; | sort)
 
-[ "${FOUND}" = "1" ] || fail "no tests matched '${TEST_FILTER}'"
+[[ "${FOUND}" = "1" ]] || fail "no tests matched '${TEST_FILTER}'"
 
 echo -e "${GREEN_COLOR}All tests passed${RESET_COLOR}"

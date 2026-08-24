@@ -155,22 +155,19 @@ func queryCounters(
 	return result, nil
 }
 
-// scanBuckets enumerates the keys of every rate the query selects.
-func scanBuckets(
-	ctx context.Context,
-	snapshot *compile.Snapshot,
-	inspector counters.Inspector,
-	query counterQuery,
-) ([]bucketRef, bool, error) {
-	var refs []bucketRef
-	seen := make(map[string]struct{})
+// selectedRule is one rule the query asked for, with the block that owns it —
+// a rule's identity is the triple, so the block travels with it.
+type selectedRule struct {
+	block *compile.Block
+	rule  *compile.Rule
+}
 
+// selectRules flattens the snapshot down to the rules the query names.
+func selectRules(snapshot *compile.Snapshot, query counterQuery) []selectedRule {
+	var selected []selectedRule
 	for i := range snapshot.Blocks {
 		block := &snapshot.Blocks[i]
-		if query.policy != "" && block.Policy != query.policy {
-			continue
-		}
-		if query.block != "" && block.Name != query.block {
+		if !query.matchesBlock(block) {
 			continue
 		}
 		for j := range block.Rules {
@@ -178,31 +175,71 @@ func scanBuckets(
 			if query.rule != "" && rule.Name != query.rule {
 				continue
 			}
-			for k := range rule.Rates {
-				rate := &rule.Rates[k]
-				keys, err := inspector.Keys(ctx, rate.Prefix)
-				if err != nil {
-					return nil, false, fmt.Errorf("list the keys of %s: %w",
-						ruleID(block.Policy, block.Name, rule.Name), err)
-				}
-				for _, k := range keys {
-					// Two rates of one rule that resolve to the same algorithm
-					// and period share a prefix. Peek rejects a duplicate key
-					// in one call, and rightly so, but a listing must not fail
-					// over a rule that merely repeats itself.
-					if _, duplicate := seen[k]; duplicate {
-						continue
-					}
-					seen[k] = struct{}{}
-					refs = append(refs, bucketRef{key: k, block: block, rule: rule, rate: rate})
-					if len(refs) >= maxScannedKeys {
-						return refs, true, nil
-					}
+			selected = append(selected, selectedRule{block: block, rule: rule})
+		}
+	}
+	return selected
+}
+
+// matchesBlock reports whether the block survives the policy and block filters.
+func (q counterQuery) matchesBlock(block *compile.Block) bool {
+	if q.policy != "" && block.Policy != q.policy {
+		return false
+	}
+	if q.block != "" && block.Name != q.block {
+		return false
+	}
+	return true
+}
+
+// bucketCollector gathers scanned keys, dropping duplicates and stopping at the
+// scan cap.
+type bucketCollector struct {
+	refs []bucketRef
+	seen map[string]struct{}
+}
+
+// add records one key and reports whether there is room for another.
+//
+// Duplicates are dropped rather than rejected: two rates of one rule that
+// resolve to the same algorithm and period share a prefix, and Peek refuses a
+// repeated key in one call — rightly, since evaluating it twice would lose a
+// charge — but a listing must not fail over a rule that merely repeats itself.
+func (c *bucketCollector) add(bucketKey string, selected selectedRule, rate *compile.Rate) bool {
+	if _, duplicate := c.seen[bucketKey]; !duplicate {
+		c.seen[bucketKey] = struct{}{}
+		c.refs = append(c.refs, bucketRef{
+			key: bucketKey, block: selected.block, rule: selected.rule, rate: rate,
+		})
+	}
+	return len(c.refs) < maxScannedKeys
+}
+
+// scanBuckets enumerates the keys of every rate the query selects.
+func scanBuckets(
+	ctx context.Context,
+	snapshot *compile.Snapshot,
+	inspector counters.Inspector,
+	query counterQuery,
+) ([]bucketRef, bool, error) {
+	collector := &bucketCollector{seen: make(map[string]struct{})}
+
+	for _, selected := range selectRules(snapshot, query) {
+		for i := range selected.rule.Rates {
+			rate := &selected.rule.Rates[i]
+			keys, err := inspector.Keys(ctx, rate.Prefix)
+			if err != nil {
+				return nil, false, fmt.Errorf("list the keys of %s: %w",
+					ruleID(selected.block.Policy, selected.block.Name, selected.rule.Name), err)
+			}
+			for _, bucketKey := range keys {
+				if !collector.add(bucketKey, selected, rate) {
+					return collector.refs, true, nil
 				}
 			}
 		}
 	}
-	return refs, false, nil
+	return collector.refs, false, nil
 }
 
 // paginate cuts the page the cursor asks for, reporting whether more follows.
@@ -316,6 +353,28 @@ type resetTarget struct {
 // in that order, so a selection skipping one addresses no prefix and could
 // only be honored by scanning and filtering every counter of the rule.
 func resolveTarget(snapshot *compile.Snapshot, policy, block, rule string, axes map[string]string) (resetTarget, error) {
+	id := ruleID(policy, block, rule)
+
+	target := findRule(snapshot, policy, block, rule)
+	if target.rule == nil {
+		return resetTarget{}, rejectf(
+			"No rule %q is being enforced for domain %q. "+
+				"A rule missing here but present in a policy object means the policy was rejected or is running on an earlier spec.",
+			id, snapshot.Domain)
+	}
+
+	ordered, named, err := resolveAxes(id, target.rule.Counters, axes)
+	if err != nil {
+		return resetTarget{}, err
+	}
+	target.axes = ordered
+	target.named = named
+	return target, nil
+}
+
+// findRule locates one rule of the snapshot by its triple, returning a target
+// whose rule is nil when the rule set does not carry it.
+func findRule(snapshot *compile.Snapshot, policy, block, rule string) resetTarget {
 	var target resetTarget
 	for i := range snapshot.Blocks {
 		candidate := &snapshot.Blocks[i]
@@ -329,45 +388,45 @@ func resolveTarget(snapshot *compile.Snapshot, policy, block, rule string, axes 
 			}
 		}
 	}
-	if target.rule == nil {
-		return resetTarget{}, rejectf(
-			"No rule %q is being enforced for domain %q. "+
-				"A rule missing here but present in a policy object means the policy was rejected or is running on an earlier spec.",
-			ruleID(policy, block, rule), snapshot.Domain)
-	}
+	return target
+}
 
-	declared := target.rule.Counters
+// resolveAxes checks the selection against the axes the rule declares and puts
+// the values in key order.
+//
+// The values come back both ordered, which is how a key is built, and keyed by
+// name, which is what the audit record and the response report.
+func resolveAxes(id string, declared []string, axes map[string]string) ([]string, map[string]string, error) {
 	for name := range axes {
 		if !slices.Contains(declared, name) {
-			return resetTarget{}, rejectf(
-				"Rule %q does not count by axis %q. It counts by: %v.",
-				ruleID(policy, block, rule), name, declared)
+			return nil, nil, rejectf(
+				"Rule %q does not count by axis %q. It counts by: %v.", id, name, declared)
 		}
 	}
 	if len(axes) > len(declared) {
-		return resetTarget{}, rejectf(
-			"Rule %q counts by %d axes, and the request names %d.",
-			ruleID(policy, block, rule), len(declared), len(axes))
+		return nil, nil, rejectf(
+			"Rule %q counts by %d axes, and the request names %d.", id, len(declared), len(axes))
 	}
 
-	target.axes = make([]string, 0, len(axes))
-	target.named = make(map[string]string, len(axes))
-	for _, name := range declared[:len(axes)] {
+	leading := declared[:len(axes)]
+	ordered := make([]string, 0, len(axes))
+	named := make(map[string]string, len(axes))
+	for _, name := range leading {
 		value, ok := axes[name]
 		if !ok {
-			return resetTarget{}, rejectf(
+			return nil, nil, rejectf(
 				"Axis values must name a leading run of the rule's axes, in order. "+
 					"Rule %q counts by %v, so selecting %d of them means naming %v.",
-				ruleID(policy, block, rule), declared, len(axes), declared[:len(axes)])
+				id, declared, len(axes), leading)
 		}
 		if value == "" {
-			return resetTarget{}, rejectf(
+			return nil, nil, rejectf(
 				"Axis %q has an empty value, which addresses no counter.", name)
 		}
-		target.axes = append(target.axes, value)
-		target.named[name] = value
+		ordered = append(ordered, value)
+		named[name] = value
 	}
-	return target, nil
+	return ordered, named, nil
 }
 
 // dropCounters drops the counter state the target selects and reports the

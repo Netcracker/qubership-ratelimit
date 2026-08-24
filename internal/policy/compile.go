@@ -179,35 +179,8 @@ func compileDomain(
 	// last-good generation instead of taking a neighbor down.
 	slots := admitPolicies(domain, policies, previous, env)
 
-	chosen := make([]model.Policy, 0, len(policies))
-	outcomes := make(map[string]PolicyOutcome, len(policies))
-	for _, object := range policies {
-		s := slots[object.Name]
-
-		outcome := PolicyOutcome{
-			Outcome:  Outcome{Generation: object.Generation, Err: structural(s.latest.problems)},
-			Problems: ruleProblems(s.latest.problems),
-		}
-		if s.running {
-			outcome.ActiveGeneration = s.final.generation
-			chosen = append(chosen, modelPolicy(object.Name, s.final.spec))
-
-			bundle.Policies = append(bundle.Policies, PolicyState{
-				Name:           object.Name,
-				UID:            string(object.UID),
-				GoodGeneration: s.final.generation,
-				GoodSpec:       *s.final.spec.DeepCopy(),
-			})
-		}
-		if !outcome.Ready() {
-			if s.rejected {
-				outcome.Reason = v1alpha1.ReasonRejectedByDomainBudget
-			} else {
-				outcome.Reason = readyReason(s.latest.problems, env != nil)
-			}
-		}
-		outcomes[object.Name] = outcome
-	}
+	chosen, outcomes, states := settlePolicies(policies, slots, env)
+	bundle.Policies = states
 
 	snapshot, problems := enginecompile.Compile(domain, chosen, env)
 	for _, problem := range problems {
@@ -239,6 +212,57 @@ func compileDomain(
 	// wrong thing entirely.
 	result.Snapshots[domain] = snapshot
 	result.State[domain] = bundle
+}
+
+// settlePolicies turns the admitted slots into what the rest of compilation
+// needs: the specs to compile, the per-object outcome, and the policy half of
+// the bundle to persist.
+//
+// Only a running policy contributes a spec and a persisted state — a rejected
+// one keeps its outcome, so its status still says why, and puts nothing into
+// the snapshot.
+func settlePolicies(
+	policies []*v1alpha1.RateLimitPolicy,
+	slots map[string]*slot,
+	env *model.Mapping,
+) ([]model.Policy, map[string]PolicyOutcome, []PolicyState) {
+	chosen := make([]model.Policy, 0, len(policies))
+	outcomes := make(map[string]PolicyOutcome, len(policies))
+	var states []PolicyState
+
+	for _, object := range policies {
+		s := slots[object.Name]
+
+		outcome := PolicyOutcome{
+			Outcome:  Outcome{Generation: object.Generation, Err: structural(s.latest.problems)},
+			Problems: ruleProblems(s.latest.problems),
+		}
+		if s.running {
+			outcome.ActiveGeneration = s.final.generation
+			chosen = append(chosen, modelPolicy(object.Name, s.final.spec))
+
+			states = append(states, PolicyState{
+				Name:           object.Name,
+				UID:            string(object.UID),
+				GoodGeneration: s.final.generation,
+				GoodSpec:       *s.final.spec.DeepCopy(),
+			})
+		}
+		if !outcome.Ready() {
+			outcome.Reason = notReadyReason(s, env)
+		}
+		outcomes[object.Name] = outcome
+	}
+	return chosen, outcomes, states
+}
+
+// notReadyReason names why a policy is not ready: the domain gate turned it
+// away, or its own spec did not hold together.
+func notReadyReason(s *slot, env *model.Mapping) string {
+	if s.rejected {
+		return v1alpha1.ReasonRejectedByDomainBudget
+	}
+	return readyReason(s.latest.problems, env != nil)
 }
 
 // contribution counts what one policy put into the snapshot.
@@ -380,6 +404,24 @@ func admitPolicies(
 	previous Bundle,
 	env *model.Mapping,
 ) map[string]*slot {
+	slots, view, candidates := partitionBySeat(domain, policies, previous, env)
+	sortByAge(candidates)
+	admitCandidates(domain, slots, view, candidates, env)
+	return slots
+}
+
+// partitionBySeat splits the domain's policies into those already holding their
+// seat and those still to be judged.
+//
+// It returns a slot per policy, the view of what is running — seats plus the
+// last-good generations of policies whose latest edit is a candidate — and the
+// candidates themselves.
+func partitionBySeat(
+	domain string,
+	policies []*v1alpha1.RateLimitPolicy,
+	previous Bundle,
+	env *model.Mapping,
+) (map[string]*slot, map[string]attempt, []*v1alpha1.RateLimitPolicy) {
 	slots := make(map[string]*slot, len(policies))
 	view := make(map[string]attempt, len(policies))
 	var candidates []*v1alpha1.RateLimitPolicy
@@ -405,7 +447,13 @@ func admitPolicies(
 		}
 		candidates = append(candidates, object)
 	}
+	return slots, view, candidates
+}
 
+// sortByAge orders candidates oldest object first, by creation timestamp and
+// then by name. On a cold start with no seats that order is what makes the
+// outcome a function of the set rather than of the order events arrived in.
+func sortByAge(candidates []*v1alpha1.RateLimitPolicy) {
 	sort.SliceStable(candidates, func(a, b int) bool {
 		first, second := candidates[a], candidates[b]
 		if !first.CreationTimestamp.Equal(&second.CreationTimestamp) {
@@ -413,7 +461,18 @@ func admitPolicies(
 		}
 		return first.Name < second.Name
 	})
+}
 
+// admitCandidates judges each candidate against the seats of everyone plus the
+// candidates already admitted. A refused candidate falls back to its own seat,
+// or, seatless, runs nothing.
+func admitCandidates(
+	domain string,
+	slots map[string]*slot,
+	view map[string]attempt,
+	candidates []*v1alpha1.RateLimitPolicy,
+	env *model.Mapping,
+) {
 	for _, object := range candidates {
 		s := slots[object.Name]
 		seat, seated := view[object.Name]
@@ -428,7 +487,6 @@ func admitPolicies(
 		}
 		s.final, s.running = seat, seated
 	}
-	return slots
 }
 
 // fitsDomain asks the engine whether the view, with one policy replaced by the
