@@ -120,7 +120,7 @@ func withRecovery(log logr.Logger, next http.Handler) http.Handler {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				log.Error(nil, "management request panicked",
-					"panic", recovered, "path", r.URL.Path, "requestId", requestIDOf(r))
+					"panic", recovered, "path", logSafe(r.URL.Path), "requestId", requestIDOf(r))
 				internalError(w, r, "serve the request")
 			}
 		}()
@@ -187,11 +187,31 @@ func newRequestID() string {
 	return hex.EncodeToString(buf[:])
 }
 
-// sanitizeHeader strips what must never reach a log line or a response header
-// from a caller-supplied value: control characters forge log records and
-// response headers, and an unbounded value is an unbounded log record.
+// maxLoggedValueLength bounds a caller-supplied value once it is recorded. The
+// value is chosen by the client, not by us, so an unbounded copy is an
+// unbounded log record.
+const maxLoggedValueLength = 256
+
+// logSafe makes a caller-controlled string safe to put in a log line, an audit
+// record, or a Kubernetes Event.
+//
+// Two things are wrong with recording one as it arrived. Control characters let
+// a caller forge whole records by injecting newlines — an audit trail that can
+// be written by the party it is auditing is worth nothing. And the length is
+// bounded only by what the client chose to send. The decision path treats
+// descriptor values the same way; a management request is no more trustworthy
+// than a gateway check.
+func logSafe(v string) string {
+	return truncateControl(v, maxLoggedValueLength)
+}
+
+// sanitizeHeader is logSafe for a header value, which also travels back out on
+// the response and so is held to a tighter bound.
 func sanitizeHeader(v string) string {
-	const maxLength = 128
+	return truncateControl(v, 128)
+}
+
+func truncateControl(v string, maxLength int) string {
 	var b strings.Builder
 	for _, r := range v {
 		if r < 0x20 || r == 0x7f {
