@@ -49,7 +49,11 @@ jobs:
       # runner's cores. Pushes keep the full multi-arch config.
       docker-config-file: ${{ github.event_name == 'pull_request' && 'docker-dev-config-pr.json' || 'docker-dev-config.json' }}
       sonar-project-key: ${{ vars.SONAR_PROJECT_KEY }}
-    secrets: inherit
+    secrets:
+      # generic-go-build.yaml declares exactly one secret, and it is required.
+      # Inheriting the whole set would hand a reusable workflow every credential
+      # this repository holds.
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   # The engine is a separate Go module the root job's ./... does not see.
   # This job tests it with the race detector and ships its coverage as a

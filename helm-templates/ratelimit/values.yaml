@@ -1,7 +1,10 @@
 # ============== IMAGE ============================
 image:
   repository: ghcr.io/netcracker/ratelimit
-  tag: latest
+  # Empty takes the chart's appVersion, which is a fixed release. A floating tag
+  # such as "latest" moves under a running workload, so two pods of one rollout
+  # can end up on different builds.
+  tag: ""
   pullPolicy: IfNotPresent
 
 # ============== SERVICE ============================
