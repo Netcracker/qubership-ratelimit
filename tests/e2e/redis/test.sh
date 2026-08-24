@@ -130,7 +130,15 @@ fi
 # This is the whole point of the shared store. An in-process counter is lost with
 # its pod, so the budget would come back; with Redis the refusal has to survive a
 # restart, and the window is an hour so the clock cannot hand it back either.
-kubectl delete pods -n "${NAMESPACE}" -l "app.kubernetes.io/name=ratelimit" --wait=false >/dev/null
+#
+# The restart goes through a rollout rather than a pod deletion. Deleting pods
+# leaves the Deployment's generation untouched, so a `rollout status` racing the
+# controller can report success while the replacement is still coming up; the
+# probe below then finds no replica answering checks, the gateway fails open,
+# and the 200 says nothing about Redis. A rollout bumps the generation, which
+# makes the wait real, and brings the new pod up before the old one goes, so
+# the fail-open window never opens at all.
+kubectl rollout restart "deployment/${OPERATOR_SVC}" -n "${NAMESPACE}" >/dev/null
 kubectl rollout status "deployment/${OPERATOR_SVC}" -n "${NAMESPACE}" --timeout=180s >/dev/null \
   || fail "the operator did not come back after the restart"
 
