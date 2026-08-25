@@ -60,6 +60,39 @@ jobs:
   # coverage-* artifact — the naming convention the generic workflow's Sonar
   # job downloads by glob. No setup-go: GOTOOLCHAIN=auto fetches the version
   # engine/go.mod declares.
+  load:
+    name: Load floor
+    runs-on: ubuntu-latest
+    # go test executes code from the PR; the job gets a read-only token and
+    # checkout keeps no credentials on disk for that code to find.
+    permissions:
+      contents: read
+    # The floor is a claim about a replica backed by a shared store, so the
+    # measurement runs against a real one. A service container answers on
+    # loopback, which is the closest this runner gets to the same-zone store
+    # the latency budget assumes.
+    services:
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No -race: the detector costs about an order of magnitude, which would
+      # measure the detector rather than the decision path. The same tests run
+      # under -race in the other jobs; this one owns the number.
+      - name: Measure the decision throughput a replica owes
+        env:
+          REDIS_ADDR: 127.0.0.1:6379
+        run: go test ./internal/rls/ -run TestLoad -v -count=1
+
   engine:
     name: Engine module tests (race)
     runs-on: ubuntu-latest
