@@ -65,6 +65,12 @@ spec:
             capabilities:
               drop:
                 - ALL
+          # Keeps the process serving while xDS learns the pod is leaving;
+          # see the chart's Deployment for the full rationale.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 7
           livenessProbe:
             httpGet:
               path: /healthz

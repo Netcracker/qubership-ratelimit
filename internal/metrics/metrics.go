@@ -118,6 +118,13 @@ var (
 		Help: "Decisions whose request carried a value for the declared identity key.",
 	}, []string{"key"})
 
+	// TokensSeen is the traffic half of the detector: a key whose extraction
+	// series sits at zero while this one grows has a dead claim path.
+	TokensSeen = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "ratelimit_tokens_seen_total",
+		Help: "Decisions on a known domain whose request carried a token.",
+	})
+
 	// StoreRoundtrip is the counter store's share of the check. It is labeled
 	// by domain because a domain is pinned to one Redis Cluster slot: shard
 	// saturation is a property of the domain, not of the process.
@@ -163,11 +170,23 @@ var (
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		Checks, CheckDuration, Decisions, NearLimit, Refusals,
-		UnknownDomainChecks, UnmatchedChecks, ExtractionSkips, Extractions,
+		UnknownDomainChecks, UnmatchedChecks, ExtractionSkips, Extractions, TokensSeen,
 		StoreRoundtrip, StoreErrors,
 		SnapshotRebuilds, SnapshotTimestamp, StatePersistErrors,
 		stateCollector{},
 	)
+}
+
+// SeedExtractions creates a zero-valued extraction series for every declared
+// key of the new snapshot. Counter series appear on their first increment,
+// and a dead claim path never increments, so without seeding the one key the
+// detector exists for is exactly the one with no series to alert on. Seeding
+// an existing series is a no-op, and the pruner keeps seeded keys alive:
+// declared keys are part of its active set.
+func SeedExtractions(keys []string) {
+	for _, key := range keys {
+		Extractions.WithLabelValues(key)
+	}
 }
 
 // CacheStatsCollectors turns the engine's shared token-cache counters into

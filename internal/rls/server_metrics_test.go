@@ -337,3 +337,26 @@ func TestNearLimit_theBoundaryHoldsAtLargeLimits(t *testing.T) {
 	rule.Remaining++
 	assert.False(t, nearLimit(rule, 0.9), "one request earlier is not near, even at scale")
 }
+
+func TestShouldRateLimit_countsTokensSeen(t *testing.T) {
+	const domain = "gateway.public"
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	tokens := func() float64 { return testutil.ToFloat64(metrics.TokensSeen) }
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice"}`))
+
+	assert.Equal(t, 1.0, delta(tokens, func() {
+		_, err := server.ShouldRateLimit(context.Background(),
+			request(domain, map[string]string{"path": "/api", "token": "h." + payload + ".s"}))
+		require.NoError(t, err)
+	}), "a decision that arrived with a token counts, whatever extraction makes of it")
+
+	assert.Zero(t, delta(tokens, func() {
+		_, err := server.ShouldRateLimit(context.Background(),
+			request(domain, map[string]string{"path": "/api"}))
+		require.NoError(t, err)
+	}), "a tokenless decision is not evidence about any claim path")
+}

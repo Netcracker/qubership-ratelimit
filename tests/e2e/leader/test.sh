@@ -169,10 +169,10 @@ for _ in $(seq 1 8); do
   fi
   sleep 1.2
 done
-# Some requests land on the pod that is going away and are failed open by the
-# gateway, so the occasional dirty burst is expected; what must not happen is
-# the checks stopping altogether.
-if [[ "${CLEAN}" -lt 6 ]]; then
+# The preStop pause keeps the leaving pod serving until xDS stops routing to
+# it, so every burst has to stay clean: a dirty one means a check was failed
+# open mid-rollover, which N4 rules out.
+if [[ "${CLEAN}" -lt 8 ]]; then
   fail "checks degraded while the leader was replaced (${CLEAN}/8 clean bursts)"
 fi
 CHECKS=$(checks_logged_since "${SINCE}")

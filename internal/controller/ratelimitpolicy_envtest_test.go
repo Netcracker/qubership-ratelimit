@@ -232,11 +232,38 @@ var _ = Describe("RateLimitPolicy", func() {
 						Operator: ratelimitv1alpha1.OperatorEquals,
 						Value:    "prometheus",
 					}},
+					Replaces: []string{"everyone"},
 				},
 				ruleWith("everyone"),
 			))
 
 			Expect(create(policy)).To(Succeed())
+		})
+
+		It("wants replaces on a Bypass rule in an All block", func() {
+			// Without a list of exemptions such a bypass would be a silent no-op:
+			// it stops nothing in All mode, and the author meant it to stop
+			// something.
+			policy := policyWith("bypass-noop", blockWith("api",
+				ratelimitv1alpha1.Rule{
+					Name:     "internal",
+					Behavior: ratelimitv1alpha1.RuleBehaviorBypass,
+				},
+				ruleWith("everyone"),
+			))
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("names the rules it exempts from in replaces")))
+		})
+
+		It("rejects a duplicated method on a route", func() {
+			block := blockWith("api", ruleWith("total"))
+			block.Target = &ratelimitv1alpha1.Target{Routes: []ratelimitv1alpha1.Route{{
+				Path:    ratelimitv1alpha1.PathMatch{Type: ratelimitv1alpha1.PathMatchPrefix, Value: "/api/"},
+				Methods: []ratelimitv1alpha1.HTTPMethod{"GET", "GET"},
+			}}}
+
+			Expect(create(policyWith("dup-method", block))).
+				To(MatchError(ContainSubstring("methods of a route are unique")))
 		})
 
 		It("keeps replaces out of a FirstMatch block", func() {

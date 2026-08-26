@@ -329,3 +329,13 @@ func TestRebuild_prunesTheSeriesOfARenamedRule(t *testing.T) {
 	assert.Zero(t, testutil.ToFloat64(
 		metrics.Decisions.WithLabelValues("gateway.public", "gone/b/old", "ok")))
 }
+
+func TestExtractionKeys_listsTokenExtractedKeysOnce(t *testing.T) {
+	result := policy.Compile(policy.Input{
+		Policies: []v1alpha1.RateLimitPolicy{policyWith("one", 10)},
+		Mappings: []v1alpha1.RateLimitMapping{*mappingObject("gateway.public")},
+	})
+
+	assert.ElementsMatch(t, []string{"client", "tenant"}, extractionKeys(result),
+		"the built-in client and the mapped tenant are extracted from the token; path and method are resolved from the request and stay out")
+}

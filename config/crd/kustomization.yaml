@@ -3,3 +3,4 @@
 # the same bases by "make helm-crd".
 resources:
   - bases/ratelimit.netcracker.com_ratelimitpolicies.yaml
+  - bases/ratelimit.netcracker.com_ratelimitmappings.yaml

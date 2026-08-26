@@ -234,6 +234,7 @@ func (u *Updater) rebuild(ctx context.Context) {
 	metrics.SnapshotTimestamp.SetToCurrentTime()
 	metrics.PublishState(stateView(result))
 	metrics.PruneStale(activeSet(result))
+	metrics.SeedExtractions(extractionKeys(result))
 
 	u.Log.Info("rate limit store rebuilt", summarize(result).fields()...)
 }
@@ -350,6 +351,27 @@ func activeSet(result *policy.Result) *metrics.ActiveSet {
 		}
 	}
 	return active
+}
+
+// extractionKeys lists the keys the new snapshots extract from a token: the
+// built-in client plus the mapped keys of every domain. Their series are
+// seeded so that "declared but never extracted" is a visible zero rather than
+// a missing series. path and method are resolved from the request, not
+// extracted, and stay out.
+func extractionKeys(result *policy.Result) []string {
+	seen := map[string]struct{}{}
+	var keys []string
+	for _, snapshot := range result.Snapshots {
+		for i := range snapshot.Extraction {
+			key := snapshot.Extraction[i].Key
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 // stateView distills a compilation into the scrape-time status series: who is

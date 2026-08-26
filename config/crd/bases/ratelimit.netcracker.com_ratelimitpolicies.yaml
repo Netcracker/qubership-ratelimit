@@ -393,6 +393,10 @@ spec:
                             required:
                             - path
                             type: object
+                            x-kubernetes-validations:
+                            - message: the methods of a route are unique
+                              rule: '!has(self.methods) || self.methods.all(m, self.methods.filter(x,
+                                x == m).size() == 1)'
                           maxItems: 16
                           minItems: 1
                           type: array
@@ -408,6 +412,10 @@ spec:
                   - message: replaces needs mode All; in a FirstMatch block the order
                       of the rules already decides
                     rule: self.mode != 'FirstMatch' || self.rules.all(r, !has(r.replaces))
+                  - message: a Bypass rule in an All block names the rules it exempts
+                      from in replaces; without them it is a silent no-op
+                    rule: self.mode == 'FirstMatch' || self.rules.all(r, r.behavior
+                      != 'Bypass' || (has(r.replaces) && size(r.replaces) > 0))
                 maxItems: 64
                 minItems: 1
                 type: array
@@ -503,9 +511,11 @@ spec:
                 type: integer
               ruleProblems:
                 description: |-
-                  RuleProblems lists the rules that cannot match. They do not clear Ready:
-                  the object is reconciled honestly, and a dead rule is a fact to alert on
-                  rather than a failure of the object.
+                  RuleProblems lists the diagnostics of the latest generation. A blocking
+                  entry invalidates that generation whole: Ready goes false with a reason,
+                  and an earlier generation keeps running where there is one. An
+                  informational entry, such as CaptureShadowsMappedKey, leaves Ready alone —
+                  a fact to alert on rather than a failure of the object.
                 items:
                   description: |-
                     RuleProblem describes what is wrong with one rule. Problems live outside
