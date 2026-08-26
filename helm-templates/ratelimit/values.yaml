@@ -33,13 +33,25 @@ leaderElect: true
 logLevel: info
 
 # ============== RATE LIMIT SERVICE ============================
+# timeout, failClosed, rateLimitedStatus and grpcAsResourceExhausted are the
+# install-wide defaults; each gateway may override any of them under
+# gateways.<role>.
 rls:
   port: 9000
   timeout: 0.05s
-  # What an unreachable limiter means for the traffic of this gateway. It is a
-  # gateway decision rather than a service one, which is why it lives on the
-  # filter: false keeps the traffic flowing unlimited, true rejects it.
+  # What an unreachable limiter means for the traffic of a gateway. It is a
+  # gateway decision rather than a service one, which is why it renders on the
+  # filter: false keeps the traffic flowing unlimited, true rejects it with a
+  # 503. A public gateway usually prefers flowing, a private one may prefer
+  # rejecting — that is what the per-gateway override is for.
   failClosed: false
+  # Status the client sees on a refused request. Envoy ignores values below
+  # 400, and 429 is what retry-aware clients expect.
+  rateLimitedStatus: 429
+  # true answers gRPC callers behind the gateway with RESOURCE_EXHAUSTED
+  # instead of UNAVAILABLE, which is the retryable code gRPC clients back off
+  # on.
+  grpcAsResourceExhausted: false
   # The service supplies x-ratelimit-limit, x-ratelimit-remaining,
   # x-ratelimit-reset and retry-after itself, as ready response headers.
   # DRAFT_VERSION_03 would additionally let Envoy render X-RateLimit-* from
@@ -47,6 +59,17 @@ rls:
   # the honest default: the flag currently changes nothing, and the headers
   # keep coming from the one place that computes them.
   xRateLimitHeaders: "OFF"
+
+# Gateway-side switches of the filter itself: the share of requests the filter
+# checks at all, and the share it enforces on. Both are emergency controls,
+# independent of behavior: Shadow in the rules — dropping enforcedPercent to 0
+# turns every limit into a dry run without touching a single policy, and
+# enabledPercent: 0 takes the filter out of the request path entirely. Wired
+# as Envoy runtime fractions (ratelimit.<gateway>.enabled / .enforced), so a
+# runtime override can flip them without a redeploy.
+runtime:
+  enabledPercent: 100
+  enforcedPercent: 100
 
 # ============== COUNTER STORE ============================
 # Redis holds the counters, and that is what makes a limit a limit of the domain
@@ -96,7 +119,10 @@ ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
 # RateLimitPolicy that carries this gateway's rules. Nothing validates the match;
 # a typo shows up only as an "unknown rate limit domain" line in the service log.
 #
-# namespace is optional and defaults to the release namespace.
+# namespace is optional and defaults to the release namespace. timeout,
+# failClosed, rateLimitedStatus and grpcAsResourceExhausted may be set here to
+# override the rls.* defaults for one gateway — the usual case is a private
+# gateway that fails closed while the public one keeps flowing.
 gateways:
   public:
     enabled: true

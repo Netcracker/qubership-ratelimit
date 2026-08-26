@@ -123,6 +123,7 @@ type PathMatch struct {
 
 // Route selects request traffic for a block. The fields of one route combine
 // with AND; the routes of a target combine with OR.
+// +kubebuilder:validation:XValidation:rule="!has(self.methods) || self.methods.all(m, self.methods.filter(x, x == m).size() == 1)",message="the methods of a route are unique"
 type Route struct {
 	// Path selects request paths.
 	Path PathMatch `json:"path"`
@@ -253,6 +254,7 @@ type Rule struct {
 // Blocks always add up: a request that lands in several blocks has to fit the
 // verdict of each.
 // +kubebuilder:validation:XValidation:rule="self.mode != 'FirstMatch' || self.rules.all(r, !has(r.replaces))",message="replaces needs mode All; in a FirstMatch block the order of the rules already decides"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'FirstMatch' || self.rules.all(r, r.behavior != 'Bypass' || (has(r.replaces) && size(r.replaces) > 0))",message="a Bypass rule in an All block names the rules it exempts from in replaces; without them it is a silent no-op"
 type LimitBlock struct {
 	// Name is unique within its policy and is part of the counter key.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
@@ -348,9 +350,11 @@ type RateLimitPolicyStatus struct {
 	// +optional
 	Problems int32 `json:"problems,omitempty"`
 
-	// RuleProblems lists the rules that cannot match. They do not clear Ready:
-	// the object is reconciled honestly, and a dead rule is a fact to alert on
-	// rather than a failure of the object.
+	// RuleProblems lists the diagnostics of the latest generation. A blocking
+	// entry invalidates that generation whole: Ready goes false with a reason,
+	// and an earlier generation keeps running where there is one. An
+	// informational entry, such as CaptureShadowsMappedKey, leaves Ready alone —
+	// a fact to alert on rather than a failure of the object.
 	// +optional
 	// +kubebuilder:validation:MaxItems=256
 	// +listType=atomic

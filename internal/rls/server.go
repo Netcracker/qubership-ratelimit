@@ -166,6 +166,9 @@ func (s *Server) ShouldRateLimit(
 	decisions := make([]engine.Decision, 0, len(requests))
 	allowed := true
 	for _, er := range requests {
+		if er.Token != "" {
+			metrics.TokensSeen.Inc()
+		}
 		decision, err := eng.Decide(ctx, er)
 		if err != nil {
 			if errors.Is(err, engine.ErrTooManyBuckets) {

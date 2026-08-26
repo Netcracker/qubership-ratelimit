@@ -1,3 +1,4 @@
+{{- include "ratelimit.validateDomains" . -}}
 {{- $root := . -}}
 {{- $cluster := include "ratelimit.rlsCluster" . -}}
 {{- $roles := dict
@@ -9,6 +10,12 @@
 {{- if $config.enabled }}
 {{- $gatewayName := required (printf "gateways.%s is enabled, so ISTIO_%s_GATEWAY_NAME must be set" $role (upper $role)) $entry.gatewayName }}
 {{- $namespace := $config.namespace | default $root.Release.Namespace }}
+{{- /* Per-gateway overrides of the rls.* defaults. Booleans go through hasKey
+       because `default` would swallow an explicit false. */}}
+{{- $timeout := $config.timeout | default $root.Values.rls.timeout }}
+{{- $failClosed := ternary $config.failClosed $root.Values.rls.failClosed (hasKey $config "failClosed") }}
+{{- $limitedStatus := $config.rateLimitedStatus | default $root.Values.rls.rateLimitedStatus }}
+{{- $resourceExhausted := ternary $config.grpcAsResourceExhausted $root.Values.rls.grpcAsResourceExhausted (hasKey $config "grpcAsResourceExhausted") }}
 ---
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
@@ -39,15 +46,39 @@ spec:
           typed_config:
             "@type": type.googleapis.com/envoy.extensions.filters.http.ratelimit.v3.RateLimit
             domain: {{ $config.domain }}
-            failure_mode_deny: {{ $root.Values.rls.failClosed }}
-            timeout: {{ $root.Values.rls.timeout }}
+            failure_mode_deny: {{ $failClosed }}
+            {{- if $failClosed }}
+            {{- /* Without this a deny answers with Envoy's default 500, which
+                   reads as a gateway bug rather than a dependency outage. */}}
+            status_on_error:
+              code: 503
+            {{- end }}
+            timeout: {{ $timeout }}
             {{- /* Quoted: bare OFF is a YAML boolean, and the field is a string enum. */}}
             enable_x_ratelimit_headers: {{ $root.Values.rls.xRateLimitHeaders | quote }}
+            rate_limited_status:
+              code: {{ $limitedStatus }}
+            rate_limited_as_resource_exhausted: {{ $resourceExhausted }}
+            stat_prefix: {{ include "ratelimit.statPrefix" $gatewayName }}
+            {{- /* The emergency pair: runtime fractions Envoy re-reads live,
+                   so an operator can disable or dry-run the filter without a
+                   redeploy. */}}
+            filter_enabled:
+              runtime_key: ratelimit.{{ $gatewayName }}.enabled
+              default_value:
+                numerator: {{ $root.Values.runtime.enabledPercent }}
+                denominator: HUNDRED
+            filter_enforced:
+              runtime_key: ratelimit.{{ $gatewayName }}.enforced
+              default_value:
+                numerator: {{ $root.Values.runtime.enforcedPercent }}
+                denominator: HUNDRED
             rate_limit_service:
               transport_api_version: V3
               grpc_service:
                 envoy_grpc:
                   cluster_name: {{ $cluster }}
+                  authority: {{ include "ratelimit.rlsAuthority" $root }}
     - applyTo: VIRTUAL_HOST
       match:
         context: GATEWAY

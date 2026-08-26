@@ -147,3 +147,16 @@ func TestInstrumentStore_delegatesTheManagementPath(t *testing.T) {
 	// Neither call is traffic: the error counter must not move.
 	assert.Zero(t, testutil.ToFloat64(StoreErrors.WithLabelValues("mgmt.domain", "other")))
 }
+
+func TestSeedExtractions_makesZeroObservableWithoutResettingLiveSeries(t *testing.T) {
+	before := testutil.CollectAndCount(Extractions)
+	SeedExtractions([]string{"seeded_dead", "seeded_live"})
+	assert.Equal(t, before+2, testutil.CollectAndCount(Extractions),
+		"seeding has to create the series: a dead claim path never increments, so an unseeded key has no series to alert on")
+	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("seeded_dead")))
+
+	Extractions.WithLabelValues("seeded_live").Inc()
+	SeedExtractions([]string{"seeded_live"})
+	assert.Equal(t, 1.0, testutil.ToFloat64(Extractions.WithLabelValues("seeded_live")),
+		"reseeding an existing series is a no-op, not a reset")
+}

@@ -130,3 +130,28 @@ jobs:
           name: coverage-engine
           path: engine/engine.coverage.out
           if-no-files-found: error
+
+  # The chart's CRD templates are generated artifacts — copies of
+  # config/crd/bases with the keep annotation injected — and nothing but this
+  # gate stops an api/ change from shipping a chart whose CRDs no longer match
+  # the operator. helm lint runs once per resource profile, because the chart
+  # is never installed without one.
+  helm:
+    name: Helm lint and CRD drift
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the chart against every resource profile
+        run: make helm-lint
+      - name: Regenerate the manifests and the chart CRDs
+        run: make sync-helm-crds
+      - name: Fail on drift between the generated files and the commit
+        run: |
+          if ! git diff --exit-code -- config/rbac config/crd/bases helm-templates/ratelimit/templates; then
+            echo "::error::generated manifests drifted from the commit: run 'make sync-helm-crds' and commit the result"
+            exit 1
+          fi

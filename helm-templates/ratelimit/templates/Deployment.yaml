@@ -91,6 +91,15 @@ spec:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
+          # On delete the pod leaves the Endpoints at once, but the gateways
+          # keep sending checks until xDS catches up. The pause keeps the
+          # process serving through that window, so a rolling restart refuses
+          # nothing and fails nothing open; the SIGTERM drain then handles the
+          # stragglers. Native sleep handler: no shell in the image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 7
           livenessProbe:
             httpGet:
               path: /healthz
