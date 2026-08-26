@@ -514,9 +514,11 @@ spec:
                 type: integer
               ruleProblems:
                 description: |-
-                  RuleProblems lists the rules that cannot match. They do not clear Ready:
-                  the object is reconciled honestly, and a dead rule is a fact to alert on
-                  rather than a failure of the object.
+                  RuleProblems lists the diagnostics of the latest generation. A blocking
+                  entry invalidates that generation whole: Ready goes false with a reason,
+                  and an earlier generation keeps running where there is one. An
+                  informational entry, such as CaptureShadowsMappedKey, leaves Ready alone —
+                  a fact to alert on rather than a failure of the object.
                 items:
                   description: |-
                     RuleProblem describes what is wrong with one rule. Problems live outside
