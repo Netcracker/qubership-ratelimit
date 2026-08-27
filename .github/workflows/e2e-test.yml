@@ -126,6 +126,7 @@ jobs:
       # is the same run for human eyes - both uploaded below whatever the
       # outcome.
       - name: Run the e2e suites
+        id: e2e
         run: make test-e2e-go E2E_NAMESPACE="${E2E_NAMESPACE}"
 
       - name: Upload the e2e report
@@ -137,6 +138,32 @@ jobs:
             artifacts/e2e-go.xml
             artifacts/e2e-go.html
           if-no-files-found: ignore
+
+      # The verdict goes to the configured mailing list with the HTML report
+      # attached. Recipients live in the EMAIL_TO repository variable, and an
+      # empty one turns the step off; connection settings come from the
+      # organization's EMAIL_* variables. Mail is a courtesy, not a gate, so
+      # the step never fails the run. Pull request runs stay quiet: the list
+      # follows branch health, not every iteration of a review.
+      - name: Email the e2e report
+        if: always() && github.event_name != 'pull_request' && vars.EMAIL_TO != ''
+        continue-on-error: true
+        uses: netcracker/qubership-workflow-hub/actions/email-action@27fd7674286e5f561a6fd8277f2f389ff96ddb9e # v2.6.0
+        env:
+          EMAIL_SMTP_HOST: ${{ vars.EMAIL_SMTP_HOST }}
+          EMAIL_SMTP_PORT: ${{ vars.EMAIL_SMTP_PORT }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          EMAIL_USERNAME: ${{ vars.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ vars.EMAIL_TO }}
+        with:
+          subject: "[e2e] ${{ steps.e2e.outcome }} - ${{ github.repository }} (${{ github.ref_name }})"
+          body: |
+            The e2e run finished with outcome: ${{ steps.e2e.outcome }}.
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            The HTML report of the run is attached.
+          attachments: artifacts/e2e-go.html
+          priority: ${{ steps.e2e.outcome == 'success' && 'normal' || 'high' }}
 
       - name: Dump state on failure
         if: failure()
