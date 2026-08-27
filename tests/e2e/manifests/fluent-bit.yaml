@@ -73,8 +73,14 @@ spec:
           image: cr.fluentbit.io/fluent/fluent-bit:2.2.2
           imagePullPolicy: IfNotPresent
           volumeMounts:
-            - name: varlog
-              mountPath: /var/log
+            # The CRI symlinks under containers/ point into pods/, so the
+            # tail needs both; neither is written to.
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
             - name: fluentbit-state
               mountPath: /var/log/fluent-bit
             - name: config
@@ -86,9 +92,12 @@ spec:
               cpu: 50m
               memory: 100Mi
       volumes:
-        - name: varlog
+        - name: varlogpods
           hostPath:
-            path: /var/log
+            path: /var/log/pods
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
         - name: fluentbit-state
           hostPath:
             path: /var/log/fluent-bit
