@@ -46,8 +46,13 @@ jobs:
       # Without this the make step downloads the pinned toolchain and the
       # whole module graph on every run; setup-go restores both from the
       # actions cache, keyed by go.sum.
+      #
+      # The cache-poisoning audit is suppressed deliberately: everything this
+      # workflow uploads is run diagnostics - a test report and pod logs -
+      # not release material, and a pull request cannot write cache entries
+      # the base branch would read.
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 # zizmor: ignore[cache-poisoning]
         with:
           go-version-file: go.mod
 
