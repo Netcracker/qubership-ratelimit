@@ -11,16 +11,17 @@ COPY go.sum go.sum
 # The engine module is replace-directed to ./engine; its go.mod must be
 # present before go mod download once the operator imports it.
 COPY engine/go.mod engine/go.mod
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+# The modules land in a plain image layer, not a BuildKit cache mount: layer
+# caches (CI's type=gha included) persist layers only, and a mount would
+# leave every cached-but-mountless build re-downloading the graph.
+RUN go mod download
 
 # Copy the Go source (relies on .dockerignore to filter)
 COPY . .
 
 # The builder stage always runs on the build host platform (BUILDPLATFORM) to avoid QEMU emulation.
 # Cross-compilation is handled natively by Go via TARGETOS/TARGETARCH, which BuildKit sets automatically.
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
     go build -o ratelimit ./cmd/
 
