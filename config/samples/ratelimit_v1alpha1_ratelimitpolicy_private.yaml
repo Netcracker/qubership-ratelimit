@@ -16,4 +16,4 @@ spec:
       rules:
         - name: total
           rates:
-            - {requests: 500, period: 1m}
+            - { requests: 500, period: 1m }
