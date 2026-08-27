@@ -125,8 +125,6 @@ gradlew         text eol=lf
 # ``shelve``, ``marshal``, ``anydbm``, & ``bsddb``
 # (among others).
 
-AGENTS.md linguist-generated=true
-.github/workflows/AGENTS.md linguist-generated=true
 .agents/** linguist-generated=true
 .claude/** linguist-generated=true
 .cursor/** linguist-generated=true
