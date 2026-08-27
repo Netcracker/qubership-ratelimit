@@ -71,7 +71,7 @@ jobs:
           persist-credentials: false
 
       - name: Run apm-packages-update action
-        uses: netcracker/qubership-workflow-hub/actions/apm-packages-update@v2.6.0
+        uses: netcracker/qubership-workflow-hub/actions/apm-packages-update@27fd7674286e5f561a6fd8277f2f389ff96ddb9e # v2.6.0
         with:
           branch: ${{ env.BRANCH }}
           debug: ${{ env.DEBUG }}
