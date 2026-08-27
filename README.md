@@ -3,13 +3,13 @@
 Rate limiting for an Istio ambient mesh with two ingress gateways. The gateways call this service over the Envoy rate
 limit service (RLS) protocol; the rules arrive as `RateLimitPolicy` custom resources.
 
-| Item             | Value                                                                    |
-|------------------|--------------------------------------------------------------------------|
-| API group        | `ratelimit.netcracker.com`                                               |
-| Kinds            | `RateLimitPolicy` (rules), `RateLimitMapping` (identity keys and groups)  |
-| gRPC RLS port    | 9000                                                                     |
-| Health probes    | 8081                                                                     |
-| Scope            | namespaced — one installation, one namespace                              |
+| Item          | Value                                                                    |
+|---------------|--------------------------------------------------------------------------|
+| API group     | `ratelimit.netcracker.com`                                               |
+| Kinds         | `RateLimitPolicy` (rules), `RateLimitMapping` (identity keys and groups) |
+| gRPC RLS port | 9000                                                                     |
+| Health probes | 8081                                                                     |
+| Scope         | namespaced — one installation, one namespace                             |
 
 **What is built today**: the two resources and their validation, the lifecycle around them — atomic generations,
 last-good fallback, and the transaction gate on a mapping update — and the decision engine that enforces the compiled
@@ -34,12 +34,12 @@ and on the path through the routes of its block.
 Controller and RLS endpoint share one binary and one Deployment. `--mode=all|controller|rls` selects the components, so
 splitting them later is a Helm change rather than a refactor. Only `all` is exercised today.
 
-| Component        | Runs on       | Leader election | Does                                                       |
-|------------------|---------------|-----------------|------------------------------------------------------------|
-| Store updater    | every replica | no              | recompiles every domain on any policy or mapping event      |
-| gRPC RLS server  | every replica | no              | answers a check; a stub until the evaluator lands            |
-| Reconcilers      | leader only   | yes             | write `Accepted`, `Ready`, `ruleProblems`, `effectiveKeys`   |
-| State writer     | leader only   | yes             | persists the last-good spec of each object before a swap     |
+| Component       | Runs on       | Leader election | Does                                                       |
+|-----------------|---------------|-----------------|------------------------------------------------------------|
+| Store updater   | every replica | no              | recompiles every domain on any policy or mapping event     |
+| gRPC RLS server | every replica | no              | answers a check; a stub until the evaluator lands          |
+| Reconcilers     | leader only   | yes             | write `Accepted`, `Ready`, `ruleProblems`, `effectiveKeys` |
+| State writer    | leader only   | yes             | persists the last-good spec of each object before a swap   |
 
 The split is a correctness requirement. `Reconcile` runs on the leader alone, so a store filled there would leave every
 other replica answering checks from an empty store — limits that apply on some pods and not others.
@@ -78,13 +78,13 @@ sample that stopped being valid fails the build.
 The schema rejects what it can see; the compiler reports what needs the domain to judge. Those land in
 `status.ruleProblems`, and the `PROBLEMS` printer column counts them:
 
-| Reason                      | Weight | Means                                                                       |
-|-----------------------------|--------|-----------------------------------------------------------------------------|
-| `UnresolvedKeyReference`    | blocking | nothing produces the key — no built-in, no mapping, no capture            |
-| `UnresolvedGroupReference`  | blocking | `InGroup` names a group neither the policy nor the mapping defines        |
-| `IncompatibleOperator`      | blocking | the operator cannot apply to the type of the key, e.g. `Equals` on an array |
-| `InvalidCounterAxis`        | blocking | an array key cannot key a bucket                                          |
-| `CaptureShadowsMappedKey`   | informational | inside this block a route capture wins over the mapped key           |
+| Reason                     | Weight        | Means                                                                       |
+|----------------------------|---------------|-----------------------------------------------------------------------------|
+| `UnresolvedKeyReference`   | blocking      | nothing produces the key — no built-in, no mapping, no capture              |
+| `UnresolvedGroupReference` | blocking      | `InGroup` names a group neither the policy nor the mapping defines          |
+| `IncompatibleOperator`     | blocking      | the operator cannot apply to the type of the key, e.g. `Equals` on an array |
+| `InvalidCounterAxis`       | blocking      | an array key cannot key a bucket                                            |
+| `CaptureShadowsMappedKey`  | informational | inside this block a route capture wins over the mapped key                  |
 
 One blocking entry invalidates the whole generation: not one of its rules enters the snapshot. Applying the healthy
 rules of a broken policy would be worse than applying none — a `FirstMatch` cascade missing a rule silently hands its

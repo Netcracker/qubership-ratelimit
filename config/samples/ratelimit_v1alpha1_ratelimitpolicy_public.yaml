@@ -21,45 +21,45 @@ spec:
     - name: order-management
       target:
         routes:
-          - path: {type: Prefix, value: /api/v1/order-management/}
+          - path: { type: Prefix, value: /api/v1/order-management/ }
             methods: [GET]
-          - path: {type: Template, value: "/api/v1/orders/{order_id}/items"}
+          - path: { type: Template, value: "/api/v1/orders/{order_id}/items" }
       mode: FirstMatch
       rules:
         # The scraper is exempt from this block and from nothing else: a Bypass
         # rule bypasses its own block, so the ceilings below still apply.
         - name: internal-bypass
           when:
-            - {key: client, operator: Equals, value: prometheus}
+            - { key: client, operator: Equals, value: prometheus }
           behavior: Bypass
 
         # Shadow tries a tighter limit over the live one: it counts and records
         # metrics, never rejects, and does not end the cascade.
         - name: mvno-group-1-trial
           when:
-            - {key: client, operator: InGroup, value: mvno-group-1}
+            - { key: client, operator: InGroup, value: mvno-group-1 }
           behavior: Shadow
           rates:
-            - {requests: 50, period: 1m}
+            - { requests: 50, period: 1m }
 
         - name: mvno-group-1
           when:
-            - {key: client, operator: InGroup, value: mvno-group-1}
+            - { key: client, operator: InGroup, value: mvno-group-1 }
           # No axes: the group shares one bucket.
           counters: []
           rates:
-            - {requests: 100, period: 1m, algorithm: FixedWindow}
-            - {requests: 10000, period: 1d, algorithm: FixedWindow}
+            - { requests: 100, period: 1m, algorithm: FixedWindow }
+            - { requests: 10000, period: 1d, algorithm: FixedWindow }
 
         # roles is declared by the RateLimitMapping of this domain. Without that
         # mapping this whole policy is invalid — not just this rule — and its
         # status says so with Ready: False and MappingRequired.
         - name: subscriber-per-user
           when:
-            - {key: roles, operator: Contains, value: subscriber}
+            - { key: roles, operator: Contains, value: subscriber }
           counters: [client]
           rates:
-            - {requests: 1000, period: 1m, burst: 100}
+            - { requests: 1000, period: 1m, burst: 100 }
 
         # No predicate, so it matches every caller who has a client value. An
         # anonymous caller has none, and a rule cannot key a bucket by an axis
@@ -68,29 +68,29 @@ spec:
         - name: per-user
           counters: [client]
           rates:
-            - {requests: 100, period: 1m}
+            - { requests: 100, period: 1m }
 
         - name: anonymous
           when:
-            - {key: client, operator: NotExists}
+            - { key: client, operator: NotExists }
           counters: []
           rates:
-            - {requests: 100, period: 1m}
+            - { requests: 100, period: 1m }
 
     # A second block, so its verdict adds to the one above: a request that lands
     # in both has to fit both.
     - name: api-defaults
       target:
         routes:
-          - path: {type: Prefix, value: /api/}
+          - path: { type: Prefix, value: /api/ }
       rules:
         # A smoothed minute next to a daily quota. Each window is an independent
         # bucket, and each can reject on its own.
         - name: per-user
           counters: [client]
           rates:
-            - {requests: 300, period: 1m}
-            - {requests: 20000, period: 1d, algorithm: FixedWindow}
+            - { requests: 300, period: 1m }
+            - { requests: 20000, period: 1d, algorithm: FixedWindow }
 
         # Two axes, so the bucket is per pair. Under a Prefix route the path axis
         # is the raw request path, so its cardinality is as wide as the traffic;
@@ -98,4 +98,4 @@ spec:
         - name: per-user-per-path
           counters: [client, path]
           rates:
-            - {requests: 60, period: 1m}
+            - { requests: 60, period: 1m }

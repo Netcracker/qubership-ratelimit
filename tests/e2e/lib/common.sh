@@ -61,8 +61,7 @@ curl_gw_burst() {
   kubectl port-forward -n "${NAMESPACE}" "svc/${gateway}-istio" "${port}:8080" >/dev/null 2>&1 &
   local pf_pid=$!
   sleep 3
-  local i
-  for i in $(seq 1 "${count}"); do
+  for _ in $(seq 1 "${count}"); do
     if [[ -n "${header}" ]]; then
       curl -s -o /dev/null -w '%{http_code}\n' -m 10 -H "${header}" "http://127.0.0.1:${port}${path}" || echo "000"
     else
@@ -79,8 +78,7 @@ curl_gw_burst() {
 wait_for_domain() {
   local domain="$1" since
   since=$(now_rfc3339)
-  local i
-  for i in $(seq 1 20); do
+  for _ in $(seq 1 20); do
     if operator_logs_since "${since}" | grep -q "rate limit store rebuilt"; then
       return 0
     fi
@@ -170,8 +168,8 @@ policy_condition() {
 # state. Only after the store updater has rebuilt and written does an edit that
 # breaks the policy have something to fall back to.
 wait_for_state() {
-  local domain="$1" i
-  for i in $(seq 1 20); do
+  local domain="$1"
+  for _ in $(seq 1 20); do
     if kubectl get configmap "ratelimit-state-${domain}" -n "${NAMESPACE}" >/dev/null 2>&1; then
       return 0
     fi

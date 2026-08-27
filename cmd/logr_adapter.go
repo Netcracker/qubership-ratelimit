@@ -76,8 +76,7 @@ func formatMessage(msg string, kvs []any) string {
 	var b strings.Builder
 	b.WriteString(msg)
 	for i := 0; i+1 < len(kvs); i += 2 {
-		b.WriteByte(' ')
-		b.WriteString(fmt.Sprintf("%v=%v", kvs[i], kvs[i+1]))
+		fmt.Fprintf(&b, " %v=%v", kvs[i], kvs[i+1])
 	}
 	return b.String()
 }

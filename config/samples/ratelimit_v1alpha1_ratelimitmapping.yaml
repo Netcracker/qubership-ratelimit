@@ -14,14 +14,14 @@ spec:
   mappings:
     # An array claim: Contains and In apply to it, Equals does not, and it cannot
     # key a bucket.
-    - {key: roles, claim: realm_access.roles, type: StringArray}
+    - { key: roles, claim: realm_access.roles, type: StringArray }
 
     # A fallback chain: the first path that yields a value wins, so a token
     # without org_id still produces a tenant.
-    - {key: tenant, claim: org_id, fallbacks: [sub], normalize: Lowercase}
+    - { key: tenant, claim: org_id, fallbacks: [sub], normalize: Lowercase }
 
     # A claim whose own name contains dots is addressed segment by segment.
-    - {key: entitlements, claimPath: ["https://acme.com/entitlements"], type: StringArray}
+    - { key: entitlements, claimPath: ["https://acme.com/entitlements"], type: StringArray }
 
   # Shared groups: visible to every policy of this domain. A policy that defines
   # a group of the same name shadows this one.
