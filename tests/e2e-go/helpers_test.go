@@ -177,10 +177,25 @@ func nextWindow() {
 	time.Sleep(now.Truncate(time.Second).Add(1100 * time.Millisecond).Sub(now))
 }
 
+// storeRebuilds counts the rebuild lines in the logs of the running
+// replicas. A restarted pod starts a fresh log, so counts only compare
+// within one stable set of pods.
+func storeRebuilds() int {
+	total := 0
+	for _, pod := range operatorPods() {
+		total += strings.Count(podLogs(pod.Name, nil), "rate limit store rebuilt")
+	}
+	return total
+}
+
 // waitStoreRebuilt is the bash wait_for_domain: the store updater logs one
 // line per rebuild, and that line is the only signal the running pod saw the
-// event.
-func waitStoreRebuilt(since time.Time) {
-	Eventually(operatorLogsSince(since)).Should(ContainSubstring("rate limit store rebuilt"),
+// event. Callers snapshot storeRebuilds() before their change and wait for
+// the count to grow. Waiting for "a line after time T" instead would race:
+// the log API filters timestamps at whole-second granularity, so a
+// neighbouring suite's rebuild from the same wall second satisfies it and
+// traffic then runs against a store that has not seen the change.
+func waitStoreRebuilt(before int) {
+	Eventually(storeRebuilds).Should(BeNumerically(">", before),
 		"the store never rebuilt after the change")
 }

@@ -111,16 +111,19 @@ test-e2e: ## Run the bash end-to-end suites against an installed release.
 # chart installed; the suite installs nothing. The JUnit report is the Go
 # analog of a surefire report; the HTML page is its human rendering. Both are
 # produced whatever the outcome - a red run is exactly when the report
-# matters - and CI uploads them as one artifact.
+# matters - and CI uploads them as one artifact. The recipe shell runs under
+# -e, so every command is guarded with ||: an unguarded ginkgo failure would
+# kill the shell before the report renders.
 .PHONY: test-e2e-go
 test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
 	@mkdir -p "$(E2E_ARTIFACTS)"
-	@NAMESPACE="$(E2E_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
+	@rc=0; NAMESPACE="$(E2E_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
 	  --flake-attempts=2 --poll-progress-after=120s \
 	  --junit-report=e2e-go.xml --output-dir="$(E2E_ARTIFACTS)" \
-	  ./tests/e2e-go; rc=$$?; \
+	  ./tests/e2e-go || rc=$$?; \
 	go run ./tests/e2e-go/report "$(E2E_ARTIFACTS)/e2e-go.xml" "$(E2E_ARTIFACTS)/e2e-go.html" \
-	  && echo "report: $(E2E_ARTIFACTS)/e2e-go.html"; \
+	  && echo "report: $(E2E_ARTIFACTS)/e2e-go.html" \
+	  || echo "report rendering failed" >&2; \
 	exit $$rc
 
 E2E_ARTIFACTS ?= artifacts

@@ -44,10 +44,10 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 			// Warmed before the policy exists: warm-up probes would come out
 			// of the hour-long budget the burst below is about to spend.
 			waitGatewayServes("public-gateway", probePath)
-			since := time.Now()
+			before := storeRebuilds()
 			Expect(apply(newPolicy(policyName, domain,
 				prefixLimits(probePath, "per-path", []string{"path"}, limit, "1h")))).To(Succeed())
-			waitStoreRebuilt(since)
+			waitStoreRebuilt(before)
 
 			window = time.Now()
 			codes := gatewayBurst("public-gateway", probePath, limit+2, nil)

@@ -52,10 +52,10 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 			// restart straddling a boundary cannot hand the budget back
 			// and blame Redis for it.
 			waitGatewayServes("public-gateway", probePath)
-			since := time.Now()
+			before := storeRebuilds()
 			Expect(apply(newPolicy(policyName, domain,
 				prefixLimits(probePath, "total", nil, limit, "1h")))).To(Succeed())
-			waitStoreRebuilt(since)
+			waitStoreRebuilt(before)
 		}
 	})
 	AfterAll(func() {
@@ -120,14 +120,14 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 	It("keeps a spent budget across an operator restart", func() {
 		// This is the whole point of the shared store: an in-process counter
 		// is lost with its pod, so the budget would come back.
-		since := time.Now()
 		rolloutRestart(operatorDeployment())
 
 		// Only the store has to be back, and it is waited for through the
 		// rebuild it logs. Probing the gateway here would be worse than
 		// useless: the budget is spent, so every probe answers 429 and a
-		// warm-up that insists on 2xx would never finish.
-		waitStoreRebuilt(since)
+		// warm-up that insists on 2xx would never finish. The replacement
+		// pod starts a fresh log, so its first rebuild line is the signal.
+		waitStoreRebuilt(0)
 		Expect(gatewayGet("public-gateway", probePath, nil)).To(Equal(429),
 			"the budget came back after a restart; the counters did not outlive the process")
 	})
