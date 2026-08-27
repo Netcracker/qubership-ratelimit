@@ -131,9 +131,22 @@ var _ = Describe("leader election", Ordered, Label("leader"), func() {
 	It("keeps answering checks while the leader is replaced", func() {
 		since := time.Now()
 		time.Sleep(time.Second)
-		var pod corev1.Pod
-		Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: leader}, &pod)).To(Succeed())
-		Expect(k8s.Delete(ctx, &pod)).To(Succeed())
+
+		// The leader is re-resolved here rather than carried over from the
+		// first spec: a helm upgrade in this suite reverts the restartedAt
+		// annotation another suite's rollout restart left on the template,
+		// and that rollover replaces every pod - the one elected there
+		// included. Resolve, verify and delete under one retry so a pod
+		// that dies between the steps only restarts the resolution.
+		Eventually(func(g Gomega) {
+			holder := leaseHolderPod()
+			g.Expect(holder).NotTo(BeEmpty())
+			var pod corev1.Pod
+			g.Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: holder}, &pod)).To(Succeed())
+			g.Expect(k8s.Delete(ctx, &pod)).To(Succeed())
+			leader = holder
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
+			"no live leader to kill")
 
 		// The preStop pause keeps the leaving pod serving until xDS stops
 		// routing to it, so every burst has to stay clean: a dirty one means
