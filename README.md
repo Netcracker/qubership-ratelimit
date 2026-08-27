@@ -231,8 +231,8 @@ make helm-lint          # helm lint against values.schema.json
 
 `make test-e2e-go` runs the Ginkgo suites in `tests/e2e-go/` against a cluster that already has Istio ambient, the two
 gateways, and this chart installed — it installs nothing and uninstalls nothing, so point it at a namespace where the
-release is already deployed. It writes a JUnit report to `artifacts/e2e-go.xml`, which CI uploads as the `e2e-go-report`
-artifact:
+release is already deployed. It writes a JUnit report to `artifacts/e2e-go.xml` and renders it as
+`artifacts/e2e-go.html` (via `tests/e2e-go/report`); CI uploads both as the `e2e-go-report` artifact:
 
 ```bash
 make test-e2e-go E2E_NAMESPACE=core

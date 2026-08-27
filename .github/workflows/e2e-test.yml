@@ -122,17 +122,20 @@ jobs:
           kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/echo.yaml
           kubectl rollout status deployment/e2e-echo -n "${E2E_NAMESPACE}" --timeout=120s
 
-      # The JUnit report is the surefire analog - uploaded below whatever the
+      # The JUnit report is the surefire analog, and the HTML page next to it
+      # is the same run for human eyes - both uploaded below whatever the
       # outcome.
       - name: Run the e2e suites
         run: make test-e2e-go E2E_NAMESPACE="${E2E_NAMESPACE}"
 
-      - name: Upload the e2e JUnit report
+      - name: Upload the e2e report
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: e2e-go-report
-          path: artifacts/e2e-go.xml
+          path: |
+            artifacts/e2e-go.xml
+            artifacts/e2e-go.html
           if-no-files-found: ignore
 
       - name: Dump state on failure

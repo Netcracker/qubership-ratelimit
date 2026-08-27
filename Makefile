@@ -109,14 +109,19 @@ test-e2e: ## Run the bash end-to-end suites against an installed release.
 # The Go end-to-end suites (tests/e2e-go), replacing the bash ones suite by
 # suite. Same contract: the cluster already has Istio, the gateways, and the
 # chart installed; the suite installs nothing. The JUnit report is the Go
-# analog of a surefire report - CI uploads it as an artifact.
+# analog of a surefire report; the HTML page is its human rendering. Both are
+# produced whatever the outcome - a red run is exactly when the report
+# matters - and CI uploads them as one artifact.
 .PHONY: test-e2e-go
 test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
 	@mkdir -p "$(E2E_ARTIFACTS)"
-	NAMESPACE="$(E2E_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
+	@NAMESPACE="$(E2E_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
 	  --flake-attempts=2 --poll-progress-after=120s \
 	  --junit-report=e2e-go.xml --output-dir="$(E2E_ARTIFACTS)" \
-	  ./tests/e2e-go
+	  ./tests/e2e-go; rc=$$?; \
+	go run ./tests/e2e-go/report "$(E2E_ARTIFACTS)/e2e-go.xml" "$(E2E_ARTIFACTS)/e2e-go.html" \
+	  && echo "report: $(E2E_ARTIFACTS)/e2e-go.html"; \
+	exit $$rc
 
 E2E_ARTIFACTS ?= artifacts
 
