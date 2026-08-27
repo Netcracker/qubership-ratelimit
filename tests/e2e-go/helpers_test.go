@@ -118,3 +118,69 @@ func printedRow(resource, name string) string {
 	}
 	return strings.Join(cells, " ")
 }
+
+// --- Shared fixtures: the Go form of the bash apply_policy/apply_mapping. ---
+
+func typeMetaFor(kind string) metav1.TypeMeta {
+	return metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: kind}
+}
+
+func newPolicy(name, domain string, limits []v1alpha1.LimitBlock) *v1alpha1.RateLimitPolicy {
+	return &v1alpha1.RateLimitPolicy{
+		TypeMeta:   typeMetaFor("RateLimitPolicy"),
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec:       v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: limits},
+	}
+}
+
+// totalLimits is the bash apply_policy body: one block, one unconditional
+// rule, one fixed window.
+func totalLimits(requests int32, period string) []v1alpha1.LimitBlock {
+	return []v1alpha1.LimitBlock{{Name: "everything", Rules: []v1alpha1.Rule{{
+		Name:  "total",
+		Rates: []v1alpha1.Rate{{Requests: requests, Period: period, Algorithm: v1alpha1.AlgorithmFixedWindow}},
+	}}}}
+}
+
+// prefixLimits is totalLimits scoped to a path prefix, in a block named
+// probe. Ginkgo shuffles the top-level containers, so a suite whose window
+// outlives its own run - the hour-long redis and metrics budgets - must not
+// see traffic the other suites send; a domain-wide block would.
+func prefixLimits(prefix, rule string, counters []string, requests int32, period string) []v1alpha1.LimitBlock {
+	return []v1alpha1.LimitBlock{{
+		Name: "probe",
+		Target: &v1alpha1.Target{Routes: []v1alpha1.Route{{
+			Path: v1alpha1.PathMatch{Type: v1alpha1.PathMatchPrefix, Value: prefix},
+		}}},
+		Rules: []v1alpha1.Rule{{
+			Name:     rule,
+			Counters: counters,
+			Rates:    []v1alpha1.Rate{{Requests: requests, Period: period, Algorithm: v1alpha1.AlgorithmFixedWindow}},
+		}},
+	}}
+}
+
+func deletePolicies(names ...string) {
+	for _, name := range names {
+		_ = k8s.Delete(ctx, newPolicy(name, "unused", nil))
+	}
+}
+
+// nextWindow sleeps into the first tenth of the next wall-clock second.
+// FixedWindow buckets align to the clock, so a burst that starts here owns
+// its whole one-second window; without this a warm-up probe or an earlier
+// attempt of the same spec lands in the same second and spends the budget
+// the burst is about to count. The bash suites never needed it - every curl
+// paid seconds of port-forward setup between steps.
+func nextWindow() {
+	now := time.Now()
+	time.Sleep(now.Truncate(time.Second).Add(1100 * time.Millisecond).Sub(now))
+}
+
+// waitStoreRebuilt is the bash wait_for_domain: the store updater logs one
+// line per rebuild, and that line is the only signal the running pod saw the
+// event.
+func waitStoreRebuilt(since time.Time) {
+	Eventually(operatorLogsSince(since)).Should(ContainSubstring("rate limit store rebuilt"),
+		"the store never rebuilt after the change")
+}

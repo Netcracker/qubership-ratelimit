@@ -29,22 +29,6 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		domain     = "gateway.e2e"
 	)
 
-	typeMeta := func(kind string) metav1.TypeMeta {
-		return metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: kind}
-	}
-	newPolicy := func(name string, limits []v1alpha1.LimitBlock) *v1alpha1.RateLimitPolicy {
-		return &v1alpha1.RateLimitPolicy{
-			TypeMeta:   typeMeta("RateLimitPolicy"),
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
-			Spec:       v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: limits},
-		}
-	}
-	oneTotalRule := func(requests int32, period string) []v1alpha1.LimitBlock {
-		return []v1alpha1.LimitBlock{{Name: "everything", Rules: []v1alpha1.Rule{{
-			Name:  "total",
-			Rates: []v1alpha1.Rate{{Requests: requests, Period: period, Algorithm: v1alpha1.AlgorithmFixedWindow}},
-		}}}}
-	}
 	tenantRule := func() []v1alpha1.LimitBlock {
 		return []v1alpha1.LimitBlock{{Name: "api", Rules: []v1alpha1.Rule{{
 			Name:  "per-tenant",
@@ -54,9 +38,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	}
 
 	AfterAll(func() {
-		for _, name := range []string{policyName, deadRule} {
-			_ = k8s.Delete(ctx, newPolicy(name, nil))
-		}
+		deletePolicies(policyName, deadRule)
 		_ = k8s.Delete(ctx, &v1alpha1.RateLimitMapping{
 			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: domain}})
 	})
@@ -66,7 +48,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	// would accept every spec below and the operator would compile nonsense.
 	DescribeTable("the installed CRD rejects",
 		func(mutate func(*v1alpha1.RateLimitPolicy)) {
-			p := newPolicy("e2e-policy-invalid", oneTotalRule(1, "1s"))
+			p := newPolicy("e2e-policy-invalid", domain, totalLimits(1, "1s"))
 			mutate(p)
 			err := k8s.Create(ctx, p, client.DryRunAll)
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid rejection, got: %v", err)
@@ -87,7 +69,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	)
 
 	It("accepts a valid policy and tracks its generation", func() {
-		Expect(apply(newPolicy(policyName, oneTotalRule(1, "1s")))).To(Succeed())
+		Expect(apply(newPolicy(policyName, domain, totalLimits(1, "1s")))).To(Succeed())
 		Eventually(policyCondition(policyName, v1alpha1.ConditionAccepted)).Should(Equal("True"),
 			"policy not accepted; is a reconciler holding the lease?")
 
@@ -109,7 +91,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	It("reports a rule nothing can produce a key for, and blocks its generation", func() {
 		// A typo in a key has to give a rule that does nothing. The status is
 		// where that becomes visible, and the mapping is what revives it.
-		Expect(apply(newPolicy(deadRule, tenantRule()))).To(Succeed())
+		Expect(apply(newPolicy(deadRule, domain, tenantRule()))).To(Succeed())
 
 		Eventually(func() string {
 			p, err := getPolicy(deadRule)
@@ -131,7 +113,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 
 	It("revives that policy when a mapping declares the key", func() {
 		Expect(apply(&v1alpha1.RateLimitMapping{
-			TypeMeta:   typeMeta("RateLimitMapping"),
+			TypeMeta:   typeMetaFor("RateLimitMapping"),
 			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: domain},
 			Spec: v1alpha1.RateLimitMappingSpec{
 				Domain: domain,
@@ -212,7 +194,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 
 	It("rebuilds the store in the running pod when a policy is deleted", func() {
 		since := time.Now().Add(-time.Second)
-		Expect(k8s.Delete(ctx, newPolicy(policyName, nil))).To(Succeed())
+		Expect(k8s.Delete(ctx, newPolicy(policyName, domain, nil))).To(Succeed())
 		Eventually(operatorLogsSince(since)).Should(ContainSubstring("rate limit store rebuilt"),
 			"no store rebuild logged after the policy was deleted")
 	})

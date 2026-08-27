@@ -2,7 +2,8 @@
 #
 # Stands up a kind cluster with the platform's own mesh — qubership-istio for
 # the distribution and qubership-core-mesh-config for the gateways — installs
-# the chart with an image built from the checked-out sources, and runs tests/e2e.
+# the chart with an image built from the checked-out sources, and runs the
+# Ginkgo suites in tests/e2e-go.
 
 name: E2E
 
@@ -121,16 +122,10 @@ jobs:
           kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/echo.yaml
           kubectl rollout status deployment/e2e-echo -n "${E2E_NAMESPACE}" --timeout=120s
 
-      # The Go suites replace the bash ones suite by suite; both run against
-      # the same installed release. The JUnit report is the surefire analog -
-      # uploaded below whatever the outcome.
-      - name: Run the Go e2e suites (policy)
+      # The JUnit report is the surefire analog - uploaded below whatever the
+      # outcome.
+      - name: Run the e2e suites
         run: make test-e2e-go E2E_NAMESPACE="${E2E_NAMESPACE}"
-
-      # Everything not ported yet. The [!p]* glob excludes the ported policy
-      # suite (lib/ carries no test.sh and is skipped by the runner).
-      - name: Run the bash e2e suites not yet ported
-        run: make test-e2e E2E_NAMESPACE="${E2E_NAMESPACE}" E2E_TEST='[!p]*'
 
       - name: Upload the e2e JUnit report
         if: always()

@@ -229,15 +229,16 @@ make lint               # golangci-lint
 make helm-lint          # helm lint against values.schema.json
 ```
 
-`make test-e2e` runs the suite in `tests/e2e/` against a cluster that already has Istio ambient, the two gateways, and
-this chart installed — it installs nothing and uninstalls nothing, so point it at a namespace where the release is
-already deployed:
+`make test-e2e-go` runs the Ginkgo suites in `tests/e2e-go/` against a cluster that already has Istio ambient, the two
+gateways, and this chart installed — it installs nothing and uninstalls nothing, so point it at a namespace where the
+release is already deployed. It writes a JUnit report to `artifacts/e2e-go.xml`, which CI uploads as the `e2e-go-report`
+artifact:
 
 ```bash
-make test-e2e E2E_NAMESPACE=core
+make test-e2e-go E2E_NAMESPACE=core
 ```
 
-`tests/e2e/redis/` is the exception to "run everything": it asserts what only a
+The `redis` suite is the exception to "run everything": it asserts what only a
 shared counter store can do — that the operator selected Redis rather than
 falling back, that the counters carry the documented key, and that a spent budget
 survives the process that spent it. An install without `redis.addresses` is a
