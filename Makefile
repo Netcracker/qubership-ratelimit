@@ -103,8 +103,22 @@ test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, inc
 # with Istio ambient, the gateways, and this chart already installed. It changes
 # no release: install first, then run.
 .PHONY: test-e2e
-test-e2e: ## Run the end-to-end suite against an installed release.
+test-e2e: ## Run the bash end-to-end suites against an installed release.
 	NAMESPACE="$(E2E_NAMESPACE)" bash tests/e2e/test-suite.sh '$(E2E_TEST)'
+
+# The Go end-to-end suites (tests/e2e-go), replacing the bash ones suite by
+# suite. Same contract: the cluster already has Istio, the gateways, and the
+# chart installed; the suite installs nothing. The JUnit report is the Go
+# analog of a surefire report - CI uploads it as an artifact.
+.PHONY: test-e2e-go
+test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
+	@mkdir -p "$(E2E_ARTIFACTS)"
+	NAMESPACE="$(E2E_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
+	  --flake-attempts=2 --poll-progress-after=120s \
+	  --junit-report=e2e-go.xml --output-dir="$(E2E_ARTIFACTS)" \
+	  ./tests/e2e-go
+
+E2E_ARTIFACTS ?= artifacts
 
 E2E_NAMESPACE ?= core
 E2E_TEST ?= *
@@ -185,10 +199,15 @@ KUBECTL ?= kubectl
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GINKGO = $(LOCALBIN)/ginkgo
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
 GOLANGCI_LINT_VERSION ?= v2.8.0
+
+# The ginkgo CLI version follows go.mod, so the runner and the library cannot
+# drift apart.
+GINKGO_VERSION ?= $(call gomodver,github.com/onsi/ginkgo/v2)
 
 # Both versions are derived from go.mod so that the envtest control plane cannot
 # drift from the client libraries the service is built against.
@@ -224,6 +243,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: ginkgo
+ginkgo: $(GINKGO) ## Download the ginkgo CLI locally if necessary.
+$(GINKGO): $(LOCALBIN)
+	$(call go-install-tool,$(GINKGO),github.com/onsi/ginkgo/v2/ginkgo,$(GINKGO_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

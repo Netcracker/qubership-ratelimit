@@ -121,8 +121,24 @@ jobs:
           kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/echo.yaml
           kubectl rollout status deployment/e2e-echo -n "${E2E_NAMESPACE}" --timeout=120s
 
-      - name: Run e2e tests
-        run: make test-e2e E2E_NAMESPACE="${E2E_NAMESPACE}"
+      # The Go suites replace the bash ones suite by suite; both run against
+      # the same installed release. The JUnit report is the surefire analog -
+      # uploaded below whatever the outcome.
+      - name: Run the Go e2e suites (policy)
+        run: make test-e2e-go E2E_NAMESPACE="${E2E_NAMESPACE}"
+
+      # Everything not ported yet. The [!p]* glob excludes the ported policy
+      # suite (lib/ carries no test.sh and is skipped by the runner).
+      - name: Run the bash e2e suites not yet ported
+        run: make test-e2e E2E_NAMESPACE="${E2E_NAMESPACE}" E2E_TEST='[!p]*'
+
+      - name: Upload the e2e JUnit report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-go-report
+          path: artifacts/e2e-go.xml
+          if-no-files-found: ignore
 
       - name: Dump state on failure
         if: failure()
