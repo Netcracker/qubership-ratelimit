@@ -139,14 +139,14 @@ jobs:
             artifacts/e2e-go.html
           if-no-files-found: ignore
 
-      # The verdict goes to the configured mailing list with the HTML report
-      # attached. Recipients live in the EMAIL_TO repository variable, and an
-      # empty one turns the step off; connection settings come from the
-      # organization's EMAIL_* variables. Mail is a courtesy, not a gate, so
-      # the step never fails the run. Pull request runs stay quiet: the list
-      # follows branch health, not every iteration of a review.
+      # The verdict of every run goes to the configured mailing list with the
+      # HTML report attached. Recipients live in the EMAIL_TO repository
+      # variable, and an empty one turns the step off; connection settings
+      # come from the organization's EMAIL_* variables. Mail is a courtesy,
+      # not a gate, so the step never fails the run - on a pull request from
+      # a fork it quietly does nothing, since forks see no secrets.
       - name: Email the e2e report
-        if: always() && github.event_name != 'pull_request' && vars.EMAIL_TO != ''
+        if: always() && vars.EMAIL_TO != ''
         continue-on-error: true
         uses: netcracker/qubership-workflow-hub/actions/email-action@27fd7674286e5f561a6fd8277f2f389ff96ddb9e # v2.6.0
         env:
@@ -157,7 +157,7 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ vars.EMAIL_TO }}
         with:
-          subject: "[e2e] ${{ steps.e2e.outcome }} - ${{ github.repository }} (${{ github.ref_name }})"
+          subject: "[e2e] ${{ steps.e2e.outcome }} - ${{ github.repository }} (${{ github.head_ref || github.ref_name }})"
           body: |
             The e2e run finished with outcome: ${{ steps.e2e.outcome }}.
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
