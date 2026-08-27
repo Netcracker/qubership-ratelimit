@@ -56,6 +56,14 @@ jobs:
       - name: Load the image into kind
         run: kind load docker-image "${IMAGE}" --name ratelimit-e2e
 
+      # Captures every pod's stdout from here on - including pods the suites
+      # kill, whose logs kubectl cannot show afterwards. Collected and
+      # uploaded at the end of the job.
+      - name: Deploy the log capture
+        run: |
+          kubectl apply -f tests/e2e/manifests/fluent-bit.yaml
+          kubectl rollout status daemonset/fluent-bit -n logging --timeout=120s
+
       - name: Install Gateway API CRDs
         run: |
           kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
@@ -164,6 +172,19 @@ jobs:
             The HTML report of the run is attached.
           attachments: artifacts/e2e-go.html
           priority: ${{ steps.e2e.outcome == 'success' && 'normal' || 'high' }}
+
+      - name: Collect the pod logs
+        id: pod_logs
+        if: always()
+        run: .github/scripts/collect-e2e-pod-logs.sh
+
+      - name: Upload the pod logs
+        if: always() && steps.pod_logs.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-pod-logs
+          path: pod-logs/
+          if-no-files-found: warn
 
       - name: Dump state on failure
         if: failure()
