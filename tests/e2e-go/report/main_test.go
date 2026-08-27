@@ -43,7 +43,7 @@ func TestBuildGroupsAndCounts(t *testing.T) {
 		t.Fatalf("verdict = %q", rep.Verdict)
 	}
 
-	var labels []string
+	labels := make([]string, 0, len(rep.Groups))
 	for _, g := range rep.Groups {
 		labels = append(labels, g.Label)
 	}
@@ -74,7 +74,7 @@ func TestBuildCarriesFailureDetail(t *testing.T) {
 	rep := parse(t, redRun)
 
 	setup := rep.Groups[0].Specs[0]
-	if setup.State != "fail" || !strings.Contains(setup.Detail, "no Deployment") {
+	if setup.State != stateFail || !strings.Contains(setup.Detail, "no Deployment") {
 		t.Fatalf("setup spec = %+v", setup)
 	}
 }

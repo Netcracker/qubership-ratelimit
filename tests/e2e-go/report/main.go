@@ -35,9 +35,17 @@ type outcome struct {
 	Body    string `xml:",chardata"`
 }
 
+// The three states a spec renders in; the template's CSS classes carry the
+// same names.
+const (
+	statePass = "pass"
+	stateFail = "fail"
+	stateSkip = "skip"
+)
+
 type spec struct {
 	Name    string
-	State   string // pass, fail, skip
+	State   string // statePass, stateFail, stateSkip
 	Seconds float64
 	Detail  string
 	BarPct  float64
@@ -105,14 +113,14 @@ func build(file junitFile) report {
 			rep.Timestamp = suite.Timestamp
 		}
 		for _, c := range suite.Cases {
-			s := spec{Name: c.Name, Seconds: c.Time, State: "pass"}
+			s := spec{Name: c.Name, Seconds: c.Time, State: statePass}
 			switch {
 			case c.Failure != nil:
-				s.State, s.Detail = "fail", detail(c.Failure)
+				s.State, s.Detail = stateFail, detail(c.Failure)
 			case c.Error != nil:
-				s.State, s.Detail = "fail", detail(c.Error)
+				s.State, s.Detail = stateFail, detail(c.Error)
 			case c.Skipped != nil:
-				s.State, s.Detail = "skip", detail(c.Skipped)
+				s.State, s.Detail = stateSkip, detail(c.Skipped)
 			}
 
 			label := "other"
@@ -120,7 +128,7 @@ func build(file junitFile) report {
 				s.Name = rest
 			} else {
 				// A setup or reporting node. Only a red one carries news.
-				if s.State != "fail" {
+				if s.State != stateFail {
 					continue
 				}
 				label = "setup"
@@ -131,9 +139,9 @@ func build(file junitFile) report {
 			}
 
 			switch s.State {
-			case "fail":
+			case stateFail:
 				rep.Failed++
-			case "skip":
+			case stateSkip:
 				rep.Skipped++
 			default:
 				rep.Passed++
@@ -285,7 +293,10 @@ var page = template.Must(template.New("report").Funcs(template.FuncMap{
     display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
     border-bottom: 2px solid var(--ink); padding-bottom: 8px;
   }
-  .suite-meta { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .suite-meta {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px;
+    color: var(--muted); white-space: nowrap;
+  }
   ul { list-style: none; margin: 0; padding: 0; }
   li { border-bottom: 1px solid var(--line); padding: 8px 2px; }
   .row { display: grid; grid-template-columns: 14px 1fr 76px 120px; gap: 12px; align-items: center; }
@@ -312,7 +323,8 @@ var page = template.Must(template.New("report").Funcs(template.FuncMap{
   <h1>ratelimit e2e</h1>
   <p class="stamp">{{.Timestamp}}</p>
   <p class="verdict {{if .Failed}}fail{{else}}pass{{end}}">{{.Verdict}}</p>
-  <p class="totals">{{.Passed}} passed &middot; {{.Failed}} failed &middot; {{.Skipped}} skipped &middot; {{duration .Seconds}} in specs</p>
+  <p class="totals">{{.Passed}} passed &middot; {{.Failed}} failed &middot;
+    {{.Skipped}} skipped &middot; {{duration .Seconds}} in specs</p>
   {{range .Groups}}
   <section class="suite">
     <div class="suite-head">
