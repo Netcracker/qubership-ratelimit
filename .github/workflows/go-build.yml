@@ -79,6 +79,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # make lint builds golangci-lint from source with `go install`, and a
+      # binary built by an older Go refuses to target this module's version -
+      # so the job needs exactly the toolchain go.mod declares, not whatever
+      # the runner has preinstalled.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       # Whole-module runs with the Makefile's pinned golangci-lint. This is
       # the linting GO_MODULES would do, minus its per-directory mode, which
       # cannot cope with a module whose root holds no .go files.
