@@ -34,6 +34,21 @@ var _ = Describe("an unknown domain", Ordered, Label("unknown-domain"), func() {
 				"%s claims %s; this suite needs the domain unclaimed", p.Name, domain)
 		}
 		waitGatewayServes("private-gateway", probePath)
+
+		// The check above reads the API; the engines lag it by a debounced
+		// rebuild. Right after another suite deletes its policy for this
+		// domain, a probe can still be refused by the snapshot that policy
+		// lived in - so wait until a probe demonstrably lands in the
+		// unknown-domain counter before measuring anything.
+		Eventually(func() bool {
+			before := counterSum(scrapeAllReplicas(), "ratelimit_unknown_domain_checks_total", nil)
+			code := gatewayGet("private-gateway", probePath, nil)
+			if (code < 200 || code > 299) && code != 404 {
+				return false
+			}
+			return counterSum(scrapeAllReplicas(), "ratelimit_unknown_domain_checks_total", nil) > before
+		}).WithTimeout(time.Minute).WithPolling(2*time.Second).Should(BeTrue(),
+			"the engines never started treating %s as unknown", domain)
 	})
 
 	It("passes the traffic, counted and named", func() {
