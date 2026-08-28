@@ -32,3 +32,6 @@ go.work
 
 # APM dependencies
 apm_modules/
+
+# e2e reports
+artifacts/

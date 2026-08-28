@@ -99,15 +99,28 @@ test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, inc
 	@echo "Running tests with KUBEBUILDER_ASSETS=$$("$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)"
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $(TEST_PKGS) -coverprofile cover.out
 
-# The e2e suite drives real traffic through the gateways, so it needs a cluster
-# with Istio ambient, the gateways, and this chart already installed. It changes
-# no release: install first, then run.
-.PHONY: test-e2e
-test-e2e: ## Run the end-to-end suite against an installed release.
-	NAMESPACE="$(E2E_NAMESPACE)" bash tests/e2e/test-suite.sh '$(E2E_TEST)'
+# The e2e suites (tests/e2e-go) drive real traffic through the gateways, so
+# they need a cluster with Istio ambient, the gateways, and this chart already
+# installed; the suite installs nothing and changes no release. The JUnit
+# report is the Go analog of a surefire report; the HTML page is its human
+# rendering. Both are produced whatever the outcome - a red run is exactly
+# when the report matters - and CI uploads them as one artifact. The recipe
+# shell runs under -e, so every command is guarded with ||: an unguarded
+# ginkgo failure would kill the shell before the report renders.
+.PHONY: test-e2e-go
+test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
+	@mkdir -p "$(E2E_ARTIFACTS)"
+	@rc=0; NAMESPACE="$(E2E_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
+	  --flake-attempts=2 --poll-progress-after=120s \
+	  --junit-report=e2e-go.xml --output-dir="$(E2E_ARTIFACTS)" \
+	  ./tests/e2e-go || rc=$$?; \
+	go run ./tests/e2e-go/report "$(E2E_ARTIFACTS)/e2e-go.xml" "$(E2E_ARTIFACTS)/e2e-go.html" \
+	  && echo "report: $(E2E_ARTIFACTS)/e2e-go.html" \
+	  || echo "report rendering failed" >&2; \
+	exit $$rc
 
+E2E_ARTIFACTS ?= artifacts
 E2E_NAMESPACE ?= core
-E2E_TEST ?= *
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter, the engine module included.
@@ -185,10 +198,15 @@ KUBECTL ?= kubectl
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GINKGO = $(LOCALBIN)/ginkgo
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
 GOLANGCI_LINT_VERSION ?= v2.8.0
+
+# The ginkgo CLI version follows go.mod, so the runner and the library cannot
+# drift apart.
+GINKGO_VERSION ?= $(call gomodver,github.com/onsi/ginkgo/v2)
 
 # Both versions are derived from go.mod so that the envtest control plane cannot
 # drift from the client libraries the service is built against.
@@ -224,6 +242,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: ginkgo
+ginkgo: $(GINKGO) ## Download the ginkgo CLI locally if necessary.
+$(GINKGO): $(LOCALBIN)
+	$(call go-install-tool,$(GINKGO),github.com/onsi/ginkgo/v2/ginkgo,$(GINKGO_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

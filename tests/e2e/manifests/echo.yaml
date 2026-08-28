@@ -64,8 +64,12 @@ kind: HTTPRoute
 metadata:
   name: e2e-echo
 spec:
+  # Both gateways route the probes: the independence test sends through the
+  # private gateway, and without a route its answer would be the mesh
+  # fallback's 503, which says nothing about rate limiting.
   parentRefs:
     - name: public-gateway
+    - name: private-gateway
   rules:
     - matches:
         # PathPrefix matches whole path segments, so /e2e- would never match
@@ -76,6 +80,9 @@ spec:
         - path:
             type: PathPrefix
             value: /e2e-ratelimit
+        - path:
+            type: PathPrefix
+            value: /e2e-redis
         - path:
             type: PathPrefix
             value: /e2e
