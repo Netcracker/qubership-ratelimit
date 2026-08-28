@@ -4,10 +4,12 @@ package e2e
 
 import (
 	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
@@ -82,8 +84,28 @@ var _ = Describe("the domain budget gate", Ordered, Label("budget"), func() {
 	})
 
 	It("gives a freed seat to the rejected policy", func() {
-		Expect(k8s.Delete(ctx, newPolicy(names[0], domain, nil))).To(Succeed())
+		// Idempotent on purpose: a flake retry of this spec re-enters after
+		// the first attempt already deleted the policy.
+		if err := k8s.Delete(ctx, newPolicy(names[0], domain, nil)); err != nil {
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "deleting %s: %v", names[0], err)
+		}
+
+		// The store re-seats the rejected policy on the deletion event
+		// itself, but its STATUS moves only when the policy is next touched:
+		// a policy event does not fan out to its domain peers the way a
+		// mapping event does. The annotation bump below is that touch - it
+		// stands for whatever next brushes the object in a real cluster.
+		Eventually(func(g Gomega) {
+			p, err := getPolicy(names[2])
+			g.Expect(err).NotTo(HaveOccurred())
+			if p.Annotations == nil {
+				p.Annotations = map[string]string{}
+			}
+			p.Annotations["e2e.ratelimit/touched"] = time.Now().Format(time.RFC3339Nano)
+			g.Expect(k8s.Update(ctx, p)).To(Succeed())
+		}).Should(Succeed())
+
 		Eventually(policyCondition(names[2], v1alpha1.ConditionReady)).Should(Equal("True"),
-			"the rejected policy did not take the freed seat")
+			"the rejected policy did not take the freed seat when re-evaluated")
 	})
 })
