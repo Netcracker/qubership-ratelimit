@@ -290,6 +290,21 @@ func TestPoliciesOfDomain_ignoresAnotherDomain(t *testing.T) {
 	assert.Empty(t, requests)
 }
 
+func TestPeersOfDomain_returnsTheDomainWithoutTheChangedPolicy(t *testing.T) {
+	changed := testPolicy(1)
+	peer := testPolicy(1)
+	peer.Name = "peer"
+	foreign := testPolicy(1)
+	foreign.Name = "foreign"
+	foreign.Spec.Domain = "gateway.private"
+	reconciler, _ := newReconciler(t, changed, peer, foreign)
+
+	requests := reconciler.peersOfDomain(context.Background(), changed)
+
+	require.Len(t, requests, 1)
+	assert.Equal(t, "peer", requests[0].Name)
+}
+
 func TestReconcile_ignoresADeletedPolicy(t *testing.T) {
 	// There are no finalizers, and the store updater drops the policy on the same
 	// informer event, so a missing object needs no cleanup and no requeue.

@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"fmt"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -90,22 +89,9 @@ var _ = Describe("the domain budget gate", Ordered, Label("budget"), func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "deleting %s: %v", names[0], err)
 		}
 
-		// The store re-seats the rejected policy on the deletion event
-		// itself, but its STATUS moves only when the policy is next touched:
-		// a policy event does not fan out to its domain peers the way a
-		// mapping event does. The annotation bump below is that touch - it
-		// stands for whatever next brushes the object in a real cluster.
-		Eventually(func(g Gomega) {
-			p, err := getPolicy(names[2])
-			g.Expect(err).NotTo(HaveOccurred())
-			if p.Annotations == nil {
-				p.Annotations = map[string]string{}
-			}
-			p.Annotations["e2e.ratelimit/touched"] = time.Now().Format(time.RFC3339Nano)
-			g.Expect(k8s.Update(ctx, p)).To(Succeed())
-		}).Should(Succeed())
-
+		// The deletion event fans out to the domain's peers, so the freed
+		// seat reaches the rejected policy's status with no further touch.
 		Eventually(policyCondition(names[2], v1alpha1.ConditionReady)).Should(Equal("True"),
-			"the rejected policy did not take the freed seat when re-evaluated")
+			"the rejected policy did not take the freed seat")
 	})
 })
