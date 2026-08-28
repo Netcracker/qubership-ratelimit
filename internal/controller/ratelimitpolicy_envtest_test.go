@@ -8,8 +8,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
@@ -587,5 +589,23 @@ var _ = Describe("RateLimitMapping", func() {
 		})
 
 		Expect(err).NotTo(HaveOccurred())
+	})
+})
+
+var _ = Describe("SetupWithManager", func() {
+	// The builder chain - watches, predicates, the named controller - runs at
+	// registration, and registration needs a real manager. The manager is
+	// never started: what these lines can get wrong fails right here.
+	It("registers both controllers with a manager", func() {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:  clientgoscheme.Scheme,
+			Metrics: metricsserver.Options{BindAddress: "0"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect((&RateLimitPolicyReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).
+			SetupWithManager(mgr)).To(Succeed())
+		Expect((&RateLimitMappingReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).
+			SetupWithManager(mgr)).To(Succeed())
 	})
 })

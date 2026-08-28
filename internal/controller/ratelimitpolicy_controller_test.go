@@ -16,15 +16,17 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
 const (
-	testNamespace = "biz"
-	testName      = "public-gateway"
-	testDomain    = "gateway.public"
+	testNamespace   = "biz"
+	testName        = "public-gateway"
+	testDomain      = "gateway.public"
+	testOtherDomain = "gateway.private"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -137,7 +139,7 @@ func TestReconcile_tracksANewGeneration(t *testing.T) {
 
 	stored := fetch(t, fakeClient)
 	stored.Generation = 2
-	stored.Spec.Domain = "gateway.private"
+	stored.Spec.Domain = testOtherDomain
 	require.NoError(t, fakeClient.Update(context.Background(), stored))
 
 	_, err = reconciler.Reconcile(context.Background(), testRequest())
@@ -147,7 +149,7 @@ func TestReconcile_tracksANewGeneration(t *testing.T) {
 	assert.Equal(t, int64(2), updated.Status.ObservedGeneration)
 	accepted := condition(t, updated.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
 	assert.Equal(t, int64(2), accepted.ObservedGeneration)
-	assert.Contains(t, accepted.Message, "gateway.private")
+	assert.Contains(t, accepted.Message, testOtherDomain)
 }
 
 func TestReconcile_aBlockingProblemKeepsTheGenerationOut(t *testing.T) {
@@ -283,8 +285,8 @@ func TestPoliciesOfDomain_ignoresAnotherDomain(t *testing.T) {
 	reconciler, _ := newReconciler(t, testPolicy(1))
 
 	requests := reconciler.policiesOfDomain(context.Background(), &ratelimitv1alpha1.RateLimitMapping{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "gateway.private"},
-		Spec:       ratelimitv1alpha1.RateLimitMappingSpec{Domain: "gateway.private"},
+		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testOtherDomain},
+		Spec:       ratelimitv1alpha1.RateLimitMappingSpec{Domain: testOtherDomain},
 	})
 
 	assert.Empty(t, requests)
@@ -296,13 +298,37 @@ func TestPeersOfDomain_returnsTheDomainWithoutTheChangedPolicy(t *testing.T) {
 	peer.Name = "peer"
 	foreign := testPolicy(1)
 	foreign.Name = "foreign"
-	foreign.Spec.Domain = "gateway.private"
+	foreign.Spec.Domain = testOtherDomain
 	reconciler, _ := newReconciler(t, changed, peer, foreign)
 
 	requests := reconciler.peersOfDomain(context.Background(), changed)
 
 	require.Len(t, requests, 1)
 	assert.Equal(t, "peer", requests[0].Name)
+}
+
+func TestPeersOfDomain_ignoresAnythingButAPolicy(t *testing.T) {
+	reconciler, _ := newReconciler(t)
+
+	requests := reconciler.peersOfDomain(context.Background(),
+		&ratelimitv1alpha1.RateLimitMapping{})
+
+	assert.Empty(t, requests)
+}
+
+func TestPeersOfDomain_returnsNothingWhenTheListFails(t *testing.T) {
+	scheme := testScheme(t)
+	failing := fake.NewClientBuilder().WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return fmt.Errorf("the API server is away")
+			},
+		}).Build()
+	reconciler := &RateLimitPolicyReconciler{Client: failing, Scheme: scheme}
+
+	requests := reconciler.peersOfDomain(context.Background(), testPolicy(1))
+
+	assert.Empty(t, requests)
 }
 
 func TestReconcile_ignoresADeletedPolicy(t *testing.T) {
