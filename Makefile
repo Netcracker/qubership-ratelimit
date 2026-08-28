@@ -99,21 +99,14 @@ test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, inc
 	@echo "Running tests with KUBEBUILDER_ASSETS=$$("$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)"
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $(TEST_PKGS) -coverprofile cover.out
 
-# The e2e suite drives real traffic through the gateways, so it needs a cluster
-# with Istio ambient, the gateways, and this chart already installed. It changes
-# no release: install first, then run.
-.PHONY: test-e2e
-test-e2e: ## Run the bash end-to-end suites against an installed release.
-	NAMESPACE="$(E2E_NAMESPACE)" bash tests/e2e/test-suite.sh '$(E2E_TEST)'
-
-# The Go end-to-end suites (tests/e2e-go), replacing the bash ones suite by
-# suite. Same contract: the cluster already has Istio, the gateways, and the
-# chart installed; the suite installs nothing. The JUnit report is the Go
-# analog of a surefire report; the HTML page is its human rendering. Both are
-# produced whatever the outcome - a red run is exactly when the report
-# matters - and CI uploads them as one artifact. The recipe shell runs under
-# -e, so every command is guarded with ||: an unguarded ginkgo failure would
-# kill the shell before the report renders.
+# The e2e suites (tests/e2e-go) drive real traffic through the gateways, so
+# they need a cluster with Istio ambient, the gateways, and this chart already
+# installed; the suite installs nothing and changes no release. The JUnit
+# report is the Go analog of a surefire report; the HTML page is its human
+# rendering. Both are produced whatever the outcome - a red run is exactly
+# when the report matters - and CI uploads them as one artifact. The recipe
+# shell runs under -e, so every command is guarded with ||: an unguarded
+# ginkgo failure would kill the shell before the report renders.
 .PHONY: test-e2e-go
 test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
 	@mkdir -p "$(E2E_ARTIFACTS)"
@@ -127,9 +120,7 @@ test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release
 	exit $$rc
 
 E2E_ARTIFACTS ?= artifacts
-
 E2E_NAMESPACE ?= core
-E2E_TEST ?= *
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter, the engine module included.
