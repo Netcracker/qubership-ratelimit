@@ -1,0 +1,22 @@
+{{- if .Values.MONITORING_ENABLED }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ printf "%s-pod-monitor" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/processed-by-operator: victoriametrics-operator
+spec:
+  podMetricsEndpoints:
+    - interval: 30s
+      port: metrics
+      scheme: http
+      path: /metrics
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+{{- end }}

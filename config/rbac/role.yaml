@@ -1,0 +1,36 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: manager-role
+  namespace: ratelimit-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+- apiGroups:
+  - ratelimit.netcracker.com
+  resources:
+  - ratelimitmappings
+  - ratelimitpolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ratelimit.netcracker.com
+  resources:
+  - ratelimitmappings/status
+  - ratelimitpolicies/status
+  verbs:
+  - get
+  - patch
+  - update

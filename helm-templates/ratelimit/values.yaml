@@ -1,0 +1,144 @@
+# ============== IMAGE ============================
+image:
+  repository: ghcr.io/netcracker/ratelimit
+  # Empty takes the chart's appVersion, which is a fixed release. A floating tag
+  # such as "latest" moves under a running workload, so two pods of one rollout
+  # can end up on different builds.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# ============== SERVICE ============================
+# Components this Deployment runs: all, controller or rls. Controller and RLS
+# engine share one binary today; the flag exists so that splitting them into two
+# Deployments is a values change rather than a code change.
+mode: all
+
+# REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
+# the resource profile, not here — one source of truth, so the defaults cannot
+# drift away from the profiles. values.schema.json requires them, so installing
+# without `-f resource-profiles/<profile>.yaml` fails with a clear message
+# instead of rendering a Deployment with empty resources.
+#
+# Every replica answers rate limit checks; only status writes are leader-gated,
+# so scaling REPLICAS out needs no other change. GOMEMLIMIT is derived from
+# MEMORY_LIMIT, so it governs the Go heap and not only the cgroup ceiling.
+
+# Leader election gates status writes only. The rate limit endpoint and its rule
+# store run on every replica, so scaling out does not depend on this setting.
+leaderElect: true
+
+# Passed as LOGGING_LEVEL_ROOT: the platform logger resolves its root level
+# from the logging.level.root property; LOG_LEVEL only applies before the
+# configloader is initialized.
+logLevel: info
+
+# ============== RATE LIMIT SERVICE ============================
+# timeout, failClosed, rateLimitedStatus and grpcAsResourceExhausted are the
+# install-wide defaults; each gateway may override any of them under
+# gateways.<role>.
+rls:
+  port: 9000
+  timeout: 0.05s
+  # What an unreachable limiter means for the traffic of a gateway. It is a
+  # gateway decision rather than a service one, which is why it renders on the
+  # filter: false keeps the traffic flowing unlimited, true rejects it with a
+  # 503. A public gateway usually prefers flowing, a private one may prefer
+  # rejecting — that is what the per-gateway override is for.
+  failClosed: false
+  # Status the client sees on a refused request. Envoy ignores values below
+  # 400, and 429 is what retry-aware clients expect.
+  rateLimitedStatus: 429
+  # true answers gRPC callers behind the gateway with RESOURCE_EXHAUSTED
+  # instead of UNAVAILABLE, which is the retryable code gRPC clients back off
+  # on.
+  grpcAsResourceExhausted: false
+  # The service supplies x-ratelimit-limit, x-ratelimit-remaining,
+  # x-ratelimit-reset and retry-after itself, as ready response headers.
+  # DRAFT_VERSION_03 would additionally let Envoy render X-RateLimit-* from
+  # per-descriptor statuses — which the service does not populate — so OFF is
+  # the honest default: the flag currently changes nothing, and the headers
+  # keep coming from the one place that computes them.
+  xRateLimitHeaders: "OFF"
+
+# Gateway-side switches of the filter itself: the share of requests the filter
+# checks at all, and the share it enforces on. Both are emergency controls,
+# independent of behavior: Shadow in the rules — dropping enforcedPercent to 0
+# turns every limit into a dry run without touching a single policy, and
+# enabledPercent: 0 takes the filter out of the request path entirely. Wired
+# as Envoy runtime fractions (ratelimit.<gateway>.enabled / .enforced), so a
+# runtime override can flip them without a redeploy.
+runtime:
+  enabledPercent: 100
+  enforcedPercent: 100
+
+# ============== COUNTER STORE ============================
+# Redis holds the counters, and that is what makes a limit a limit of the domain
+# rather than of each replica: with N replicas counting in their own memory, a
+# limit of 100 admits 100*N. An empty address list selects the in-process store,
+# which is correct at one replica and for a developer install.
+#
+# addresses is a comma-separated host:port list: one entry is a standalone server,
+# several are a cluster. Setting masterName selects Sentinel.
+redis:
+  addresses: ""
+  db: 0
+  username: ""
+  masterName: ""
+  # The password comes from a Secret rather than from values: values end up in
+  # the release, and the release is readable by anyone with get on Secrets in the
+  # namespace.
+  existingSecret: ""
+  passwordKey: password
+
+healthProbe:
+  port: 8081
+
+# ============== METRICS ============================
+# The Prometheus endpoint: decisions and their latencies, budget headroom,
+# extraction health, and per-policy status. Plain HTTP, cluster-internal.
+metrics:
+  port: 8080
+  # An admission counts as near-limit once the rule has consumed this share of
+  # its limit. Quoted so YAML cannot reshape the number before the service
+  # parses it.
+  nearLimitRatio: "0.9"
+
+# ============== MONITORING DELIVERY ============================
+# The scrape target and the Grafana dashboard, delivered as custom resources:
+# a PodMonitor for the platform's Prometheus and a GrafanaDashboard for
+# grafana-operator v4. The deployer sets this platform parameter; off by
+# default because both need their operators' CRDs — installing them into a
+# cluster without monitoring fails the release.
+MONITORING_ENABLED: false
+
+ISTIO_PUBLIC_GATEWAY_NAME: public-gateway
+ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
+
+# What this chart owns per gateway: whether to rate limit it, and under which
+# domain. The domain is the binding key — it must equal spec.domain of the
+# RateLimitPolicy that carries this gateway's rules. Nothing validates the match;
+# a typo shows up only as an "unknown rate limit domain" line in the service log.
+#
+# namespace is optional and defaults to the release namespace. timeout,
+# failClosed, rateLimitedStatus and grpcAsResourceExhausted may be set here to
+# override the rls.* defaults for one gateway — the usual case is a private
+# gateway that fails closed while the public one keeps flowing.
+gateways:
+  public:
+    enabled: true
+    domain: gateway.public
+  private:
+    enabled: true
+    domain: gateway.private
+
+# ============== KUBERNETES ============================
+serviceAccount:
+  create: true
+  # Defaults to the chart's fullname when empty.
+  name: ""
+
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

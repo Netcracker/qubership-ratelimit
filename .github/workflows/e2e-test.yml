@@ -1,0 +1,222 @@
+# End-to-end tests
+#
+# Stands up a kind cluster with the platform's own mesh — qubership-istio for
+# the distribution and qubership-core-mesh-config for the gateways — installs
+# the chart with an image built from the checked-out sources, and runs the
+# Ginkgo suites in tests/e2e-go.
+
+name: E2E
+
+run-name: >
+  E2E —
+  ${{ github.event_name == 'push' && format('push [{0}]', github.event.head_commit.message) || '' }}
+  ${{ github.event_name == 'pull_request' && format('PR ({0}) [{1}]', github.head_ref, github.event.pull_request.title) || '' }}
+
+on:
+  push:
+    branches:
+      - main
+      - 'lts/**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch: {}
+
+env:
+  GATEWAY_API_VERSION: v1.4.0
+  ISTIO_REPO: https://github.com/Netcracker/qubership-istio.git
+  ISTIO_REF: main
+  MESH_CONFIG_REPO: https://github.com/Netcracker/qubership-core-mesh-config.git
+  MESH_CONFIG_REF: main
+  E2E_NAMESPACE: ratelimit-e2e
+  IMAGE: ratelimit:e2e
+
+jobs:
+  e2e:
+    name: e2e (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Without this the make step downloads the pinned toolchain and the
+      # whole module graph on every run; setup-go restores both from the
+      # actions cache, keyed by go.sum.
+      #
+      # The cache-poisoning audit is suppressed deliberately: everything this
+      # workflow uploads is run diagnostics - a test report and pod logs -
+      # not release material, and a pull request cannot write cache entries
+      # the base branch would read.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 # zizmor: ignore[cache-poisoning]
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # The layer cache carries the base images and the module-download
+      # layer between runs; only the build of changed sources remains.
+      # load: true keeps the image in the local daemon for kind to side-load.
+      - name: Build operator image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=e2e-image
+          cache-to: type=gha,scope=e2e-image,mode=max
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: ratelimit-e2e
+
+      # kind nodes cannot reach the local docker daemon, so the image has to be
+      # side-loaded. The chart's IfNotPresent policy then uses it as-is.
+      - name: Load the image into kind
+        run: kind load docker-image "${IMAGE}" --name ratelimit-e2e
+
+      # Captures every pod's stdout from here on - including pods the suites
+      # kill, whose logs kubectl cannot show afterwards. Collected and
+      # uploaded at the end of the job.
+      - name: Deploy the log capture
+        run: |
+          kubectl apply -f tests/e2e/manifests/fluent-bit.yaml
+          kubectl rollout status daemonset/fluent-bit -n logging --timeout=120s
+
+      - name: Install Gateway API CRDs
+        run: |
+          kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+
+      - name: Install qubership-istio
+        run: |
+          git clone --depth 1 --branch "${ISTIO_REF}" "${ISTIO_REPO}" /tmp/qubership-istio
+          helm dependency update /tmp/qubership-istio/helm-templates/qubership-istio
+          kubectl create namespace istio-system
+          helm upgrade --install qubership-istio /tmp/qubership-istio/helm-templates/qubership-istio \
+            --namespace istio-system \
+            --set global.istioNamespace=istio-system \
+            --set MONITORING_ENABLED=false \
+            --wait --timeout 10m
+          kubectl rollout status deployment/istiod -n istio-system --timeout=300s
+          kubectl rollout status daemonset/ztunnel -n istio-system --timeout=300s
+          kubectl rollout status daemonset/istio-cni-node -n istio-system --timeout=300s
+
+      - name: Install qubership-core-mesh-config
+        run: |
+          git clone --depth 1 --branch "${MESH_CONFIG_REF}" "${MESH_CONFIG_REPO}" /tmp/mesh-config
+          kubectl create namespace "${E2E_NAMESPACE}"
+          kubectl label namespace "${E2E_NAMESPACE}" istio.io/dataplane-mode=ambient --overwrite
+          kubectl label namespace "${E2E_NAMESPACE}" istio.io/use-waypoint=waypoint --overwrite
+
+          helm upgrade --install core-istio-mesh /tmp/mesh-config \
+            --namespace "${E2E_NAMESPACE}" \
+            -f /tmp/mesh-config/resource-profiles/dev.yaml \
+            --set SERVICE_MESH_TYPE=Istio \
+            --set MONITORING_ENABLED=false \
+            --set CPU_REQUEST=10m \
+            --set WAYPOINT_CPU_REQUEST=100m \
+            --wait --timeout 10m
+
+          for gw in public-gateway private-gateway; do
+            kubectl wait "gateways.gateway.networking.k8s.io/${gw}" -n "${E2E_NAMESPACE}" \
+              --for=condition=Programmed --timeout=300s
+            kubectl rollout status "deployment/${gw}-istio" -n "${E2E_NAMESPACE}" --timeout=300s
+          done
+
+      - name: Deploy the counter store
+        run: |
+          kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/redis.yaml
+          kubectl rollout status deployment/e2e-redis -n "${E2E_NAMESPACE}" --timeout=120s
+
+      - name: Install the chart
+        run: |
+          # A profile is mandatory: values.yaml carries no resource keys, so the
+          # chart is always installed the way it is in production.
+          helm upgrade --install ratelimit helm-templates/ratelimit \
+            --namespace "${E2E_NAMESPACE}" \
+            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            --set logLevel=debug \
+            --set image.repository=ratelimit \
+            --set image.tag=e2e \
+            --set redis.addresses=e2e-redis:6379 \
+            --wait --timeout 5m
+
+      - name: Deploy the probe backend
+        run: |
+          # Routes the /e2e- probe paths to a real backend, so the suite gets
+          # terminal codes to assert on: admitted traffic answers from the
+          # backend, a refusal answers 429, and 503 means the gateway itself.
+          kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/echo.yaml
+          kubectl rollout status deployment/e2e-echo -n "${E2E_NAMESPACE}" --timeout=120s
+
+      # The JUnit report is the surefire analog, and the HTML page next to it
+      # is the same run for human eyes - both uploaded below whatever the
+      # outcome.
+      - name: Run the e2e suites
+        id: e2e
+        run: make test-e2e-go E2E_NAMESPACE="${E2E_NAMESPACE}"
+
+      - name: Upload the e2e report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-go-report
+          path: |
+            artifacts/e2e-go.xml
+            artifacts/e2e-go.html
+          if-no-files-found: ignore
+
+      # The verdict of every run goes to the configured mailing list with the
+      # HTML report attached. Recipients live in the EMAIL_TO repository
+      # variable, and an empty one turns the step off; connection settings
+      # come from the organization's EMAIL_* variables. Mail is a courtesy,
+      # not a gate, so the step never fails the run - on a pull request from
+      # a fork it quietly does nothing, since forks see no secrets.
+      - name: Email the e2e report
+        if: always() && vars.EMAIL_TO != ''
+        continue-on-error: true
+        uses: netcracker/qubership-workflow-hub/actions/email-action@27fd7674286e5f561a6fd8277f2f389ff96ddb9e # v2.6.0
+        env:
+          EMAIL_SMTP_HOST: ${{ vars.EMAIL_SMTP_HOST }}
+          EMAIL_SMTP_PORT: ${{ vars.EMAIL_SMTP_PORT }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          EMAIL_USERNAME: ${{ vars.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ vars.EMAIL_TO }}
+        with:
+          subject: "[e2e] ${{ steps.e2e.outcome }} - ${{ github.repository }} (${{ github.head_ref || github.ref_name }})"
+          body: |
+            The e2e run finished with outcome: ${{ steps.e2e.outcome }}.
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            The HTML report of the run is attached.
+          attachments: artifacts/e2e-go.html
+          priority: ${{ steps.e2e.outcome == 'success' && 'normal' || 'high' }}
+
+      - name: Collect the pod logs
+        id: pod_logs
+        if: always()
+        run: .github/scripts/collect-e2e-pod-logs.sh
+
+      - name: Upload the pod logs
+        if: always() && steps.pod_logs.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-pod-logs
+          path: pod-logs/
+          if-no-files-found: warn
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl get all,ratelimitpolicies,envoyfilters,gateways.gateway.networking.k8s.io,httproutes \
+            -n "${E2E_NAMESPACE}" -o wide || true
+          kubectl describe pods -n "${E2E_NAMESPACE}" || true
+          kubectl logs -n "${E2E_NAMESPACE}" -l app.kubernetes.io/name=ratelimit --tail=200 || true
+          kubectl get pods -n istio-system -o wide || true
+          kubectl logs -n istio-system -l app=istiod --tail=100 || true

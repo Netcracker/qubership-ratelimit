@@ -1,0 +1,200 @@
+# Go Build Workflow
+#
+# Builds and tests the service, then builds its Docker image.
+# Uses generic-go-build.yaml for the actual build process.
+#
+# Triggers:
+#   - Push to main or an lts/** branch
+#   - Pull requests
+#
+# See generic-go-build.yaml for full documentation on build features and required secrets/vars.
+
+name: Build
+
+run-name: >
+  Build —
+  ${{ github.event_name == 'push' && format('push [{0}]', github.event.head_commit.message) || '' }}
+  ${{ github.event_name == 'pull_request' && format('PR ({0}) [{1}]', github.head_ref, github.event.pull_request.title) || '' }}
+
+# The default token is read-only; jobs that need more say so themselves.
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+      - 'lts/**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  build:
+    name: Build and test
+    # Waits for the engine job so its coverage artifact exists before the
+    # Sonar job downloads coverage-* artifacts.
+    needs: engine
+    # Exactly what generic-go-build.yaml declares for itself: a called workflow
+    # can only narrow the caller's token, never widen it.
+    permissions:
+      contents: read
+      pull-requests: write
+      packages: write
+    uses: Netcracker/qubership-core-infra/.github/workflows/generic-go-build.yaml@71206242f5967ac6691337913593f8623863f711 # v2.5.2
+    with:
+      # Pinned to the root on purpose: module discovery would also run the
+      # workflow's envtest step for engine/, and that step hard-fails on a
+      # module without controller-runtime. The engine job below tests the
+      # engine module instead and ships its coverage as a coverage-* artifact,
+      # which the Sonar job picks up by glob.
+      go-module-dir: .
+      # internal/controller runs against a real API server through envtest.
+      # Without this the suite fails on a missing control plane rather than skipping.
+      install-envtest: true
+      # Matches k8s.io/api in go.mod, so the test control plane cannot drift from
+      # the client libraries the service is built against.
+      kube-version: '1.36.0'
+      # Pull requests build a single native platform: the image is validation
+      # only there, and the two cross-compilations otherwise contend for the
+      # runner's cores. Pushes keep the full multi-arch config.
+      docker-config-file: ${{ github.event_name == 'pull_request' && 'docker-dev-config-pr.json' || 'docker-dev-config.json' }}
+      sonar-project-key: ${{ vars.SONAR_PROJECT_KEY }}
+    secrets:
+      # generic-go-build.yaml declares exactly one secret, and it is required.
+      # Inheriting the whole set would hand a reusable workflow every credential
+      # this repository holds.
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # The engine is a separate Go module the root job's ./... does not see.
+  # This job tests it with the race detector and ships its coverage as a
+  # coverage-* artifact — the naming convention the generic workflow's Sonar
+  # job downloads by glob. No setup-go: GOTOOLCHAIN=auto fetches the version
+  # engine/go.mod declares.
+  golangci:
+    name: golangci-lint (both modules)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # make lint builds golangci-lint from source with `go install`, and a
+      # binary built by an older Go refuses to target this module's version -
+      # so the job needs exactly the toolchain go.mod declares, not whatever
+      # the runner has preinstalled.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Whole-module runs with the Makefile's pinned golangci-lint. This is
+      # the linting GO_MODULES would do, minus its per-directory mode, which
+      # cannot cope with a module whose root holds no .go files.
+      - name: Lint the root and engine modules
+        run: make lint
+
+  load:
+    name: Load floor
+    runs-on: ubuntu-latest
+    # go test executes code from the PR; the job gets a read-only token and
+    # checkout keeps no credentials on disk for that code to find.
+    permissions:
+      contents: read
+    # The floor is a claim about a replica backed by a shared store, so the
+    # measurement runs against a real one. A service container answers on
+    # loopback, which is the closest this runner gets to the same-zone store
+    # the latency budget assumes.
+    services:
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No -race: the detector costs about an order of magnitude, which would
+      # measure the detector rather than the decision path. The same tests run
+      # under -race in the other jobs; this one owns the number.
+      - name: Measure the decision throughput a replica owes
+        env:
+          REDIS_ADDR: 127.0.0.1:6379
+        run: go test ./internal/rls/ -run TestLoad -v -count=1
+
+  engine:
+    name: Engine module tests (race)
+    runs-on: ubuntu-latest
+    # go test executes code from the PR; the job gets a read-only token and
+    # checkout keeps no credentials on disk for that code to find.
+    permissions:
+      contents: read
+    # The Redis store tests gate on REDIS_ADDR and skip without it; the
+    # service container makes them run — conformance, differential, oracle —
+    # on every PR.
+    services:
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test engine module
+        working-directory: engine
+        env:
+          REDIS_ADDR: 127.0.0.1:6379
+        run: |
+          go vet ./...
+          go test -race ./... -coverpkg=./... -coverprofile engine.coverage.out
+
+      # The standalone service above cannot refuse a cross-slot script, so it
+      # never exercises the slot mechanics the key contract exists for: the
+      # {domain} hash tag that lets one Lua script decide a whole domain
+      # atomically. A real six-node cluster closes that - a lost hash tag
+      # fails here with CROSSSLOT instead of in production.
+      - name: Test the store against a Redis Cluster
+        working-directory: engine
+        run: |
+          REDIS_ADDR="$(../hack/redis-cluster.sh up)"             go test -race ./store/redis/ -count=1
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: coverage-engine
+          path: engine/engine.coverage.out
+          if-no-files-found: error
+
+  # The chart's CRD templates are generated artifacts — copies of
+  # config/crd/bases with the keep annotation injected — and nothing but this
+  # gate stops an api/ change from shipping a chart whose CRDs no longer match
+  # the operator. helm lint runs once per resource profile, because the chart
+  # is never installed without one.
+  helm:
+    name: Helm lint and CRD drift
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the chart against every resource profile
+        run: make helm-lint
+      - name: Regenerate the manifests and the chart CRDs
+        run: make sync-helm-crds
+      - name: Fail on drift between the generated files and the commit
+        run: |
+          if ! git diff --exit-code -- config/rbac config/crd/bases helm-templates/ratelimit/templates; then
+            echo "::error::generated manifests drifted from the commit: run 'make sync-helm-crds' and commit the result"
+            exit 1
+          fi

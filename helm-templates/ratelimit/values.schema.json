@@ -1,0 +1,447 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "$id": "https://netcracker.com/ratelimit/values.schema.json",
+  "type": "object",
+  "title": "The ratelimit schema.",
+  "description": "JSON Schema for ratelimit.",
+  "required": [
+    "image",
+    "mode",
+    "rls",
+    "redis",
+    "ISTIO_PUBLIC_GATEWAY_NAME",
+    "ISTIO_PRIVATE_GATEWAY_NAME",
+    "gateways",
+    "REPLICAS",
+    "CPU_REQUEST",
+    "MEMORY_REQUEST",
+    "CPU_LIMIT",
+    "MEMORY_LIMIT"
+  ],
+  "properties": {
+    "nameOverride": {
+      "type": "string",
+      "title": "Chart name override",
+      "description": "Replaces the chart name in resource names and labels."
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "title": "Full name override",
+      "description": "Replaces the generated name of the Deployment, Service, ServiceAccount and RBAC pair. The Service name is part of the gRPC cluster address in the EnvoyFilter, so overriding it rewrites that address too."
+    },
+    "image": {
+      "type": "object",
+      "title": "Service image",
+      "required": [
+        "repository",
+        "tag"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "title": "Image repository"
+        },
+        "tag": {
+          "type": "string",
+          "title": "Image tag"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "title": "Image pull policy",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "mode": {
+      "type": "string",
+      "title": "Components to run",
+      "description": "all runs the controller and the rate limit service in one Deployment. controller and rls exist for a future split; only all is exercised today.",
+      "enum": [
+        "all",
+        "controller",
+        "rls"
+      ],
+      "default": "all"
+    },
+    "leaderElect": {
+      "type": "boolean",
+      "title": "Leader election",
+      "description": "Gates status writes only. The rate limit endpoint and its rule store run on every replica.",
+      "default": true
+    },
+    "logLevel": {
+      "type": "string",
+      "title": "Log level",
+      "enum": [
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ],
+      "default": "info"
+    },
+    "rls": {
+      "type": "object",
+      "title": "Rate limit service",
+      "required": [
+        "port"
+      ],
+      "properties": {
+        "port": {
+          "type": "integer",
+          "title": "gRPC port",
+          "description": "Port of the Envoy rate limit service. 8081 is reserved for the health probes.",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 9000
+        },
+        "timeout": {
+          "type": "string",
+          "title": "Check timeout",
+          "description": "Envoy-side timeout for a rate limit check, as a protobuf duration: seconds with an optional fraction, e.g. 0.05s. Go-style values such as 50ms are rejected by Envoy.",
+          "pattern": "^[0-9]+(\\.[0-9]+)?s$",
+          "default": "0.05s"
+        },
+        "failClosed": {
+          "type": "boolean",
+          "title": "Fail closed",
+          "description": "true rejects traffic when the rate limit service is unreachable (failure_mode_deny). Keep false while the service is an allow-all stub.",
+          "default": false
+        },
+        "rateLimitedStatus": {
+          "type": "integer",
+          "title": "Refusal status",
+          "description": "Status the client sees on a refused request. Envoy ignores values below 400.",
+          "minimum": 400,
+          "maximum": 599,
+          "default": 429
+        },
+        "grpcAsResourceExhausted": {
+          "type": "boolean",
+          "title": "gRPC refusal code",
+          "description": "true maps a refusal to RESOURCE_EXHAUSTED for gRPC callers behind the gateway — the code their clients back off and retry on — instead of UNAVAILABLE.",
+          "default": false
+        },
+        "xRateLimitHeaders": {
+          "type": "string",
+          "title": "x-ratelimit response headers",
+          "description": "The service supplies the x-ratelimit-* and retry-after headers itself. DRAFT_VERSION_03 additionally lets Envoy render X-RateLimit-* from per-descriptor statuses, which the service does not populate, so OFF is the default.",
+          "enum": [
+            "OFF",
+            "DRAFT_VERSION_03"
+          ],
+          "default": "OFF"
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "title": "Filter switches",
+      "description": "Share of requests the filter checks (enabledPercent) and enforces on (enforcedPercent). Emergency controls independent of behavior: Shadow in the rules; rendered as Envoy runtime fractions, so a runtime override flips them without a redeploy.",
+      "properties": {
+        "enabledPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 100
+        },
+        "enforcedPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 100
+        }
+      }
+    },
+    "redis": {
+      "type": "object",
+      "title": "Counter store",
+      "description": "Redis holds the counters. An empty address list falls back to an in-process store, which counts per replica and is therefore correct at one replica only: with N replicas a limit of 100 admits 100*N.",
+      "required": [
+        "addresses"
+      ],
+      "properties": {
+        "addresses": {
+          "type": "string",
+          "title": "Redis addresses",
+          "description": "Comma-separated host:port list. One entry is a standalone server, several are a cluster; with masterName set they are Sentinel addresses. Empty selects the in-process store.",
+          "default": ""
+        },
+        "db": {
+          "type": "integer",
+          "title": "Database index",
+          "description": "Ignored by Redis Cluster, which has one database.",
+          "minimum": 0,
+          "default": 0
+        },
+        "username": {
+          "type": "string",
+          "title": "Username",
+          "description": "Leave empty for a server without ACL users."
+        },
+        "masterName": {
+          "type": "string",
+          "title": "Sentinel master name",
+          "description": "Set to select Sentinel; the addresses are then the sentinels."
+        },
+        "existingSecret": {
+          "type": "string",
+          "title": "Password secret",
+          "description": "Name of a Secret holding the password. The password is read from a Secret rather than from values, because values end up in the release and the release is readable by anyone with get on Secrets in the namespace."
+        },
+        "passwordKey": {
+          "type": "string",
+          "title": "Password key",
+          "description": "Key inside existingSecret.",
+          "default": "password"
+        }
+      }
+    },
+    "healthProbe": {
+      "type": "object",
+      "title": "Health probe endpoint",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8081
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "title": "Prometheus metrics endpoint",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 8080
+        },
+        "nearLimitRatio": {
+          "$ref": "#/definitions/numberOrString",
+          "description": "Share of a rule's limit consumed before an admission counts as near-limit; a ratio in (0, 1).",
+          "default": "0.9"
+        }
+      }
+    },
+    "MONITORING_ENABLED": {
+      "$id": "#/properties/MONITORING_ENABLED",
+      "type": "boolean",
+      "title": "The MONITORING_ENABLED schema",
+      "description": "Set to true to import dashboards to Grafana and configure integration with Prometheus. Requires Platform System Monitor CRDs to be deployed to target k8s/openshift cluster",
+      "examples": [
+        true,
+        false
+      ]
+    },
+    "ISTIO_PUBLIC_GATEWAY_NAME": {
+      "type": "string",
+      "title": "Public gateway name",
+      "description": "Name of the public Istio gateway. Shared deployment parameter: must equal ISTIO_PUBLIC_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "minLength": 1,
+      "default": "public-gateway"
+    },
+    "ISTIO_PRIVATE_GATEWAY_NAME": {
+      "type": "string",
+      "title": "Private gateway name",
+      "description": "Name of the private Istio gateway. Shared deployment parameter: must equal ISTIO_PRIVATE_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "minLength": 1,
+      "default": "private-gateway"
+    },
+    "gateways": {
+      "type": "object",
+      "title": "Rate limited gateways",
+      "description": "One EnvoyFilter is rendered per enabled gateway. The gateway names come from the ISTIO_*_GATEWAY_NAME parameters, not from here.",
+      "properties": {
+        "public": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render an EnvoyFilter for this gateway.",
+              "default": true
+            },
+            "domain": {
+              "type": "string",
+              "title": "Rate limit domain",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the service log. The pattern is the CRD's spec.domain pattern, so a value the policy side cannot ever carry is refused here too.",
+              "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+              "minLength": 1,
+              "maxLength": 63
+            },
+            "namespace": {
+              "type": "string",
+              "title": "Gateway namespace",
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to the release namespace, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+            },
+            "timeout": {
+              "type": "string",
+              "title": "Check timeout override",
+              "description": "Overrides rls.timeout for this gateway. Same format: a protobuf duration such as 0.05s.",
+              "pattern": "^[0-9]+(\\.[0-9]+)?s$"
+            },
+            "failClosed": {
+              "type": "boolean",
+              "title": "Fail closed override",
+              "description": "Overrides rls.failClosed for this gateway. An explicit false wins over a true default."
+            },
+            "rateLimitedStatus": {
+              "type": "integer",
+              "title": "Refusal status override",
+              "description": "Overrides rls.rateLimitedStatus for this gateway. Envoy ignores values below 400.",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "grpcAsResourceExhausted": {
+              "type": "boolean",
+              "title": "gRPC refusal code override",
+              "description": "Overrides rls.grpcAsResourceExhausted for this gateway."
+            }
+          }
+        },
+        "private": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render an EnvoyFilter for this gateway.",
+              "default": true
+            },
+            "domain": {
+              "type": "string",
+              "title": "Rate limit domain",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the service log. The pattern is the CRD's spec.domain pattern, so a value the policy side cannot ever carry is refused here too.",
+              "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+              "minLength": 1,
+              "maxLength": 63
+            },
+            "namespace": {
+              "type": "string",
+              "title": "Gateway namespace",
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to the release namespace, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+            },
+            "timeout": {
+              "type": "string",
+              "title": "Check timeout override",
+              "description": "Overrides rls.timeout for this gateway. Same format: a protobuf duration such as 0.05s.",
+              "pattern": "^[0-9]+(\\.[0-9]+)?s$"
+            },
+            "failClosed": {
+              "type": "boolean",
+              "title": "Fail closed override",
+              "description": "Overrides rls.failClosed for this gateway. An explicit false wins over a true default."
+            },
+            "rateLimitedStatus": {
+              "type": "integer",
+              "title": "Refusal status override",
+              "description": "Overrides rls.rateLimitedStatus for this gateway. Envoy ignores values below 400.",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "grpcAsResourceExhausted": {
+              "type": "boolean",
+              "title": "gRPC refusal code override",
+              "description": "Overrides rls.grpcAsResourceExhausted for this gateway."
+            }
+          }
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "default": true
+        },
+        "name": {
+          "type": "string",
+          "description": "Defaults to the chart's fullname when empty."
+        }
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "title": "Extra pod annotations"
+    },
+    "nodeSelector": {
+      "type": "object",
+      "title": "Node selector"
+    },
+    "tolerations": {
+      "type": "array",
+      "title": "Tolerations"
+    },
+    "affinity": {
+      "type": "object",
+      "title": "Affinity"
+    },
+    "REPLICAS": {
+      "$id": "#/properties/REPLICAS",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The REPLICAS schema",
+      "internal": true,
+      "envSpecific": true
+    },
+    "CPU_REQUEST": {
+      "$id": "#/properties/CPU_REQUEST",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The CPU_REQUEST schema",
+      "internal": true,
+      "envSpecific": true
+    },
+    "MEMORY_REQUEST": {
+      "$id": "#/properties/MEMORY_REQUEST",
+      "type": "string",
+      "title": "The MEMORY_REQUEST schema",
+      "description": "Defines minimum amount of memory the container will use to start",
+      "examples": [
+        "256Mi"
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "CPU_LIMIT": {
+      "$id": "#/properties/CPU_LIMIT",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The CPU_LIMIT schema",
+      "internal": true,
+      "envSpecific": true
+    },
+    "MEMORY_LIMIT": {
+      "$id": "#/properties/MEMORY_LIMIT",
+      "type": "string",
+      "title": "The MEMORY_LIMIT schema",
+      "internal": true,
+      "envSpecific": true
+    }
+  },
+  "definitions": {
+    "integerOrString": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "numberOrString": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  }
+}

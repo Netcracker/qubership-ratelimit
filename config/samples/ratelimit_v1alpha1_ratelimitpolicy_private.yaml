@@ -1,0 +1,19 @@
+apiVersion: ratelimit.netcracker.com/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: private-gateway
+  labels:
+    app.kubernetes.io/name: ratelimit
+spec:
+  # Must equal the domain in the rate limit filter of the private gateway.
+  domain: gateway.private
+
+  limits:
+    # No target, so the block sees the whole domain, and one rule with no axes,
+    # so the domain shares one bucket. This is the smallest policy that does
+    # something.
+    - name: everything
+      rules:
+        - name: total
+          rates:
+            - { requests: 500, period: 1m }

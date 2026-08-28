@@ -1,0 +1,148 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ratelimit.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.REPLICAS }}
+  selector:
+    matchLabels:
+      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # The gateways must never lose every RLS endpoint at once: with
+      # failClosed=false a gap lets traffic through unchecked, with
+      # failClosed=true it rejects traffic outright.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "ratelimit.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ratelimit.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ratelimit
+          image: '{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}'
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/bin/entrypoint.sh
+          args:
+            - /app/ratelimit
+            - --mode={{ .Values.mode }}
+            - --rls-bind-address=:{{ .Values.rls.port }}
+            - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            {{- if .Values.leaderElect }}
+            - --leader-elect
+            {{- end }}
+          env:
+            - name: LOGGING_LEVEL_ROOT
+              value: '{{ lower .Values.logLevel }}'
+            # The namespace this installation serves. It is what keeps the
+            # service's RBAC a Role: unset is a startup error, not a fallback
+            # to watching the whole cluster.
+            - name: CLOUD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: METRICS_NEAR_LIMIT_RATIO
+              value: '{{ .Values.metrics.nearLimitRatio }}'
+            # Where the counters live. Empty falls back to an in-process store,
+            # which counts per replica and is therefore correct at one replica
+            # only.
+            - name: REDIS_ADDRESSES
+              value: '{{ .Values.redis.addresses }}'
+            - name: REDIS_DB
+              value: '{{ .Values.redis.db }}'
+            {{- with .Values.redis.username }}
+            - name: REDIS_USERNAME
+              value: '{{ . }}'
+            {{- end }}
+            {{- with .Values.redis.masterName }}
+            - name: REDIS_MASTERNAME
+              value: '{{ . }}'
+            {{- end }}
+            {{- if .Values.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.passwordKey }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.rls.port }}
+              protocol: TCP
+            - name: probes
+              containerPort: {{ .Values.healthProbe.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          # On delete the pod leaves the Endpoints at once, but the gateways
+          # keep sending checks until xDS catches up. The pause keeps the
+          # process serving through that window, so a rolling restart refuses
+          # nothing and fails nothing open; the SIGTERM drain then handles the
+          # stragglers. Native sleep handler: no shell in the image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 7
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: '{{ .Values.CPU_REQUEST }}'
+              memory: '{{ .Values.MEMORY_REQUEST }}'
+              # Bounded here rather than in a resource profile: the process
+              # writes no files, so its ephemeral storage is the container log
+              # and nothing else, and that does not vary by install size.
+              ephemeral-storage: 64Mi
+            limits:
+              cpu: '{{ .Values.CPU_LIMIT }}'
+              memory: '{{ .Values.MEMORY_LIMIT }}'
+              ephemeral-storage: 256Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Long enough for the gRPC drain (--rls-drain-timeout, 10s by default) to
+      # finish before the kubelet sends SIGKILL.
+      terminationGracePeriodSeconds: 30
