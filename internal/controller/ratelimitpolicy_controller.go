@@ -13,9 +13,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
@@ -111,8 +113,48 @@ func (r *RateLimitPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// would keep its problem in the status until something else touched the
 		// policy.
 		Watches(&v1alpha1.RateLimitMapping{}, handler.EnqueueRequestsFromMapFunc(r.policiesOfDomain)).
+		// Policies of one domain judge each other too: what one contributes
+		// decides whether another fits the domain budget, and a deletion
+		// frees the seat a rejected peer waits for. Without this watch that
+		// peer's status would wait for a coincidental touch - the same
+		// staleness the mapping watch prevents. For() already enqueues the
+		// changed policy; this fans the event out to the rest of its domain.
+		// Status-only updates are filtered: peers judge specs and existence,
+		// and letting every status write ripple would be pure churn.
+		Watches(&v1alpha1.RateLimitPolicy{},
+			handler.EnqueueRequestsFromMapFunc(r.peersOfDomain),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("ratelimitpolicy").
 		Complete(r)
+}
+
+// peersOfDomain turns one policy's event into reconciles of every other
+// policy of its domain. The changed policy itself is excluded - For() already
+// enqueues it - and a deleted policy still carries its spec, so its peers are
+// reachable exactly when its departure matters to them.
+func (r *RateLimitPolicyReconciler) peersOfDomain(ctx context.Context, object client.Object) []reconcile.Request {
+	changed, ok := object.(*v1alpha1.RateLimitPolicy)
+	if !ok {
+		return nil
+	}
+
+	var list v1alpha1.RateLimitPolicyList
+	if err := r.List(ctx, &list, client.InNamespace(changed.Namespace)); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to list the peers of a changed policy",
+			"domain", changed.Spec.Domain)
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for i := range list.Items {
+		if list.Items[i].Spec.Domain != changed.Spec.Domain || list.Items[i].Name == changed.Name {
+			continue
+		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
+		})
+	}
+	return requests
 }
 
 func (r *RateLimitPolicyReconciler) policiesOfDomain(ctx context.Context, object client.Object) []reconcile.Request {

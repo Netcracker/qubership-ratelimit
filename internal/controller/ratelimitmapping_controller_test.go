@@ -74,7 +74,7 @@ func TestMappingReconcile_reportsAMappingWhoseNameIsNotItsDomain(t *testing.T) {
 	// through a client that bypassed validation. Reporting it beats serving a
 	// singleton that is not one.
 	mapping := testMapping(ratelimitv1alpha1.ClaimMapping{Key: "tenant", Claim: "org_id"})
-	mapping.Spec.Domain = "gateway.private"
+	mapping.Spec.Domain = testOtherDomain
 	reconciler, fakeClient := newMappingReconciler(t, mapping)
 
 	_, err := reconciler.Reconcile(context.Background(), mappingRequest())

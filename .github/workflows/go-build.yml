@@ -156,6 +156,17 @@ jobs:
         run: |
           go vet ./...
           go test -race ./... -coverpkg=./... -coverprofile engine.coverage.out
+
+      # The standalone service above cannot refuse a cross-slot script, so it
+      # never exercises the slot mechanics the key contract exists for: the
+      # {domain} hash tag that lets one Lua script decide a whole domain
+      # atomically. A real six-node cluster closes that - a lost hash tag
+      # fails here with CROSSSLOT instead of in production.
+      - name: Test the store against a Redis Cluster
+        working-directory: engine
+        run: |
+          REDIS_ADDR="$(../hack/redis-cluster.sh up)"             go test -race ./store/redis/ -count=1
+
       - name: Upload coverage artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

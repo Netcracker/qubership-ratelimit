@@ -2,7 +2,8 @@
 #
 # Stands up a kind cluster with the platform's own mesh — qubership-istio for
 # the distribution and qubership-core-mesh-config for the gateways — installs
-# the chart with an image built from the checked-out sources, and runs tests/e2e.
+# the chart with an image built from the checked-out sources, and runs the
+# Ginkgo suites in tests/e2e-go.
 
 name: E2E
 
@@ -42,8 +43,33 @@ jobs:
         with:
           persist-credentials: false
 
+      # Without this the make step downloads the pinned toolchain and the
+      # whole module graph on every run; setup-go restores both from the
+      # actions cache, keyed by go.sum.
+      #
+      # The cache-poisoning audit is suppressed deliberately: everything this
+      # workflow uploads is run diagnostics - a test report and pod logs -
+      # not release material, and a pull request cannot write cache entries
+      # the base branch would read.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 # zizmor: ignore[cache-poisoning]
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # The layer cache carries the base images and the module-download
+      # layer between runs; only the build of changed sources remains.
+      # load: true keeps the image in the local daemon for kind to side-load.
       - name: Build operator image
-        run: docker build -t "${IMAGE}" .
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=e2e-image
+          cache-to: type=gha,scope=e2e-image,mode=max
 
       - name: Create kind cluster
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
@@ -54,6 +80,14 @@ jobs:
       # side-loaded. The chart's IfNotPresent policy then uses it as-is.
       - name: Load the image into kind
         run: kind load docker-image "${IMAGE}" --name ratelimit-e2e
+
+      # Captures every pod's stdout from here on - including pods the suites
+      # kill, whose logs kubectl cannot show afterwards. Collected and
+      # uploaded at the end of the job.
+      - name: Deploy the log capture
+        run: |
+          kubectl apply -f tests/e2e/manifests/fluent-bit.yaml
+          kubectl rollout status daemonset/fluent-bit -n logging --timeout=120s
 
       - name: Install Gateway API CRDs
         run: |
@@ -121,8 +155,61 @@ jobs:
           kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/echo.yaml
           kubectl rollout status deployment/e2e-echo -n "${E2E_NAMESPACE}" --timeout=120s
 
-      - name: Run e2e tests
-        run: make test-e2e E2E_NAMESPACE="${E2E_NAMESPACE}"
+      # The JUnit report is the surefire analog, and the HTML page next to it
+      # is the same run for human eyes - both uploaded below whatever the
+      # outcome.
+      - name: Run the e2e suites
+        id: e2e
+        run: make test-e2e-go E2E_NAMESPACE="${E2E_NAMESPACE}"
+
+      - name: Upload the e2e report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-go-report
+          path: |
+            artifacts/e2e-go.xml
+            artifacts/e2e-go.html
+          if-no-files-found: ignore
+
+      # The verdict of every run goes to the configured mailing list with the
+      # HTML report attached. Recipients live in the EMAIL_TO repository
+      # variable, and an empty one turns the step off; connection settings
+      # come from the organization's EMAIL_* variables. Mail is a courtesy,
+      # not a gate, so the step never fails the run - on a pull request from
+      # a fork it quietly does nothing, since forks see no secrets.
+      - name: Email the e2e report
+        if: always() && vars.EMAIL_TO != ''
+        continue-on-error: true
+        uses: netcracker/qubership-workflow-hub/actions/email-action@27fd7674286e5f561a6fd8277f2f389ff96ddb9e # v2.6.0
+        env:
+          EMAIL_SMTP_HOST: ${{ vars.EMAIL_SMTP_HOST }}
+          EMAIL_SMTP_PORT: ${{ vars.EMAIL_SMTP_PORT }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          EMAIL_USERNAME: ${{ vars.EMAIL_FROM }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ vars.EMAIL_TO }}
+        with:
+          subject: "[e2e] ${{ steps.e2e.outcome }} - ${{ github.repository }} (${{ github.head_ref || github.ref_name }})"
+          body: |
+            The e2e run finished with outcome: ${{ steps.e2e.outcome }}.
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            The HTML report of the run is attached.
+          attachments: artifacts/e2e-go.html
+          priority: ${{ steps.e2e.outcome == 'success' && 'normal' || 'high' }}
+
+      - name: Collect the pod logs
+        id: pod_logs
+        if: always()
+        run: .github/scripts/collect-e2e-pod-logs.sh
+
+      - name: Upload the pod logs
+        if: always() && steps.pod_logs.outcome == 'success'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: e2e-pod-logs
+          path: pod-logs/
+          if-no-files-found: warn
 
       - name: Dump state on failure
         if: failure()
