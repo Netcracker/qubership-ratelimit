@@ -9,6 +9,7 @@ import (
 	"maps"
 	"sort"
 	"sync/atomic"
+	"time"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -25,6 +26,11 @@ import (
 type Domain struct {
 	Engine   *engine.Engine
 	Snapshot *compile.Snapshot
+
+	// Version identifies the enforced set the pair above represents. It is
+	// hashed once, when the domain is built, because every management response
+	// quotes it and every pinned reset compares it.
+	Version string
 }
 
 // RuleSet is an immutable snapshot of the domains that have a policy bound to
@@ -58,6 +64,12 @@ func (r *RuleSet) Snapshot(domain string) *compile.Snapshot {
 	return r.domains[domain].Snapshot
 }
 
+// Version returns the enforced-set version of the domain, or an empty string
+// for an unbound one.
+func (r *RuleSet) Version(domain string) string {
+	return r.domains[domain].Version
+}
+
 // Domains lists the bound domains in name order, so a management response and
 // the log line of a rebuild agree on ordering.
 func (r *RuleSet) Domains() []string {
@@ -80,6 +92,12 @@ func (r *RuleSet) Len() int { return len(r.domains) }
 // Store holds the current RuleSet.
 type Store struct {
 	current atomic.Pointer[RuleSet]
+
+	// swappedAt is when the rule set last changed here. Replicas swap
+	// independently, so this is a per-replica fact and the one the management
+	// API reports: comparing it across pods is how a rollout skew becomes
+	// visible.
+	swappedAt atomic.Pointer[time.Time]
 }
 
 // New returns a Store holding an empty rule set, so readers that run before the
@@ -101,6 +119,17 @@ func (s *Store) Replace(rs *RuleSet) {
 		rs = NewRuleSet(nil)
 	}
 	s.current.Store(rs)
+	now := time.Now()
+	s.swappedAt.Store(&now)
+}
+
+// SwappedAt is when this replica last swapped its rule set, or the zero time
+// before the first one lands.
+func (s *Store) SwappedAt() time.Time {
+	if at := s.swappedAt.Load(); at != nil {
+		return *at
+	}
+	return time.Time{}
 }
 
 // Engine returns the current engine of the domain in one atomic load, or nil

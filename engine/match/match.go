@@ -51,6 +51,21 @@ func Match(snap *compile.Snapshot, path, method string) Candidates {
 // stands, and identity extraction has nothing to feed.
 func (c Candidates) Empty() bool { return len(c.hits) == 0 }
 
+// Blocks lists the targeted blocks in snapshot order.
+//
+// It exists for introspection: an operator asking which rules guard a path
+// deserves the answer the decision path would give, and a caller filtering the
+// rule listing by hand would reimplement segment-based prefixes and template
+// captures, which is the exact place where a second matcher drifts from this
+// one. The blocks belong to the snapshot and are read-only.
+func (c Candidates) Blocks() []*compile.Block {
+	out := make([]*compile.Block, 0, len(c.hits))
+	for i := range c.hits {
+		out = append(out, c.hits[i].block)
+	}
+	return out
+}
+
 // Evaluate runs the rule phase over the candidates. Keys are the extracted
 // identity values; a key's value is a set — scalar keys carry one element,
 // array keys their elements, absent keys nothing. Built-in path and method

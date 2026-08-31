@@ -42,7 +42,9 @@ import (
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
+	"github.com/netcracker/qubership-ratelimit/internal/management"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
+	"github.com/netcracker/qubership-ratelimit/internal/records"
 	"github.com/netcracker/qubership-ratelimit/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/internal/state"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
@@ -83,6 +85,7 @@ func main() {
 	var probeAddr string
 	var metricsAddr string
 	var rlsAddr string
+	var managementAddr string
 	var enableLeaderElection bool
 	var storeDebounce time.Duration
 	var drainTimeout time.Duration
@@ -93,6 +96,9 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
 		"The address the Prometheus metrics endpoint binds to. \"0\" disables it.")
 	flag.StringVar(&rlsAddr, "rls-bind-address", ":9000", "The address the rate limit gRPC endpoint binds to.")
+	flag.StringVar(&managementAddr, "management-bind-address", "0",
+		"The address the management API binds to. \"0\" disables it. It must never be reachable "+
+			"from the data path: these endpoints lift limits.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election. Only status writes are leader-gated; the rate limit endpoint "+
 			"and its store run on every replica.")
@@ -121,6 +127,7 @@ func main() {
 		probeAddr:            probeAddr,
 		metricsAddr:          metricsAddr,
 		rlsAddr:              rlsAddr,
+		managementAddr:       managementAddr,
 		enableLeaderElection: enableLeaderElection,
 		storeDebounce:        storeDebounce,
 		drainTimeout:         drainTimeout,
@@ -134,10 +141,11 @@ func main() {
 // runOptions collects what the flags decided. It replaces a parameter list
 // that had grown past the point where a caller could tell two strings apart.
 type runOptions struct {
-	mode        string
-	probeAddr   string
-	metricsAddr string
-	rlsAddr     string
+	mode           string
+	probeAddr      string
+	metricsAddr    string
+	rlsAddr        string
+	managementAddr string
 
 	enableLeaderElection bool
 	storeDebounce        time.Duration
@@ -174,8 +182,10 @@ func newCounterStore() counterBackend {
 	})
 	return counterBackend{
 		store:       redisstore.New(shared),
+		records:     records.NewRedis(shared),
 		closer:      shared,
 		description: "redis at " + addresses,
+		shared:      true,
 	}
 }
 
@@ -184,8 +194,14 @@ func newCounterStore() counterBackend {
 // description for the startup line.
 type counterBackend struct {
 	store       enginestore.Store
+	records     records.Store
 	closer      io.Closer
 	description string
+
+	// shared marks a store every replica counts in. Without one a limit of N
+	// admits N per replica — and the management API's records are per replica
+	// too.
+	shared bool
 }
 
 // nearLimitRatio reads the near-limit margin for the metrics. The property
@@ -277,6 +293,10 @@ func run(options runOptions) error {
 	// released here rather than where it was built.
 	defer closeCounterStore(limiter.closer)
 
+	if err := addManagementAPI(mgr, options, limiter); err != nil {
+		return err
+	}
+
 	if err := addProbes(mgr, limiter); err != nil {
 		return err
 	}
@@ -349,6 +369,25 @@ type rateLimitEndpoint struct {
 	runner  *rls.Runner
 	updater *store.Updater
 	closer  io.Closer
+
+	// rules is the enforced rule set and counters is where it counts. The
+	// management API reads both, so they are handed out rather than rebuilt:
+	// an endpoint reporting a second copy of the rules would report something
+	// other than what is being enforced.
+	rules    *store.Store
+	counters enginestore.Store
+
+	// records is where accepted mutations are remembered, in the counter store
+	// itself: losing both together leaves a re-executed reset over an empty
+	// store, which is harmless, while losing one without the other would not
+	// be.
+	records records.Store
+
+	// backend describes the counter store in the words the startup line uses,
+	// which is what the status endpoint reports, and shared says whether every
+	// replica counts in it.
+	backend string
+	shared  bool
 }
 
 // addRateLimitEndpoint registers the decision path: the counter store, the rule
@@ -372,6 +411,11 @@ func addRateLimitEndpoint(
 	metrics.RegisterCacheStats(cacheStats)
 
 	ruleStore := store.New()
+	endpoint.rules = ruleStore
+	endpoint.counters = backend.store
+	endpoint.records = backend.records
+	endpoint.backend = backend.description
+	endpoint.shared = backend.shared
 	endpoint.updater = &store.Updater{
 		Cache:      mgr.GetCache(),
 		Store:      ruleStore,
@@ -397,6 +441,54 @@ func addRateLimitEndpoint(
 		return endpoint, fmt.Errorf("add rls server: %w", err)
 	}
 	return endpoint, nil
+}
+
+// addManagementAPI registers the control interface, on its own listener.
+//
+// It is off unless an address is configured, and the address is never the one
+// the gateways reach: these endpoints lift limits, so serving them on the data
+// path would let the traffic being limited turn its own limits off. It follows
+// the decision path rather than the controller — every replica serves it, for
+// the same reason every replica answers checks, and a reset against a shared
+// store takes effect wherever it lands.
+func addManagementAPI(mgr ctrl.Manager, options runOptions, limiter rateLimitEndpoint) error {
+	if options.managementAddr == "" || options.managementAddr == "0" || limiter.rules == nil {
+		return nil
+	}
+
+	if !limiter.shared {
+		// The in-process counter store is a single-replica configuration by
+		// definition, and the management API assumes a shared one: records,
+		// confirmation tokens, and operations live beside the counters, so with
+		// several replicas a retry that lands elsewhere finds nothing. The chart
+		// keeps replicas at one in this mode; this line is what a deployment
+		// that got it wrong will find in its log.
+		setupLog.Warnf("management API is serving over the in-process counter store; " +
+			"it is correct at one replica only, like the limits themselves")
+	}
+
+	api := &management.API{
+		Rules:          limiter.rules,
+		Counters:       limiter.counters,
+		Records:        limiter.records,
+		CounterBackend: limiter.backend,
+		Log:            logging.GetLogger(loggerName + "/management"),
+	}
+	app, err := management.NewApp(api)
+	if err != nil {
+		return err
+	}
+	runner := &management.Runner{
+		Addr:         options.managementAddr,
+		App:          app,
+		API:          api,
+		Log:          logging.GetLogger(loggerName + "/management"),
+		DrainTimeout: options.drainTimeout,
+	}
+	if err := mgr.Add(runner); err != nil {
+		return fmt.Errorf("add management api: %w", err)
+	}
+	return nil
 }
 
 // closeCounterStore releases the counter store client at shutdown. A process
