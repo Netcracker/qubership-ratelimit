@@ -20,6 +20,7 @@ import (
 	counters "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	"github.com/netcracker/qubership-ratelimit/internal/ruleview"
 )
 
 // DefaultDebounce is how long the updater waits after the first event of a burst
@@ -323,7 +324,15 @@ func (u *Updater) ruleSet(result *policy.Result, previous map[string]policy.Bund
 		// The store is wrapped per domain so the roundtrip series carries the
 		// domain label without parsing bucket keys on the hot path.
 		instrumented := metrics.InstrumentStore(domain, u.Counters)
-		domains[domain] = Domain{Engine: engine.New(snapshot, instrumented, opts...), Snapshot: snapshot}
+		domains[domain] = Domain{
+			Engine:   engine.New(snapshot, instrumented, opts...),
+			Snapshot: snapshot,
+			// The version is hashed here, once per rebuild, and read as a
+			// string everywhere after: the management API quotes it on every
+			// listing and compares it on every pinned reset, and none of that
+			// should cost a hash of the whole rule set.
+			Version: ruleview.Version(snapshot),
+		}
 	}
 	u.domains = domains
 	return NewRuleSet(domains)

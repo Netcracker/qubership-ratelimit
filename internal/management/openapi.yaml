@@ -1,0 +1,3932 @@
+openapi: 3.0.3
+info:
+  title: Rate Limit Management API
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  description: |
+    Control interface of the rate limit service: read what is enforced,
+    inspect and reset live counters, simulate a request, and tap the decision
+    audit stream.
+
+    Principles:
+    * The API mutates runtime state only (counters, audit taps). Configuration
+      (limits, rules, mappings) lives in the RateLimitPolicy and
+      RateLimitMapping custom resources - the GitOps path. There are no
+      configuration write endpoints.
+    * Reads never charge counters: every read goes through the store's Peek,
+      evaluated at cost=1. Judging arbitrary costs is what the simulation
+      endpoint is for.
+    * Every mutation is audited - a structured audit log line with the
+      request id and subject is the durable journal; a Kubernetes Event is
+      emitted as an operational signal on top, never as the record.
+    * Destructive radius is bounded by construction: DELETE only addresses
+      one rule; anything wider goes through the counter-resets action, whose execution step only exists with the single-use confirmation token minted by a mandatory preview - look before you delete is enforced by construction, and the sweep's work is bounded server-side: the walk has a deadline, and a domain runs at most one sweep at a time.
+    * The base path is a security boundary: the gateway's auth extension authenticates every call against the platform identity provider, and the service itself authorizes it by the roles the token carries, per path and verb.
+
+    Dynamic axis parameters: counters are addressed by named identity axes
+    (client, captured path segments). Query parameters of the form
+    `axis.<name>=<value>` select by them: repeating one name ORs its values,
+    different names AND together, and a counter whose rule lacks a named
+    axis never matches. OpenAPI cannot declare wildcard parameter names, so each endpoint carries a stand-in entry marked x-dynamic-parameter: true - exclude those from generated clients and send the family as raw query pairs; the stand-ins document the contract and are shown in examples. Bulk selections
+    travel as a JSON body in the counter-resets action instead - a URL is
+    the wrong place for a thousand client ids.
+
+    Errors: every non-2xx the SERVICE forms is NC.TMFErrorResponse.v1.0 (see the TmfErrorResponse schema); clients branch on `code`, never on prose. The perimeter answers before the service on an invalid or expired token, in its own format - never parse an arbitrary 401 as TMF, and do not expect X-Request-Id on one.
+    Catalog:
+    * RLS-0400 - invalid request (query, body, cursor, header patterns)
+    * RLS-0401 - authentication required
+    * RLS-0403 - access denied
+    * RLS-0404 - unknown resource (domain, rule, window)
+    * RLS-0409 - conflict; meta.conflictType names the recovery (stale If-Match; same Idempotency-Key with a different canonical command; a confirmation token whose selection,
+      domain, subject, or rule-set version no longer matches; an expectedRuleSetVersion that no longer matches)
+    * RLS-0410 - confirmation token expired or already used
+    * RLS-0422 - selection exceeds the synchronous work limit (a failure
+      after acceptance: recorded, replayed, partial disclosure attached)
+    * RLS-0501 - command interrupted after acceptance: any unforeseen error
+      that cut the sweep - recorded by the walker itself, or finalized by a
+      retry once the lease expired; replays with mandatory partial disclosure
+    * RLS-0500 - internal error
+    * RLS-0503 - counter store unavailable
+
+    Traceability: every response the service forms carries the X-Request-Id header - a caller-supplied value round-trips, an absent one is generated - and the same id runs through the operator log, the audit journal, and the meta.requestId of every error body. Quote it when asking what happened.
+servers:
+- url: /ratelimit/v1
+security:
+- bearerAuth: []
+tags:
+- name: domains
+  description: The enforced rule set, as the decision path reads it.
+- name: counters
+  description: Live counter state - inspection and resets.
+- name: simulations
+  description: Non-charging request debugger.
+- name: meta
+  description: Service self-description.
+paths:
+  /domains:
+    get:
+      tags:
+      - domains
+      operationId: listDomains
+      summary: List the domains under management
+      responses:
+        '200':
+          description: Every domain the current rule set carries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainList'
+              example:
+                items:
+                - domain: gateway.public
+                  ruleSetVersion: 7c31a9f4e0d2
+                  policies: 2
+                  blocks: 8
+                  rules: 15
+                  effectiveKeys:
+                  - client
+                  - plan
+                  - roles
+                  - tenant
+                  listValuedKeys:
+                  - roles
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      description: 'The entry point of an investigation: which domains the enforced
+        rule set carries and how big each one is. Domains are few by design, so
+        the listing is not paginated.'
+      parameters:
+      - $ref: '#/components/parameters/xRequestId'
+  /domains/{domain}/rules:
+    get:
+      tags:
+      - domains
+      operationId: getRules
+      summary: The enforced rule set of one domain
+      description: |-
+        Reports what is actually enforced - which can be an earlier last-good
+        generation of a policy, not the latest object in the cluster. The `axes`
+        list of each rule is the DELETE contract: the direct form requires one
+        value for every declared axis.
+
+        With `path` (and optionally `method`) the view is filtered to the
+        blocks whose targets match that request - the engine's own route
+        matcher, not a naive prefix compare, so segment-based Prefix and
+        Template captures behave exactly as they do on traffic. This is the
+        static answer to "which rules guard this API"; feed the resulting
+        rule ids into the counters listing with `limited=true` to see which
+        of them hold refusals right now.
+
+        The response names the ruleSetVersion of the snapshot it renders; the addressed DELETE accepts it as expectedRuleSetVersion to refuse acting on a set the operator has not seen.
+
+        Scoped by axis.<name> (e.g. ?axis.client=alice), the same view turns into an applicability analysis: every rule is annotated always (applies for every completion of the unknown identity), conditional (for some - conditionalOn names the gates), or never. Supplying more axes sharpens the answer monotonically: a gate closed by a new value moves rules between the classes and never reopens.
+      parameters:
+      - $ref: '#/components/parameters/domain'
+      - name: path
+        in: query
+        required: false
+        description: Filter to blocks whose targets match this request path.
+        schema:
+          type: string
+        example: /api/orders
+      - name: method
+        in: query
+        required: false
+        description: HTTP method for the route match; meaningful only with path
+          - method without path is refused (RLS-0400), not silently ignored.
+        schema:
+          type: string
+        example: GET
+      - name: axis.<name>
+        in: query
+        required: false
+        description: 'Documentation stand-in for the dynamic axis parameters (OpenAPI
+          cannot declare wildcard names). Scopes the view to a partial identity:
+          each supplied key is fixed by what one caller carries: a scalar key takes
+          ONE value, and repeating it is refused (RLS-0400), unlike the listing''s
+          OR; a list-valued key (see listValuedKeys) IS repeatable, and the supplied
+          values form its COMPLETE set - Contains and Exists decide against it,
+          e.g. ?axis.client=alice&axis.roles=support&axis.roles=operator. Unnamed
+          keys stay unknown. Every rule then carries applicability and, when conditional,
+          conditionalOn. Valid names are the domain''s effectiveKeys and the blocks''
+          captures; an unknown name is refused (RLS-0400), never ignored. Orthogonal
+          to path/method, which filter blocks rather than annotate rules.'
+        schema:
+          type: string
+        example: alice
+        x-dynamic-parameter: true
+      - name: absent
+        in: query
+        required: false
+        style: form
+        explode: true
+        description: 'Declares identity keys KNOWN ABSENT: the key''s value set
+          is empty - for a list-valued key that is the same statement as an empty
+          list, which is exactly how the engine reads Exists (set non-empty) and
+          NotExists (set empty). Repeatable. An absent key decides conditions -
+          NotExists satisfied, Exists failed - and voids rules that count by it:
+          their axis can never take a value, so applicability is never. A key both
+          supplied via axis.<name> and declared absent is a contradiction (RLS-0400);
+          an unknown name is refused likewise. absent alone forms an identity scope:
+          the applicability annotations appear even when no axis.<name> is supplied.'
+        schema:
+          type: array
+          items:
+            type: string
+        example:
+        - tenant
+      - $ref: '#/components/parameters/xRequestId'
+      responses:
+        '200':
+          description: The compiled rule set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleSetView'
+              examples:
+                full:
+                  summary: 'Unscoped: the enforced set as compiled'
+                  value:
+                    domain: gateway.public
+                    ruleSetVersion: 7c31a9f4e0d2
+                    effectiveKeys:
+                    - client
+                    - plan
+                    - roles
+                    - tenant
+                    listValuedKeys:
+                    - roles
+                    blocks:
+                    - policy: quote-api
+                      block: cascade
+                      mode: FirstMatch
+                      routes:
+                      - type: Prefix
+                        value: /api/quotes/
+                        methods:
+                        - GET
+                        - POST
+                      rules:
+                      - id: quote-api/cascade/internal
+                        policy: quote-api
+                        block: cascade
+                        rule: internal
+                        mode: bypass
+                        axes: []
+                        when:
+                        - key: client
+                          operator: Equals
+                          value: prometheus
+                        rates: []
+                      - id: quote-api/cascade/trial
+                        policy: quote-api
+                        block: cascade
+                        rule: trial
+                        mode: shadow
+                        axes:
+                        - client
+                        when:
+                        - key: client
+                          operator: In
+                          values:
+                          - trial-1
+                          - trial-2
+                        rates:
+                        - algorithm: gcra
+                          requests: 10
+                          periodSeconds: 60
+                          period: 1m
+                      - id: quote-api/cascade/premium
+                        policy: quote-api
+                        block: cascade
+                        rule: premium
+                        mode: enforce
+                        axes:
+                        - client
+                        when:
+                        - key: plan
+                          operator: In
+                          values:
+                          - gold
+                          - platinum
+                        rates:
+                        - algorithm: gcra
+                          requests: 300
+                          periodSeconds: 60
+                          period: 1m
+                          burst: 50
+                      - id: quote-api/cascade/everyone
+                        policy: quote-api
+                        block: cascade
+                        rule: everyone
+                        mode: enforce
+                        axes:
+                        - client
+                        rates:
+                        - algorithm: gcra
+                          requests: 100
+                          periodSeconds: 60
+                          period: 1m
+                          burst: 20
+                    - policy: quote-api
+                      block: quota
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/quotes/
+                      rules:
+                      - id: quote-api/quota/daily
+                        policy: quote-api
+                        block: quota
+                        rule: daily
+                        mode: enforce
+                        axes:
+                        - client
+                        rates:
+                        - algorithm: gcra
+                          requests: 100
+                          periodSeconds: 60
+                          period: 1m
+                        - algorithm: fixedwindow
+                          requests: 10000
+                          periodSeconds: 86400
+                          period: 24h
+                    - policy: quote-api
+                      block: reports
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/reports/
+                        methods:
+                        - POST
+                      rules:
+                      - id: quote-api/reports/heavy
+                        policy: quote-api
+                        block: reports
+                        rule: heavy
+                        mode: enforce
+                        axes:
+                        - client
+                        - path
+                        rates:
+                        - algorithm: gcra
+                          requests: 5
+                          periodSeconds: 60
+                          period: 1m
+                      - id: quote-api/reports/gold
+                        policy: quote-api
+                        block: reports
+                        rule: gold
+                        mode: enforce
+                        axes:
+                        - client
+                        - path
+                        when:
+                        - key: plan
+                          operator: In
+                          values:
+                          - gold
+                          - platinum
+                        replaces:
+                        - heavy
+                        rates:
+                        - algorithm: gcra
+                          requests: 20
+                          periodSeconds: 60
+                          period: 1m
+                    - policy: quote-api
+                      block: services
+                      mode: All
+                      routes:
+                      - type: Template
+                        value: /api/{service}/status
+                      captures:
+                      - service
+                      rules:
+                      - id: quote-api/services/per-service
+                        policy: quote-api
+                        block: services
+                        rule: per-service
+                        mode: enforce
+                        axes:
+                        - service
+                        rates:
+                        - algorithm: gcra
+                          requests: 60
+                          periodSeconds: 60
+                          period: 1m
+                    - policy: quote-api
+                      block: tenants
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/
+                      rules:
+                      - id: quote-api/tenants/partner-lift
+                        policy: quote-api
+                        block: tenants
+                        rule: partner-lift
+                        mode: bypass
+                        axes: []
+                        when:
+                        - key: client
+                          operator: In
+                          values:
+                          - p-1
+                          - p-2
+                        replaces:
+                        - per-tenant
+                        rates: []
+                      - id: quote-api/tenants/per-tenant
+                        policy: quote-api
+                        block: tenants
+                        rule: per-tenant
+                        mode: enforce
+                        axes:
+                        - tenant
+                        rates:
+                        - algorithm: gcra
+                          requests: 1000
+                          periodSeconds: 60
+                          period: 1m
+                    - policy: quote-api
+                      block: login
+                      mode: All
+                      routes:
+                      - type: Exact
+                        value: /api/login
+                        methods:
+                        - POST
+                      rules:
+                      - id: quote-api/login/anonymous
+                        policy: quote-api
+                        block: login
+                        rule: anonymous
+                        mode: enforce
+                        axes: []
+                        when:
+                        - key: tenant
+                          operator: NotExists
+                        rates:
+                        - algorithm: gcra
+                          requests: 20
+                          periodSeconds: 60
+                          period: 1m
+                      - id: quote-api/login/authenticated
+                        policy: quote-api
+                        block: login
+                        rule: authenticated
+                        mode: enforce
+                        axes:
+                        - tenant
+                        when:
+                        - key: tenant
+                          operator: Exists
+                        rates:
+                        - algorithm: gcra
+                          requests: 100
+                          periodSeconds: 60
+                          period: 1m
+                    - policy: quote-api
+                      block: total
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/
+                      rules:
+                      - id: quote-api/total/bots
+                        policy: quote-api
+                        block: total
+                        rule: bots
+                        mode: shadow
+                        axes:
+                        - client
+                        when:
+                        - key: roles
+                          operator: Contains
+                          value: bot
+                        rates:
+                        - algorithm: gcra
+                          requests: 1
+                          periodSeconds: 60
+                          period: 1m
+                      - id: quote-api/total/all
+                        policy: quote-api
+                        block: total
+                        rule: all
+                        mode: enforce
+                        axes: []
+                        rates:
+                        - algorithm: gcra
+                          requests: 5000
+                          periodSeconds: 60
+                          period: 1m
+                    - policy: search-api
+                      block: search
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/search
+                      rules:
+                      - id: search-api/search/per-client
+                        policy: search-api
+                        block: search
+                        rule: per-client
+                        mode: enforce
+                        axes:
+                        - client
+                        rates:
+                        - algorithm: gcra
+                          requests: 30
+                          periodSeconds: 60
+                          period: 1m
+                scopedToClient:
+                  summary: ?axis.client=alice - every rule annotated with applicability
+                  value:
+                    domain: gateway.public
+                    ruleSetVersion: 7c31a9f4e0d2
+                    effectiveKeys:
+                    - client
+                    - plan
+                    - roles
+                    - tenant
+                    listValuedKeys:
+                    - roles
+                    blocks:
+                    - policy: quote-api
+                      block: cascade
+                      mode: FirstMatch
+                      routes:
+                      - type: Prefix
+                        value: /api/quotes/
+                        methods:
+                        - GET
+                        - POST
+                      rules:
+                      - id: quote-api/cascade/internal
+                        policy: quote-api
+                        block: cascade
+                        rule: internal
+                        mode: bypass
+                        axes: []
+                        when:
+                        - key: client
+                          operator: Equals
+                          value: prometheus
+                        rates: []
+                        applicability: never
+                      - id: quote-api/cascade/trial
+                        policy: quote-api
+                        block: cascade
+                        rule: trial
+                        mode: shadow
+                        axes:
+                        - client
+                        when:
+                        - key: client
+                          operator: In
+                          values:
+                          - trial-1
+                          - trial-2
+                        rates:
+                        - algorithm: gcra
+                          requests: 10
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: never
+                      - id: quote-api/cascade/premium
+                        policy: quote-api
+                        block: cascade
+                        rule: premium
+                        mode: enforce
+                        axes:
+                        - client
+                        when:
+                        - key: plan
+                          operator: In
+                          values:
+                          - gold
+                          - platinum
+                        rates:
+                        - algorithm: gcra
+                          requests: 300
+                          periodSeconds: 60
+                          period: 1m
+                          burst: 50
+                        applicability: conditional
+                        conditionalOn:
+                        - reason: undecided_condition
+                          key: plan
+                      - id: quote-api/cascade/everyone
+                        policy: quote-api
+                        block: cascade
+                        rule: everyone
+                        mode: enforce
+                        axes:
+                        - client
+                        rates:
+                        - algorithm: gcra
+                          requests: 100
+                          periodSeconds: 60
+                          period: 1m
+                          burst: 20
+                        applicability: conditional
+                        conditionalOn:
+                        - reason: may_be_preempted
+                          rule: quote-api/cascade/premium
+                    - policy: quote-api
+                      block: quota
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/quotes/
+                      rules:
+                      - id: quote-api/quota/daily
+                        policy: quote-api
+                        block: quota
+                        rule: daily
+                        mode: enforce
+                        axes:
+                        - client
+                        rates:
+                        - algorithm: gcra
+                          requests: 100
+                          periodSeconds: 60
+                          period: 1m
+                        - algorithm: fixedwindow
+                          requests: 10000
+                          periodSeconds: 86400
+                          period: 24h
+                        applicability: always
+                    - policy: quote-api
+                      block: reports
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/reports/
+                        methods:
+                        - POST
+                      rules:
+                      - id: quote-api/reports/heavy
+                        policy: quote-api
+                        block: reports
+                        rule: heavy
+                        mode: enforce
+                        axes:
+                        - client
+                        - path
+                        rates:
+                        - algorithm: gcra
+                          requests: 5
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: conditional
+                        conditionalOn:
+                        - reason: may_be_preempted
+                          rule: quote-api/reports/gold
+                      - id: quote-api/reports/gold
+                        policy: quote-api
+                        block: reports
+                        rule: gold
+                        mode: enforce
+                        axes:
+                        - client
+                        - path
+                        when:
+                        - key: plan
+                          operator: In
+                          values:
+                          - gold
+                          - platinum
+                        replaces:
+                        - heavy
+                        rates:
+                        - algorithm: gcra
+                          requests: 20
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: conditional
+                        conditionalOn:
+                        - reason: undecided_condition
+                          key: plan
+                    - policy: quote-api
+                      block: services
+                      mode: All
+                      routes:
+                      - type: Template
+                        value: /api/{service}/status
+                      captures:
+                      - service
+                      rules:
+                      - id: quote-api/services/per-service
+                        policy: quote-api
+                        block: services
+                        rule: per-service
+                        mode: enforce
+                        axes:
+                        - service
+                        rates:
+                        - algorithm: gcra
+                          requests: 60
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: always
+                    - policy: quote-api
+                      block: tenants
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/
+                      rules:
+                      - id: quote-api/tenants/partner-lift
+                        policy: quote-api
+                        block: tenants
+                        rule: partner-lift
+                        mode: bypass
+                        axes: []
+                        when:
+                        - key: client
+                          operator: In
+                          values:
+                          - p-1
+                          - p-2
+                        replaces:
+                        - per-tenant
+                        rates: []
+                        applicability: never
+                      - id: quote-api/tenants/per-tenant
+                        policy: quote-api
+                        block: tenants
+                        rule: per-tenant
+                        mode: enforce
+                        axes:
+                        - tenant
+                        rates:
+                        - algorithm: gcra
+                          requests: 1000
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: conditional
+                        conditionalOn:
+                        - reason: missing_axis
+                          key: tenant
+                    - policy: quote-api
+                      block: login
+                      mode: All
+                      routes:
+                      - type: Exact
+                        value: /api/login
+                        methods:
+                        - POST
+                      rules:
+                      - id: quote-api/login/anonymous
+                        policy: quote-api
+                        block: login
+                        rule: anonymous
+                        mode: enforce
+                        axes: []
+                        when:
+                        - key: tenant
+                          operator: NotExists
+                        rates:
+                        - algorithm: gcra
+                          requests: 20
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: conditional
+                        conditionalOn:
+                        - reason: undecided_condition
+                          key: tenant
+                      - id: quote-api/login/authenticated
+                        policy: quote-api
+                        block: login
+                        rule: authenticated
+                        mode: enforce
+                        axes:
+                        - tenant
+                        when:
+                        - key: tenant
+                          operator: Exists
+                        rates:
+                        - algorithm: gcra
+                          requests: 100
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: conditional
+                        conditionalOn:
+                        - reason: undecided_condition
+                          key: tenant
+                    - policy: quote-api
+                      block: total
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/
+                      rules:
+                      - id: quote-api/total/bots
+                        policy: quote-api
+                        block: total
+                        rule: bots
+                        mode: shadow
+                        axes:
+                        - client
+                        when:
+                        - key: roles
+                          operator: Contains
+                          value: bot
+                        rates:
+                        - algorithm: gcra
+                          requests: 1
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: conditional
+                        conditionalOn:
+                        - reason: undecided_condition
+                          key: roles
+                      - id: quote-api/total/all
+                        policy: quote-api
+                        block: total
+                        rule: all
+                        mode: enforce
+                        axes: []
+                        rates:
+                        - algorithm: gcra
+                          requests: 5000
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: always
+                    - policy: search-api
+                      block: search
+                      mode: All
+                      routes:
+                      - type: Prefix
+                        value: /api/search
+                      rules:
+                      - id: search-api/search/per-client
+                        policy: search-api
+                        block: search
+                        rule: per-client
+                        mode: enforce
+                        axes:
+                        - client
+                        rates:
+                        - algorithm: gcra
+                          requests: 30
+                          periodSeconds: 60
+                          period: 1m
+                        applicability: always
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/Error'
+        '404':
+          description: Unknown domain (RLS-0404).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: b3e51f28-9c04-4d67-a1f5-2e8b0d7c4a19
+                code: RLS-0404
+                reason: Unknown resource
+                message: domain "gateway.typo" is not in the enforced rule set
+                status: '404'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: c81d2f96
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '400':
+          description: 'Invalid request: method without path, an unknown or repeated
+            axis name, a key both supplied and declared absent, or malformed parameters
+            (RLS-0400).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 1c67e2a9-4b58-4d30-8f12-6a9d0c5b3e74
+                code: RLS-0400
+                reason: Invalid request
+                message: method is meaningful only with path
+                status: '400'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: 4e83b1d7
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /domains/{domain}/counters:
+    get:
+      tags:
+      - counters
+      operationId: listCounters
+      summary: List live counters without charging them
+      description: |-
+        Peek-based: reading never spends anyone's budget; `limited` is
+        evaluated at cost=1. Takes the full selection grammar - rules x
+        window x identity x state - plus pagination.
+
+        Work is bounded per call: the server examines at most its scan
+        budget of keys for one page, so a narrow filter over a huge domain
+        may return fewer than `pageSize` items mid-collection. `scanned` in
+        the envelope says how much was examined; a present `nextCursor` is
+        the only signal of completion, never the page fill.
+
+        A cursor is bound to its selection: it embeds a fingerprint of the canonical selector (the form defined on ResetSelector, applied to the query selection likewise) and a TTL, and presenting it with different selectors - or after expiry - is RLS-0400, never a silently different listing. Pages are not a consistent snapshot: the store
+        is scanned live, so counters created, expired, or changed between
+        pages may be missed, duplicated, or reported with newer numbers.
+
+        Counters of rules no longer in the enforced set - a rollout removed the rule while its keys live out their TTL - are skipped: they cannot be rendered against the serving snapshot. They still count in scanned, remain sweepable by the counter-resets action through its key-parsing selectors (ruleIds, algorithm, period, domain-wide - axes and limited need the rule and cannot see them), and expire on their own.
+      parameters:
+      - $ref: '#/components/parameters/domain'
+      - $ref: '#/components/parameters/ruleIdMulti'
+      - $ref: '#/components/parameters/algorithm'
+      - $ref: '#/components/parameters/period'
+      - name: axis.<name>
+        in: query
+        required: false
+        description: 'Documentation stand-in for the dynamic axis parameters (OpenAPI
+          cannot declare wildcard names). Listings accept partial selections: repeating
+          one name ORs its values, different names AND together, and a counter whose
+          rule lacks a named axis never matches - e.g. ?axis.client=alice answers
+          what alice has accumulated anywhere in the domain.'
+        schema:
+          type: string
+        example: alice
+        x-dynamic-parameter: true
+      - name: limited
+        in: query
+        required: false
+        description: Only counters that would refuse the next cost=1 request; omit
+          instead of passing false.
+        schema:
+          type: boolean
+          enum:
+          - true
+          description: 'Narrows to counters refusing right now (cost=1). Only true
+            exists: false would be a no-op filter pretending to narrow - omit the
+            parameter instead.'
+      - name: pageSize
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 100
+        description: Upper bound on items in one page. A page may carry fewer even
+          mid-collection when the scan budget fills first, so the end of the listing
+          is an absent nextCursor, never a short page.
+      - name: cursor
+        in: query
+        required: false
+        description: Opaque continuation from the previous page's nextCursor; valid
+          for the same selection.
+        schema:
+          type: string
+      - $ref: '#/components/parameters/xRequestId'
+      responses:
+        '200':
+          description: One page of counters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CounterList'
+              example:
+                items:
+                - key: 'rl:v1:{gateway.public}:quote-api/cascade/everyone:gcra:60:bob:'
+                  ruleId: quote-api/cascade/everyone
+                  policy: quote-api
+                  block: cascade
+                  rule: everyone
+                  mode: enforce
+                  algorithm: gcra
+                  periodSeconds: 60
+                  axes:
+                    client: bob
+                  limit: 100
+                  remaining: 17
+                  limited: false
+                - key: 'rl:v1:{gateway.public}:quote-api/cascade/everyone:gcra:60:crawler:'
+                  ruleId: quote-api/cascade/everyone
+                  policy: quote-api
+                  block: cascade
+                  rule: everyone
+                  mode: enforce
+                  algorithm: gcra
+                  periodSeconds: 60
+                  axes:
+                    client: crawler
+                  limit: 100
+                  remaining: 0
+                  limited: true
+                  retryAfterSeconds: 12.4
+                  resetAfterSeconds: 60
+                scanned: 2
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/Error'
+        '404':
+          description: Unknown domain (RLS-0404). Rule and window filters are matched
+            against keys, never validated against the enforced set - a stale filter
+            yields an empty page, not an error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: e9c2a750-4f18-4b3d-86e2-1d5a9f0c7b34
+                code: RLS-0404
+                reason: Unknown resource
+                message: domain "gateway.typo" is not in the enforced rule set
+                status: '404'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: c81d2f96
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '400':
+          description: 'Invalid request: a cursor presented with different selectors
+            or after its TTL, or malformed parameters (RLS-0400).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 5d28c4a1-9f36-4e07-b1d5-8a2c7e9f0b64
+                code: RLS-0400
+                reason: Invalid request
+                message: the cursor was minted for a different selection; restart
+                  the listing
+                status: '400'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: 1f68b3d0
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags:
+      - counters
+      operationId: resetCounter
+      summary: Addressed reset - one rule, optionally narrowed
+      description: |-
+        The bounded-by-construction form. The invariant is key
+        computability: exactly one full policy/block/rule id, and one
+        `axis.<name>=<value>` parameter for EVERY axis the rule declares,
+        each with a single value - e.g. for a rule with axes [client, path]:
+
+            ?ruleId=quote-api/by-path/each&axis.client=alice&axis.path=/api/orders
+
+        With the identity fully named, the keys are computed from the
+        snapshot - one per window - never scanned. `algorithm`/`period`
+        optionally narrow WHICH of the computed windows to drop; they may be
+        omitted because the rule's window set is finite and known, so
+        omission still computes. A rule with no axes needs no axis
+        parameters.
+
+        A partial axis selection ("all paths of alice"), a rule set, a
+        block, a policy, a cross-rule sweep, a whole domain - anything whose
+        keys cannot be computed - is a counter-resets action (POST
+        /domains/{domain}/counter-resets): those selections scan, and a scan
+        deserves a preview, a work budget, and an explicit body. A partial axis
+        selection here is refused (RLS-0400), not silently widened.
+
+        Semantics under live traffic: a reset is not a consistent snapshot.
+        `resetCount` is the number of keys actually deleted; requests arriving during the call recreate counters independently. The record, the deletions, and the recorded outcome commit in ONE atomic store script - so a server error means the script never ran: nothing deleted, nothing bound.
+
+        A rule no longer in the enforced set answers 404 - keys cannot be computed without the rule; its leftover counters remain sweepable by the counter-resets action and expire on their own.
+
+        Retries ride the mandatory Idempotency-Key; see the parameter.
+      parameters:
+      - $ref: '#/components/parameters/domain'
+      - name: Idempotency-Key
+        in: header
+        required: true
+        description: 'Client-generated opaque key with the same semantics as on
+          counter-resets, scoped to (authenticated subject, domain, endpoint). It
+          binds to the CANONICAL COMMAND of this call - the full query selection
+          (ruleId, every axis value, algorithm, period, limited, expectedRuleSetVersion)
+          plus dryRun, normalized as the canonical selector defines (period to seconds,
+          algorithm lowercased), so 1m and 60s are one command - and for at least
+          24h a repeat of the same key and command answers the original result instead
+          of executing again: under live traffic a re-run would delete counters
+          that did not exist the first time. The record is consulted FIRST: a retry
+          of a completed call answers the recorded outcome before expectedRuleSetVersion
+          is re-checked - the command already ran against the set that was current
+          then. The record is bound in the same atomic script that executes, and
+          a retry replays the recorded 200 body - the preview as much as the execution.
+          A refusal (400, 401, 403, 404, 409, 410) binds nothing - no record is
+          created, and a corrected repeat re-evaluates cleanly. The whole command
+          is ONE atomic store script: consulting and binding the record, dropping
+          the computed keys, and writing the outcome commit together, so there is
+          no in-between state to get wrong. A server error before the script reached
+          the store means nothing ran and nothing was bound - a clean retry re-executes.
+          A lost reply after it ran is not ambiguity but latency: the retry finds
+          the recorded outcome and replays it. Nothing is ever released, because
+          nothing can be half-done - the addressed form has no interrupted state,
+          deliberately unlike counter-resets, whose walk cannot be one script. The
+          key blocks nothing about the counter itself: resetting the same selection
+          again is a new command instance with a NEW key - only a retry of the same
+          instance reuses the old one, and which of the two it is, only the caller
+          knows. The same key with a different command is a conflict (409, RLS-0409);
+          a preview and its subsequent execution differ in dryRun and are therefore
+          different commands - use different keys. The key follows the same log-safe
+          pattern as X-Request-Id: it lands in the audit journal verbatim, and values
+          outside the pattern are refused (RLS-0400).'
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+      - name: ruleId
+        in: query
+        required: true
+        description: One full policy/block/rule triple; prefix forms are refused
+          here.
+        schema:
+          type: string
+        example: quote-api/cascade/everyone
+      - $ref: '#/components/parameters/algorithm'
+      - $ref: '#/components/parameters/period'
+      - name: limited
+        in: query
+        required: false
+        description: Reset only counters refusing right now (cost=1); omit instead
+          of passing false.
+        schema:
+          type: boolean
+          enum:
+          - true
+          description: 'Narrows to counters refusing right now (cost=1). Only true
+            exists: false would be a no-op filter pretending to narrow - omit the
+            parameter instead.'
+      - name: expectedRuleSetVersion
+        in: query
+        required: false
+        description: 'The ruleSetVersion the caller read from GET /rules. When present,
+          the keys are computed only against exactly that enforced set: a rollout
+          that swapped the snapshot answers 409 (RLS-0409) instead of silently resetting
+          windows the operator never saw. Omitted, the current snapshot governs
+          - the bounded radius makes that an acceptable default. Part of the canonical
+          command.'
+        schema:
+          type: string
+        example: 7c31a9f4e0d2
+      - name: axis.<name>
+        in: query
+        required: false
+        description: |
+          Documentation stand-in for the dynamic axis parameters (OpenAPI
+          cannot declare wildcard names): one parameter per declared axis
+          of the rule, single value each, all of them required when the
+          rule declares any. See the operation description for the exact
+          contract and an example.
+        schema:
+          type: string
+        example: alice
+        x-dynamic-parameter: true
+      - name: dryRun
+        in: query
+        required: false
+        description: Report what would be reset without resetting it; omit the parameter
+          to execute.
+        schema:
+          type: boolean
+          enum:
+          - true
+          description: 'Only true exists: a command is either the preview (dryRun=true
+            present) or the execution (parameter absent), never an ambiguous explicit
+            false - the same rule limited follows.'
+      - $ref: '#/components/parameters/xRequestId'
+      responses:
+        '200':
+          description: What the reset actually dropped (or would drop, on dryRun).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressedResetResponse'
+              examples:
+                addressed:
+                  summary: Both windows of one client's rule - executed
+                  value:
+                    dryRun: false
+                    domain: gateway.public
+                    ruleId: quote-api/quota/daily
+                    ruleSetVersion: 7c31a9f4e0d2
+                    axes:
+                      client: alice
+                    resetCount: 2
+                    keys:
+                    - 'rl:v1:{gateway.public}:quote-api/quota/daily:gcra:60:alice:'
+                    - 'rl:v1:{gateway.public}:quote-api/quota/daily:fixedwindow:86400:alice:'
+                preview:
+                  summary: The same selection with dryRun=true - matched, not deleted,
+                    no token needed
+                  value:
+                    dryRun: true
+                    domain: gateway.public
+                    ruleId: quote-api/quota/daily
+                    ruleSetVersion: 7c31a9f4e0d2
+                    axes:
+                      client: alice
+                    matchedCount: 2
+                    keys:
+                    - 'rl:v1:{gateway.public}:quote-api/quota/daily:gcra:60:alice:'
+                    - 'rl:v1:{gateway.public}:quote-api/quota/daily:fixedwindow:86400:alice:'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/Error'
+        '409':
+          description: The same Idempotency-Key arrived with a different command
+            - a different selection, algorithm/period, limited, expectedRuleSetVersion,
+            or dryRun - or an expectedRuleSetVersion that no longer matches the
+            enforced rule set (RLS-0409); meta.conflictType says which.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConflictErrorResponse'
+              examples:
+                keyConflict:
+                  summary: The key was already used for another command
+                  value:
+                    id: 6c1d9e42-7a30-4b5f-8e21-3d9f0a7c4b16
+                    code: RLS-0409
+                    reason: Conflict
+                    message: this Idempotency-Key was used with a different command
+                    status: '409'
+                    '@type': NC.TMFErrorResponse.v1.0
+                    meta:
+                      requestId: a4e82d17
+                      conflictType: command_mismatch
+                staleRuleSet:
+                  summary: The snapshot swapped between look and delete
+                  value:
+                    id: 4a92c7e0-5d31-4b68-9f04-2e7c1a8d5b39
+                    code: RLS-0409
+                    reason: Conflict
+                    message: the enforced rule set is 9d02e5b7c4a1, not 7c31a9f4e0d2;
+                      re-read GET /rules and repeat
+                    status: '409'
+                    '@type': NC.TMFErrorResponse.v1.0
+                    meta:
+                      requestId: 83b1f6d2
+                      conflictType: stale_rule_set
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '404':
+          description: 'Unknown domain, rule, or window (RLS-0404): the addressed
+            form computes keys from the enforced rule, so the rule and any named
+            window must exist in it.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 1a84d6f3-0b29-4e75-9c48-6f2e3d1b8a50
+                code: RLS-0404
+                reason: Unknown resource
+                message: domain "gateway.typo" is not in the enforced rule set
+                status: '404'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: c81d2f96
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '400':
+          description: 'Invalid request: a partial axis selection, a prefix ruleId,
+            or malformed parameters - the addressed form refuses rather than silently
+            widening (RLS-0400).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 7b40e2d9-3c58-4f16-a2e7-9d0b5c8f1a73
+                code: RLS-0400
+                reason: Invalid request
+                message: the rule declares axes [client, path] and the selection
+                  names only client; use the counter-resets action
+                status: '400'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: 0d95c7a2
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /domains/{domain}/counter-resets:
+    post:
+      tags:
+      - counters
+      operationId: createCounterReset
+      summary: Bulk reset action - mandatory preview, then execute
+      description: |
+        Executes a bulk reset over the selection grammar carried in the body, in two mandatory steps. Step one: a preview (`dryRun: true`) answers the match as of preview time - live traffic drifts the count - and mints the confirmation token. Step two: the same selector plus `confirmationToken`, without `dryRun`; the execution re-resolves the selection and answers what was actually deleted. The domain-wide form is `confirmDomain` carrying the domain name from the path, and it must be the only selection - combining it with narrowing selectors is a confused call and is refused; this is the single deliberate way to reset a domain, and nothing does it by accident. A preview and its subsequent execution are different commands over one selection, so they use DIFFERENT Idempotency-Keys; reusing the preview's key for the execution is a conflict (409), not a retry. Semantics under live traffic: not a consistent snapshot - counts are keys actually deleted, and traffic during the sweep recreates counters independently.
+
+        ### Acceptance
+
+        Retries ride the mandatory Idempotency-Key, scoped to the tuple (authenticated subject, domain, endpoint): the same key in another domain or from another subject is an independent record - it can neither replay a foreign outcome nor raise a false conflict. Within the scope the server binds the key to a hash of the CANONICAL COMMAND BODY: the command type (preview or execute, by selector or domain-wide), the domain, the canonical selector or confirmDomain, dryRun, and confirmationToken. The same key with a canonically different command is a conflict (409, RLS-0409, conflictType command_mismatch). Acceptance is ONE atomic store write, done before the first deletion: it consumes the confirmation token (of an execution), binds the key, creates the record, and claims the domain's SWEEP LEASE, whose value is the command's fencing token - a domain runs at most one sweep at a time, and a competing command is refused with 409 (conflictType sweep_in_flight, Retry-After attached) BEFORE anything binds. Acceptance is the POINT OF NO RETURN: once bound, the record is never released - an error after acceptance, even one that deleted nothing, is recorded as the command's failed outcome, because releasing would let the same key run a second sweep and leave the consumed token ambiguous. Only a refusal, which was never accepted (400, 401, 403, 404, 409, 410, a 503 on the idempotency lookup, or an internal fault before the acceptance write), binds nothing - a corrected repeat re-evaluates. A 503 AT the acceptance write is the one ambiguous answer: the write may or may not have landed. It is resolved by retrying the SAME key - the retry finds the record and proceeds as a retry, or finds nothing and safely executes first; never resolve it by minting a new key, which could start a second sweep. The record is consulted BEFORE the confirmation token and the rule-set version are validated: a retry of a finished execution answers the recorded outcome, never 410 for the token it already consumed.
+
+        ### Execution
+
+        The sweep runs synchronously to completion - previews and executions alike - and the work is bounded server-side, not by the client's patience. Each batch is ONE atomic store script: verify the fencing token, delete the batch, advance the recorded progress. A walker that lost its lease deletes nothing further - there is no gap between the check and the deletions for an expired lease to fall into - and the terminal outcome commits the same way, only under a live matching token. Progress lives in the record and advances with the deletions it counts, so what happened is never unknown. The walk has a DEADLINE (a server constant, on the order of a minute): hitting it is a failure AFTER acceptance, recorded as RLS-0422 with the partial disclosure in meta.partialReset - deletions stand, and finishing the job means narrower selections or per-rule commands. Any other unforeseen error the walker can still record - a defect, an answer the walk cannot decode - ends the sweep the same way the deadline does, but as RLS-0501: the walker catches it, records the failed outcome with the progress so far under its live token, and answers it. The one error it cannot record is the store itself failing: that call answers RLS-0503, the record stays ACCEPTED, and recovery runs on the lease - a retry meets 202 while the lease lives, and finalizes RLS-0501 once it expired. The deadline keeps its own code (RLS-0422) because its recovery differs: narrowing the selection helps there, retrying the same width does not. A client that disconnects mid-walk changes nothing for the sweep: an accepted command runs to its recorded outcome, and a retry replays it - acceptance, not the connection, is the commitment. Real selections fit comfortably: a domain is one store slot, and walking a few hundred thousand keys takes seconds; size the client timeout for that. v1 provides no explicit asynchronous submission mode - an accepted command may outlive its client connection, and the only 202 in this contract answers a retry that met its own command still in flight; a detached mode returns only if legitimate domains outgrow the deadline.
+
+        The record shares the counters' store and their fate: losing the store empties both, and a re-executed reset over an emptied store deletes nothing that mattered. While the store is unreachable, idempotency lookups fail closed with RLS-0503 - an outage is never read as an empty record. PARTIAL state loss is engineered away, not assumed away: the store runs WITHOUT eviction (records and counters are correctness state, not cache, so memory pressure fails writes instead of silently dropping keys), acceptance is one atomic write in one slot (the token, the record, and the lease cannot be lost separately), and after a failover the residual window is bounded to acceptances not yet replicated - a deployment closes even that by requiring replica acknowledgement on acceptance.
+
+        ### Retry
+
+        A retry of the same key and canonical command answers by the record's state - see the table. A replayed error keeps its recorded id (it is the same error instance) while meta.requestId always names the CURRENT call: body and header never diverge, whatever the status. A retried lost preview answers the ORIGINAL confirmation token rather than minting a second. A new reset of the same selection is a NEW request with a NEW key - the record binds the key, never the selection; a failed execution's deletions stand, and finishing the job is a NEW request with a NEW key, made deliberately.
+
+        ### Recovery
+
+        A record left ACCEPTED with its lease expired marks a sweep that died. The first retry FINALIZES it atomically - compare-and-set against the still-empty outcome - as a failure - the same RLS-0501 a live walker records for itself when it catches an error mid-walk: one code for any unforeseen error that cut the command after acceptance, written by whichever hand can (the walker immediately, or the finalizing retry once a dead walker's lease expired). HTTP 500 is shared with plain internal errors; the explicit answer is a oneOf discriminated by code, and the RLS-0501 branch requires meta.partialReset, here taken from the recorded progress: every batch committed its counts together with its deletions, so the disclosure is exact up to the last batch that ran. Later retries replay that terminal outcome rather than a limbo. Retention: the record lives at least 24h, its TTL set at acceptance and refreshed by the outcome - a record that never got one still expires, from acceptance. AFTER the retention window the idempotency guarantee simply ends: the record is gone and the request is evaluated afresh - a re-sent preview runs again and mints a new token, while a re-sent execution normally answers 410, its confirmation token consumed or expired long before. Do not retry across days.
+
+        ### Record states
+
+        | Record | A retry of the same key and command gets | Leaves the state by |
+        |---|---|---|
+        | none | executed as new (or refused; refusals bind nothing) | acceptance - one atomic write |
+        | accepted, lease live | 202 + Retry-After, no body: the sweep is running, the retry is the poll | owner commits the outcome |
+        | accepted, lease expired | the retry finalizes: failed RLS-0501 (interrupted) + partialReset from progress | compare-and-set to terminal |
+        | terminal, completed | 200 with the recorded body | TTL expiry, 24h+ after outcome |
+        | terminal, failed | the recorded error: 422 (deadline) or 500/RLS-0501 (interrupted), each with partialReset | TTL expiry, 24h+ after outcome |
+        | gone (retention passed) | evaluated afresh: a preview re-runs, an execution normally 410 | - |
+      parameters:
+      - $ref: '#/components/parameters/domain'
+      - name: Idempotency-Key
+        in: header
+        required: true
+        description: Client-generated opaque key binding retries to the original
+          command; see the operation description. The key follows the same log-safe
+          pattern as X-Request-Id; values outside it are refused (RLS-0400).
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+      - $ref: '#/components/parameters/xRequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CounterResetRequest'
+            examples:
+              previewSelector:
+                summary: 'Step one: preview a block sweep'
+                value:
+                  selector:
+                    ruleIds:
+                    - quote-api/cascade
+                  dryRun: true
+              executeSelector:
+                summary: 'Step two: execute it with the previewed token'
+                value:
+                  selector:
+                    ruleIds:
+                    - quote-api/cascade
+                  confirmationToken: ct-5b8e2f9d4a10
+              tenantUsers:
+                summary: Preview a tenant's users (OR within the axis)
+                value:
+                  selector:
+                    axes:
+                      client:
+                      - u1
+                      - u2
+                      - u3
+                  dryRun: true
+              previewDomainWide:
+                summary: Step one of the domain-wide form
+                value:
+                  confirmDomain: gateway.public
+                  dryRun: true
+              executeDomainWide:
+                summary: 'Step two: the name repeated AND the token'
+                value:
+                  confirmDomain: gateway.public
+                  confirmationToken: ct-9d51c2e055a1
+      responses:
+        '200':
+          description: The preview or the execution, walked to completion - and
+            the body a retry of a completed command replays.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkResetResponse'
+              examples:
+                preview:
+                  summary: 'BulkPreview: the match and the single-use token'
+                  value:
+                    dryRun: true
+                    domain: gateway.public
+                    scanned: 63
+                    matchedCount: 63
+                    keys:
+                    - 'rl:v1:{gateway.public}:quote-api/cascade/everyone:gcra:60:crawler:'
+                    truncated: true
+                    rules:
+                    - ruleId: quote-api/cascade/trial
+                      matchedCount: 2
+                    - ruleId: quote-api/cascade/premium
+                      matchedCount: 20
+                    - ruleId: quote-api/cascade/everyone
+                      matchedCount: 41
+                    confirmationToken: ct-5b8e2f9d4a10
+                    confirmationExpiresAt: '2026-08-24T14:15:02Z'
+                executed:
+                  summary: ResetResult after the token round-trip
+                  value:
+                    dryRun: false
+                    domain: gateway.public
+                    scanned: 63
+                    resetCount: 63
+                    keys:
+                    - 'rl:v1:{gateway.public}:quote-api/cascade/everyone:gcra:60:crawler:'
+                    truncated: true
+                    rules:
+                    - ruleId: quote-api/cascade/trial
+                      resetCount: 2
+                    - ruleId: quote-api/cascade/premium
+                      resetCount: 20
+                    - ruleId: quote-api/cascade/everyone
+                      resetCount: 41
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/Error'
+        '409':
+          description: 'Conflict (RLS-0409); meta.conflictType names the recovery:
+            stale_confirmation - the token''s selection, domain, subject, or rule-set
+            version no longer match, run a new preview; command_mismatch - this
+            Idempotency-Key was bound to a different canonical command, use a new
+            key or restore the original body; sweep_in_flight - another sweep of
+            the domain is running, nothing was bound, retry after Retry-After.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConflictErrorResponse'
+              example:
+                id: b7f31c95-2e48-4d06-9a73-5c1e8f2d6a40
+                code: RLS-0409
+                reason: Conflict
+                message: the enforced rule set changed since the preview; run a
+                  new preview
+                status: '409'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: d19c4b72
+                  conflictType: stale_confirmation
+          headers:
+            Retry-After:
+              description: 'Present on sweep_in_flight: seconds until the running
+                sweep''s lease expires.'
+              required: false
+              schema:
+                type: integer
+                minimum: 1
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '410':
+          description: The confirmation token expired or was already used (RLS-0410).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 9e5a2f80-1c67-4b39-8d24-7f0b3e6c1a58
+                code: RLS-0410
+                reason: Confirmation token gone
+                message: the confirmation token expired; run a new preview
+                status: '410'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: f27e9a03
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '404':
+          description: 'Unknown domain (RLS-0404). Selector members are never validated
+            against the enforced set: a stale ruleId or window matches whatever
+            keys remain - possibly none, a 200 with zero counts - which is what
+            keeps counters of removed rules sweepable.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 7f30b9e2-5d16-4a08-b7c3-9e4a1f6d2c85
+                code: RLS-0404
+                reason: Unknown resource
+                message: domain "gateway.typo" is not in the enforced rule set
+                status: '404'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: c81d2f96
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '400':
+          description: 'Invalid request: a body matching none of the four shapes,
+            an unknown selector member, or confirmDomain differing from the path
+            domain (RLS-0400).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 8a24f9c1-6e07-4b53-9d28-3f1c7e0b5a92
+                code: RLS-0400
+                reason: Invalid request
+                message: confirmDomain "gateway.typo" does not match the path domain
+                  "gateway.public"
+                status: '400'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: b52f7c04
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 'Counter store unavailable (RLS-0503) - on the idempotency
+            lookup, at acceptance, or mid-walk. On the lookup nothing binds. AT
+            the acceptance write the answer is ambiguous - the write may or may
+            not have landed - and is resolved by retrying the SAME key: the retry
+            finds the record and proceeds as a retry, or finds nothing and safely
+            executes first. Never mint a new key to resolve it. After acceptance
+            the outcome cannot be recorded in a store that is down, so the record
+            stays ACCEPTED without an outcome, and recovery runs on the lease: once
+            the store returns, a retry of the same key and command meets 202 while
+            the lease still lives, and after it expires finalizes and replays the
+            interrupted failure (RLS-0501), its partial disclosure taken from the
+            recorded progress - deletions made before the outage stand and are counted.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 5b07e9d2-1c84-4f36-a0d5-8e2b6c9f4a71
+                code: RLS-0503
+                reason: Counter store unavailable
+                message: the counter store did not answer while sweeping; the outcome
+                  could not be recorded - a retry replays an interrupted failure
+                status: '503'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: 3d80f5c2
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '202':
+          description: 'The same key and canonical command are still executing -
+            the sweep lease is live. Nothing new was started and there is no body:
+            retry the same call after Retry-After for the recorded outcome. Only
+            a retry can see this answer; the original call holds until its outcome.'
+          headers:
+            Retry-After:
+              description: Seconds until the sweep lease expires - the latest moment
+                the outcome, or the right to finalize, becomes available.
+              required: true
+              schema:
+                type: integer
+                minimum: 1
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '422':
+          description: 'The walk hit the synchronous work limit (RLS-0422) - a failure
+            AFTER acceptance: recorded, replayed on every retry of the same key
+            and command, partial disclosure in meta.partialReset (an execution''s
+            deletions stand). Narrow the selection or reset per rule.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PartialResetErrorResponse'
+              example:
+                id: c4a81f37-9d02-4e65-b1f8-2a7c5e9d0b46
+                code: RLS-0422
+                reason: Selection exceeds the synchronous work limit
+                message: the walk hit the server deadline; deletions made so far
+                  stand - narrow the selection or reset per rule
+                status: '422'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: 7e12c9d4
+                  partialReset:
+                    dryRun: false
+                    scanned: 9600000
+                    resetCount: 3121088
+                    rules:
+                    - ruleId: quote-api/tenants/per-tenant
+                      resetCount: 2988040
+                    - ruleId: quote-api/total/all
+                      resetCount: 133048
+                    keys:
+                    - 'rl:v1:{gateway.public}:quote-api/total/all:gcra:60:'
+                    truncated: true
+        '500':
+          description: 'Two formally distinct answers share this status, told apart
+            by code. RLS-0500 - a plain internal error before acceptance: nothing
+            bound, nothing to disclose, a corrected repeat re-evaluates. RLS-0501
+            - an unforeseen error cut the command after acceptance: caught by the
+            walker, which records the failed outcome and answers it immediately
+            - or finalized by the first retry after the lease expired, when the
+            walker died or the store outage kept the outcome from being written.
+            Either way a recorded outcome that replays on every retry, meta.partialReset
+            carrying the progress the batches had committed.'
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/InternalErrorResponse'
+                - $ref: '#/components/schemas/InterruptedErrorResponse'
+                discriminator:
+                  propertyName: code
+                  mapping:
+                    RLS-0500: '#/components/schemas/InternalErrorResponse'
+                    RLS-0501: '#/components/schemas/InterruptedErrorResponse'
+              example:
+                id: e9b04c72-6a15-4d38-9f27-1c8e5a3d7b60
+                code: RLS-0501
+                reason: Command interrupted after acceptance
+                message: the sweep was interrupted after acceptance; progress below
+                  is exact up to the last batch that ran, and its deletions stand
+                status: '500'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: 9c4e1f27
+                  partialReset:
+                    dryRun: false
+                    scanned: 84000
+                    resetCount: 83641
+                    rules:
+                    - ruleId: quote-api/tenants/per-tenant
+                      resetCount: 83641
+                    keys:
+                    - 'rl:v1:{gateway.public}:quote-api/tenants/per-tenant:gcra:60:acme:'
+                    truncated: true
+  /simulations:
+    post:
+      tags:
+      - simulations
+      operationId: simulateCheck
+      summary: Ask what would happen to a request, charging nothing
+      description: |
+        Runs the full decision pipeline - matching, identity extraction,
+        per-rule verdicts - through the store's non-charging read, at the
+        cost the body names. The answer is the verdict as of evaluatedAt - nothing is reserved, and parallel traffic can change the real outcome - plus the per-rule breakdown the gateway never sees.
+
+        Identity comes from `identitySource`; the three request forms are
+        structural (see SimulationRequest):
+        * `merge` (default) - extract from the token, then explicit keys
+          override per key. This is the gateway's own semantics; with
+          neither present the simulation is anonymous.
+        * `token` - extraction only; the form admits no keys field.
+        * `keys` - explicit keys only; the form admits no token field.
+
+        The token is write-only input: it is never echoed in the response,
+        never written to access or audit logs, never quoted in errors, and
+        never reaches the audit stream.
+
+        The domain travels in the body rather than the path: one mutation-free POST path keeps the role model trivial - viewer holds post on exactly this path and never on the mutations.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SimulationRequest'
+            examples:
+              merge:
+                summary: 'Gateway semantics: token extraction with keys overlaid'
+                value:
+                  domain: gateway.public
+                  path: /api/quotes/42
+                  method: GET
+                  keys:
+                    client:
+                    - alice
+                    tenant:
+                    - acme
+                    plan:
+                    - gold
+              tokenOnly:
+                summary: Pure token - what extraction alone would judge
+                value:
+                  domain: gateway.public
+                  path: /api/quotes/42
+                  method: GET
+                  identitySource: token
+                  token: eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.sig
+              anonymous:
+                summary: No identity at all - what the unconditional rules say
+                value:
+                  domain: gateway.public
+                  path: /api/login
+                  method: POST
+      responses:
+        '200':
+          description: The decision the gateway would have received.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimulationResponse'
+              example:
+                allowed: false
+                evaluatedAt: '2026-08-24T14:02:09Z'
+                refusalReason: rate_limited
+                headers:
+                  limit: 100
+                  remaining: 0
+                  retryAfterSeconds: 23.4
+                  resetAfterSeconds: 60
+                  algorithm: gcra
+                  periodSeconds: 60
+                rules:
+                - id: quote-api/cascade/everyone
+                  mode: enforce
+                  allowed: false
+                  refusalReason: rate_limited
+                  limit: 100
+                  remaining: 0
+                  retryAfterSeconds: 23.4
+                  algorithm: gcra
+                  periodSeconds: 60
+                - id: quote-api/quota/daily
+                  mode: enforce
+                  allowed: true
+                  limit: 10000
+                  remaining: 8734
+                  algorithm: fixedwindow
+                  periodSeconds: 86400
+                - id: quote-api/tenants/per-tenant
+                  mode: enforce
+                  allowed: true
+                  limit: 1000
+                  remaining: 902
+                  algorithm: gcra
+                  periodSeconds: 60
+                - id: quote-api/total/all
+                  mode: enforce
+                  allowed: true
+                  limit: 5000
+                  remaining: 4310
+                  algorithm: gcra
+                  periodSeconds: 60
+                skips: []
+                extractedKeys:
+                - client
+                - plan
+                - tenant
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/Error'
+        '404':
+          description: Unknown domain (RLS-0404).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: c5d17a94-2e63-4f80-8b19-0a7c4e9f3d26
+                code: RLS-0404
+                reason: Unknown resource
+                message: domain "gateway.typo" is not in the enforced rule set
+                status: '404'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: c81d2f96
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '400':
+          description: 'Invalid request: an identity form violated (token form without
+            a token, keys form with an empty map) or malformed body (RLS-0400).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+              example:
+                id: 8c53a0e7-1d49-4b26-9f38-6e2a7d0c4b91
+                code: RLS-0400
+                reason: Invalid request
+                message: identitySource token requires the token field
+                status: '400'
+                '@type': NC.TMFErrorResponse.v1.0
+                meta:
+                  requestId: 6b21f4d8
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      parameters:
+      - $ref: '#/components/parameters/xRequestId'
+  /status:
+    get:
+      tags:
+      - meta
+      operationId: getStatus
+      summary: What this replica is serving right now
+      description: |
+        Per-replica view: the custom resource status shows the consensus,
+        while replicas can diverge - briefly during a rollout, or durably when their last-good histories differ - and this is the endpoint that makes the divergence visible.
+      responses:
+        '200':
+          description: The replica's serving state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusView'
+              example:
+                replica: ratelimit-6c9d-x2v
+                snapshotSwappedAt: '2026-08-24T13:58:41Z'
+                ruleSetVersions:
+                  gateway.public: 7c31a9f4e0d2
+                counterStore:
+                  backend: redis at redis:6379
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      parameters:
+      - $ref: '#/components/parameters/xRequestId'
+  /openapi.yaml:
+    get:
+      tags:
+      - meta
+      operationId: getOpenAPI
+      summary: This specification
+      responses:
+        '200':
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+      description: 'The specification, embedded at build time: what you read here
+        is what this binary was built against, not a copy that can drift.'
+      parameters:
+      - $ref: '#/components/parameters/xRequestId'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A bearer JWT issued by the platform identity provider. Authentication is the perimeter's job: the gateway's auth extension validates the token (signature, expiry, issuer) before the request reaches the service, and the mesh restricts the service's ingress to that gateway. Authorization is the service's own, and its trust boundary is explicit: identity is read from EXACTLY ONE source - the bearer token in the Authorization header, whose signature the gateway has already validated; no auxiliary identity header (X-Forwarded-User and kin) is ever consulted, so none can be spoofed. What makes the unvalidated read safe is a DEPLOYMENT REQUIREMENT, not an assumption: the mesh must restrict the service's ingress to the gateway alone; a deployment that cannot enforce that must validate the token signature in-service instead. The service enforces the role model per path and verb - viewer holds every GET and POST /simulations; operator holds the mutations (DELETE on counters, POST on counter-resets, PUT on the audit selection) plus everything viewer holds. Role names and claim locations are deployment configuration; viewer and operator are the canonical defaults. The subject also feeds the audit journal, the Idempotency-Key scope, and the confirmation-token binding. A request without a bearer token is refused outright (401) - but that is hygiene, not the defense: the service does not validate signatures, so with the ingress requirement broken a forged token would pass. The model's security rests on that requirement, or on in-service validation where the mesh cannot provide it. An invalid token is normally rejected at the gateway, in the perimeter's own error format. Roles cannot narrow to particular axis values: whoever holds viewer sees axis values (client ids), which is a documented property of the access model, not an accident.
+  parameters:
+    domain:
+      name: domain
+      in: path
+      required: true
+      schema:
+        type: string
+      example: gateway.public
+      description: The rate limit domain, as the gateway's filter names it.
+    ruleIdMulti:
+      name: ruleId
+      in: query
+      required: false
+      style: form
+      explode: true
+      description: |
+        Rule selection; repeatable, and 1-2 segment values are prefix forms
+        (policy, policy/block).
+      schema:
+        type: array
+        items:
+          type: string
+      example:
+      - quote-api/cascade/everyone
+    algorithm:
+      name: algorithm
+      in: query
+      required: false
+      description: Window filter; values as the rule listing reports in rates[].
+      schema:
+        type: string
+      example: gcra
+    period:
+      name: period
+      in: query
+      required: false
+      description: |
+        Window filter. Canonically an integer of seconds; a duration string
+        is accepted and normalized before comparison, so 1m and 60s select
+        the same window.
+      schema:
+        type: string
+      example: 24h
+    xRequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: 'Caller-supplied request id; it round-trips into the X-Request-Id
+        response header and ties the call to the operator log, the audit journal,
+        and meta.requestId of error bodies. Absent, the server generates one. Values
+        outside the pattern are refused (RLS-0400), never sanitized: the id lands
+        verbatim in logs and the audit journal, so only log-safe characters are
+        admitted.'
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+  responses:
+    Forbidden:
+      description: Access denied (RLS-0403).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TmfErrorResponse'
+          example:
+            id: e4b19c6d-2a53-4f70-8d14-6b9e0c3a7f28
+            code: RLS-0403
+            reason: Access denied
+            message: subject support-viewer lacks the operator role for DELETE /ratelimit/v1/domains/gateway.public/counters
+            status: '403'
+            '@type': NC.TMFErrorResponse.v1.0
+            meta:
+              requestId: 9d1f4c2e
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+    Error:
+      description: |
+        Any error. The body is NC.TMFErrorResponse.v1.0; branch on `code`
+        (see the catalog in the API description), read the HTTP status from
+        `status`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TmfErrorResponse'
+          example:
+            id: 3f9a7b2c-8e15-4d60-a2c9-1b4f6d8e0a37
+            code: RLS-0404
+            reason: Unknown resource
+            message: domain "gateway.typo" is not in the enforced rule set
+            status: '404'
+            '@type': NC.TMFErrorResponse.v1.0
+            meta:
+              requestId: b21c9f30
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+    Unauthorized:
+      description: 'Authentication required (RLS-0401): the request arrived without
+        a bearer token. An invalid or expired one is normally rejected at the gateway,
+        in the perimeter''s own format.'
+      headers:
+        WWW-Authenticate:
+          description: Always Bearer - the API expects the platform IdP bearer token.
+          required: true
+          schema:
+            type: string
+            example: Bearer
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TmfErrorResponse'
+          example:
+            id: d82f5c30-6a19-4e47-b0d8-3c7f1e9a5b62
+            code: RLS-0401
+            reason: Authentication required
+            message: no bearer token on the request; call through the platform gateway
+            status: '401'
+            '@type': NC.TMFErrorResponse.v1.0
+            meta:
+              requestId: 5c19e8f4
+  schemas:
+    TmfErrorResponse:
+      type: object
+      description: |
+        NC.TMFErrorResponse.v1.0, produced with
+        qubership-core-lib-go-error-handling. `id` identifies the error
+        instance (quote it when asking why a call failed), `code` is the
+        stable contract to branch on, `reason` is the code's title, `message`
+        carries the context detail.
+      required:
+      - id
+      - code
+      - reason
+      - message
+      - '@type'
+      - status
+      - meta
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique id of this error instance - what a person quotes when
+            asking why a call failed.
+        code:
+          type: string
+          pattern: ^([A-Z]+-)+\d{4}$
+          example: RLS-0404
+          description: The stable machine contract to branch on; see the catalog
+            in the API description.
+        reason:
+          type: string
+          example: Unknown resource
+          description: The error code's title - constant per code, never per instance.
+        message:
+          type: string
+          example: domain "gateway.typo" is not in the enforced rule set
+          description: Human-readable detail of this instance; free to change, never
+            a contract.
+        referenceError:
+          type: string
+          description: URL of documentation for the error, when one exists.
+        status:
+          type: string
+          example: '404'
+          description: The HTTP status code, carried as a string per the TMF envelope;
+            always present, so a client reading the body alone knows the outcome
+            class.
+        source:
+          description: The request element the error originates from, when one is
+            identifiable.
+        meta:
+          type: object
+          additionalProperties: true
+          description: Carries requestId; for validation errors, fields; on every
+            409 the service forms, conflictType; for a bulk reset that failed after
+            acceptance, partialReset.
+          required:
+          - requestId
+          properties:
+            requestId:
+              type: string
+              minLength: 1
+              maxLength: 128
+              description: The request id of the failing call - the X-Request-Id
+                value; quote it together with id when asking what happened.
+              pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$
+            fields:
+              type: array
+              items:
+                type: string
+                description: One request field at fault.
+              description: Request fields the validation error is about.
+            partialReset:
+              $ref: '#/components/schemas/PartialReset'
+            conflictType:
+              type: string
+              enum:
+              - command_mismatch
+              - stale_confirmation
+              - stale_rule_set
+              - sweep_in_flight
+              - stale_if_match
+              description: 'Which conflict this 409 is, because each recovers differently:
+                command_mismatch - new Idempotency-Key or the original body; stale_confirmation
+                - new preview; stale_rule_set - re-read the enforced set and repeat;
+                sweep_in_flight - retry after Retry-After; stale_if_match - re-read
+                the ETag, merge, retry. Present on every 409 the service forms.'
+        errors:
+          type: array
+          items:
+            type: object
+            description: One nested error of the aggregate.
+          description: Nested component errors of an aggregate failure.
+        '@type':
+          type: string
+          enum:
+          - NC.TMFErrorResponse.v1.0
+          description: The TMF envelope type marker.
+        '@schemaLocation':
+          type: string
+          description: URL of the schema describing this error structure.
+    DomainList:
+      type: object
+      description: Domains are few by design; the listing is not paginated.
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DomainSummary'
+          description: Every domain of the enforced rule set.
+    DomainSummary:
+      type: object
+      required:
+      - domain
+      - ruleSetVersion
+      - policies
+      - blocks
+      - rules
+      - effectiveKeys
+      properties:
+        domain:
+          type: string
+          example: gateway.public
+          description: The rate limit domain, as the gateway's filter names it.
+        ruleSetVersion:
+          type: string
+          example: 7c31a9f4e0d2
+          description: This domain's rule-set version - the same value GET /rules
+            reports; it changes only with this domain's enforced set.
+        policies:
+          type: integer
+          description: Policies contributing to the domain's enforced set.
+        blocks:
+          type: integer
+          description: Compiled blocks across those policies.
+        rules:
+          type: integer
+          description: Compiled rules across those blocks.
+        effectiveKeys:
+          type: array
+          items:
+            type: string
+          example:
+          - client
+          - tenant
+          description: Every identity key the domain declares - built-ins plus mapped
+            keys, sorted.
+        listValuedKeys:
+          type: array
+          items:
+            type: string
+          example:
+          - roles
+          description: The subset of effectiveKeys whose values are sets (array
+            claims, e.g. roles); every other key is a scalar. A list-valued key
+            never appears in rule axes - counters key by scalars only - but conditions
+            read it (Contains), and the applicability scope accepts it as a repeatable
+            parameter forming its complete set.
+      description: One domain and the size of its enforced rule set.
+    RuleSetView:
+      type: object
+      required:
+      - domain
+      - ruleSetVersion
+      - effectiveKeys
+      - blocks
+      properties:
+        domain:
+          type: string
+          description: The rate limit domain, as the gateway's filter names it.
+        ruleSetVersion:
+          type: string
+          example: 7c31a9f4e0d2
+          description: 'Opaque identity of THIS domain''s enforced rule set - it
+            changes when the domain''s enforced set changes, and only then: unrelated
+            domains'' rollouts leave it alone, so a pinned DELETE is not disturbed
+            by them. Pin it as expectedRuleSetVersion on the addressed DELETE to
+            make the reset conditional on exactly the set you looked at.'
+        effectiveKeys:
+          type: array
+          items:
+            type: string
+          description: Every identity key the domain declares - built-ins plus mapped
+            keys, sorted.
+        listValuedKeys:
+          type: array
+          items:
+            type: string
+          example:
+          - roles
+          description: The subset of effectiveKeys whose values are sets (array
+            claims, e.g. roles); every other key is a scalar. A list-valued key
+            never appears in rule axes - counters key by scalars only - but conditions
+            read it (Contains), and the applicability scope accepts it as a repeatable
+            parameter forming its complete set.
+        blocks:
+          type: array
+          items:
+            $ref: '#/components/schemas/BlockView'
+          description: The compiled blocks, ordered by policy name and authored
+            position.
+      description: The compiled rule set of one domain - what the decision path
+        actually enforces, which can be a last-good generation rather than the latest
+        object.
+    BlockView:
+      type: object
+      required:
+      - policy
+      - block
+      - mode
+      - routes
+      - rules
+      properties:
+        policy:
+          type: string
+          description: The policy name - the first segment of the policy/block/rule
+            identity.
+        block:
+          type: string
+          description: The block name - the second segment of the policy/block/rule
+            identity.
+        mode:
+          type: string
+          enum:
+          - All
+          - FirstMatch
+          description: 'How the block''s rules combine: All applies every matching
+            rule, FirstMatch lets the first matching rule decide. The spelling mirrors
+            the custom resource, as do RouteView.type values - configuration views
+            keep the configuration''s vocabulary.'
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/RouteView'
+          description: 'The target: a request entering any of these routes is subject
+            to the block.'
+        captures:
+          type: array
+          items:
+            type: string
+          description: Template placeholder names of the block's routes - block-scoped
+            identity keys, sorted.
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuleView'
+          description: The block's rules, in authored order - the order FirstMatch
+            evaluates.
+      description: 'One compiled limits block: the target routes and the rules that
+        share them.'
+    RouteView:
+      type: object
+      required:
+      - type
+      - value
+      properties:
+        type:
+          type: string
+          enum:
+          - Exact
+          - Prefix
+          - Template
+          description: 'How the value matches the request path: Exact, segment-based
+            Prefix, or Template with placeholders.'
+        value:
+          type: string
+          example: /api/quotes/
+          description: The path pattern; for Template, {name} segments capture into
+            identity keys.
+        methods:
+          type: array
+          items:
+            type: string
+          description: HTTP methods the route accepts; absent means any.
+      description: One compiled route matcher of a block's target.
+    RuleView:
+      type: object
+      required:
+      - id
+      - policy
+      - block
+      - rule
+      - mode
+      - axes
+      - rates
+      properties:
+        id:
+          type: string
+          description: policy/block/rule - the identity counters and metrics use.
+          example: quote-api/cascade/everyone
+        policy:
+          type: string
+          description: The policy name - the first segment of the policy/block/rule
+            identity.
+        block:
+          type: string
+          description: The block name - the second segment of the policy/block/rule
+            identity.
+        rule:
+          type: string
+          description: The rule name - the last segment of the policy/block/rule
+            identity.
+        mode:
+          type: string
+          enum:
+          - enforce
+          - shadow
+          - bypass
+          description: 'The single mode field; there is no separate boolean to contradict
+            it. Lowercase on purpose: this is the API-wide runtime vocabulary, shared
+            with counter, outcome, and audit views - unlike BlockView.mode, which
+            mirrors the custom resource spelling.'
+        axes:
+          type: array
+          items:
+            type: string
+          description: The rule's declared axes. Direct DELETE requires one value
+            for every declared axis; bulk selections filter by axis name.
+          example:
+          - client
+        when:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConditionView'
+          description: Conditions gating the rule; group indirection is already
+            resolved into value sets.
+        replaces:
+          type: array
+          items:
+            type: string
+          description: Rules of the same block this rule suppresses when it matches
+            - the narrow rule silencing the wide one (bare rule names, as authored).
+            Only All-blocks declare it; a FirstMatch cascade stops by itself. Absent
+            when the rule replaces nothing.
+        rates:
+          type: array
+          items:
+            $ref: '#/components/schemas/RateView'
+          description: The rule's windows; each is its own counter.
+        applicability:
+          type: string
+          enum:
+          - always
+          - conditional
+          - never
+          description: 'Present only when the listing is scoped - by axis.<name>
+            parameters, the absent parameter, or both. Whether this rule can apply
+            to the supplied partial identity: always - for every completion of the
+            unknown keys; conditional - for some completions (conditionalOn names
+            the gates); never - for none. Judged by the engine''s own semantics:
+            conditions against the supplied values (groups already resolved), counter-axis
+            availability (a block''s capture axes count as present - any request
+            that reaches the Template route carries them), FirstMatch preemption,
+            bypass cut-offs, replaces, and keys declared known-absent via the absent
+            parameter.'
+        conditionalOn:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApplicabilityGate'
+          description: 'Why the rule is conditional - present exactly when applicability
+            is conditional: every gate that must resolve the rule''s way.'
+      description: One compiled rule with its resolved mode, axes, conditions, and
+        windows.
+    ConditionView:
+      description: |
+        A compiled condition - one of five operator shapes, discriminated by operator. Group indirection ends at compile time: InGroup renders as In with the group resolved into the value set. Compiled values are strings: array claims are flattened by extraction before matching. Contains is element membership in the key's value set - never a substring. Exists and NotExists are unary - they take no parameters, and a stray one is inexpressible by schema, mirroring the engine's loud arity check.
+      oneOf:
+      - $ref: '#/components/schemas/ConditionEquals'
+      - $ref: '#/components/schemas/ConditionIn'
+      - $ref: '#/components/schemas/ConditionContains'
+      - $ref: '#/components/schemas/ConditionExists'
+      - $ref: '#/components/schemas/ConditionNotExists'
+      discriminator:
+        propertyName: operator
+        mapping:
+          Equals: '#/components/schemas/ConditionEquals'
+          In: '#/components/schemas/ConditionIn'
+          Contains: '#/components/schemas/ConditionContains'
+          Exists: '#/components/schemas/ConditionExists'
+          NotExists: '#/components/schemas/ConditionNotExists'
+    RateView:
+      type: object
+      description: |
+        One window. periodSeconds is canonical; period is the same value as
+        a human-readable duration, derived for display. Every algorithm the
+        engine ships is window-based and carries requests and periodSeconds;
+        an algorithm without a window concept would arrive only with a new
+        API version.
+      required:
+      - algorithm
+      - requests
+      - periodSeconds
+      - period
+      properties:
+        algorithm:
+          type: string
+          example: gcra
+          description: The counting algorithm of the window (gcra, fixedwindow),
+            as the rule listing reports it.
+        requests:
+          type: integer
+          format: int64
+          description: The window's request budget.
+        periodSeconds:
+          type: integer
+          format: int64
+          description: The window length in seconds - the canonical representation.
+        period:
+          type: string
+          example: 1m
+          description: The same window as a human-readable duration, derived from
+            periodSeconds for display.
+        burst:
+          type: integer
+          format: int64
+          description: Momentary allowance above the steady rate, when the rule
+            declares one.
+    CounterList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CounterView'
+          description: The page of counters; an empty page is an empty array, never
+            null.
+        nextCursor:
+          type: string
+          description: Pass back as ?cursor=; absent on the last page.
+        truncated:
+          type: boolean
+          description: True when the page was cut by a limit rather than by the
+            end of the collection; a present nextCursor implies it.
+        scanned:
+          type: integer
+          description: |-
+            Keys examined to build this page. A narrow filter may examine
+            many and return few; the scan budget bounds each call. Includes keys of rules no longer enforced, which the listing skips.
+      description: One page of live counters.
+    CounterView:
+      type: object
+      required:
+      - key
+      - ruleId
+      - policy
+      - block
+      - rule
+      - algorithm
+      - periodSeconds
+      - mode
+      - limit
+      - remaining
+      - limited
+      properties:
+        key:
+          type: string
+          description: Opaque counter key, returned for diagnostics and log correlation.
+            Clients must not parse or construct this value; its format is not part
+            of the API compatibility contract.
+        ruleId:
+          type: string
+          description: The policy/block/rule triple - the identity that counters,
+            metrics, and the audit stream share.
+        policy:
+          type: string
+          description: The policy name - the first segment of the policy/block/rule
+            identity.
+        block:
+          type: string
+          description: The block name - the second segment of the policy/block/rule
+            identity.
+        rule:
+          type: string
+          description: The rule name - the last segment of the policy/block/rule
+            identity.
+        algorithm:
+          type: string
+          description: The counting algorithm of the window (gcra, fixedwindow),
+            as the rule listing reports it.
+        periodSeconds:
+          type: integer
+          format: int64
+          description: The window length in seconds - the canonical representation.
+        mode:
+          type: string
+          enum:
+          - enforce
+          - shadow
+          description: Bypass rules carry no counters, so only two modes appear
+            here.
+        axes:
+          type: object
+          additionalProperties:
+            type: string
+          description: Identity values this counter belongs to; absent for a rule
+            with no axes.
+          example:
+            client: alice
+        limit:
+          type: integer
+          format: int64
+          description: The window's request budget.
+        remaining:
+          type: integer
+          format: int64
+          description: Requests the counter would still admit right now; recovers
+            over time under gcra.
+        limited:
+          type: boolean
+          description: Would refuse the next cost=1 request. A shadow-mode counter
+            can be limited and still admit - that is what shadow mode is for.
+        retryAfterSeconds:
+          type: number
+          description: Seconds until the refusing window would admit the request;
+            present on refusals that waiting cures.
+        resetAfterSeconds:
+          type: number
+          description: Seconds until the counter returns to its empty state.
+      description: One live counter and what it would do to the next cost=1 request.
+    CounterResetRequest:
+      description: 'Exactly one of four shapes: preview or execute, by selector
+        or domain-wide. Execution NEVER runs from a cold start: it requires the
+        confirmationToken minted by a preview of the same normalized selection -
+        the two-step is enforced by construction, because a bare algorithm or period
+        filter is a near-domain-wide deletion and deserves the same ceremony as
+        confirmDomain (limited: false is inexpressible for the same reason - a no-op
+        filter pretending to narrow). The token is bound to the normalized selection,
+        the domain, the subject, and the rule-set version; the runtime additionally
+        checks that confirmDomain equals the domain in the path.'
+      oneOf:
+      - $ref: '#/components/schemas/ResetPreviewBySelector'
+      - $ref: '#/components/schemas/ResetExecuteBySelector'
+      - $ref: '#/components/schemas/ResetPreviewDomainWide'
+      - $ref: '#/components/schemas/ResetExecuteDomainWide'
+    SimulationRequest:
+      description: |
+        Three structural forms, discriminated by identitySource. merge (the
+        default when the field is absent) mirrors the gateway: extraction
+        from the token with explicit keys overlaid per key, and with
+        neither present the simulation is anonymous - a legitimate question
+        (what do the unconditional rules say). The pure forms admit exactly
+        their own source, so what was judged is never ambiguous. The
+        runtime enforces no additional structural constraints.
+      oneOf:
+      - $ref: '#/components/schemas/SimulationMerge'
+      - $ref: '#/components/schemas/SimulationToken'
+      - $ref: '#/components/schemas/SimulationKeys'
+    SimulationMerge:
+      type: object
+      additionalProperties: false
+      required:
+      - domain
+      - method
+      - path
+      properties:
+        domain:
+          type: string
+          example: gateway.public
+          description: The rate limit domain, as the gateway's filter names it.
+        path:
+          type: string
+          example: /api/quotes/1
+          description: 'The request path; matching ignores the query string. Required:
+            a gateway request always has one, and route matching is undefined without
+            it.'
+        method:
+          type: string
+          example: GET
+          description: The HTTP method; required for the same reason as path.
+        identitySource:
+          type: string
+          enum:
+          - merge
+          description: Optional; absence means merge.
+        token:
+          $ref: '#/components/schemas/SimulationTokenValue'
+        keys:
+          $ref: '#/components/schemas/SimulationKeysValue'
+        cost:
+          type: integer
+          format: int64
+          minimum: 1
+          default: 1
+          description: Every window is judged using this cost; the simulation never
+            charges counters.
+      description: 'The gateway-mirroring form: identity extracted from the token
+        with explicit keys overlaid per key; with neither present the simulation
+        is anonymous.'
+    SimulationToken:
+      type: object
+      additionalProperties: false
+      required:
+      - domain
+      - method
+      - path
+      - identitySource
+      - token
+      properties:
+        domain:
+          type: string
+          description: The rate limit domain, as the gateway's filter names it.
+        path:
+          type: string
+          description: The request path; matching ignores the query string.
+        method:
+          type: string
+          description: The HTTP method of the request.
+        identitySource:
+          type: string
+          enum:
+          - token
+          description: Names this form; fixed to token.
+        token:
+          $ref: '#/components/schemas/SimulationTokenValue'
+        cost:
+          type: integer
+          format: int64
+          minimum: 1
+          default: 1
+          description: Every window is judged using this cost; the simulation never
+            charges counters.
+      description: 'The pure-token form: identity comes from extraction alone, and
+        the shape admits no keys field.'
+    SimulationKeys:
+      type: object
+      additionalProperties: false
+      required:
+      - domain
+      - method
+      - path
+      - identitySource
+      - keys
+      properties:
+        domain:
+          type: string
+          description: The rate limit domain, as the gateway's filter names it.
+        path:
+          type: string
+          description: The request path; matching ignores the query string.
+        method:
+          type: string
+          description: The HTTP method of the request.
+        identitySource:
+          type: string
+          enum:
+          - keys
+          description: Names this form; fixed to keys.
+        keys:
+          $ref: '#/components/schemas/SimulationKeysValue'
+        cost:
+          type: integer
+          format: int64
+          minimum: 1
+          default: 1
+          description: Every window is judged using this cost; the simulation never
+            charges counters.
+      description: 'The pure-keys form: identity comes from explicit values alone,
+        and the shape admits no token field.'
+    SimulationTokenValue:
+      type: string
+      writeOnly: true
+      minLength: 1
+      maxLength: 8192
+      description: |
+        Raw token descriptor value. Write-only: never echoed, never logged,
+        never quoted in errors, never on the audit stream.
+    SimulationKeysValue:
+      type: object
+      minProperties: 1
+      additionalProperties:
+        type: array
+        minItems: 1
+        items:
+          type: string
+      description: Pre-extracted identity values, the direct-consumer form.
+      example:
+        client:
+        - alice
+    SimulationResponse:
+      description: The decision the gateway would have received, plus the per-rule
+        breakdown the gateway never sees.
+      oneOf:
+      - $ref: '#/components/schemas/SimulationAdmitted'
+      - $ref: '#/components/schemas/SimulationRateLimited'
+      - $ref: '#/components/schemas/SimulationCapacityExceeded'
+    RuleOutcomeView:
+      description: 'One applied rule''s own verdict inside a simulation. A rule
+        may carry several windows; the numbers come from the binding one among the
+        rule''s own windows, named by algorithm and periodSeconds. The binding choice
+        is deterministic, in strict priority: windows refusing with capacity_exceeded
+        rank above every retryable refusal - a permanent impossibility binds harder
+        than any wait, and retryAfterSeconds is undefined for them, so among them
+        the tie-break is the smallest counter key. Then retryable refusals, by the
+        longest retryAfterSeconds - the constraint that actually binds the client.
+        Then, on an admission, the window with the least remaining. Every remaining
+        tie breaks by the lexicographically smallest counter key, which orders by
+        the policy/block/rule triple, then algorithm, then periodSeconds - the same
+        on every replica.'
+      oneOf:
+      - $ref: '#/components/schemas/RuleOutcomeAdmitted'
+      - $ref: '#/components/schemas/RuleOutcomeRefused'
+    SkipView:
+      type: object
+      description: One identity-extraction anomaly; never carries claim values.
+      required:
+      - key
+      - reason
+      properties:
+        key:
+          type: string
+          description: The declared identity key whose extraction failed.
+        reason:
+          type: string
+          enum:
+          - decode_failed
+          - bad_type
+          - too_long
+          - too_many_items
+          description: Why extraction skipped the key; the fixed anomaly vocabulary
+            of the identity layer.
+    StatusView:
+      type: object
+      required:
+      - replica
+      - counterStore
+      properties:
+        replica:
+          type: string
+          description: This pod's name.
+        snapshotSwappedAt:
+          type: string
+          format: date-time
+          description: When the serving rule set last changed on this replica.
+        ruleSetVersions:
+          type: object
+          additionalProperties:
+            type: string
+            description: One domain's rule-set version.
+          description: Per-domain rule-set versions of the serving snapshot - what
+            GET /rules reports for each domain; compare across replicas to see rollout
+            skew. Absent until the first snapshot lands.
+        counterStore:
+          type: object
+          required:
+          - backend
+          properties:
+            backend:
+              type: string
+              example: redis at redis:6379
+              description: Human-readable backend description, as the startup log
+                prints it.
+          description: Where the counters live.
+      description: One replica's serving state - the per-replica view the custom
+        resource status cannot give.
+    SimulationAdmitted:
+      type: object
+      additionalProperties: false
+      description: 'The request would pass: no enforcing rule refused, and no refusal
+        reason exists to carry.'
+      required:
+      - allowed
+      - rules
+      - evaluatedAt
+      properties:
+        allowed:
+          type: boolean
+          description: 'The overall verdict: no enforcing rule refused.'
+          enum:
+          - true
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: 'When the evaluation ran. The verdict is best-effort as of
+            this instant: nothing is reserved, and counters move with traffic.'
+        headers:
+          $ref: '#/components/schemas/HeadersAdmitted'
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuleOutcomeView'
+          description: Every applied rule with its own verdict - shadow rules included,
+            reporting what they would have done.
+        skips:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkipView'
+          description: Identity-extraction anomalies; they never carry claim values.
+        extractedKeys:
+          type: array
+          items:
+            type: string
+          description: Names of the declared identity keys the request carried -
+            never the values.
+    RuleOutcomeAdmitted:
+      type: object
+      additionalProperties: false
+      description: The rule admitted; a refusal reason or retry hint cannot appear
+        here.
+      required:
+      - id
+      - mode
+      - allowed
+      - algorithm
+      - periodSeconds
+      - limit
+      - remaining
+      properties:
+        id:
+          type: string
+          example: quote-api/cascade/everyone
+          description: The policy/block/rule triple - the identity shared by counters,
+            metrics, and audit records.
+        mode:
+          type: string
+          enum:
+          - enforce
+          - shadow
+          description: Bypass rules end the cascade without an outcome, so only
+            two modes appear.
+        allowed:
+          type: boolean
+          description: This rule's own verdict; for shadow rules it is reported
+            and never enforced.
+          enum:
+          - true
+        algorithm:
+          type: string
+          description: The algorithm of the binding window - the one whose numbers
+            this outcome carries (gcra, fixedwindow).
+        periodSeconds:
+          type: integer
+          format: int64
+          description: The length of the binding window in seconds - what tells
+            a minute limit from a daily quota.
+        limit:
+          type: integer
+          format: int64
+          description: The window's request budget.
+        remaining:
+          type: integer
+          format: int64
+          description: Requests the counter would still admit right now; recovers
+            over time under gcra.
+    RuleOutcomeRefused:
+      description: The rule refused; refusalReason is mandatory, and retryAfterSeconds
+        is present exactly when the refusal is rate_limited - a capacity_exceeded
+        refusal carries no hint, no waiting cures it.
+      oneOf:
+      - $ref: '#/components/schemas/RuleOutcomeRateLimited'
+      - $ref: '#/components/schemas/RuleOutcomeCapacityExceeded'
+      discriminator:
+        propertyName: refusalReason
+        mapping:
+          rate_limited: '#/components/schemas/RuleOutcomeRateLimited'
+          capacity_exceeded: '#/components/schemas/RuleOutcomeCapacityExceeded'
+    RuleOutcomeRateLimited:
+      type: object
+      additionalProperties: false
+      description: 'A window doing its job: waiting cures the refusal, so retryAfterSeconds
+        is mandatory.'
+      required:
+      - id
+      - mode
+      - allowed
+      - algorithm
+      - periodSeconds
+      - limit
+      - remaining
+      - refusalReason
+      - retryAfterSeconds
+      properties:
+        id:
+          type: string
+          example: quote-api/cascade/everyone
+          description: The policy/block/rule triple - the identity shared by counters,
+            metrics, and audit records.
+        mode:
+          type: string
+          enum:
+          - enforce
+          - shadow
+          description: Bypass rules end the cascade without an outcome, so only
+            two modes appear.
+        allowed:
+          type: boolean
+          description: This rule's own verdict; for shadow rules it is reported
+            and never enforced.
+          enum:
+          - false
+        refusalReason:
+          type: string
+          enum:
+          - rate_limited
+          description: 'Why the rule refused; present only on refusals. rate_limited
+            is a window doing its job - waiting cures it. capacity_exceeded is a
+            request no waiting can cure: its cost is larger than the window can
+            ever hold, and this field is what names the rule that made the request
+            fundamentally impossible.'
+        algorithm:
+          type: string
+          description: The algorithm of the binding window - the one whose numbers
+            this outcome carries (gcra, fixedwindow).
+        periodSeconds:
+          type: integer
+          format: int64
+          description: The length of the binding window in seconds - what tells
+            a minute limit from a daily quota.
+        limit:
+          type: integer
+          format: int64
+          description: The window's request budget.
+        remaining:
+          type: integer
+          format: int64
+          description: Requests the counter would still admit right now; recovers
+            over time under gcra.
+        retryAfterSeconds:
+          type: number
+          description: Seconds until the refusing window would admit the request;
+            present on refusals that waiting cures.
+    RuleOutcomeCapacityExceeded:
+      type: object
+      additionalProperties: false
+      description: No waiting cures this refusal - the cost is larger than the window
+        can ever hold - so no retry hint can appear.
+      required:
+      - id
+      - mode
+      - allowed
+      - algorithm
+      - periodSeconds
+      - limit
+      - remaining
+      - refusalReason
+      properties:
+        id:
+          type: string
+          example: quote-api/cascade/everyone
+          description: The policy/block/rule triple - the identity shared by counters,
+            metrics, and audit records.
+        mode:
+          type: string
+          enum:
+          - enforce
+          - shadow
+          description: Bypass rules end the cascade without an outcome, so only
+            two modes appear.
+        allowed:
+          type: boolean
+          description: This rule's own verdict; for shadow rules it is reported
+            and never enforced.
+          enum:
+          - false
+        refusalReason:
+          type: string
+          enum:
+          - capacity_exceeded
+          description: 'Why the rule refused; present only on refusals. rate_limited
+            is a window doing its job - waiting cures it. capacity_exceeded is a
+            request no waiting can cure: its cost is larger than the window can
+            ever hold, and this field is what names the rule that made the request
+            fundamentally impossible.'
+        algorithm:
+          type: string
+          description: The algorithm of the binding window - the one whose numbers
+            this outcome carries (gcra, fixedwindow).
+        periodSeconds:
+          type: integer
+          format: int64
+          description: The length of the binding window in seconds - what tells
+            a minute limit from a daily quota.
+        limit:
+          type: integer
+          format: int64
+          description: The window's request budget.
+        remaining:
+          type: integer
+          format: int64
+          description: Requests the counter would still admit right now; recovers
+            over time under gcra.
+    HeadersAdmitted:
+      type: object
+      additionalProperties: false
+      description: 'The headers of an admitted answer; a retry hint cannot appear
+        here. What the x-ratelimit response headers would have carried: the binding
+        window across every applied enforcing rule - shadow rules never bind headers.
+        The binding choice is deterministic, in strict priority: windows refusing
+        with capacity_exceeded rank above every retryable refusal - a permanent
+        impossibility binds harder than any wait, and retryAfterSeconds is undefined
+        for them, so among them the tie-break is the smallest counter key. Then
+        retryable refusals, by the longest retryAfterSeconds - the constraint that
+        actually binds the client. Then, on an admission, the window with the least
+        remaining. Every remaining tie breaks by the lexicographically smallest
+        counter key, which orders by the policy/block/rule triple, then algorithm,
+        then periodSeconds - the same on every replica.'
+      required:
+      - algorithm
+      - periodSeconds
+      - limit
+      - remaining
+      properties:
+        algorithm:
+          type: string
+          description: The algorithm of the binding window - the one whose numbers
+            this outcome carries (gcra, fixedwindow).
+        periodSeconds:
+          type: integer
+          format: int64
+          description: The length of the binding window in seconds - what tells
+            a minute limit from a daily quota.
+        limit:
+          type: integer
+          format: int64
+          description: The binding window's budget.
+        remaining:
+          type: integer
+          format: int64
+          description: The binding window's remaining admissions.
+        resetAfterSeconds:
+          type: number
+          description: Seconds until the counter returns to its empty state.
+    HeadersRateLimited:
+      type: object
+      additionalProperties: false
+      description: 'The headers of a rate_limited refusal: waiting cures it, so
+        retryAfterSeconds is mandatory. What the x-ratelimit response headers would
+        have carried: the binding window across every applied enforcing rule - shadow
+        rules never bind headers. The binding choice is deterministic, in strict
+        priority: windows refusing with capacity_exceeded rank above every retryable
+        refusal - a permanent impossibility binds harder than any wait, and retryAfterSeconds
+        is undefined for them, so among them the tie-break is the smallest counter
+        key. Then retryable refusals, by the longest retryAfterSeconds - the constraint
+        that actually binds the client. Then, on an admission, the window with the
+        least remaining. Every remaining tie breaks by the lexicographically smallest
+        counter key, which orders by the policy/block/rule triple, then algorithm,
+        then periodSeconds - the same on every replica.'
+      required:
+      - algorithm
+      - periodSeconds
+      - limit
+      - remaining
+      - retryAfterSeconds
+      properties:
+        algorithm:
+          type: string
+          description: The algorithm of the binding window - the one whose numbers
+            this outcome carries (gcra, fixedwindow).
+        periodSeconds:
+          type: integer
+          format: int64
+          description: The length of the binding window in seconds - what tells
+            a minute limit from a daily quota.
+        limit:
+          type: integer
+          format: int64
+          description: The binding window's budget.
+        remaining:
+          type: integer
+          format: int64
+          description: The binding window's remaining admissions.
+        retryAfterSeconds:
+          type: number
+          description: Seconds until the refusing window would admit the request;
+            present on refusals that waiting cures.
+        resetAfterSeconds:
+          type: number
+          description: Seconds until the counter returns to its empty state.
+    HeadersCapacityExceeded:
+      type: object
+      additionalProperties: false
+      description: 'The headers of a capacity_exceeded refusal: no waiting cures
+        it, so no retry hint can appear. What the x-ratelimit response headers would
+        have carried: the binding window across every applied enforcing rule - shadow
+        rules never bind headers. The binding choice is deterministic, in strict
+        priority: windows refusing with capacity_exceeded rank above every retryable
+        refusal - a permanent impossibility binds harder than any wait, and retryAfterSeconds
+        is undefined for them, so among them the tie-break is the smallest counter
+        key. Then retryable refusals, by the longest retryAfterSeconds - the constraint
+        that actually binds the client. Then, on an admission, the window with the
+        least remaining. Every remaining tie breaks by the lexicographically smallest
+        counter key, which orders by the policy/block/rule triple, then algorithm,
+        then periodSeconds - the same on every replica.'
+      required:
+      - algorithm
+      - periodSeconds
+      - limit
+      - remaining
+      properties:
+        algorithm:
+          type: string
+          description: The algorithm of the binding window - the one whose numbers
+            this outcome carries (gcra, fixedwindow).
+        periodSeconds:
+          type: integer
+          format: int64
+          description: The length of the binding window in seconds - what tells
+            a minute limit from a daily quota.
+        limit:
+          type: integer
+          format: int64
+          description: The binding window's budget.
+        remaining:
+          type: integer
+          format: int64
+          description: The binding window's remaining admissions.
+        resetAfterSeconds:
+          type: number
+          description: Seconds until the counter returns to its empty state.
+    SimulationRateLimited:
+      type: object
+      additionalProperties: false
+      description: The request would be refused by a window doing its job; headers
+        carry the mandatory retry hint of the binding enforcing window.
+      required:
+      - allowed
+      - rules
+      - refusalReason
+      - headers
+      - evaluatedAt
+      properties:
+        allowed:
+          type: boolean
+          description: 'The overall verdict: an enforcing rule refused.'
+          enum:
+          - false
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: 'When the evaluation ran. The verdict is best-effort as of
+            this instant: nothing is reserved, and counters move with traffic.'
+        refusalReason:
+          type: string
+          enum:
+          - rate_limited
+          description: 'Present only when allowed is false: the reason of the binding
+            enforcing window, under the same binding rule the headers use. Shadow
+            rules never set it - their reasons live in their own rule outcomes.
+            capacity_exceeded means no waiting cures the refusal and no retry hint
+            is carried.'
+        headers:
+          $ref: '#/components/schemas/HeadersRateLimited'
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuleOutcomeView'
+          description: Every applied rule with its own verdict - shadow rules included,
+            reporting what they would have done.
+        skips:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkipView'
+          description: Identity-extraction anomalies; they never carry claim values.
+        extractedKeys:
+          type: array
+          items:
+            type: string
+          description: Names of the declared identity keys the request carried -
+            never the values.
+    SimulationCapacityExceeded:
+      type: object
+      additionalProperties: false
+      description: The request is fundamentally impossible - its cost is larger
+        than the binding window can ever hold; headers carry no retry hint, and
+        the rule outcomes name the window that made it so.
+      required:
+      - allowed
+      - rules
+      - refusalReason
+      - headers
+      - evaluatedAt
+      properties:
+        allowed:
+          type: boolean
+          description: 'The overall verdict: an enforcing rule refused.'
+          enum:
+          - false
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: 'When the evaluation ran. The verdict is best-effort as of
+            this instant: nothing is reserved, and counters move with traffic.'
+        refusalReason:
+          type: string
+          enum:
+          - capacity_exceeded
+          description: 'Present only when allowed is false: the reason of the binding
+            enforcing window, under the same binding rule the headers use. Shadow
+            rules never set it - their reasons live in their own rule outcomes.
+            capacity_exceeded means no waiting cures the refusal and no retry hint
+            is carried.'
+        headers:
+          $ref: '#/components/schemas/HeadersCapacityExceeded'
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuleOutcomeView'
+          description: Every applied rule with its own verdict - shadow rules included,
+            reporting what they would have done.
+        skips:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkipView'
+          description: Identity-extraction anomalies; they never carry claim values.
+        extractedKeys:
+          type: array
+          items:
+            type: string
+          description: Names of the declared identity keys the request carried -
+            never the values.
+    AddressedPreview:
+      type: object
+      additionalProperties: false
+      description: 'A dryRun answer of the addressed DELETE. No confirmation token
+        is minted: the addressed radius is bounded by construction, so execution
+        needs none.'
+      required:
+      - dryRun
+      - domain
+      - ruleId
+      - matchedCount
+      - keys
+      - ruleSetVersion
+      properties:
+        domain:
+          type: string
+          description: The domain the reset ran in.
+        ruleId:
+          type: string
+          description: Present for the addressed DELETE form.
+        ruleSetVersion:
+          type: string
+          description: The enforced rule set the keys were computed from - what
+            expectedRuleSetVersion pins.
+        axes:
+          type: object
+          additionalProperties:
+            type: string
+          description: The identity values of the addressed form, echoed back.
+        keys:
+          type: array
+          items:
+            type: string
+            description: One computed counter key.
+          description: 'The COMPLETE list of computed keys - the addressed form
+            computes them from the snapshot and never scans, so this is not a sample
+            and needs no cap: it is bounded by the rule''s window count.'
+        dryRun:
+          type: boolean
+          enum:
+          - true
+          description: Marks a preview; nothing was deleted.
+        matchedCount:
+          type: integer
+          description: Keys the selection matched at preview time; live traffic
+            drifts this number, and the execution re-resolves the same selection.
+    BulkPreview:
+      type: object
+      additionalProperties: false
+      description: 'A dryRun answer of the counter-resets action: the match at preview
+        time and the short-lived confirmation token the execution step requires.
+        The token is bound to the normalized selection, the domain, the subject,
+        and the rule-set version: if the enforced rules change between the steps,
+        the token is rejected with RLS-0409 (409) - the operator confirmed a selection
+        over rules that no longer exist. The counter set itself is advisory under
+        live traffic: counters created after the preview match the same selection
+        and will be swept, which is the documented not-a-snapshot semantics. The
+        token is single-use and expires at confirmationExpiresAt; an expired or
+        already-used token answers RLS-0410 (410). Reading the token from a replayed
+        preview grants nothing to anyone else: it only works for the subject that
+        ran the preview.'
+      required:
+      - dryRun
+      - domain
+      - scanned
+      - matchedCount
+      - keys
+      - rules
+      - confirmationToken
+      - confirmationExpiresAt
+      properties:
+        domain:
+          type: string
+          description: The domain the reset ran in.
+        scanned:
+          type: integer
+          description: Keys examined by a sweeping selection.
+        keys:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            description: One matched counter key - opaque, for diagnostics and log
+              correlation; not part of the compatibility contract.
+          description: A sample of at most 100 MATCHED keys - nothing was deleted;
+            the counts are always exact.
+        truncated:
+          type: boolean
+          description: True when the key sample was cut at its bound; the count
+            is exact regardless.
+        dryRun:
+          type: boolean
+          enum:
+          - true
+          description: Marks a preview; nothing was deleted.
+        matchedCount:
+          type: integer
+          description: Keys the selection matched at preview time; live traffic
+            drifts this number, and the execution re-resolves the same selection.
+        rules:
+          type: array
+          description: 'Per-rule breakdown of the match. It is complete: the matchedCount
+            values sum to the top-level matchedCount.'
+          items:
+            type: object
+            description: One rule's share of the match.
+            required:
+            - ruleId
+            - matchedCount
+            properties:
+              ruleId:
+                type: string
+                description: The rule whose counters this line counts.
+              matchedCount:
+                type: integer
+                description: Keys of this rule the selection matches.
+        confirmationToken:
+          type: string
+          description: Opaque single-use token binding this exact preview to the
+            execution step - the enforced look-before-you-delete.
+        confirmationExpiresAt:
+          type: string
+          format: date-time
+          description: When the confirmation token stops being accepted.
+    ResetPreviewBySelector:
+      type: object
+      additionalProperties: false
+      description: 'Step one: preview a selection; answers BulkPreview with the
+        confirmation token.'
+      required:
+      - selector
+      - dryRun
+      properties:
+        selector:
+          $ref: '#/components/schemas/ResetSelector'
+        dryRun:
+          type: boolean
+          enum:
+          - true
+          description: Marks a preview; nothing was deleted.
+    ResetExecuteBySelector:
+      type: object
+      additionalProperties: false
+      description: 'Step two: the same selector plus confirmationToken, without
+        dryRun. The token is what proves the look happened.'
+      required:
+      - selector
+      - confirmationToken
+      properties:
+        selector:
+          $ref: '#/components/schemas/ResetSelector'
+        confirmationToken:
+          type: string
+          description: The confirmationToken from the preview of this same selection.
+    ResetPreviewDomainWide:
+      type: object
+      additionalProperties: false
+      description: Step one of the domain-wide form.
+      required:
+      - confirmDomain
+      - dryRun
+      properties:
+        confirmDomain:
+          type: string
+          description: Domain-wide selection; must equal the domain in the path
+            and stands alone.
+          example: gateway.public
+        dryRun:
+          type: boolean
+          enum:
+          - true
+          description: Marks a preview; nothing was deleted.
+    ResetExecuteDomainWide:
+      type: object
+      additionalProperties: false
+      description: 'Step two of the domain-wide form: the name repeated AND the
+        previewed token.'
+      required:
+      - confirmDomain
+      - confirmationToken
+      properties:
+        confirmDomain:
+          type: string
+          description: Domain-wide selection; must equal the domain in the path
+            and stands alone.
+          example: gateway.public
+        confirmationToken:
+          type: string
+          description: The confirmationToken from the preview of this same selection.
+    ResetSelector:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      description: 'The selection: rules x window x identity x state; unknown members
+        are rejected, so a typo cannot widen a selection. Its CANONICAL SELECTOR
+        form is what the confirmation token and the listing cursor fingerprint are
+        computed over: ruleIds sorted and deduplicated; axis names sorted, values
+        within each axis sorted and deduplicated; period canonicalized to seconds
+        (1m and 60s are one selection); algorithm lowercased; absent fields absent
+        from the canonical form. Two bodies with one canonical selector are one
+        SELECTION - but not necessarily one COMMAND: the Idempotency-Key hashes
+        the canonical command body instead (see the operation description). Member
+        VALUES are matched against the KEY, never validated against the enforced
+        set: ruleIds, algorithm, and period parse each key and therefore reach counters
+        of removed rules; axes and limited need the rule''s definition (the axis-name
+        mapping, the window budgets) and match only counters of rules currently
+        enforced.'
+      properties:
+        ruleIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            description: A full policy/block/rule id or a 1-2 segment prefix form.
+          description: Full ids and 1-2 segment prefix forms mix freely.
+          example:
+          - quote-api/cascade
+          - search-api
+        algorithm:
+          type: string
+          description: Window filter; values as the rule listing reports in rates[].
+        period:
+          type: string
+          description: Window filter, normalized before comparison; 1m and 60s are
+            one window.
+        axes:
+          type: object
+          minProperties: 1
+          additionalProperties:
+            type: array
+            minItems: 1
+            items:
+              type: string
+              description: One axis value.
+            description: The values of one axis; OR within the list.
+          description: OR within one axis name, AND across names. Needs the rule's
+            axis-name mapping, so it matches only counters of enforced rules.
+          example:
+            client:
+            - u1
+            - u2
+            - u3
+        limited:
+          type: boolean
+          enum:
+          - true
+          description: 'Narrows to counters refusing right now (cost=1). Only true
+            exists: false would be a no-op filter pretending to narrow, so the schema
+            does not admit it - omit the field instead. Needs the rule''s window
+            budgets, so it matches only counters of enforced rules.'
+    AddressedResetResult:
+      type: object
+      additionalProperties: false
+      description: |
+        The execution result of the addressed DELETE. It always names its one rule; a per-rule breakdown would be a list of one and does not exist here. Not a consistent snapshot: resetCount is the number of keys actually
+        deleted, and traffic arriving during the call recreates counters
+        independently.
+      required:
+      - dryRun
+      - domain
+      - resetCount
+      - keys
+      - ruleId
+      - ruleSetVersion
+      properties:
+        domain:
+          type: string
+          description: The domain the reset ran in.
+        ruleId:
+          type: string
+          description: Present for the addressed DELETE form.
+        ruleSetVersion:
+          type: string
+          description: The enforced rule set the keys were computed from - what
+            expectedRuleSetVersion pins.
+        axes:
+          type: object
+          additionalProperties:
+            type: string
+          description: The identity values of the addressed form, echoed back.
+        keys:
+          type: array
+          items:
+            type: string
+            description: One computed counter key.
+          description: 'The COMPLETE list of computed keys - the addressed form
+            computes them from the snapshot and never scans, so this is not a sample
+            and needs no cap: it is bounded by the rule''s window count.'
+        dryRun:
+          type: boolean
+          enum:
+          - false
+          description: Marks an execution; the deletions are real.
+        resetCount:
+          type: integer
+          description: Keys actually deleted.
+    BulkResetResult:
+      type: object
+      additionalProperties: false
+      description: |
+        The execution result of the counter-resets action. Not a consistent snapshot: resetCount is the number of keys actually
+        deleted, and traffic arriving during the call recreates counters
+        independently.
+      required:
+      - dryRun
+      - domain
+      - resetCount
+      - keys
+      - rules
+      properties:
+        domain:
+          type: string
+          description: The domain the reset ran in.
+        scanned:
+          type: integer
+          description: Keys examined by a sweeping selection.
+        keys:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            description: One deleted counter key - opaque, for diagnostics and log
+              correlation; not part of the compatibility contract.
+          description: A sample of at most 100 deleted keys; the counts are always
+            exact.
+        truncated:
+          type: boolean
+          description: True when the key sample was cut at its bound; the count
+            is exact regardless.
+        rules:
+          type: array
+          description: 'Per-rule breakdown of any selection wider than one rule.
+            It is complete: the resetCount values sum to the top-level resetCount.'
+          items:
+            type: object
+            required:
+            - ruleId
+            - resetCount
+            properties:
+              ruleId:
+                type: string
+                description: The rule whose counters this line counts.
+              resetCount:
+                type: integer
+                description: Keys of this rule actually deleted.
+            description: One rule's share of the sweep.
+        dryRun:
+          type: boolean
+          enum:
+          - false
+          description: Marks an execution; the deletions are real.
+        resetCount:
+          type: integer
+          description: Keys actually deleted.
+    AddressedResetResponse:
+      description: The addressed DELETE answers either its preview or its execution
+        result; dryRun discriminates formally.
+      oneOf:
+      - $ref: '#/components/schemas/AddressedPreview'
+      - $ref: '#/components/schemas/AddressedResetResult'
+    BulkResetResponse:
+      description: The counter-resets action answers either the preview with its
+        confirmation token or the execution result; dryRun discriminates formally.
+      oneOf:
+      - $ref: '#/components/schemas/BulkPreview'
+      - $ref: '#/components/schemas/BulkResetResult'
+    ConditionEquals:
+      type: object
+      additionalProperties: false
+      required:
+      - key
+      - operator
+      - value
+      properties:
+        key:
+          type: string
+          description: The identity key the condition reads.
+        operator:
+          type: string
+          enum:
+          - Equals
+          description: Fixed to Equals.
+        value:
+          type: string
+          description: The single value the key must equal.
+      description: 'Single-value comparison: the key''s value set is exactly the
+        one given value. Rejected at compile time for array-valued keys.'
+    ConditionIn:
+      type: object
+      additionalProperties: false
+      required:
+      - key
+      - operator
+      - values
+      properties:
+        key:
+          type: string
+          description: The identity key the condition reads.
+        operator:
+          type: string
+          enum:
+          - In
+          description: Fixed to In; also how a compiled InGroup renders.
+        values:
+          type: array
+          items:
+            type: string
+          description: The membership set; client groups are already resolved into
+            it at compile time.
+      description: 'Membership: the key''s value set intersects the given set. A
+        client group (InGroup in the custom resource) is already resolved into values
+        at compile time.'
+    ConditionContains:
+      type: object
+      additionalProperties: false
+      required:
+      - key
+      - operator
+      - value
+      properties:
+        key:
+          type: string
+          description: The identity key the condition reads.
+        operator:
+          type: string
+          enum:
+          - Contains
+          description: Fixed to Contains.
+        value:
+          type: string
+          description: The element that must be present in the key's value set -
+            membership, never a substring.
+      description: Element membership in the key's value set - never a substring.
+        Meant for array claims (e.g. roles).
+    ConditionExists:
+      type: object
+      additionalProperties: false
+      required:
+      - key
+      - operator
+      properties:
+        key:
+          type: string
+          description: The identity key the condition reads.
+        operator:
+          type: string
+          enum:
+          - Exists
+          description: Fixed to Exists.
+      description: The key's value set is non-empty. Takes no parameters - a stray
+        one is inexpressible, mirroring the engine's arity check.
+    ConditionNotExists:
+      type: object
+      additionalProperties: false
+      required:
+      - key
+      - operator
+      properties:
+        key:
+          type: string
+          description: The identity key the condition reads.
+        operator:
+          type: string
+          enum:
+          - NotExists
+          description: Fixed to NotExists.
+      description: The key's value set is empty (the key itself must be declared).
+        Takes no parameters - a stray one is inexpressible, mirroring the engine's
+        arity check.
+    GateMissingAxis:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      - key
+      description: 'The rule counts by an axis the supplied identity does not carry;
+        the rule applies only to requests that produce it. Never reported alongside
+        an undecided_condition gate on the same key: deciding a condition on a key
+        decides the axis too, so the condition gate alone stands for both.'
+      properties:
+        reason:
+          type: string
+          enum:
+          - missing_axis
+          description: Fixed to missing_axis.
+        key:
+          type: string
+          description: The counter axis the identity lacks.
+    GateUndecidedCondition:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      - key
+      description: A when-condition reads a key outside the supplied identity; some
+        completions satisfy it, some do not.
+      properties:
+        reason:
+          type: string
+          enum:
+          - undecided_condition
+          description: Fixed to undecided_condition.
+        key:
+          type: string
+          description: The identity key the condition reads.
+    GateMayBePreempted:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      - rule
+      description: An earlier deciding rule of a FirstMatch cascade - or a rule
+        that replaces this one - may match first for some completions.
+      properties:
+        reason:
+          type: string
+          enum:
+          - may_be_preempted
+          description: Fixed to may_be_preempted.
+        rule:
+          type: string
+          description: Full policy/block/rule id of the rule that may preempt this
+            one.
+    ApplicabilityGate:
+      description: One gate keeping a rule conditional for the supplied partial
+        identity - discriminated by reason.
+      oneOf:
+      - $ref: '#/components/schemas/GateMissingAxis'
+      - $ref: '#/components/schemas/GateUndecidedCondition'
+      - $ref: '#/components/schemas/GateMayBePreempted'
+      discriminator:
+        propertyName: reason
+        mapping:
+          missing_axis: '#/components/schemas/GateMissingAxis'
+          undecided_condition: '#/components/schemas/GateUndecidedCondition'
+          may_be_preempted: '#/components/schemas/GateMayBePreempted'
+    PartialReset:
+      description: 'Partial disclosure of a bulk command that failed after acceptance
+        - the same facts a completed answer would carry, cut at the stop. Present
+        on the failing answer and on every replay of it, the interrupted command
+        included: progress commits batch by batch together with the deletions it
+        counts, so the record always knows what happened. Zeroes and empty arrays
+        mean the failure preceded the first deletion.'
+      oneOf:
+      - $ref: '#/components/schemas/PartialResetPreview'
+      - $ref: '#/components/schemas/PartialResetExecution'
+    PartialResetPreview:
+      type: object
+      additionalProperties: false
+      required:
+      - dryRun
+      - scanned
+      - matchedCount
+      - rules
+      - keys
+      description: 'A preview cut at the stop: nothing was deleted.'
+      properties:
+        dryRun:
+          type: boolean
+          enum:
+          - true
+          description: 'Fixed to true: a preview failed.'
+        scanned:
+          type: integer
+          minimum: 0
+          description: Keys scanned before the stop.
+        matchedCount:
+          type: integer
+          minimum: 0
+          description: Keys matched before the stop.
+        rules:
+          type: array
+          description: Per-rule breakdown of the walk so far; complete over what
+            was walked.
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - ruleId
+            - matchedCount
+            properties:
+              ruleId:
+                type: string
+              matchedCount:
+                type: integer
+                minimum: 0
+        keys:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            description: One key the walk touched - opaque, for diagnostics; not
+              part of the compatibility contract.
+          description: A sample of at most 100 keys the walk touched before the
+            stop; the counts are always exact.
+        truncated:
+          type: boolean
+          description: true when the walk touched more keys than the sample carries.
+    PartialResetExecution:
+      type: object
+      additionalProperties: false
+      required:
+      - dryRun
+      - scanned
+      - resetCount
+      - rules
+      - keys
+      description: 'An execution cut at the stop: the deletions counted here stand.'
+      properties:
+        dryRun:
+          type: boolean
+          enum:
+          - false
+          description: 'Fixed to false: an execution failed mid-sweep.'
+        scanned:
+          type: integer
+          minimum: 0
+          description: Keys scanned before the stop.
+        resetCount:
+          type: integer
+          minimum: 0
+          description: Keys deleted before the stop; they stay deleted.
+        rules:
+          type: array
+          description: Per-rule breakdown of the walk so far; complete over what
+            was walked.
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - ruleId
+            - resetCount
+            properties:
+              ruleId:
+                type: string
+              resetCount:
+                type: integer
+                minimum: 0
+        keys:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            description: One key the walk touched - opaque, for diagnostics; not
+              part of the compatibility contract.
+          description: A sample of at most 100 keys the walk touched before the
+            stop; the counts are always exact.
+        truncated:
+          type: boolean
+          description: true when the walk touched more keys than the sample carries.
+    ConflictErrorResponse:
+      description: 'A 409 the service forms: the TMF error envelope with meta.conflictType
+        mandatory, so a generated client can branch on the recovery without a null
+        check.'
+      allOf:
+      - $ref: '#/components/schemas/TmfErrorResponse'
+      - type: object
+        properties:
+          meta:
+            type: object
+            required:
+            - requestId
+            - conflictType
+    PartialResetErrorResponse:
+      description: The recorded failure of an ACCEPTED bulk command - the TMF error
+        envelope with meta.partialReset mandatory, so the partial disclosure cannot
+        be omitted. Used by 422 (deadline, RLS-0422) and by the interrupted branch
+        of 500 (RLS-0501). Both are recorded outcomes and replay on every retry.
+        A failure BEFORE acceptance binds nothing, has nothing to disclose, and
+        is the other branch of 500.
+      allOf:
+      - $ref: '#/components/schemas/TmfErrorResponse'
+      - type: object
+        properties:
+          meta:
+            type: object
+            required:
+            - requestId
+            - partialReset
+    InternalErrorResponse:
+      description: 'A plain internal error (RLS-0500): a fault before acceptance,
+        or anywhere outside a recorded outcome. Binds nothing and discloses nothing
+        - there is nothing to disclose.'
+      allOf:
+      - $ref: '#/components/schemas/TmfErrorResponse'
+      - type: object
+        properties:
+          code:
+            type: string
+            enum:
+            - RLS-0500
+    InterruptedErrorResponse:
+      description: 'The recorded failure of an accepted command that an unforeseen
+        error cut short (RLS-0501, command interrupted after acceptance): recorded
+        immediately by a walker that caught its own error, or finalized by the first
+        retry once the lease expired - the walker died, or the store outage kept
+        the outcome from being written. Either way a recorded outcome: it replays
+        on every retry, meta.partialReset mandatory with the progress the batches
+        had committed.'
+      allOf:
+      - $ref: '#/components/schemas/PartialResetErrorResponse'
+      - type: object
+        properties:
+          code:
+            type: string
+            enum:
+            - RLS-0501
+  headers:
+    XRequestId:
+      description: 'The request id of this call: a caller-supplied X-Request-Id
+        round-tripped, or a generated one when the caller sent none. The same id
+        runs through the operator log, the audit journal, and meta.requestId of
+        every error body.'
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$

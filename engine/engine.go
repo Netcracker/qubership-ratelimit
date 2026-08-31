@@ -13,9 +13,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/netcracker/qubership-ratelimit/engine/algo"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/engine/identity"
 	"github.com/netcracker/qubership-ratelimit/engine/match"
@@ -134,6 +136,12 @@ type Headers struct {
 	Remaining  int64
 	RetryAfter time.Duration // negative when no retry hint applies
 	ResetAfter time.Duration
+
+	// Algorithm and PeriodSeconds name the window these numbers came from.
+	// Without them a reader cannot tell which of a rule's windows bound the
+	// request, and two windows of one rule report the same shape.
+	Algorithm     string
+	PeriodSeconds int64
 }
 
 // RuleOutcome is one applied rule's own verdict, for metrics and the decision
@@ -146,12 +154,21 @@ type RuleOutcome struct {
 	Shadow  bool
 	Allowed bool
 
+	// CostExceedsCapacity marks a refusal by this rule that no waiting cures:
+	// the cost is larger than its bucket can ever hold. It separates the two
+	// refusal reasons a caller has to tell apart, and no retry hint applies.
+	CostExceedsCapacity bool
+
 	// Limit, Remaining, and RetryAfter come from the rule's own strictest
 	// bucket, chosen by the same tie-break the response headers use — the
 	// numbers behind near-limit metrics and per-rule audit records.
 	Limit      int64
 	Remaining  int64
 	RetryAfter time.Duration
+
+	// Algorithm and PeriodSeconds name the window those numbers came from.
+	Algorithm     string
+	PeriodSeconds int64
 }
 
 // Decision is the answer plus the facts the adapter turns into a protocol
@@ -188,6 +205,29 @@ type Decision struct {
 // the one exception is ErrTooManyBuckets, whose contract requires a denial —
 // see its documentation.
 func (e *Engine) Decide(ctx context.Context, req Request) (Decision, error) {
+	return e.evaluate(ctx, req, e.store.Decide)
+}
+
+// Peek answers the same question as Decide and charges nothing.
+//
+// It is the introspection facade: the listing reports what a counter would do
+// next and a simulation reports what a request would meet, and neither may move
+// the state it describes. The pipeline is the same one Decide runs: the same
+// matching, the same identity, the same bucket set, the same aggregation. An
+// answer here and a decision there differ only in whether the store committed.
+// ErrTooManyBuckets applies unchanged: a decision over the budget is a
+// configuration violation whether or not anything is charged for it.
+//
+// The verdict is best-effort by nature. Nothing is reserved, so live traffic can
+// change the answer between this call and the next request.
+func (e *Engine) Peek(ctx context.Context, req Request) (Decision, error) {
+	return e.evaluate(ctx, req, e.store.Peek)
+}
+
+// commit is the store call a pass makes: Decide charges, Peek does not.
+type commit func(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error)
+
+func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decision, error) {
 	cost := req.Cost
 	if cost == 0 {
 		cost = 1
@@ -209,7 +249,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (Decision, error) {
 		return Decision{}, fmt.Errorf("%w: the request matched %d buckets", ErrTooManyBuckets, len(buckets))
 	}
 
-	verdicts, err := e.store.Decide(ctx, buckets, cost)
+	verdicts, err := judge(ctx, buckets, cost)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -222,6 +262,17 @@ func (e *Engine) Decide(ctx context.Context, req Request) (Decision, error) {
 	}
 	decision.Headers, decision.CostExceedsCapacity = aggregate(buckets, verdicts, decision.Allowed)
 	return decision, nil
+}
+
+// algorithmName renders an algorithm the way the counter key and the API do:
+// lowercase, so a value read out of a key and a value read out of a view are
+// the same string.
+func algorithmName(id algo.ID) string {
+	a, ok := algo.ByID(id)
+	if !ok {
+		return ""
+	}
+	return strings.ToLower(a.Name())
 }
 
 // keyNames lists the declared identity keys the request carried, sorted.
@@ -271,10 +322,17 @@ func ruleOutcomes(matched match.Result, buckets []store.Bucket, verdicts []store
 				outcome.Allowed = false
 			}
 		}
+		for j := from; j < to; j++ {
+			if !verdicts[j].Allowed && verdicts[j].CostExceedsCapacity {
+				outcome.CostExceedsCapacity = true
+			}
+		}
 		if best := strictestIndex(buckets, verdicts, from, to, outcome.Allowed, false); best >= 0 {
 			outcome.Limit = buckets[best].Window.Requests
 			outcome.Remaining = verdicts[best].Remaining
 			outcome.RetryAfter = verdicts[best].RetryAfter
+			outcome.Algorithm = algorithmName(buckets[best].Algorithm)
+			outcome.PeriodSeconds = int64(buckets[best].Window.Period / time.Second)
 		}
 		out = append(out, outcome)
 	}
@@ -305,10 +363,12 @@ func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (
 	}
 
 	h := &Headers{
-		Limit:      buckets[best].Window.Requests,
-		Remaining:  verdicts[best].Remaining,
-		RetryAfter: verdicts[best].RetryAfter,
-		ResetAfter: verdicts[best].ResetAfter,
+		Limit:         buckets[best].Window.Requests,
+		Remaining:     verdicts[best].Remaining,
+		RetryAfter:    verdicts[best].RetryAfter,
+		ResetAfter:    verdicts[best].ResetAfter,
+		Algorithm:     algorithmName(buckets[best].Algorithm),
+		PeriodSeconds: int64(buckets[best].Window.Period / time.Second),
 	}
 	if costExceeds {
 		h.RetryAfter = -1
@@ -342,7 +402,17 @@ func stricter(buckets []store.Bucket, verdicts []store.Verdict, i, best int, all
 		if verdicts[i].Remaining != verdicts[best].Remaining {
 			return verdicts[i].Remaining < verdicts[best].Remaining
 		}
-	} else if verdicts[i].RetryAfter != verdicts[best].RetryAfter {
+		return buckets[i].Key < buckets[best].Key
+	}
+
+	// Among refusals a cost that never fits binds harder than one waiting
+	// cures: reporting a retry hint for a request that can never succeed sends
+	// the caller back on a schedule that will not help. Retry hints are
+	// meaningless on those buckets, so they tie-break straight to the key.
+	if verdicts[i].CostExceedsCapacity != verdicts[best].CostExceedsCapacity {
+		return verdicts[i].CostExceedsCapacity
+	}
+	if !verdicts[i].CostExceedsCapacity && verdicts[i].RetryAfter != verdicts[best].RetryAfter {
 		return verdicts[i].RetryAfter > verdicts[best].RetryAfter
 	}
 	return buckets[i].Key < buckets[best].Key
