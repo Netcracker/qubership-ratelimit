@@ -104,11 +104,6 @@ type apiError struct {
 
 	// retryAfter is the wait a conflicting sweep imposes.
 	retryAfter time.Duration
-
-	// recorded is a failure that already happened once and is being replayed to
-	// a retry. Its id is kept, since it is the same error instance, while the
-	// request id below always names the current call.
-	recorded *tmf.Response
 }
 
 // errorf builds an error of the given code.
@@ -171,15 +166,12 @@ func replayOf(code errs.ErrorCode, id, message string, partial *PartialReset) *a
 	return failure
 }
 
-// tmfResponse renders this error as the body it is answered with. A recorded
-// outcome stores one, so the failing call and every replay of it show the same
-// failure.
+// tmfResponse renders this error as the body it is answered with.
+//
+// A replay comes through here too: replayOf rebuilt the error from what the
+// record kept, id included, so the failing call and every replay of it produce
+// the same body apart from the request id.
 func (e *apiError) tmfResponse(requestID string) *tmf.Response {
-	if e.recorded != nil {
-		response := *e.recorded
-		response.Meta = e.meta(requestID)
-		return &response
-	}
 	return tmf.NewResponseBuilder(e).Status(e.status()).Meta(*e.meta(requestID)).Build()
 }
 

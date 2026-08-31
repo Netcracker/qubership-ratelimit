@@ -98,6 +98,23 @@ func TestRender_carriesNoApplicabilityAnnotations(t *testing.T) {
 	require.Empty(t, view.RuleSetVersion)
 }
 
+// Summary counts what the domain index shows without rendering a rule set.
+func TestSummary_countsTheEnforcedSet(t *testing.T) {
+	other := policy(50)
+	other.Name = "other-api"
+	snapshot := snapshotOf(t, policy(100), other)
+
+	summary := ruleview.Summary(snapshot, "7c31a9f4e0d2")
+
+	require.Equal(t, domain, summary.Domain)
+	require.Equal(t, "7c31a9f4e0d2", summary.RuleSetVersion)
+	require.Equal(t, 2, summary.Policies)
+	require.Equal(t, 2, summary.Blocks)
+	require.Equal(t, 2, summary.Rules)
+	require.Equal(t, []string{"client", "method", "path"}, summary.EffectiveKeys)
+	require.Empty(t, summary.ListValuedKeys, "this domain declares no array claim")
+}
+
 func TestMode_rendersTheRuntimeVocabulary(t *testing.T) {
 	require.Equal(t, "enforce", ruleview.Mode(""))
 	require.Equal(t, "enforce", ruleview.Mode(model.BehaviorEnforce))

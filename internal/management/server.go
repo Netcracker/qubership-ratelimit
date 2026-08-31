@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -92,6 +93,18 @@ type Runner struct {
 	Log Logger
 
 	DrainTimeout time.Duration
+
+	// bound is the address the listener actually took. The port is the kernel's
+	// choice when the address ends in :0, so it can only be read back.
+	bound atomic.Pointer[string]
+}
+
+// boundAddr is the address this runner listens on, empty before it does.
+func (r *Runner) boundAddr() string {
+	if addr := r.bound.Load(); addr != nil {
+		return *addr
+	}
+	return ""
 }
 
 // NeedLeaderElection reports false.
@@ -114,11 +127,13 @@ func (r *Runner) Start(ctx context.Context) error {
 		r.API.StartBackground(ctx)
 	}
 
+	addr := listener.Addr().String()
+	r.bound.Store(&addr)
+
 	served := make(chan error, 1)
 	go func() { served <- r.App.Listener(listener) }()
 
-	r.Log.InfoC(ctx, "management API listening address=%v basePath=%v",
-		listener.Addr().String(), BasePath)
+	r.Log.InfoC(ctx, "management API listening address=%v basePath=%v", addr, BasePath)
 
 	select {
 	case err := <-served:
