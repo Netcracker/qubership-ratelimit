@@ -5,10 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -24,6 +26,7 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/xrequestid"
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/ctxmanager"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -83,6 +86,7 @@ func main() {
 	var probeAddr string
 	var metricsAddr string
 	var rlsAddr string
+	var serviceName string
 	var enableLeaderElection bool
 	var storeDebounce time.Duration
 	var drainTimeout time.Duration
@@ -93,6 +97,9 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
 		"The address the Prometheus metrics endpoint binds to. \"0\" disables it.")
 	flag.StringVar(&rlsAddr, "rls-bind-address", ":9000", "The address the rate limit gRPC endpoint binds to.")
+	flag.StringVar(&serviceName, "service-name", "",
+		"The Service whose ready endpoints are this component's replicas. The leader reads the enforced "+
+			"generation from each of them to decide whether a policy is Ready. Defaults to microservice.name.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election. Only status writes are leader-gated; the rate limit endpoint "+
 			"and its store run on every replica.")
@@ -121,6 +128,7 @@ func main() {
 		probeAddr:            probeAddr,
 		metricsAddr:          metricsAddr,
 		rlsAddr:              rlsAddr,
+		serviceName:          serviceName,
 		enableLeaderElection: enableLeaderElection,
 		storeDebounce:        storeDebounce,
 		drainTimeout:         drainTimeout,
@@ -138,6 +146,7 @@ type runOptions struct {
 	probeAddr   string
 	metricsAddr string
 	rlsAddr     string
+	serviceName string
 
 	enableLeaderElection bool
 	storeDebounce        time.Duration
@@ -245,7 +254,12 @@ func run(options runOptions) error {
 		return err
 	}
 
-	mgr, err := newManager(options, namespace, runController)
+	// The applied-generations endpoint is registered with the metrics server,
+	// which the manager owns, while the updater that answers it is built after
+	// the manager exists. The holder is what lets one refer to the other.
+	applied := &deferredHandler{}
+
+	mgr, err := newManager(options, namespace, runController, applied)
 	if err != nil {
 		return err
 	}
@@ -264,15 +278,16 @@ func run(options runOptions) error {
 		"app.kubernetes.io/managed-by": managedBy,
 	}, newLogrLogger().WithName("state"), mgr.GetEventRecorder("ratelimit"))
 
-	if err := addControllers(mgr, lastGood, runController); err != nil {
+	if err := addControllers(mgr, options, namespace, lastGood, runController); err != nil {
 		return err
 	}
 	// +kubebuilder:scaffold:builder
 
-	limiter, err := addRateLimitEndpoint(mgr, options, lastGood, runRLS)
+	limiter, err := addRateLimitEndpoint(mgr, options, namespace, lastGood, runRLS)
 	if err != nil {
 		return err
 	}
+	applied.set(limiter.applied)
 	// The counter store client outlives every runnable that uses it, so it is
 	// released here rather than where it was built.
 	defer closeCounterStore(limiter.closer)
@@ -292,10 +307,22 @@ func run(options runOptions) error {
 // newManager builds the controller-runtime manager. The cache is scoped to the
 // one namespace this installation serves, which is what keeps the operator's
 // RBAC a Role rather than a ClusterRole.
-func newManager(options runOptions, namespace string, runController bool) (ctrl.Manager, error) {
+func newManager(
+	options runOptions,
+	namespace string,
+	runController bool,
+	applied http.Handler,
+) (ctrl.Manager, error) {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: options.metricsAddr},
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: options.metricsAddr,
+			// Read-only diagnostics on the cluster-internal metrics port: the
+			// leader reads it to learn which generation each replica enforces.
+			// It is not the management API, carries no authentication, and is
+			// outside the compatibility promises.
+			ExtraHandlers: map[string]http.Handler{store.AppliedPath: applied},
+		},
 		HealthProbeBindAddress: options.probeAddr,
 		// Only status writes are leader-gated. In rls mode nothing is, so the
 		// process does not compete for a lease it would never use.
@@ -306,7 +333,10 @@ func newManager(options runOptions, namespace string, runController bool) (ctrl.
 				&ratelimitv1alpha1.RateLimitPolicy{}: {
 					Namespaces: map[string]cache.Config{namespace: {}},
 				},
-				&ratelimitv1alpha1.RateLimitMapping{}: {
+				// The leader reads the ready endpoints of its own Service to
+				// learn which replicas enforce which generation. Only the
+				// controller needs them, and only in its own namespace.
+				&discoveryv1.EndpointSlice{}: {
 					Namespaces: map[string]cache.Config{namespace: {}},
 				},
 			},
@@ -321,25 +351,75 @@ func newManager(options runOptions, namespace string, runController bool) (ctrl.
 
 // addControllers registers the reconcilers that write object status. They are
 // the only leader-gated part of the process.
-func addControllers(mgr ctrl.Manager, lastGood *state.Store, enabled bool) error {
+func addControllers(
+	mgr ctrl.Manager,
+	options runOptions,
+	namespace string,
+	lastGood *state.Store,
+	enabled bool,
+) error {
 	if !enabled {
 		return nil
 	}
-	if err := (&controller.RateLimitPolicyReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		State:  lastGood,
-	}).SetupWithManager(mgr); err != nil {
+	reconciler := &controller.RateLimitPolicyReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Namespace: namespace,
+		State:     lastGood,
+	}
+	// A typed nil in an interface field is not nil, and the reconciler reads a
+	// missing probe as "the fleet cannot be observed".
+	if probe := replicaProbe(mgr, options, namespace); probe != nil {
+		reconciler.Probe = probe
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("set up RateLimitPolicy controller: %w", err)
 	}
-	if err := (&controller.RateLimitMappingReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		State:  lastGood,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("set up RateLimitMapping controller: %w", err)
-	}
 	return nil
+}
+
+// replicaProbe builds the fleet probe, or returns nil when the metrics port is
+// disabled: without it there is no /debug/applied to read, and a probe that
+// cannot reach anybody would report every replica as behind rather than
+// admitting it cannot see them.
+func replicaProbe(mgr ctrl.Manager, options runOptions, namespace string) *controller.ReplicaProbe {
+	port, err := portOf(options.metricsAddr)
+	if err != nil {
+		setupLog.Warnf("replica status is unavailable: %v", err)
+		return nil
+	}
+	return &controller.ReplicaProbe{
+		Reader:    mgr.GetCache(),
+		Namespace: namespace,
+		Service:   serviceName(options),
+		Port:      port,
+	}
+}
+
+// serviceName is the Service whose ready endpoints are the replicas: the flag
+// when set, otherwise the platform's own name for this microservice.
+func serviceName(options runOptions) string {
+	if options.serviceName != "" {
+		return options.serviceName
+	}
+	return configloader.GetOrDefaultString("microservice.name", "ratelimit")
+}
+
+// portOf reads the port out of a bind address. "0" and an empty address both
+// mean the endpoint is disabled.
+func portOf(addr string) (int, error) {
+	if addr == "" || addr == "0" {
+		return 0, errors.New("the metrics endpoint is disabled, so replicas cannot be probed")
+	}
+	_, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, fmt.Errorf("read the port of the metrics address %q: %w", addr, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port == 0 {
+		return 0, fmt.Errorf("the metrics address %q carries no usable port", addr)
+	}
+	return port, nil
 }
 
 // rateLimitEndpoint is what serving rate limit checks adds to the process: the
@@ -349,6 +429,34 @@ type rateLimitEndpoint struct {
 	runner  *rls.Runner
 	updater *store.Updater
 	closer  io.Closer
+
+	// applied answers the leader's probe. It is nil in controller mode, where
+	// this process enforces nothing and has nothing to report.
+	applied http.Handler
+}
+
+// deferredHandler stands in for a handler that exists only once the manager
+// does. Until then it answers 503: a replica that has not built its rule store
+// is not enforcing anything, and the leader reads that as "behind", which it
+// is.
+type deferredHandler struct {
+	inner atomic.Pointer[http.Handler]
+}
+
+func (d *deferredHandler) set(h http.Handler) {
+	if h == nil {
+		return
+	}
+	d.inner.Store(&h)
+}
+
+func (d *deferredHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	inner := d.inner.Load()
+	if inner == nil {
+		http.Error(w, "this replica is not serving rate limit checks", http.StatusServiceUnavailable)
+		return
+	}
+	(*inner).ServeHTTP(w, r)
 }
 
 // addRateLimitEndpoint registers the decision path: the counter store, the rule
@@ -357,6 +465,7 @@ type rateLimitEndpoint struct {
 func addRateLimitEndpoint(
 	mgr ctrl.Manager,
 	options runOptions,
+	namespace string,
 	lastGood *state.Store,
 	enabled bool,
 ) (rateLimitEndpoint, error) {
@@ -375,6 +484,7 @@ func addRateLimitEndpoint(
 	endpoint.updater = &store.Updater{
 		Cache:      mgr.GetCache(),
 		Store:      ruleStore,
+		Namespace:  namespace,
 		Debounce:   options.storeDebounce,
 		Log:        newLogrLogger().WithName("store"),
 		Counters:   backend.store,
@@ -385,6 +495,7 @@ func addRateLimitEndpoint(
 	if err := mgr.Add(endpoint.updater); err != nil {
 		return endpoint, fmt.Errorf("add store updater: %w", err)
 	}
+	endpoint.applied = store.AppliedHandler(endpoint.updater)
 
 	endpoint.runner = &rls.Runner{
 		Addr: options.rlsAddr,

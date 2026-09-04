@@ -15,16 +15,20 @@ import (
 // What the engine decides — which rules compile, which references resolve, what a
 // counter key looks like — is covered by the engine module's own suite and is not
 // restated here. These tests are about the part that is ours: which generation of
-// each object the engine is handed, and how what it says back becomes status.
+// the policy the engine is handed, and how what it says back becomes status.
 
 const (
 	testNamespace = "biz"
 	testDomain    = "gateway.public"
 )
 
-func policyObject(name string, blocks ...v1alpha1.LimitBlock) v1alpha1.RateLimitPolicy {
+// policyObject builds the domain's one policy. Its name is its domain, which is
+// what makes a second policy for the domain unrepresentable.
+func policyObject(blocks ...v1alpha1.LimitBlock) v1alpha1.RateLimitPolicy {
 	return v1alpha1.RateLimitPolicy{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name, Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace, Name: testDomain, Generation: 1, UID: "uid-1",
+		},
 		Spec: v1alpha1.RateLimitPolicySpec{
 			Domain: testDomain,
 			Limits: blocks,
@@ -32,70 +36,45 @@ func policyObject(name string, blocks ...v1alpha1.LimitBlock) v1alpha1.RateLimit
 	}
 }
 
-func mappingObject(entries ...v1alpha1.ClaimMapping) v1alpha1.RateLimitMapping {
-	return v1alpha1.RateLimitMapping{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testDomain, Generation: 1},
-		Spec: v1alpha1.RateLimitMappingSpec{
-			Domain:   testDomain,
-			Mappings: entries,
-		},
-	}
-}
-
 func minuteRate(requests int32) v1alpha1.Rate {
-	return v1alpha1.Rate{Requests: requests, Period: "1m"}
+	return v1alpha1.Rate{Requests: requests, PeriodSeconds: 60}
 }
 
-func simpleRule(name string, when ...v1alpha1.Predicate) v1alpha1.Rule {
-	return v1alpha1.Rule{Name: name, When: when, Rates: []v1alpha1.Rate{minuteRate(100)}}
+func simpleRule(name string, matches ...v1alpha1.Predicate) v1alpha1.Rule {
+	return v1alpha1.Rule{Name: name, Matches: matches, Rates: []v1alpha1.Rate{minuteRate(100)}}
 }
 
-func key(name string) client.ObjectKey {
-	return client.ObjectKey{Namespace: testNamespace, Name: name}
+func key() client.ObjectKey {
+	return client.ObjectKey{Namespace: testNamespace, Name: testDomain}
 }
 
-func TestCompile_isAPureFunctionOfTheSet(t *testing.T) {
-	// The order the objects arrived in must not reach the engine: two replicas
-	// listing the same namespace have to hand it the same set.
-	first := policyObject("alpha", v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("r")}})
-	second := policyObject("zeta", v1alpha1.LimitBlock{Name: "z", Rules: []v1alpha1.Rule{simpleRule("r")}})
-
-	forward := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{first, second}})
-	reverse := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{second, first}})
-
-	assert.Equal(t, []string{"alpha", "zeta"}, blockPolicies(forward))
-	assert.Equal(t, blockPolicies(forward), blockPolicies(reverse))
+// compileOf runs one compilation over the domain's policy.
+func compileOf(objects ...v1alpha1.RateLimitPolicy) *Result {
+	return Compile(Input{Namespace: testNamespace, Policies: objects})
 }
 
-func blockPolicies(result *Result) []string {
-	blocks := result.Snapshots[testDomain].Blocks
-	names := make([]string, 0, len(blocks))
-	for i := range blocks {
-		names = append(names, blocks[i].Policy)
-	}
-	return names
-}
-
-func TestCompile_reportsWhatEachPolicyContributed(t *testing.T) {
-	object := policyObject("orders",
+func TestCompile_reportsWhatTheGenerationContributed(t *testing.T) {
+	object := policyObject(
 		v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("one"), simpleRule("two")}},
 		v1alpha1.LimitBlock{Name: "b", Rules: []v1alpha1.Rule{simpleRule("one")}},
 	)
 
-	outcome := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{object}}).Policies[key("orders")]
+	outcome := compileOf(object).Policies[key()]
 
 	assert.Equal(t, 2, outcome.Blocks)
 	assert.Equal(t, 3, outcome.Rules)
 	assert.Equal(t, int64(1), outcome.Generation)
 	assert.Equal(t, int64(1), outcome.ActiveGeneration)
-	assert.True(t, outcome.Ready())
+	assert.True(t, outcome.Enforced())
+	assert.True(t, outcome.Compiled())
+	assert.Subset(t, outcome.EffectiveKeys, []string{"client", "method", "path"})
 }
 
 func TestCompile_aBlockingProblemKeepsTheWholeGenerationOut(t *testing.T) {
 	// One dead rule cannot be applied on its own: a FirstMatch cascade missing a
 	// rule silently hands its traffic to the neighbours. The engine drops such a
-	// policy; what is asserted here is that the status says so.
-	object := policyObject("orders", v1alpha1.LimitBlock{
+	// generation; what is asserted here is that the status says so.
+	object := policyObject(v1alpha1.LimitBlock{
 		Name: "quote-api",
 		Rules: []v1alpha1.Rule{
 			simpleRule("per-plan", v1alpha1.Predicate{Key: "plan", Operator: v1alpha1.OperatorExists}),
@@ -103,196 +82,198 @@ func TestCompile_aBlockingProblemKeepsTheWholeGenerationOut(t *testing.T) {
 		},
 	})
 
-	result := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{object}})
+	result := compileOf(object)
 
-	outcome := result.Policies[key("orders")]
+	outcome := result.Policies[key()]
 	require.Len(t, outcome.Problems, 1)
 	assert.Equal(t, v1alpha1.ProblemUnresolvedKeyReference, outcome.Problems[0].Reason)
 	assert.Equal(t, "quote-api", outcome.Problems[0].Block)
 	assert.Equal(t, "per-plan", outcome.Problems[0].Rule)
 
-	assert.False(t, outcome.Ready())
+	assert.False(t, outcome.Compiled())
 	assert.Zero(t, outcome.ActiveGeneration)
 	assert.Empty(t, result.Snapshots[testDomain].Blocks,
-		"the healthy rule of an invalid policy must not be applied either")
+		"the healthy rule of an invalid generation must not be applied either")
 }
 
-func TestCompile_namesTheFixForAnUnresolvedReference(t *testing.T) {
-	// "No mapping at all" and "the mapping does not declare this key" are
-	// different fixes, so they are different reasons.
-	object := policyObject("orders", v1alpha1.LimitBlock{
-		Name:  "api",
-		Rules: []v1alpha1.Rule{simpleRule("per-plan", v1alpha1.Predicate{Key: "plan", Operator: v1alpha1.OperatorExists})},
+// TestCompile_summarizesEveryBlockingReason pins what the Accepted message
+// says: a count and the distinct reasons, with the addresses left to
+// RuleProblems.
+func TestCompile_summarizesEveryBlockingReason(t *testing.T) {
+	object := policyObject(v1alpha1.LimitBlock{
+		Name: "a",
+		Rules: []v1alpha1.Rule{
+			simpleRule("one", v1alpha1.Predicate{Key: "plan", Operator: v1alpha1.OperatorExists}),
+			{Name: "two", Rates: []v1alpha1.Rate{{Requests: 500_001, PeriodSeconds: 1}}},
+		},
 	})
 
-	withoutMapping := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{object}})
-	assert.Equal(t, v1alpha1.ReasonMappingRequired, withoutMapping.Policies[key("orders")].Reason)
+	outcome := compileOf(object).Policies[key()]
 
-	withMapping := Compile(Input{
-		Policies: []v1alpha1.RateLimitPolicy{object},
-		Mappings: []v1alpha1.RateLimitMapping{mappingObject(
-			v1alpha1.ClaimMapping{Key: "tenant", Claim: "org_id"})},
-	})
-	assert.Equal(t, v1alpha1.ReasonUnresolvedReferences, withMapping.Policies[key("orders")].Reason)
+	require.Error(t, outcome.Err)
+	assert.Contains(t, outcome.Err.Error(), "2 blocking problems")
+	assert.Contains(t, outcome.Err.Error(), v1alpha1.ProblemUnresolvedKeyReference)
+	assert.Contains(t, outcome.Err.Error(), v1alpha1.ProblemInvalidWindow)
 }
 
-func TestCompile_anIncompatibleReferenceHasItsOwnReason(t *testing.T) {
-	object := policyObject("orders", v1alpha1.LimitBlock{
+// TestCompile_theMappingsOfTheObjectResolveItsOwnRules pins the point of the
+// singleton: extraction and rules are one generation, so a rule over a mapped
+// key resolves without waiting for a second object.
+func TestCompile_theMappingsOfTheObjectResolveItsOwnRules(t *testing.T) {
+	object := policyObject(v1alpha1.LimitBlock{
+		Name: "a",
+		Rules: []v1alpha1.Rule{simpleRule("by-role",
+			v1alpha1.Predicate{Key: "roles", Operator: v1alpha1.OperatorContains, Value: "admin"})},
+	})
+	object.Spec.Mappings = []v1alpha1.ClaimMapping{
+		{Key: "roles", Claim: "realm_access.roles", Type: v1alpha1.ClaimTypeStringArray},
+	}
+
+	outcome := compileOf(object).Policies[key()]
+
+	require.NoError(t, outcome.Err)
+	assert.True(t, outcome.Enforced())
+	assert.Subset(t, outcome.EffectiveKeys, []string{"client", "roles"})
+}
+
+func TestCompile_anUndeclaredKeyBlocksTheGeneration(t *testing.T) {
+	object := policyObject(v1alpha1.LimitBlock{
 		Name: "a",
 		Rules: []v1alpha1.Rule{simpleRule("by-role",
 			v1alpha1.Predicate{Key: "roles", Operator: v1alpha1.OperatorEquals, Value: "admin"})},
 	})
-	mapping := mappingObject(v1alpha1.ClaimMapping{
-		Key: "roles", Claim: "realm_access.roles", Type: v1alpha1.ClaimTypeStringArray,
-	})
 
-	result := Compile(Input{
-		Policies: []v1alpha1.RateLimitPolicy{object},
-		Mappings: []v1alpha1.RateLimitMapping{mapping},
-	})
+	outcome := compileOf(object).Policies[key()]
 
-	outcome := result.Policies[key("orders")]
-	assert.Equal(t, v1alpha1.ReasonIncompatibleReferences, outcome.Reason)
+	require.Error(t, outcome.Err)
 	assert.Zero(t, outcome.ActiveGeneration)
 }
 
-func TestCompile_aMalformedSpecClearsAccepted(t *testing.T) {
-	// Accepted reports structural validity, and a spec the engine calls malformed
-	// is the only thing that clears it. An unresolved reference does not: the spec
-	// is well formed, it just names something the domain does not produce.
-	object := policyObject("orders", v1alpha1.LimitBlock{
-		Name: "a",
-		Rules: []v1alpha1.Rule{{
-			Name:     "narrow",
-			Replaces: []string{"absent"},
-			Rates:    []v1alpha1.Rate{minuteRate(10)},
+// TestCompile_theLastGoodGenerationKeepsServing pins the reason last-good is
+// persisted at all: a rejected edit costs the author an answer, never the
+// gateway its limits.
+func TestCompile_theLastGoodGenerationKeepsServing(t *testing.T) {
+	good := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
+
+	broken := *good.DeepCopy()
+	broken.Generation = 2
+	broken.Spec.Limits[0].Rules[0].Matches = []v1alpha1.Predicate{
+		{Key: "ghost", Operator: v1alpha1.OperatorExists}}
+
+	result := Compile(Input{
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{broken},
+		State: map[string]Bundle{testDomain: {
+			UID: "uid-1", GoodGeneration: 1, GoodSpec: good.Spec,
 		}},
 	})
 
-	outcome := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{object}}).Policies[key("orders")]
-
-	require.Error(t, outcome.Err)
-	assert.Equal(t, v1alpha1.ReasonInvalidSpec, outcome.Reason)
-}
-
-func TestCompile_oneBadPolicyLeavesTheRestOfTheDomainAlone(t *testing.T) {
-	// A single bad policy must not be able to turn the limits of a whole gateway
-	// off.
-	broken := policyObject("broken", v1alpha1.LimitBlock{
-		Name:  "a",
-		Rules: []v1alpha1.Rule{simpleRule("r", v1alpha1.Predicate{Key: "plan", Operator: v1alpha1.OperatorExists})},
-	})
-	healthy := policyObject("healthy", v1alpha1.LimitBlock{
-		Name: "b", Rules: []v1alpha1.Rule{simpleRule("r")},
-	})
-
-	result := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{broken, healthy}})
-
-	assert.False(t, result.Policies[key("broken")].Ready())
-	assert.True(t, result.Policies[key("healthy")].Ready())
+	outcome := result.Policies[key()]
+	assert.False(t, outcome.Compiled(), "the latest generation is the one the problems are about")
+	assert.Equal(t, int64(2), outcome.Generation)
+	assert.Equal(t, int64(1), outcome.ActiveGeneration)
+	assert.Equal(t, 1, outcome.Rules, "the last-good generation is the one being counted")
 	require.Len(t, result.Snapshots[testDomain].Blocks, 1)
-	assert.Equal(t, "healthy", result.Snapshots[testDomain].Blocks[0].Policy)
+	assert.Equal(t, int64(1), result.State[testDomain].GoodGeneration,
+		"the bundle must keep pointing at the generation that runs")
 }
 
-func TestCompile_publishesTheEffectiveKeysOfTheMapping(t *testing.T) {
-	mapping := mappingObject(
-		v1alpha1.ClaimMapping{Key: "roles", Claim: "realm_access.roles", Type: v1alpha1.ClaimTypeStringArray},
-		v1alpha1.ClaimMapping{Key: "tenant", Claim: "org_id"},
-	)
+// TestCompile_aRecreatedObjectInheritsNothing pins the UID guard: a policy
+// deleted and recreated under the same name starts at generation 1 too, and
+// reviving its namesake's spec would enforce rules nobody wrote.
+func TestCompile_aRecreatedObjectInheritsNothing(t *testing.T) {
+	good := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
 
-	outcome := Compile(Input{Mappings: []v1alpha1.RateLimitMapping{mapping}}).Mappings[key(testDomain)]
+	recreated := *good.DeepCopy()
+	recreated.UID = "uid-2"
+	recreated.Spec.Limits[0].Rules[0].Matches = []v1alpha1.Predicate{
+		{Key: "ghost", Operator: v1alpha1.OperatorExists}}
 
-	require.NoError(t, outcome.Err)
-	assert.Subset(t, outcome.EffectiveKeys, []string{"client", "roles", "tenant"})
-	assert.True(t, outcome.Ready())
+	result := Compile(Input{
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{recreated},
+		State: map[string]Bundle{testDomain: {
+			UID: "uid-1", GoodGeneration: 1, GoodSpec: good.Spec,
+		}},
+	})
+
+	outcome := result.Policies[key()]
+	assert.Zero(t, outcome.ActiveGeneration, "somebody else's last-good spec must not be resurrected")
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
+	assert.Empty(t, result.State[testDomain].UID, "and it must not be written back either")
 }
 
-func TestCompile_aMappingWhoseNameIsNotItsDomainIsIgnored(t *testing.T) {
-	// The API server rejects it, so this only happens through a client that
-	// bypassed validation. Taking it would make the singleton a lie.
-	mapping := mappingObject(v1alpha1.ClaimMapping{Key: "tenant", Claim: "org_id"})
-	mapping.Name = "something-else"
+// TestCompile_aClaimedDomainIsNotAnUnknownOne pins the snapshot of a domain
+// whose policy compiles to nothing: it exists, so its requests are allowed
+// rather than logged as an unknown domain, which would point at the wrong fix.
+func TestCompile_aClaimedDomainIsNotAnUnknownOne(t *testing.T) {
+	object := policyObject(v1alpha1.LimitBlock{
+		Name:  "a",
+		Rules: []v1alpha1.Rule{simpleRule("r", v1alpha1.Predicate{Key: "ghost", Operator: v1alpha1.OperatorExists})},
+	})
 
-	result := Compile(Input{Mappings: []v1alpha1.RateLimitMapping{mapping}})
+	result := compileOf(object)
+
+	require.Contains(t, result.Snapshots, testDomain)
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
+}
+
+// TestCompile_aNameThatIsNotItsDomainIsRefused pins the singleton: the API
+// server rejects such an object, so it can only arrive from a client that
+// bypassed validation, and taking it would let two names claim one domain.
+func TestCompile_aNameThatIsNotItsDomainIsRefused(t *testing.T) {
+	object := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("r")}})
+	object.Name = "something-else"
+
+	result := Compile(Input{Namespace: testNamespace, Policies: []v1alpha1.RateLimitPolicy{object}})
 
 	assert.Empty(t, result.Snapshots)
-	require.Error(t, result.Mappings[key("something-else")].Err)
+	require.Error(t, result.Policies[client.ObjectKey{Namespace: testNamespace, Name: "something-else"}].Err)
 }
 
-func TestCompile_surfacesTheDomainBudgetWarning(t *testing.T) {
-	// A seat set inherited over the bounds — state written before the gate
-	// existed — is not evicted: no single policy is at fault, everyone keeps
-	// running, and the warning is what says the backstop is within reach.
-	policies := []v1alpha1.RateLimitPolicy{
-		widePolicy64("p1"), widePolicy64("p2"), widePolicy64("p3"),
-	}
-	result := Compile(Input{Policies: policies, State: map[string]Bundle{
-		testDomain: seatedBundle(policies...),
-	}})
+// TestCompile_oneBadDomainLeavesTheOthersAlone pins the blast radius: domains
+// are independent objects, and a rejected edit to one cannot reach another.
+func TestCompile_oneBadDomainLeavesTheOthersAlone(t *testing.T) {
+	broken := policyObject(v1alpha1.LimitBlock{
+		Name:  "a",
+		Rules: []v1alpha1.Rule{simpleRule("r", v1alpha1.Predicate{Key: "ghost", Operator: v1alpha1.OperatorExists})},
+	})
+	healthy := policyObject(v1alpha1.LimitBlock{Name: "b", Rules: []v1alpha1.Rule{simpleRule("r")}})
+	healthy.Name = "gateway.private"
+	healthy.Spec.Domain = "gateway.private"
+	healthy.UID = "uid-2"
 
-	require.NotEmpty(t, result.Warnings[testDomain], "the domain-level record must not be dropped")
-	for name, outcome := range result.Policies {
-		assert.True(t, outcome.Ready(), "policy %s must stay enforced: %+v", name, outcome)
-	}
-	assert.Len(t, result.Snapshots[testDomain].Blocks, 3)
+	result := compileOf(broken, healthy)
+
+	assert.False(t, result.Policies[key()].Enforced())
+	assert.True(t, result.Policies[client.ObjectKey{Namespace: testNamespace, Name: "gateway.private"}].Enforced())
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
+	assert.Len(t, result.Snapshots["gateway.private"].Blocks, 1)
 }
 
-// widePolicy64 sits exactly at the per-policy budget: one block of 16 rules,
-// four windows each.
-func widePolicy64(name string) v1alpha1.RateLimitPolicy {
-	rules := make([]v1alpha1.Rule, 0, 16)
-	for i := range 16 {
+// TestCompile_theBucketBudgetBlocksTheGeneration pins the budget as blocking
+// rather than advisory: a generation the runtime backstop would refuse on its
+// widest paths never becomes the active one.
+func TestCompile_theBucketBudgetBlocksTheGeneration(t *testing.T) {
+	rules := make([]v1alpha1.Rule, 0, 33)
+	for i := range 33 {
 		rules = append(rules, v1alpha1.Rule{
 			Name: fmt.Sprintf("r%d", i),
 			Rates: []v1alpha1.Rate{
-				{Requests: 100, Period: "1m"},
-				{Requests: 100, Period: "1h"},
-				{Requests: 100, Period: "30s"},
-				{Requests: 100, Period: "10s"},
+				{Requests: 100, PeriodSeconds: 60},
+				{Requests: 100, PeriodSeconds: 3600},
+				{Requests: 100, PeriodSeconds: 30},
+				{Requests: 100, PeriodSeconds: 10},
 			},
 		})
 	}
-	return policyObject(name, v1alpha1.LimitBlock{Name: "b", Rules: rules})
-}
+	object := policyObject(v1alpha1.LimitBlock{Name: "b", Rules: rules})
 
-// seatedBundle seats every given policy at its current generation, the way a
-// previous rebuild would have persisted it.
-func seatedBundle(policies ...v1alpha1.RateLimitPolicy) Bundle {
-	bundle := Bundle{}
-	for i := range policies {
-		object := &policies[i]
-		bundle.Policies = append(bundle.Policies, PolicyState{
-			Name:           object.Name,
-			UID:            string(object.UID),
-			GoodGeneration: object.Generation,
-			GoodSpec:       *object.Spec.DeepCopy(),
-		})
-	}
-	return bundle
-}
+	result := compileOf(object)
 
-func TestCompile_aBudgetBlockedPolicyReadsAsInvalidSpec(t *testing.T) {
-	// One policy over the per-policy budget is blocked whole, and the fix is in
-	// its own spec: pointing the author at references would mislead.
-	rules := make([]v1alpha1.Rule, 0, 17)
-	for i := range 17 {
-		rules = append(rules, v1alpha1.Rule{
-			Name: fmt.Sprintf("r%d", i),
-			Rates: []v1alpha1.Rate{
-				{Requests: 100, Period: "1m"},
-				{Requests: 100, Period: "1h"},
-				{Requests: 100, Period: "30s"},
-				{Requests: 100, Period: "10s"},
-			},
-		})
-	}
-	object := policyObject("wide", v1alpha1.LimitBlock{Name: "b", Rules: rules})
-
-	result := Compile(Input{Policies: []v1alpha1.RateLimitPolicy{object}})
-
-	outcome := result.Policies[key("wide")]
-	assert.False(t, outcome.Ready())
-	assert.Zero(t, outcome.ActiveGeneration, "a budget-blocked policy enforces nothing")
-	assert.Equal(t, v1alpha1.ReasonInvalidSpec, outcome.Reason)
+	outcome := result.Policies[key()]
+	assert.False(t, outcome.Compiled())
+	assert.Zero(t, outcome.ActiveGeneration, "a budget-blocked generation enforces nothing")
+	assert.Contains(t, outcome.Err.Error(), v1alpha1.ProblemDomainBudgetExceeded)
 	assert.Empty(t, result.Snapshots[testDomain].Blocks)
 }

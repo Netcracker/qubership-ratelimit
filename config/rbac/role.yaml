@@ -16,10 +16,18 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - ratelimit.netcracker.com
   resources:
-  - ratelimitmappings
   - ratelimitpolicies
   verbs:
   - get
@@ -28,7 +36,6 @@ rules:
 - apiGroups:
   - ratelimit.netcracker.com
   resources:
-  - ratelimitmappings/status
   - ratelimitpolicies/status
   verbs:
   - get

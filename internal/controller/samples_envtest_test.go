@@ -36,8 +36,9 @@ var _ = Describe("the samples in config/samples", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(paths).NotTo(BeEmpty(), "no samples were found; has the directory moved?")
 
-		policies := &RateLimitPolicyReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-		mappings := &RateLimitMappingReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		policies := &RateLimitPolicyReconciler{
+			Client: k8sClient, Scheme: k8sClient.Scheme(), Namespace: namespace,
+		}
 
 		for _, path := range paths {
 			name := filepath.Base(path)
@@ -59,25 +60,17 @@ var _ = Describe("the samples in config/samples", func() {
 			})
 
 			By("reconciling " + name)
-			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(object)}
-			switch object.GetKind() {
-			case "RateLimitPolicy":
-				_, err = policies.Reconcile(ctx, request)
-			case "RateLimitMapping":
-				_, err = mappings.Reconcile(ctx, request)
-			default:
-				Fail("unexpected kind " + object.GetKind() + " in " + name)
-			}
+			Expect(object.GetKind()).To(Equal("RateLimitPolicy"), "unexpected kind in "+name)
+			_, err = policies.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(object)})
 			Expect(err).NotTo(HaveOccurred(), "sample %s", name)
 		}
 	})
 
-	It("compile without a spec error, and only the problems they document", func() {
-		// The public sample carries one rule that references a mapped key, and the
-		// mapping sample declares it. Applied together they leave no problem
-		// behind, which is the claim the two samples make about each other.
+	It("compile without a single problem", func() {
+		// Each sample declares the keys its own rules reference, because a domain
+		// is one object. A sample that left a problem behind would be documenting
+		// a policy nobody should copy.
 		for _, name := range []string{
-			"ratelimit_v1alpha1_ratelimitmapping.yaml",
 			"ratelimit_v1alpha1_ratelimitpolicy_public.yaml",
 			"ratelimit_v1alpha1_ratelimitpolicy_quote_api.yaml",
 		} {
@@ -93,8 +86,10 @@ var _ = Describe("the samples in config/samples", func() {
 			})
 		}
 
-		reconciler := &RateLimitPolicyReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
-		for _, policyName := range []string{"order-management", "quote-api-v1"} {
+		reconciler := &RateLimitPolicyReconciler{
+			Client: k8sClient, Scheme: k8sClient.Scheme(), Namespace: namespace,
+		}
+		for _, policyName := range []string{"gateway.public", "gateway.partner"} {
 			request := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: namespace, Name: policyName}}
 			_, err := reconciler.Reconcile(ctx, request)
 			Expect(err).NotTo(HaveOccurred())

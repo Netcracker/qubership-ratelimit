@@ -125,20 +125,26 @@ func typeMetaFor(kind string) metav1.TypeMeta {
 	return metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: kind}
 }
 
-func newPolicy(name, domain string, limits []v1alpha1.LimitBlock) *v1alpha1.RateLimitPolicy {
+// newPolicy builds the one policy of a domain. Its name is its domain: object
+// names are unique within a namespace, so that is what makes a second policy
+// for the domain unrepresentable. Suites run serially, so each one owns the
+// policy of its domain for its duration.
+func newPolicy(domain string, limits []v1alpha1.LimitBlock) *v1alpha1.RateLimitPolicy {
 	return &v1alpha1.RateLimitPolicy{
 		TypeMeta:   typeMetaFor("RateLimitPolicy"),
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: domain},
 		Spec:       v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: limits},
 	}
 }
 
 // totalLimits is the bash apply_policy body: one block, one unconditional
 // rule, one fixed window.
-func totalLimits(requests int32, period string) []v1alpha1.LimitBlock {
+func totalLimits(requests, periodSeconds int32) []v1alpha1.LimitBlock {
 	return []v1alpha1.LimitBlock{{Name: "everything", Rules: []v1alpha1.Rule{{
-		Name:  "total",
-		Rates: []v1alpha1.Rate{{Requests: requests, Period: period, Algorithm: v1alpha1.AlgorithmFixedWindow}},
+		Name: "total",
+		Rates: []v1alpha1.Rate{{
+			Requests: requests, PeriodSeconds: periodSeconds, Algorithm: v1alpha1.AlgorithmFixedWindow,
+		}},
 	}}}}
 }
 
@@ -146,7 +152,7 @@ func totalLimits(requests int32, period string) []v1alpha1.LimitBlock {
 // probe. Ginkgo shuffles the top-level containers, so a suite whose window
 // outlives its own run - the hour-long redis and metrics budgets - must not
 // see traffic the other suites send; a domain-wide block would.
-func prefixLimits(prefix, rule string, counters []string, requests int32, period string) []v1alpha1.LimitBlock {
+func prefixLimits(prefix, rule string, counters []string, requests, periodSeconds int32) []v1alpha1.LimitBlock {
 	return []v1alpha1.LimitBlock{{
 		Name: "probe",
 		Target: &v1alpha1.Target{Routes: []v1alpha1.Route{{
@@ -155,14 +161,16 @@ func prefixLimits(prefix, rule string, counters []string, requests int32, period
 		Rules: []v1alpha1.Rule{{
 			Name:     rule,
 			Counters: counters,
-			Rates:    []v1alpha1.Rate{{Requests: requests, Period: period, Algorithm: v1alpha1.AlgorithmFixedWindow}},
+			Rates: []v1alpha1.Rate{{
+				Requests: requests, PeriodSeconds: periodSeconds, Algorithm: v1alpha1.AlgorithmFixedWindow,
+			}},
 		}},
 	}}
 }
 
-func deletePolicies(names ...string) {
-	for _, name := range names {
-		_ = k8s.Delete(ctx, newPolicy(name, "unused", nil))
+func deletePolicies(domains ...string) {
+	for _, domain := range domains {
+		_ = k8s.Delete(ctx, newPolicy(domain, nil))
 	}
 }
 

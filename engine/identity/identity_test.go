@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
@@ -15,12 +16,16 @@ import (
 // tests exercise the real compile output, not a hand-built lookalike.
 func plan(t *testing.T) []compile.KeyExtraction {
 	t.Helper()
-	snap, problems := compile.Compile("gateway.public", nil, &model.Mapping{
+	snap, problems := compile.Compile("core-1-core", "gateway.public", &model.Policy{
 		Domain: "gateway.public",
 		Mappings: []model.KeyMapping{
 			{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
-			{Key: "tenant", Claim: "org_id", Fallbacks: []string{"sub"}, Normalize: model.NormalizeLowercase},
+			{Key: "tenant", Claim: "org_id", Fallbacks: []string{"sub"}, Normalization: model.NormalizeLowercase},
 		},
+		Blocks: []model.Block{{
+			Name:  "b",
+			Rules: []model.Rule{{Name: "r", Rates: []model.Rate{{Requests: 1, Period: time.Minute}}}},
+		}},
 	})
 	if len(problems) != 0 {
 		t.Fatalf("compile problems: %v", problems)
@@ -164,7 +169,7 @@ func TestAbsenceIsSilent(t *testing.T) {
 // sanitary bounds regardless of input shape.
 func FuzzExtract(f *testing.F) {
 	p := []compile.KeyExtraction{
-		{Key: "client", Path: []string{"sub"}, Type: model.ValueString, Normalize: model.NormalizeLowercase},
+		{Key: "client", Path: []string{"sub"}, Type: model.ValueString, Normalization: model.NormalizeLowercase},
 		{Key: "roles", Path: []string{"a", "b"}, Type: model.ValueStringArray},
 		{Key: "tenant", Path: []string{"org"}, Type: model.ValueString, Fallbacks: [][]string{{"sub"}}},
 	}

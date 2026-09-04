@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -24,7 +23,10 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 		domain    = "gateway.public"
 		probePath = "/e2e-redis"
 	)
-	var policyName, redisDeployment string
+	var (
+		applied         bool
+		redisDeployment string
+	)
 
 	scaleRedis := func(replicas int32) {
 		var dep appsv1.Deployment
@@ -53,20 +55,20 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 			Skip("the store at " + addresses + " is not a Deployment in this namespace")
 		}
 
-		if policyName == "" {
-			policyName = fmt.Sprintf("e2e-failopen-%d", time.Now().Unix())
+		if !applied {
+			applied = true
 			waitGatewayServes("public-gateway", probePath)
 			// Far above the burst: every probe is an admission, and every
 			// admission is a store roundtrip - which is all this suite needs.
 			before := storeRebuilds()
-			Expect(apply(newPolicy(policyName, domain,
-				prefixLimits(probePath, "total", nil, 1000, "1m")))).To(Succeed())
+			Expect(apply(newPolicy(domain,
+				prefixLimits(probePath, "total", nil, 1000, 60)))).To(Succeed())
 			waitStoreRebuilt(before)
 		}
 	})
 	AfterAll(func() {
-		if policyName != "" {
-			deletePolicies(policyName)
+		if applied {
+			deletePolicies(domain)
 		}
 		// The store comes back whatever happened above; a suite that leaves
 		// Redis at zero would fail everything after it.

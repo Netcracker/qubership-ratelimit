@@ -8,7 +8,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/engine/algo"
 )
 
-var id = Ident{Domain: "gateway.public", Policy: "orders", Block: "api", Rule: "per-user"}
+var id = Ident{Namespace: "core-1-core", Domain: "gateway.public", Block: "api", Rule: "per-user"}
 
 func mustAlgo(t *testing.T, name string) algo.Algorithm {
 	t.Helper()
@@ -33,17 +33,17 @@ func TestBucketGoldenKeys(t *testing.T) {
 		{
 			"gcra minute by client",
 			gcra, algo.Window{Requests: 100, Period: time.Minute}, []string{"alice"},
-			"rl:v1:{gateway.public}:orders/api/per-user:gcra:60:alice:",
+			"rl:v1:{core-1-core/gateway.public}:api/per-user:gcra:60:alice:",
 		},
 		{
 			"fixed day by client and path",
 			fixed, algo.Window{Requests: 10000, Period: 24 * time.Hour}, []string{"alice", "/api/v1/orders"},
-			"rl:v1:{gateway.public}:orders/api/per-user:fixedwindow:86400:alice:%2Fapi%2Fv1%2Forders:",
+			"rl:v1:{core-1-core/gateway.public}:api/per-user:fixedwindow:86400:alice:%2Fapi%2Fv1%2Forders:",
 		},
 		{
 			"no axes: the terminated window key is its own subtree prefix",
 			gcra, algo.Window{Requests: 5000, Period: time.Minute}, nil,
-			"rl:v1:{gateway.public}:orders/api/per-user:gcra:60:",
+			"rl:v1:{core-1-core/gateway.public}:api/per-user:gcra:60:",
 		},
 	}
 
@@ -78,13 +78,32 @@ func TestEscapingStopsForgery(t *testing.T) {
 	}
 }
 
-func TestEmptyDomainPanics(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("DomainPrefix accepted an empty domain; its keys would carry an empty hash tag")
-		}
-	}()
-	DomainPrefix("")
+func TestEmptyHashTagPartPanics(t *testing.T) {
+	for _, c := range []struct{ name, namespace, domain string }{
+		{"empty domain", "core-1-core", ""},
+		{"empty namespace", "", "gateway.public"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("DomainPrefix accepted an empty part; its keys would carry an empty hash tag")
+				}
+			}()
+			DomainPrefix(c.namespace, c.domain)
+		})
+	}
+}
+
+// TestNamespaceSeparatesTheTag pins the guard against two installations
+// reaching one store: the namespace is inside the tag, so their keys differ.
+func TestNamespaceSeparatesTheTag(t *testing.T) {
+	first := Ident{Namespace: "core-1-core", Domain: "gateway.public", Block: "api", Rule: "r"}
+	second := first
+	second.Namespace = "core-2-core"
+
+	if RulePrefix(first) == RulePrefix(second) {
+		t.Error("two namespaces share one bucket space")
+	}
 }
 
 // TestBucketIsItsOwnPrefix pins the terminated-segment invariant: one string
@@ -110,7 +129,7 @@ func TestBucketIsItsOwnPrefix(t *testing.T) {
 }
 
 func TestPrefixHierarchy(t *testing.T) {
-	if got, want := RulePrefix(id), DomainPrefix(id.Domain); !strings.HasPrefix(got, want) {
+	if got, want := RulePrefix(id), DomainPrefix(id.Namespace, id.Domain); !strings.HasPrefix(got, want) {
 		t.Errorf("RulePrefix(%v) = %q lacks domain prefix %q", id, got, want)
 	}
 }
@@ -132,11 +151,12 @@ func TestEveryBucketSharesTheRulePrefix(t *testing.T) {
 func TestIdentPartsAreEscaped(t *testing.T) {
 	gcra := mustAlgo(t, "GCRA")
 	w := algo.Window{Requests: 1, Period: time.Second, Burst: 1}
-	evil := Ident{Domain: "gateway.public", Policy: "orders", Block: "api/x", Rule: "r:{a}"}
+	evil := Ident{Namespace: "core-1-core", Domain: "gateway.public", Block: "api/x", Rule: "r:{a}"}
 
 	k := bucketOf(evil, gcra, w, []string{"alice"})
+	// One separator inside the hash tag, one between block and rule.
 	if strings.Count(k, "/") != 2 {
-		t.Errorf("block name forged a triple separator: %q", k)
+		t.Errorf("block name forged a separator: %q", k)
 	}
 	if strings.Count(k, "{") != 1 || strings.Count(k, "}") != 1 {
 		t.Errorf("rule name forged a hash tag: %q", k)

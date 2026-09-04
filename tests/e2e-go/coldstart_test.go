@@ -9,7 +9,6 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
@@ -22,27 +21,20 @@ import (
 // broken generation.
 var _ = Describe("cold start from the last-good state", Ordered, Label("coldstart"), func() {
 	const (
-		policyName = "e2e-coldstart"
-		domain     = "gateway.public"
-		probePath  = "/e2e"
+		domain    = "gateway.public"
+		probePath = "/e2e"
 	)
 
 	BeforeAll(func() {
 		// The breaking edit below leans on the tenant key being unresolved,
-		// so the domain must carry no mapping. Sequential containers make
-		// that a fact, not a hope - and this check makes it a diagnosis.
-		var m v1alpha1.RateLimitMapping
-		err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: domain}, &m)
-		Expect(apierrors.IsNotFound(err)).To(BeTrue(),
-			"a mapping claims %s; the breaking edit would not break", domain)
-
+		// so the policy declares no mapping of its own.
 		before := storeRebuilds()
-		Expect(apply(newPolicy(policyName, domain, prefixLimits(probePath, "total", nil, 1, "1s")))).
+		Expect(apply(newPolicy(domain, prefixLimits(probePath, "total", nil, 1, 1)))).
 			To(Succeed())
 		waitStoreRebuilt(before)
 		waitGatewayServes("public-gateway", probePath)
 	})
-	AfterAll(func() { deletePolicies(policyName) })
+	AfterAll(func() { deletePolicies(domain) })
 
 	It("survives a restart with only the ConfigMap to stand on", func() {
 		// The good generation has to reach its ConfigMap before the edit
@@ -51,20 +43,20 @@ var _ = Describe("cold start from the last-good state", Ordered, Label("coldstar
 			return k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "ratelimit-state-" + domain},
 				&corev1.ConfigMap{})
 		}).Should(Succeed(), "the last-good state was never written")
-		Eventually(generations(policyName)).Should(WithTransform(
+		Eventually(generations(domain)).Should(WithTransform(
 			func(g [2]int64) bool { return g[1] > 0 && g[0] == g[1] }, BeTrue()),
 			"the policy never reached an active generation to fall back to")
 
-		p, err := getPolicy(policyName)
+		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
 		good := p.Status.ActiveGeneration
-		p.Spec.Limits[0].Rules[0].When = []v1alpha1.Predicate{{
+		p.Spec.Limits[0].Rules[0].Matches = []v1alpha1.Predicate{{
 			Key: "tenant", Operator: v1alpha1.OperatorExists}}
 		Expect(k8s.Update(ctx, p)).To(Succeed())
 
-		Eventually(policyCondition(policyName, v1alpha1.ConditionReady)).Should(Equal("False"),
+		Eventually(policyCondition(domain, v1alpha1.ConditionReady)).Should(Equal("False"),
 			"the breaking edit was not rejected")
-		Eventually(generations(policyName)).Should(WithTransform(
+		Eventually(generations(domain)).Should(WithTransform(
 			func(g [2]int64) bool { return g[0] > good && g[1] == good }, BeTrue()),
 			"the last-good generation did not keep running after the edit")
 

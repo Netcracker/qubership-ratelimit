@@ -14,14 +14,23 @@
 # OrdinalIgnoreCase comparison is what group membership already does, because
 # members and the value tested against them are both lower-cased.
 #
+# A domain is one object, so a real migration would fold this into the policy of
+# whichever gateway fronts the API. It stands alone here to keep the translation
+# readable next to its source.
+#
 apiVersion: ratelimit.netcracker.com/v1alpha1
 kind: RateLimitPolicy
 metadata:
-  name: quote-api-v1
+  name: gateway.partner
   labels:
     app.kubernetes.io/name: ratelimit
 spec:
-  domain: gateway.public
+  domain: gateway.partner
+
+  # The roles claim is an array, which is why extraction lives in the engine at
+  # all: a gateway's claim-to-header cannot carry one.
+  mappings:
+    - { key: roles, claim: realm_access.roles, type: StringArray }
 
   # The source repeats these sixteen identifiers verbatim in two places. Here the
   # list is written once.
@@ -48,6 +57,8 @@ spec:
       clients:
         - 00000000-0000-4000-8000-0000000000b1
 
+  # The hourly windows of the source (G1H) are commented out there and are not
+  # translated. Each would be a second entry in the rates of its rule.
   limits:
     # The API tier: groups, roles and the total. They add up in the source, which
     # is mode All — the default.
@@ -59,48 +70,48 @@ spec:
         # G1M:*:partner-group-1 — one bucket shared by the whole group, which is
         # InGroup plus no axes.
         - name: g1m-any-partner-group-1
-          when:
+          matches:
             - { key: client, operator: InGroup, value: partner-group-1 }
           counters: []
           rates:
-            - { requests: 300, period: 1m }
+            - { requests: 300, periodSeconds: 60 }
 
         - name: g1m-any-partner-group-2
-          when:
+          matches:
             - { key: client, operator: InGroup, value: partner-group-2 }
           counters: []
           rates:
-            - { requests: 300, period: 1m }
+            - { requests: 300, periodSeconds: 60 }
 
-        # R1M — one bucket per role, read out of an array claim. The path of that
-        # claim inside the JWT is set by the RateLimitMapping of this domain, and
-        # this policy is invalid as a whole until that mapping declares roles.
+        # R1M — one bucket per role, read out of the array claim declared in
+        # mappings above. A rule over a key nothing declares would make the
+        # whole generation invalid, not just that rule.
         - name: r1m-role-bot
-          when:
+          matches:
             - { key: roles, operator: Contains, value: ROLE_Bot }
           counters: []
           rates:
-            - { requests: 120, period: 1m }
+            - { requests: 120, periodSeconds: 60 }
 
         - name: r1m-role-customer
-          when:
+          matches:
             - { key: roles, operator: Contains, value: ROLE_Customer }
           counters: []
           rates:
-            - { requests: 40, period: 1m }
+            - { requests: 40, periodSeconds: 60 }
 
         - name: r1m-role-partner
-          when:
+          matches:
             - { key: roles, operator: Contains, value: ROLE_Partner }
           counters: []
           rates:
-            - { requests: 120, period: 1m }
+            - { requests: 120, periodSeconds: 60 }
 
         # T1M — the unconditional total of this API.
         - name: t1m-total
           counters: []
           rates:
-            - { requests: 500, period: 1m }
+            - { requests: 500, periodSeconds: 60 }
 
     # The operation tier: the narrow group limits on createQuote. The operationId
     # of the source becomes a method and a path, which is worth checking against
@@ -112,18 +123,15 @@ spec:
             methods: [POST]
       rules:
         - name: g1m-create-partner-group-1
-          when:
+          matches:
             - { key: client, operator: InGroup, value: partner-group-1 }
           counters: []
           rates:
-            - { requests: 50, period: 1m }
+            - { requests: 50, periodSeconds: 60 }
 
         - name: g1m-create-partner-group-2
-          when:
+          matches:
             - { key: client, operator: InGroup, value: partner-group-2 }
           counters: []
           rates:
-            - { requests: 90, period: 1m }
-
-    # The hourly windows of the source (G1H) are commented out there and are not
-    # translated. Each would be a second entry in the rates of its rule.
+            - { requests: 90, periodSeconds: 60 }

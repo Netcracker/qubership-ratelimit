@@ -19,17 +19,17 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.domain
-      name: Domain
-      type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
+    - jsonPath: .status.replicas.applied
+      name: Replicas
+      type: string
+    - jsonPath: .status.rules
+      name: Rules
+      type: integer
     - jsonPath: .status.problems
       name: Problems
-      type: integer
-    - jsonPath: .status.activeGeneration
-      name: Active
       type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -38,15 +38,24 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          RateLimitPolicy is a set of rate limit rules bound to one gateway domain.
+          RateLimitPolicy is the whole rate limit configuration of one gateway domain.
 
-          Policies are units of ownership and review rather than units of evaluation:
-          every event recompiles the whole domain, and after compilation there are no
-          policies left, only one flat set of blocks.
+          The singleton comes out of the naming rule rather than out of arbitration:
+          metadata.name equals spec.domain, and object names are unique within a
+          namespace, so a second policy for a domain cannot be created. The API server
+          rejects it with AlreadyExists, and there is no "which one wins" question to
+          answer.
 
-          A generation is enforced whole or not at all. That makes the layout of a
-          namespace a design choice: keep the safety-net total limits in a small policy
-          of their own, over built-in keys, where they can hardly ever become invalid.
+          Everything the domain needs lives in this one object: the claim mapping, the
+          groups, and the rules change in one edit and apply atomically, so a request
+          never sees old extraction mixed with new rules. The compiler resolves the
+          references from rules to keys and groups inside the object, with no
+          cross-object arbitration anywhere.
+
+          A generation is enforced whole or not at all. The API server checks only the
+          shape — patterns, enums, ranges, duplicate names, and this name rule — while
+          everything that relates fields to each other is judged by the compiler on
+          every generation and answered through the status.
         properties:
           apiVersion:
             description: |-
@@ -66,51 +75,50 @@ spec:
           metadata:
             type: object
           spec:
-            description: RateLimitPolicySpec is a set of rate limit rules bound to
-              one domain.
+            description: |-
+              RateLimitPolicySpec is the whole rate limit configuration of one domain:
+              how identity is read out of a token, which client groups exist, and which
+              rules count the traffic.
             properties:
               domain:
                 description: |-
                   Domain binds this policy to a traffic source. It has to equal, byte for
-                  byte, the domain the rate limit filter of that gateway sends. Comparison
-                  is case-sensitive.
+                  byte, the domain the rate limit filter of that gateway sends, and it
+                  equals metadata.name. Comparison is case-sensitive.
 
-                  A colon separates the segments of a counter key, and braces are Redis
-                  Cluster hash tags that decide slot routing, so neither is allowed here.
-                  The naming convention is <kind>.<name>: gateway.public, service.billing.
+                  A colon separates the segments of a counter key, braces are Redis
+                  Cluster hash tags that decide slot routing, and a slash separates the
+                  namespace from the domain inside the tag, so none of them is allowed
+                  here. The naming convention is <kind>.<name>: gateway.public,
+                  service.billing.
                 maxLength: 63
                 minLength: 1
                 pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
                 type: string
               groups:
-                description: |-
-                  Groups are the client lists private to this policy. A name defined here
-                  shadows a group of the same name in the mapping of the domain.
+                description: Groups are the named client lists the InGroup operator
+                  resolves against.
                 items:
                   description: |-
                     ClientGroup names a list of client identities that the InGroup operator
                     matches against.
-
-                    A group defined by a policy is private to that policy; a group defined by the
-                    mapping of the domain is visible to every policy of the domain. A private
-                    name shadows a shared one.
                   properties:
                     clients:
                       description: |-
-                        Clients lists the members of the group. Values are compared after the
-                        same lower-case normalization the client key goes through, so the case a
-                        token happens to carry does not decide membership.
+                        Clients lists the members of the group. Values are compared with the
+                        client key after its effective normalization, which is lower-case unless
+                        a mapping entry overrides client with normalization None — then they are
+                        compared as written, and the case is the author's responsibility.
                       items:
-                        maxLength: 253
+                        maxLength: 256
                         type: string
-                      maxItems: 1024
                       minItems: 1
                       type: array
                       x-kubernetes-list-type: atomic
                     name:
                       description: |-
-                        Name is how a predicate references the group. It is unique among the
-                        groups of its object.
+                        Name is how a predicate references the group. It is unique within the
+                        policy.
                       maxLength: 63
                       minLength: 1
                       pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
@@ -119,7 +127,6 @@ spec:
                   - clients
                   - name
                   type: object
-                maxItems: 64
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -170,9 +177,63 @@ spec:
                               key the bucket by.
                             items:
                               maxLength: 63
-                              pattern: ^[a-z][a-z0-9_]*$
+                              pattern: ^[a-z][a-zA-Z0-9_]*$
                               type: string
-                            maxItems: 4
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          matches:
+                            description: |-
+                              Matches is a conjunction of predicates. An empty list matches every
+                              request the block sees.
+                            items:
+                              description: |-
+                                Predicate is one condition on the identity of the caller. Paths and methods
+                                belong in the target of the block, so a predicate cannot name them.
+
+                                The compiler checks the parameters against the operator and reports a
+                                mismatch as an InvalidSpec problem. It is not a CEL rule on the schema: the
+                                cost estimator charges every rule the product of the list bounds on the way
+                                to it, so keeping these checks at admission would mean bounding every list
+                                for the estimator's sake and maintaining a second copy of the compiler.
+                              properties:
+                                key:
+                                  description: |-
+                                    Key names the descriptor key the predicate reads: client, a mappings
+                                    key, or a capture of the block's own Template routes.
+                                  maxLength: 63
+                                  minLength: 1
+                                  pattern: ^[a-z][a-zA-Z0-9_]*$
+                                  type: string
+                                operator:
+                                  description: Operator is the predicate applied to
+                                    the value set of the key.
+                                  enum:
+                                  - Equals
+                                  - In
+                                  - InGroup
+                                  - Contains
+                                  - Exists
+                                  - DoesNotExist
+                                  type: string
+                                value:
+                                  description: |-
+                                    Value is the operand of Equals, Contains, and InGroup. For InGroup it is
+                                    the name of a group.
+                                  maxLength: 256
+                                  minLength: 1
+                                  type: string
+                                values:
+                                  description: Values is the operand of In.
+                                  items:
+                                    maxLength: 256
+                                    type: string
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                              required:
+                              - key
+                              - operator
+                              type: object
                             type: array
                             x-kubernetes-list-type: atomic
                           name:
@@ -183,7 +244,9 @@ spec:
                             pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
                             type: string
                           rates:
-                            description: Rates are the counting windows of the rule.
+                            description: |-
+                              Rates are the counting windows of the rule, keyed by period. A rule with
+                              behavior Bypass carries none; every other rule carries at least one.
                             items:
                               description: |-
                                 Rate is one counting window of a rule. Windows of a rule are independent
@@ -200,124 +263,47 @@ spec:
                                 burst:
                                   description: |-
                                     Burst is the bucket depth of a GCRA window. It defaults to Requests,
-                                    which is a full bucket.
+                                    which is a full bucket, and a FixedWindow entry that sets it is rejected
+                                    by the compiler.
                                   format: int32
+                                  maximum: 2147483647
                                   minimum: 1
                                   type: integer
-                                period:
-                                  description: 'Period is the length of the window,
-                                    written as one unit: 30s, 5m, 1h, 1d.'
-                                  maxLength: 8
-                                  pattern: ^[1-9][0-9]*(s|m|h|d)$
-                                  type: string
+                                periodSeconds:
+                                  description: |-
+                                    PeriodSeconds is the length of the window. A day is the ceiling: beyond
+                                    it a counter stops being a rate limit and becomes an accounting record.
+                                  format: int32
+                                  maximum: 86400
+                                  minimum: 1
+                                  type: integer
                                 requests:
                                   description: Requests is the quota of the window.
                                   format: int32
+                                  maximum: 2147483647
                                   minimum: 1
                                   type: integer
                               required:
-                              - period
+                              - periodSeconds
                               - requests
                               type: object
-                              x-kubernetes-validations:
-                              - message: burst is a GCRA parameter; FixedWindow entries
-                                  reject it
-                                rule: '!has(self.burst) || self.algorithm == ''GCRA'''
-                              - message: period ranges from 1s to 1d
-                                rule: self.period == '1d' || (duration(self.period)
-                                  >= duration('1s') && duration(self.period) <= duration('24h'))
-                            maxItems: 4
                             type: array
-                            x-kubernetes-list-type: atomic
-                          replaces:
+                            x-kubernetes-list-map-keys:
+                            - periodSeconds
+                            x-kubernetes-list-type: map
+                          replacedRules:
                             description: |-
-                              Replaces silences rules of the same block, which is how a narrow rule
-                              overrides a broad one. It is available only in an All block, where the
-                              order of the list carries no meaning of its own.
+                              ReplacedRules silences rules of the same block, which is how a narrow
+                              rule overrides a broad one. It is available only in an All block, where
+                              the order of the list carries no meaning of its own.
                             items:
                               maxLength: 63
                               type: string
-                            maxItems: 16
-                            type: array
-                            x-kubernetes-list-type: atomic
-                          when:
-                            description: |-
-                              When is a conjunction of predicates. An empty list matches every request
-                              the block sees.
-                            items:
-                              description: |-
-                                Predicate is one condition on the identity of the caller. Paths and methods
-                                belong in the target of the block, so a predicate cannot name them.
-                              properties:
-                                key:
-                                  description: Key names the descriptor key the predicate
-                                    reads.
-                                  maxLength: 63
-                                  minLength: 1
-                                  pattern: ^[a-z][a-z0-9_]*$
-                                  type: string
-                                operator:
-                                  description: Operator is the predicate applied to
-                                    the value set of the key.
-                                  enum:
-                                  - Equals
-                                  - In
-                                  - InGroup
-                                  - Contains
-                                  - Exists
-                                  - NotExists
-                                  type: string
-                                value:
-                                  description: |-
-                                    Value is the operand of Equals, Contains, and InGroup. For InGroup it is
-                                    the name of a group.
-                                  maxLength: 253
-                                  minLength: 1
-                                  type: string
-                                values:
-                                  description: Values is the operand of In.
-                                  items:
-                                    maxLength: 253
-                                    type: string
-                                  maxItems: 64
-                                  minItems: 1
-                                  type: array
-                                  x-kubernetes-list-type: atomic
-                              required:
-                              - key
-                              - operator
-                              type: object
-                              x-kubernetes-validations:
-                              - message: path and method are selected by target.routes,
-                                  and token is an input rather than a key; none of
-                                  them can appear in when
-                                rule: '!(self.key in [''path'', ''method'', ''token''])'
-                              - message: operators Equals, InGroup and Contains take
-                                  value and reject values
-                                rule: '!(self.operator in [''Equals'', ''InGroup'',
-                                  ''Contains'']) || (has(self.value) && !has(self.values))'
-                              - message: operator In takes values and rejects value
-                                rule: self.operator != 'In' || (has(self.values) &&
-                                  !has(self.value))
-                              - message: operators Exists and NotExists take neither
-                                  value nor values
-                                rule: '!(self.operator in [''Exists'', ''NotExists''])
-                                  || (!has(self.value) && !has(self.values))'
-                            maxItems: 8
                             type: array
                             x-kubernetes-list-type: atomic
                         required:
                         - name
                         type: object
-                        x-kubernetes-validations:
-                        - message: a rule with behavior Bypass carries no rates; every
-                            other rule carries at least one
-                          rule: 'self.behavior == ''Bypass'' ? !has(self.rates) :
-                            (has(self.rates) && size(self.rates) > 0)'
-                        - message: the periods of a rule are unique
-                          rule: '!has(self.rates) || self.rates.all(r, self.rates.filter(other,
-                            other.period == r.period).size() == 1)'
-                      maxItems: 128
                       minItems: 1
                       type: array
                       x-kubernetes-list-map-keys:
@@ -354,9 +340,8 @@ spec:
                                   - OPTIONS
                                   - TRACE
                                   type: string
-                                maxItems: 9
                                 type: array
-                                x-kubernetes-list-type: atomic
+                                x-kubernetes-list-type: set
                               path:
                                 description: Path selects request paths.
                                 properties:
@@ -372,7 +357,7 @@ spec:
                                       Value is the path, the prefix, or the template. It starts with a slash;
                                       the query string of a request is cut before matching, so it never appears
                                       here.
-                                    maxLength: 256
+                                    maxLength: 2048
                                     minLength: 1
                                     pattern: ^/
                                     type: string
@@ -380,24 +365,9 @@ spec:
                                 - type
                                 - value
                                 type: object
-                                x-kubernetes-validations:
-                                - message: in a Template every segment is either a
-                                    literal without braces or one whole placeholder
-                                    {name}, where name matches ^[a-z][a-z0-9_]*$
-                                  rule: self.type != 'Template' || self.value.matches('^(/([^/{}]+|[{][a-z][a-z0-9_]*[}]))+/?$')
-                                - message: 'a Template placeholder cannot take the
-                                    name of a built-in key: path, method, token, client'
-                                  rule: self.type != 'Template' || !(self.value.contains('{path}')
-                                    || self.value.contains('{method}') || self.value.contains('{token}')
-                                    || self.value.contains('{client}'))
                             required:
                             - path
                             type: object
-                            x-kubernetes-validations:
-                            - message: the methods of a route are unique
-                              rule: '!has(self.methods) || self.methods.all(m, self.methods.filter(x,
-                                x == m).size() == 1)'
-                          maxItems: 16
                           minItems: 1
                           type: array
                           x-kubernetes-list-type: atomic
@@ -408,19 +378,77 @@ spec:
                   - name
                   - rules
                   type: object
-                  x-kubernetes-validations:
-                  - message: replaces needs mode All; in a FirstMatch block the order
-                      of the rules already decides
-                    rule: self.mode != 'FirstMatch' || self.rules.all(r, !has(r.replaces))
-                  - message: a Bypass rule in an All block names the rules it exempts
-                      from in replaces; without them it is a silent no-op
-                    rule: self.mode == 'FirstMatch' || self.rules.all(r, r.behavior
-                      != 'Bypass' || (has(r.replaces) && size(r.replaces) > 0))
-                maxItems: 64
                 minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
+                x-kubernetes-list-type: map
+              mappings:
+                description: |-
+                  Mappings declare which token claims become descriptor keys. An empty
+                  list leaves the domain with its built-in keys, client among them.
+                items:
+                  description: ClaimMapping turns one JWT claim into one descriptor
+                    key.
+                  properties:
+                    claim:
+                      description: |-
+                        Claim is a dotted path into the payload, such as realm_access.roles.
+                        Exactly one of Claim and ClaimPath is set.
+                      maxLength: 256
+                      minLength: 1
+                      type: string
+                    claimPath:
+                      description: |-
+                        ClaimPath is the same path given segment by segment, which is how a
+                        claim name that itself contains a dot is addressed.
+                      items:
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    fallbacks:
+                      description: |-
+                        Fallbacks are dotted paths tried in order when the primary path yields
+                        nothing. The first non-empty result wins.
+                      items:
+                        maxLength: 256
+                        minLength: 1
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    key:
+                      description: |-
+                        Key names the descriptor key the rules reference. It uses the one
+                        descriptor key pattern of this API, camelCase included; path, method and
+                        token are produced by the engine and cannot be redefined, while client
+                        is an allowed override.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z][a-zA-Z0-9_]*$
+                      type: string
+                    normalization:
+                      default: None
+                      description: Normalization is applied to the extracted value.
+                      enum:
+                      - None
+                      - Lowercase
+                      type: string
+                    type:
+                      default: String
+                      description: Type is the shape of the extracted value.
+                      enum:
+                      - String
+                      - StringArray
+                      type: string
+                  required:
+                  - key
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - key
                 x-kubernetes-list-type: map
             required:
             - domain
@@ -431,10 +459,10 @@ spec:
             properties:
               activeGeneration:
                 description: |-
-                  ActiveGeneration is the generation actually in effect. It falls behind
-                  ObservedGeneration when the latest edit is not the one being enforced and an
-                  earlier, last-good generation keeps running. Zero means nothing of this
-                  object is in effect at all.
+                  ActiveGeneration is the generation actually being enforced. It falls
+                  behind ObservedGeneration when the latest edit does not compile and the
+                  last-good generation keeps running. Zero means the domain is unprotected:
+                  no generation is in effect at all.
                 format: int64
                 type: integer
               conditions:
@@ -498,58 +526,99 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              effectiveKeys:
+                description: |-
+                  EffectiveKeys is the domain-wide key set of ActiveGeneration: the
+                  built-in keys plus the mapped ones. Route captures are per block and do
+                  not appear here. It reports what is in effect rather than what was asked
+                  for, so a rule author reads the set their rules actually resolve against.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: atomic
               observedGeneration:
                 description: ObservedGeneration is the latest spec generation the
-                  operator has seen.
+                  leader has seen.
                 format: int64
                 type: integer
               problems:
-                description: |-
-                  Problems is the length of RuleProblems, which a printer column can show
-                  and a JSONPath expression cannot compute.
+                description: Problems is the length of RuleProblems, for the same
+                  reason.
                 format: int32
                 type: integer
+              replicas:
+                description: Replicas is what the leader observed about the fleet.
+                properties:
+                  applied:
+                    description: Applied is how many of them enforce ActiveGeneration.
+                    format: int32
+                    type: integer
+                  lastCheckTime:
+                    description: |-
+                      LastCheckTime is the freshness of the probe. When no pod exists at all
+                      there is nobody to write the status, and the age of this stamp is what
+                      shows it.
+                    format: date-time
+                    type: string
+                  total:
+                    description: Total is the number of ready replicas at the time
+                      of the probe.
+                    format: int32
+                    type: integer
+                type: object
               ruleProblems:
                 description: |-
                   RuleProblems lists the diagnostics of the latest generation. A blocking
-                  entry invalidates that generation whole: Ready goes false with a reason,
-                  and an earlier generation keeps running where there is one. An
-                  informational entry, such as CaptureShadowsMappedKey, leaves Ready alone —
-                  a fact to alert on rather than a failure of the object.
+                  entry invalidates that generation whole: Accepted goes false, Ready goes
+                  false with reason NotCompiled, and the last-good generation keeps running
+                  where there is one. An informational entry, such as
+                  CaptureShadowsMappedKey, leaves both alone — a fact to alert on rather
+                  than a failure of the object.
                 items:
                   description: |-
                     RuleProblem describes what is wrong with one rule. Problems live outside
-                    conditions because conditions are a map keyed by type, and a policy can hold
-                    several problems at once.
+                    conditions because conditions are a map keyed by type, and a generation can
+                    hold several problems at once.
 
                     The list carries root causes only, never the cascade of every rule in an
-                    invalid policy: the author needs the reference that does not resolve, not a
-                    restatement of the atomicity rule once per rule.
+                    invalid generation: the author needs the reference that does not resolve, not
+                    a restatement of the atomicity rule once per rule.
                   properties:
                     block:
-                      description: Block names the block the rule belongs to.
+                      description: |-
+                        Block names the block the rule belongs to. It is empty for a problem of
+                        the policy as a whole, such as the decision budget.
                       type: string
                     message:
                       description: Message says what the rule references and what
                         the domain offers.
+                      maxLength: 1024
                       type: string
                     reason:
                       description: Reason is one of the Problem constants of this
                         package.
                       type: string
                     rule:
-                      description: Rule names the rule.
+                      description: Rule names the rule, empty for a block-level or
+                        policy-level problem.
                       type: string
                   required:
-                  - block
                   - reason
-                  - rule
                   type: object
-                maxItems: 256
                 type: array
                 x-kubernetes-list-type: atomic
+              rules:
+                description: |-
+                  Rules is how many rules the active generation contributes, which a
+                  printer column can show and a JSONPath expression cannot compute.
+                format: int32
+                type: integer
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: 'metadata.name has to equal spec.domain: the policy is the singleton
+            of its domain'
+          rule: self.metadata.name == self.spec.domain
     served: true
     storage: true
     subresources:

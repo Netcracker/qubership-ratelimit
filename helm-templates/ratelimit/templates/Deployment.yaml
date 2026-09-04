@@ -44,6 +44,10 @@ spec:
             - --rls-bind-address=:{{ .Values.rls.port }}
             - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
+            # The Service whose ready endpoints are this component's replicas.
+            # The leader reads the enforced generation from each of them, which
+            # is what the Ready condition of a policy reports.
+            - --service-name={{ include "ratelimit.fullname" . }}
             {{- if .Values.leaderElect }}
             - --leader-elect
             {{- end }}

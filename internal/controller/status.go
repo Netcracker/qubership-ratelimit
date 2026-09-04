@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -13,32 +15,30 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
-// The two reconcilers differ only in the middle: which outcome they read, which
-// status fields they fill, and how they word Ready. Everything around that — the
-// compilation they read from, the Accepted condition, and the write — is the same
-// work, and is done here so the two cannot drift into disagreeing about it.
-
 // StateReader is the part of the state store a reconciler needs.
 type StateReader interface {
 	Load(ctx context.Context, domains []string) (map[string]policy.Bundle, error)
 }
 
+// propagationDeadline separates a rollout from a breakage. Under it, replicas
+// still taking up a new generation are Propagating; over it they are
+// ReplicaStale, which is the condition worth alerting on: a broken informer, or
+// image version skew that a rollout is not going to resolve on its own.
+const propagationDeadline = 30 * time.Second
+
 // compile recompiles the namespace against the last-good state of one domain.
 //
-// The whole domain is compiled rather than the one object being reconciled,
-// because a rule is only diagnosable in the context of its domain: whether a key
-// exists depends on the mapping, and so does whether a group exists.
-//
-// The last-good state is part of the input rather than an afterthought. Compiling
-// without it would report an object as contributing nothing while an earlier
-// generation of it is still in effect — a status that contradicts the snapshot.
+// The last-good state is part of the input rather than an afterthought.
+// Compiling without it would report an object as contributing nothing while an
+// earlier generation of it is still in effect — a status that contradicts the
+// snapshot the replicas are serving from.
 func compile(
 	ctx context.Context,
 	reader client.Reader,
 	state StateReader,
-	domain string,
+	namespace, domain string,
 ) (*policy.Result, error) {
-	input, err := policy.Load(ctx, reader)
+	input, err := policy.Load(ctx, reader, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -50,53 +50,138 @@ func compile(
 	return policy.Compile(input), nil
 }
 
-// fetchAndCompile fetch the object, give up quietly if it is already gone, and recompile its domain.
+// setAccepted records whether the latest generation compiles.
 //
-// It reports whether the object still exists. A deleted object needs no cleanup
-// in either kind — there are no finalizers, and the store updater drops it on the
-// same informer event — so "not found" is a plain return rather than an error.
-func fetchAndCompile[T client.Object](
-	ctx context.Context,
-	c client.Client,
-	state StateReader,
-	key client.ObjectKey,
-	object T,
-	domainOf func(T) string,
-) (*policy.Result, bool, error) {
-	if err := c.Get(ctx, key, object); err != nil {
-		return nil, false, client.IgnoreNotFound(err)
+// A false Accepted always carries CompilationFailed and a summary: the
+// individual causes live in RuleProblems, because conditions are a map keyed by
+// type and a generation can break in several places at once.
+func setAccepted(object *v1alpha1.RateLimitPolicy, outcome policy.Outcome) {
+	if outcome.Compiled() {
+		setCondition(&object.Status.Conditions, v1alpha1.ConditionAccepted, metav1.ConditionTrue,
+			v1alpha1.ReasonRulesCompiled,
+			fmt.Sprintf("generation %d compiles: %d blocks, %d rules",
+				outcome.Generation, outcome.Blocks, outcome.Rules),
+			object.Generation)
+		return
 	}
-	result, err := compile(ctx, c, state, domainOf(object))
-	if err != nil {
-		return nil, false, err
-	}
-	return result, true, nil
+	setCondition(&object.Status.Conditions, v1alpha1.ConditionAccepted, metav1.ConditionFalse,
+		v1alpha1.ReasonCompilationFailed,
+		fmt.Sprintf("generation %d does not compile: %s", outcome.Generation, outcome.Err),
+		object.Generation)
 }
 
-// observe records which generation was seen and which one is in effect. The pair
-// is one concept, and writing it in one place keeps a reconciler from updating
-// half of it.
-func observe(status *v1alpha1.GenerationStatus, seen, active int64) {
-	status.ObservedGeneration = seen
-	status.ActiveGeneration = active
+// fleetStatus is the pair of conditions that answer "are the rules I wrote the
+// rules being enforced, and if not, is that a rollout or a breakage".
+type fleetStatus struct {
+	ready        metav1.ConditionStatus
+	readyReason  string
+	readyMessage string
+
+	stalled       metav1.ConditionStatus
+	stalledReason string
 }
 
-// setAccepted records the Accepted condition, which reports structural validity.
+// judge derives Ready and Stalled from the compilation and the fleet.
 //
-// A spec the compiler rejects structurally is the only way it goes false, so the
-// failing reason and message are always the same and the caller supplies only the
-// wording for success.
-func setAccepted(
-	conditions *[]metav1.Condition,
-	generation int64,
-	err error,
-	reason, message string,
-) {
-	status := metav1.ConditionTrue
-	if err != nil {
-		status, reason, message = metav1.ConditionFalse, v1alpha1.ReasonInvalidSpec, err.Error()
+// Ready is true under exactly three conditions at once: the latest generation
+// is the one compiled, it is the one enforced rather than a last-good spec, and
+// every ready replica reports it. Stalled separates "still in progress" from
+// "stuck", so that a rollout does not page anyone and a broken informer does.
+func judge(outcome policy.Outcome, view FleetView, probeErr error, since time.Duration) fleetStatus {
+	progressing := fleetStatus{stalled: metav1.ConditionFalse, stalledReason: v1alpha1.ReasonProgressing}
+
+	switch {
+	// A generation that does not compile is stuck whatever the replicas say,
+	// and the leader knows it without asking them.
+	case !outcome.Compiled():
+		return fleetStatus{
+			ready:         metav1.ConditionFalse,
+			readyReason:   v1alpha1.ReasonNotCompiled,
+			readyMessage:  notCompiledMessage(outcome),
+			stalled:       metav1.ConditionTrue,
+			stalledReason: v1alpha1.ReasonNotCompiled,
+		}
+
+	case probeErr != nil:
+		// The leader does not know, and a guess would be worse than saying so.
+		progressing.ready = metav1.ConditionUnknown
+		progressing.readyReason = v1alpha1.ReasonProbeFailed
+		progressing.readyMessage = fmt.Sprintf("the replicas could not be observed: %v", probeErr)
+
+	case view.Total == 0:
+		// A leader that is alive but is not itself a ready endpoint. With no
+		// pod at all there is nobody to write this, and the age of
+		// lastCheckTime is what shows that instead.
+		progressing.ready = metav1.ConditionFalse
+		progressing.readyReason = v1alpha1.ReasonNoReplicas
+		progressing.readyMessage = "the service has no ready endpoint: nothing is enforcing this policy"
+
+	case view.Applied == view.Total:
+		progressing.ready = metav1.ConditionTrue
+		progressing.readyReason = v1alpha1.ReasonAllReplicas
+		progressing.readyMessage = fmt.Sprintf("all %d ready replicas enforce generation %d",
+			view.Total, outcome.ActiveGeneration)
+
+	case since > propagationDeadline:
+		return fleetStatus{
+			ready:         metav1.ConditionFalse,
+			readyReason:   v1alpha1.ReasonReplicaStale,
+			readyMessage:  behindMessage(outcome, view),
+			stalled:       metav1.ConditionTrue,
+			stalledReason: v1alpha1.ReasonReplicaStale,
+		}
+
+	case view.Applied == 0:
+		progressing.ready = metav1.ConditionFalse
+		progressing.readyReason = v1alpha1.ReasonReconciling
+		progressing.readyMessage = behindMessage(outcome, view)
+
+	default:
+		progressing.ready = metav1.ConditionFalse
+		progressing.readyReason = v1alpha1.ReasonPropagating
+		progressing.readyMessage = behindMessage(outcome, view)
 	}
-	setCondition(conditions, v1alpha1.ConditionAccepted, status, reason, message, generation)
+	return progressing
+}
+
+// notCompiledMessage says what is enforced instead of the latest generation.
+// The distinction that matters is whether anything is running at all.
+func notCompiledMessage(outcome policy.Outcome) string {
+	if outcome.ActiveGeneration == 0 {
+		return policy.ErrNoGeneration.Error()
+	}
+	return fmt.Sprintf("generation %d does not compile; generation %d remains enforced",
+		outcome.Generation, outcome.ActiveGeneration)
+}
+
+// behindMessage names the replicas that have not taken the generation up. It
+// prints at most a few: the list is a pointer to the pods worth looking at, not
+// an inventory.
+func behindMessage(outcome policy.Outcome, view FleetView) string {
+	const named = 3
+
+	message := fmt.Sprintf("%d of %d replicas enforce generation %d",
+		view.Applied, view.Total, outcome.ActiveGeneration)
+	if len(view.Behind) == 0 {
+		return message
+	}
+	behind := view.Behind
+	suffix := ""
+	if len(behind) > named {
+		behind, suffix = behind[:named], fmt.Sprintf(" and %d more", len(view.Behind)-named)
+	}
+	return fmt.Sprintf("%s; %s%s report another", message, strings.Join(behind, ", "), suffix)
+}
+
+// readyAge is how long Ready has held its current status, which is what
+// separates a rollout from a stuck one. A condition observed against an older
+// generation restarts the clock: the new edit has its own rollout.
+func readyAge(object *v1alpha1.RateLimitPolicy, now time.Time) time.Duration {
+	condition := meta.FindStatusCondition(object.Status.Conditions, v1alpha1.ConditionReady)
+	if condition == nil || condition.ObservedGeneration != object.Generation {
+		return 0
+	}
+	return now.Sub(condition.LastTransitionTime.Time)
 }
 
 // setCondition records one condition, carrying the generation into the condition
@@ -127,14 +212,13 @@ func writeStatus(
 	ctx context.Context,
 	writer client.StatusClient,
 	object client.Object,
-	kind string,
 	before, after any,
 ) (bool, error) {
 	if equalStatus(before, after) {
 		return false, nil
 	}
 	if err := writer.Status().Update(ctx, object); err != nil {
-		return false, fmt.Errorf("update %s status: %w", kind, err)
+		return false, fmt.Errorf("update RateLimitPolicy status: %w", err)
 	}
 	return true, nil
 }

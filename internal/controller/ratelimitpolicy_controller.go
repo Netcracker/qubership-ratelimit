@@ -3,47 +3,60 @@
 // Status writes are the only leader-gated work in the operator: the rule store
 // and the RLS endpoint run on every replica (see internal/store and internal/rls).
 // A reconciler therefore never decides anything the engine depends on — it reads
-// the same pure compilation the engine reads and reports what it says.
+// the same pure compilation the engine reads and reports what it says, plus the
+// one thing only the leader can see: whether every replica agrees.
 package controller
 
 import (
 	"context"
-	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
+
+// probeInterval is how often the leader re-reads the fleet while a generation
+// is still propagating. Events cover the rest: a new generation or an
+// EndpointSlice change reconciles on its own.
+const probeInterval = 10 * time.Second
 
 // RateLimitPolicyReconciler reconciles a RateLimitPolicy object.
 type RateLimitPolicyReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// Namespace is the component's own, a segment of every counter key.
+	Namespace string
+
 	// State reads the persisted last-good specs, so the status reports what the
 	// engine enforces rather than what a compilation from scratch would produce.
 	State StateReader
+
+	// Probe reads the enforced generation from every ready replica. Without it
+	// Ready cannot be established and reports ProbeFailed, which is the honest
+	// answer for a leader that cannot see the fleet.
+	Probe FleetProbe
 }
 
-// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies;ratelimitmappings,verbs=get;list;watch
-// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups="",namespace=ratelimit-system,resources=configmaps,verbs=get;list;create;update;patch;delete
+// FleetProbe reports which replicas enforce which generation of a domain.
+type FleetProbe interface {
+	Observe(ctx context.Context, domain string, want store.Applied) (FleetView, error)
+}
 
-// Reconcile compiles the domain of the policy and reports what the compiler said
-// about this object.
-//
-// The whole domain is compiled rather than this one object, because a rule is
-// only diagnosable in the context of its domain: whether a key exists depends on
-// the mapping, and whether a group exists depends on the mapping too.
+// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",namespace=ratelimit-system,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=discovery.k8s.io,namespace=ratelimit-system,resources=endpointslices,verbs=get;list;watch
+
+// Reconcile compiles the domain of the policy, asks the replicas which
+// generation they enforce, and reports both.
 //
 // A deleted policy needs no cleanup: there are no finalizers, and the store
 // updater drops it on the same informer event.
@@ -51,133 +64,96 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	log := logf.FromContext(ctx)
 
 	var object v1alpha1.RateLimitPolicy
-	result, found, err := fetchAndCompile(ctx, r.Client, r.State, req.NamespacedName, &object,
-		func(p *v1alpha1.RateLimitPolicy) string { return p.Spec.Domain })
-	if err != nil || !found {
+	if err := r.Get(ctx, req.NamespacedName, &object); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	result, err := compile(ctx, r.Client, r.State, r.Namespace, object.Spec.Domain)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 	outcome := result.Policies[req.NamespacedName]
 
-	status := object.Status.DeepCopy()
-	observe(&object.Status.GenerationStatus, object.Generation, outcome.ActiveGeneration)
+	now := time.Now()
+	view, probeErr := r.observe(ctx, &object, outcome)
+
+	before := object.Status.DeepCopy()
+	object.Status.ObservedGeneration = object.Generation
+	object.Status.ActiveGeneration = outcome.ActiveGeneration
+	object.Status.EffectiveKeys = outcome.EffectiveKeys
 	object.Status.RuleProblems = outcome.Problems
 	object.Status.Problems = int32(len(outcome.Problems))
+	object.Status.Rules = int32(outcome.Rules)
 
-	setAccepted(&object.Status.Conditions, object.Generation, outcome.Err,
-		v1alpha1.ReasonRulesCompiled,
-		fmt.Sprintf("%d blocks, %d rules compiled for domain %s",
-			outcome.Blocks, outcome.Rules, object.Spec.Domain))
+	setAccepted(&object, outcome)
 
-	if outcome.Ready() {
-		setCondition(&object.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionTrue,
-			v1alpha1.ReasonSnapshotApplied, "The compiled snapshot is the one serving checks.",
-			object.Generation)
-	} else {
-		setCondition(&object.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
-			outcome.Reason, notReadyMessage(outcome), object.Generation)
+	// The clock for "is this a rollout or a breakage" starts when Ready first
+	// went false for this generation, so it is read before the condition is
+	// overwritten.
+	judged := judge(outcome, view, probeErr, readyAge(&object, now))
+	setCondition(&object.Status.Conditions, v1alpha1.ConditionReady,
+		judged.ready, judged.readyReason, judged.readyMessage, object.Generation)
+	setCondition(&object.Status.Conditions, v1alpha1.ConditionStalled,
+		judged.stalled, judged.stalledReason, "", object.Generation)
+
+	if probeErr == nil {
+		object.Status.Replicas = v1alpha1.ReplicaStatus{
+			Total:   view.Total,
+			Applied: view.Applied,
+			// Stamped below, and only when something else moved: a probe time
+			// that advanced on its own would make every reconcile a write, and
+			// every write another reconcile.
+			LastCheckTime: before.Replicas.LastCheckTime,
+		}
+	}
+	if !equalStatus(before, &object.Status) && probeErr == nil {
+		object.Status.Replicas.LastCheckTime = &metav1.Time{Time: now}
 	}
 
-	written, err := writeStatus(ctx, r.Client, &object, "RateLimitPolicy", status, &object.Status)
-	if err != nil || !written {
+	written, err := writeStatus(ctx, r.Client, &object, before, &object.Status)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	log.Info("policy reconciled",
-		"domain", object.Spec.Domain,
-		"generation", object.Generation,
-		"activeGeneration", outcome.ActiveGeneration,
-		"blocks", outcome.Blocks,
-		"rules", outcome.Rules,
-		"problems", len(outcome.Problems),
-	)
+	if written {
+		log.Info("policy reconciled",
+			"domain", object.Spec.Domain,
+			"generation", object.Generation,
+			"activeGeneration", outcome.ActiveGeneration,
+			"rules", outcome.Rules,
+			"problems", len(outcome.Problems),
+			"replicas", view.Applied,
+			"readyReplicas", view.Total,
+			"ready", judged.readyReason,
+		)
+	}
+
+	// A generation still spreading converges without an event, so the leader
+	// comes back on its own rather than leaving the status behind the fleet.
+	if judged.ready != metav1.ConditionTrue {
+		return ctrl.Result{RequeueAfter: probeInterval}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
-// notReadyMessage says what is enforced instead of the latest generation. The
-// distinction that matters to whoever reads it is whether anything of this policy
-// is running at all.
-func notReadyMessage(outcome policy.PolicyOutcome) string {
-	if outcome.ActiveGeneration == 0 {
-		return fmt.Sprintf("generation %d is not enforced and no earlier generation is: "+
-			"this policy contributes no rules", outcome.Generation)
+// observe asks the fleet which generation of this domain it enforces.
+func (r *RateLimitPolicyReconciler) observe(
+	ctx context.Context,
+	object *v1alpha1.RateLimitPolicy,
+	outcome policy.Outcome,
+) (FleetView, error) {
+	if r.Probe == nil {
+		return FleetView{}, errNoProbe
 	}
-	return fmt.Sprintf("generation %d is not enforced; generation %d remains active",
-		outcome.Generation, outcome.ActiveGeneration)
+	return r.Probe.Observe(ctx, object.Spec.Domain, store.Applied{
+		Generation: outcome.ActiveGeneration,
+		UID:        outcome.UID,
+	})
 }
 
 // SetupWithManager registers the reconciler with the manager.
 func (r *RateLimitPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.RateLimitPolicy{}).
-		// A mapping decides which keys and groups exist, so it decides which
-		// rules are dead. Without this watch a rule fixed by adding a mapping
-		// would keep its problem in the status until something else touched the
-		// policy.
-		Watches(&v1alpha1.RateLimitMapping{}, handler.EnqueueRequestsFromMapFunc(r.policiesOfDomain)).
-		// Policies of one domain judge each other too: what one contributes
-		// decides whether another fits the domain budget, and a deletion
-		// frees the seat a rejected peer waits for. Without this watch that
-		// peer's status would wait for a coincidental touch - the same
-		// staleness the mapping watch prevents. For() already enqueues the
-		// changed policy; this fans the event out to the rest of its domain.
-		// Status-only updates are filtered: peers judge specs and existence,
-		// and letting every status write ripple would be pure churn.
-		Watches(&v1alpha1.RateLimitPolicy{},
-			handler.EnqueueRequestsFromMapFunc(r.peersOfDomain),
-			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Named("ratelimitpolicy").
 		Complete(r)
-}
-
-// peersOfDomain turns one policy's event into reconciles of every other
-// policy of its domain. The changed policy itself is excluded - For() already
-// enqueues it - and a deleted policy still carries its spec, so its peers are
-// reachable exactly when its departure matters to them.
-func (r *RateLimitPolicyReconciler) peersOfDomain(ctx context.Context, object client.Object) []reconcile.Request {
-	changed, ok := object.(*v1alpha1.RateLimitPolicy)
-	if !ok {
-		return nil
-	}
-
-	var list v1alpha1.RateLimitPolicyList
-	if err := r.List(ctx, &list, client.InNamespace(changed.Namespace)); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to list the peers of a changed policy",
-			"domain", changed.Spec.Domain)
-		return nil
-	}
-
-	var requests []reconcile.Request
-	for i := range list.Items {
-		if list.Items[i].Spec.Domain != changed.Spec.Domain || list.Items[i].Name == changed.Name {
-			continue
-		}
-		requests = append(requests, reconcile.Request{
-			NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
-		})
-	}
-	return requests
-}
-
-func (r *RateLimitPolicyReconciler) policiesOfDomain(ctx context.Context, object client.Object) []reconcile.Request {
-	mapping, ok := object.(*v1alpha1.RateLimitMapping)
-	if !ok {
-		return nil
-	}
-
-	var list v1alpha1.RateLimitPolicyList
-	if err := r.List(ctx, &list, client.InNamespace(mapping.Namespace)); err != nil {
-		logf.FromContext(ctx).Error(err, "failed to list policies of a changed mapping",
-			"domain", mapping.Spec.Domain)
-		return nil
-	}
-
-	var requests []reconcile.Request
-	for i := range list.Items {
-		if list.Items[i].Spec.Domain != mapping.Spec.Domain {
-			continue
-		}
-		requests = append(requests, reconcile.Request{
-			NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
-		})
-	}
-	return requests
 }

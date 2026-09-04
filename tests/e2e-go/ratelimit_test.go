@@ -18,8 +18,6 @@ import (
 // unit test.
 var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit"), func() {
 	const (
-		publicPolicy  = "e2e-public"
-		privatePolicy = "e2e-private"
 		publicDomain  = "gateway.public"
 		privateDomain = "gateway.private"
 		// The backend status is irrelevant - what matters is 429 versus
@@ -29,15 +27,18 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 
 	BeforeAll(func() {
 		before := storeRebuilds()
-		Expect(apply(newPolicy(publicPolicy, publicDomain, totalLimits(1, "1s")))).To(Succeed())
-		Expect(apply(newPolicy(privatePolicy, privateDomain, totalLimits(1, "1s")))).To(Succeed())
+		Expect(apply(newPolicy(publicDomain, totalLimits(1, 1)))).To(Succeed())
+		Expect(apply(newPolicy(privateDomain, totalLimits(1, 1)))).To(Succeed())
 		waitStoreRebuilt(before)
 		// Both gateways are warmed: a cold gateway answers 503 on its own,
 		// and the not-429 assertions below would take that for an admission.
 		waitGatewayServes("public-gateway", probePath)
 		waitGatewayServes("private-gateway", probePath)
 	})
-	AfterAll(func() { deletePolicies(publicPolicy, privatePolicy) })
+	// deletePolicies takes domains: a policy is named after the domain it
+	// serves, so passing anything else deletes nothing and leaks the claim
+	// into the suites that need the domain unclaimed.
+	AfterAll(func() { deletePolicies(publicDomain, privateDomain) })
 
 	It("is what the gateway is configured to call", func() {
 		// A wrong cluster name fails exactly like an unreachable operator, so
