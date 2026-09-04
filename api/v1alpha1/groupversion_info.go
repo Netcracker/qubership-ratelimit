@@ -17,10 +17,7 @@ var (
 )
 
 func addKnownTypes(scheme *runtime.Scheme) error {
-	scheme.AddKnownTypes(GroupVersion,
-		&RateLimitPolicy{}, &RateLimitPolicyList{},
-		&RateLimitMapping{}, &RateLimitMappingList{},
-	)
+	scheme.AddKnownTypes(GroupVersion, &RateLimitPolicy{}, &RateLimitPolicyList{})
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil
 }

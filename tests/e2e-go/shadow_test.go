@@ -28,16 +28,16 @@ var _ = Describe("shadow rules", Ordered, Label("shadow"), func() {
 			policyName = fmt.Sprintf("e2e-shadow-%d", time.Now().Unix())
 
 			waitGatewayServes("public-gateway", probePath)
-			limits := prefixLimits(probePath, "dry-run", nil, 1, "1h")
+			limits := prefixLimits(probePath, "dry-run", nil, 1, 3600)
 			limits[0].Rules[0].Behavior = v1alpha1.RuleBehaviorShadow
 			before := storeRebuilds()
-			Expect(apply(newPolicy(policyName, domain, limits))).To(Succeed())
+			Expect(apply(newPolicy(domain, limits))).To(Succeed())
 			waitStoreRebuilt(before)
 		}
 	})
 	AfterAll(func() {
 		if policyName != "" {
-			deletePolicies(policyName)
+			deletePolicies(domain)
 		}
 	})
 

@@ -59,14 +59,14 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 			// Far above the burst: every probe is an admission, and every
 			// admission is a store roundtrip - which is all this suite needs.
 			before := storeRebuilds()
-			Expect(apply(newPolicy(policyName, domain,
-				prefixLimits(probePath, "total", nil, 1000, "1m")))).To(Succeed())
+			Expect(apply(newPolicy(domain,
+				prefixLimits(probePath, "total", nil, 1000, 60)))).To(Succeed())
 			waitStoreRebuilt(before)
 		}
 	})
 	AfterAll(func() {
 		if policyName != "" {
-			deletePolicies(policyName)
+			deletePolicies(domain)
 		}
 		// The store comes back whatever happened above; a suite that leaves
 		// Redis at zero would fail everything after it.

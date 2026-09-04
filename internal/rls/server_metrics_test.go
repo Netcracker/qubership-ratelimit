@@ -43,7 +43,7 @@ func TestShouldRateLimit_countsChecksAndDecisions(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	const rule = "one/b/all"
+	const rule = "b/all"
 	reads := map[string]func() float64{
 		"checks ok": func() float64 {
 			return testutil.ToFloat64(metrics.Checks.WithLabelValues(domain, metrics.VerdictOK))
@@ -79,7 +79,7 @@ func TestShouldRateLimit_countsChecksAndDecisions(t *testing.T) {
 
 func TestShouldRateLimit_countsAShadowRefusalAsItsOwnOutcome(t *testing.T) {
 	const domain = "gateway.public"
-	p := model.Policy{Name: "dry", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{{Name: "trial", Behavior: model.BehaviorShadow,
 			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
@@ -91,10 +91,10 @@ func TestShouldRateLimit_countsAShadowRefusalAsItsOwnOutcome(t *testing.T) {
 
 	shadow := func() float64 {
 		return testutil.ToFloat64(metrics.Decisions.WithLabelValues(
-			domain, "dry/b/trial", metrics.OutcomeShadowOverLimit))
+			domain, "b/trial", metrics.OutcomeShadowOverLimit))
 	}
 	near := func() float64 {
-		return testutil.ToFloat64(metrics.NearLimit.WithLabelValues(domain, "dry/b/trial"))
+		return testutil.ToFloat64(metrics.NearLimit.WithLabelValues(domain, "b/trial"))
 	}
 	nearBefore := near()
 	got := delta(shadow, func() {
@@ -113,7 +113,7 @@ func TestShouldRateLimit_countsAShadowRefusalAsItsOwnOutcome(t *testing.T) {
 
 func TestShouldRateLimit_countsAnUnmatchedCheck(t *testing.T) {
 	const domain = "gateway.unmatched"
-	p := model.Policy{Name: "narrow", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Target: model.Target{Routes: []model.Route{
 			{Path: model.PathMatch{Type: model.PathExact, Value: "/api/only"}}}},
@@ -212,7 +212,7 @@ func TestShouldRateLimit_countsAnUnknownDomain(t *testing.T) {
 
 func TestShouldRateLimit_countsExtractionsAndSkips(t *testing.T) {
 	const domain = "gateway.public"
-	p := model.Policy{Name: "per-client", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
 			Rates: []model.Rate{{Requests: 10, Period: time.Hour}}}},
@@ -247,7 +247,8 @@ func TestShouldRateLimit_countsExtractionsAndSkips(t *testing.T) {
 // every operation, standing in for an outage.
 func failingRuleSet(t *testing.T, domain string) *store.RuleSet {
 	t.Helper()
-	snap, problems := compile.Compile(domain, []model.Policy{onePerHourPolicy()}, nil)
+	p := onePerHourPolicy()
+	snap, problems := compile.Compile(testNamespace, domain, &p)
 	require.Empty(t, problems)
 	return store.NewRuleSet(map[string]store.Domain{
 		domain: {Engine: engine.New(snap, failingCounters{}), Snapshot: snap},
@@ -257,12 +258,10 @@ func failingRuleSet(t *testing.T, domain string) *store.RuleSet {
 // ruleSetIn compiles the policies into the given domain over private
 // in-memory counters — for tests whose counter assertions need a domain of
 // their own.
-func ruleSetIn(t *testing.T, domain string, policies ...model.Policy) *store.RuleSet {
+func ruleSetIn(t *testing.T, domain string, p model.Policy) *store.RuleSet {
 	t.Helper()
-	snap, problems := compile.Compile(domain, policies, nil)
-	for _, p := range problems {
-		require.False(t, p.Blocking, "blocking compile problem: %+v", p)
-	}
+	snap, problems := compile.Compile(testNamespace, domain, &p)
+	require.Empty(t, problems, "broken fixture")
 	return store.NewRuleSet(map[string]store.Domain{
 		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
 	})

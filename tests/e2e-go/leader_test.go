@@ -50,10 +50,10 @@ var _ = Describe("leader election", Ordered, Label("leader"), func() {
 		// What this suite measures is whether every replica answers, not
 		// whether a limit bites, so its policy declares a limit far above any
 		// burst it sends: a refusal below is a fault, not the limit at work.
-		Expect(apply(newPolicy(policyName, domain, totalLimits(1000, "1m")))).To(Succeed())
+		Expect(apply(newPolicy(domain, totalLimits(1000, 60)))).To(Succeed())
 	})
 	AfterAll(func() {
-		deletePolicies(policyName)
+		deletePolicies(domain)
 		if release != "" {
 			helmScale(release, originalReplicas)
 		}
@@ -181,16 +181,16 @@ var _ = Describe("leader election", Ordered, Label("leader"), func() {
 		// The bash suite patched the domain with its own value, which the API
 		// server never turns into a new generation. Bump the limit instead,
 		// so observedGeneration has a real new generation to catch up with.
-		p, err := getPolicy(policyName)
+		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
 		p.Spec.Limits[0].Rules[0].Rates[0].Requests = 1001
 		Expect(k8s.Update(ctx, p)).To(Succeed())
 
-		Eventually(policyCondition(policyName, "Accepted")).
+		Eventually(policyCondition(domain, "Accepted")).
 			WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(Equal("True"),
 			"the new leader did not accept a policy after the handover")
 		Eventually(func() bool {
-			p, err := getPolicy(policyName)
+			p, err := getPolicy(domain)
 			return err == nil && p.Status.ObservedGeneration == p.Generation
 		}).WithTimeout(time.Minute).Should(BeTrue(),
 			"observedGeneration does not match generation after the handover")

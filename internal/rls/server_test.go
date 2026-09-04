@@ -270,13 +270,17 @@ func TestSanitizeValue_stripsControlCharactersFromARequestID(t *testing.T) {
 	assert.Equal(t, "idINFO forged", requestID)
 }
 
+// testNamespace stands in for the component's own namespace, which is a
+// segment of every counter key.
+const testNamespace = "biz"
+
 // ruleSetOf builds a rule set of empty-snapshot engines over private
 // in-memory counters — the shape BuildRuleSet produces for the stub CRD.
 func ruleSetOf(t *testing.T, domains ...string) *store.RuleSet {
 	t.Helper()
 	built := make(map[string]store.Domain, len(domains))
 	for _, d := range domains {
-		snap, problems := compile.Compile(d, nil, nil)
+		snap, problems := compile.Compile(testNamespace, d, nil)
 		require.Empty(t, problems)
 		built[d] = store.Domain{Engine: engine.New(snap, memory.New()), Snapshot: snap}
 	}
@@ -286,7 +290,7 @@ func ruleSetOf(t *testing.T, domains ...string) *store.RuleSet {
 // onePerHourPolicy admits a single request per hour for the whole domain: the
 // smallest fixture whose second check refuses.
 func onePerHourPolicy() model.Policy {
-	return model.Policy{Name: "one", Domain: "gateway.public", Blocks: []model.Block{{
+	return model.Policy{Domain: "gateway.public", Blocks: []model.Block{{
 		Name:  "b",
 		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
@@ -294,15 +298,11 @@ func onePerHourPolicy() model.Policy {
 
 // ruleSetWith compiles the policies into the shared test domain over
 // private in-memory counters.
-func ruleSetWith(t *testing.T, policies ...model.Policy) *store.RuleSet {
+func ruleSetWith(t *testing.T, p model.Policy) *store.RuleSet {
 	t.Helper()
 	const domain = "gateway.public"
-	snap, problems := compile.Compile(domain, policies, nil)
-	// Informational records — the domain-budget note among them — are fine;
-	// only a blocking problem means a broken fixture.
-	for _, p := range problems {
-		require.False(t, p.Blocking, "blocking compile problem: %+v", p)
-	}
+	snap, problems := compile.Compile(testNamespace, domain, &p)
+	require.Empty(t, problems, "broken fixture")
 	return store.NewRuleSet(map[string]store.Domain{
 		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
 	})
@@ -318,7 +318,7 @@ func headerMap(resp *envoyratelimit.RateLimitResponse) map[string]string {
 
 func TestShouldRateLimit_reportsTheStrictestRuleInHeaders(t *testing.T) {
 	const domain = "gateway.public"
-	p := model.Policy{Name: "quota", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name:  "b",
 		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}},
 	}}}
@@ -343,7 +343,7 @@ func TestShouldRateLimit_reportsTheStrictestRuleInHeaders(t *testing.T) {
 func TestShouldRateLimit_chargesHitsAddend(t *testing.T) {
 	const domain = "gateway.public"
 	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, model.Policy{Name: "quota", Domain: domain,
+	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
 		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
 			Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
 	log, _ := recordingLogger()
@@ -360,7 +360,7 @@ func TestShouldRateLimit_extractsTheClientFromTheToken(t *testing.T) {
 	// A per-client rule keys its bucket by the sub claim of the token
 	// descriptor: two clients must not share a counter.
 	const domain = "gateway.public"
-	p := model.Policy{Name: "per-client", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
 			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
@@ -391,7 +391,7 @@ func TestShouldRateLimit_acceptsPreExtractedKeys(t *testing.T) {
 	// The direct-consumer form: an entry that is not path, method, token, or
 	// request_id arrives as a ready identity key.
 	const domain = "gateway.public"
-	p := model.Policy{Name: "per-client", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
 			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
@@ -415,7 +415,7 @@ func TestShouldRateLimit_acceptsPreExtractedKeys(t *testing.T) {
 
 func TestShouldRateLimit_matchesRoutesByMethod(t *testing.T) {
 	const domain = "gateway.public"
-	p := model.Policy{Name: "writes", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Target: model.Target{Routes: []model.Route{{
 			Path:    model.PathMatch{Type: model.PathPrefix, Value: "/api/"},
@@ -445,23 +445,32 @@ func TestShouldRateLimit_budgetOverflowDeniesRegardlessOfFallback(t *testing.T) 
 	// The pinned contract: ErrTooManyBuckets is a configuration violation, so
 	// the answer is OVER_LIMIT — never a gRPC error that fail-open would wave
 	// through.
+	//
+	// The compiler refuses a generation over the budget, so the oversized
+	// snapshot here is built by editing a compiled one — the only way an
+	// adapter ever meets this error, and the reason the contract is pinned.
 	const domain = "gateway.public"
 	periods := []time.Duration{time.Minute, time.Hour, 30 * time.Second, 10 * time.Second}
-	policies := make([]model.Policy, 0, 3)
-	for pi := range 3 {
-		rules := make([]model.Rule, 0, 16)
-		for ri := range 16 {
-			rates := make([]model.Rate, 0, len(periods))
-			for _, pd := range periods {
-				rates = append(rates, model.Rate{Requests: 100, Period: pd})
-			}
-			rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Rates: rates})
+	rules := make([]model.Rule, 0, 32)
+	for ri := range 32 {
+		rates := make([]model.Rate, 0, len(periods))
+		for _, pd := range periods {
+			rates = append(rates, model.Rate{Requests: 100, Period: pd})
 		}
-		policies = append(policies, model.Policy{Name: fmt.Sprintf("p%d", pi), Domain: domain,
-			Blocks: []model.Block{{Name: "b", Rules: rules}}})
+		rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Rates: rates})
 	}
+	oversized := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
+
+	snap, problems := compile.Compile(testNamespace, domain, &oversized)
+	require.Empty(t, problems, "32 rules x 4 rates is exactly the budget")
+	smuggled := snap.Blocks[0]
+	smuggled.Name, smuggled.Rules = "smuggled", smuggled.Rules[:1]
+	snap.Blocks = append(snap.Blocks, smuggled)
+
 	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, policies...))
+	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
+		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
+	}))
 	log, logged := recordingLogger()
 
 	resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(),
@@ -493,7 +502,8 @@ func TestShouldRateLimit_storeErrorBecomesAGRPCError(t *testing.T) {
 	// fail-closed, so a store outage must surface as a gRPC error — not as a
 	// verdict the adapter invented on its own.
 	const domain = "gateway.public"
-	snap, problems := compile.Compile(domain, []model.Policy{onePerHourPolicy()}, nil)
+	p := onePerHourPolicy()
+	snap, problems := compile.Compile(testNamespace, domain, &p)
 	require.Empty(t, problems)
 	ruleStore := store.New()
 	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
@@ -527,7 +537,7 @@ func requestWith(descriptors ...map[string]string) *envoyratelimit.RateLimitRequ
 }
 
 func perClientOnePerHourPolicy() model.Policy {
-	return model.Policy{Name: "per-client", Domain: "gateway.public", Blocks: []model.Block{{
+	return model.Policy{Domain: "gateway.public", Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
 			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
@@ -662,7 +672,8 @@ func TestShouldRateLimit_storeErrorAfterRefusalStillDenies(t *testing.T) {
 	// answer is known, and returning an error instead would let fail-open
 	// launder a real refusal into an admission.
 	const domain = "gateway.public"
-	snap, problems := compile.Compile(domain, []model.Policy{perClientOnePerHourPolicy()}, nil)
+	perClient := perClientOnePerHourPolicy()
+	snap, problems := compile.Compile(testNamespace, domain, &perClient)
 	require.Empty(t, problems)
 	ruleStore := store.New()
 	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{

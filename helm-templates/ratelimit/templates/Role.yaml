@@ -26,10 +26,16 @@ rules:
     resources: [events]
     verbs: [create, patch]
   - apiGroups: [ratelimit.netcracker.com]
-    resources: [ratelimitpolicies, ratelimitmappings]
+    resources: [ratelimitpolicies]
+    verbs: [get, list, watch]
+  # The leader asks every ready endpoint of this Service which generation it
+  # enforces, which is what makes the Ready condition a statement about the
+  # fleet rather than about the leader alone.
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
     verbs: [get, list, watch]
   - apiGroups: [ratelimit.netcracker.com]
-    resources: [ratelimitpolicies/status, ratelimitmappings/status]
+    resources: [ratelimitpolicies/status]
     verbs: [get, update, patch]
   # The last-good spec of every object of a domain, so that a restart does not
   # forget which generation is being enforced. Names are ratelimit-state-<domain>
@@ -38,4 +44,4 @@ rules:
   # of domains that retired while somebody else held the lease.
   - apiGroups: [""]
     resources: [configmaps]
-    verbs: [get, list, create, update, patch, delete]
+    verbs: [get, list, watch, create, update, patch, delete]

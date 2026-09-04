@@ -286,7 +286,7 @@ func engineRequests(req *envoyratelimit.RateLimitRequest) []engine.Request {
 // The rule label is the policy/block/rule triple.
 func (s *Server) observeDecision(domain string, decision engine.Decision) {
 	for _, rule := range decision.Rules {
-		id := metrics.RuleID(rule.Policy, rule.Block, rule.Rule)
+		id := metrics.RuleID(rule.Block, rule.Rule)
 		outcome := metrics.OutcomeOK
 		if !rule.Allowed {
 			outcome = metrics.OutcomeOverLimit

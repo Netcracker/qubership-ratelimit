@@ -8,11 +8,11 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-// RuleID is the rule label value: the policy/block/rule triple. The adapter
-// writes it and the pruner matches against it, so the format lives in one
-// place.
-func RuleID(policy, block, rule string) string {
-	return policy + "/" + block + "/" + rule
+// RuleID is the rule label value: the block/rule pair, the same identity the
+// counter key carries. The adapter writes it and the pruner matches against
+// it, so the format lives in one place.
+func RuleID(block, rule string) string {
+	return block + "/" + rule
 }
 
 // ActiveSet lists the label values the current snapshot can produce. Series

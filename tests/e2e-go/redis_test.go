@@ -53,14 +53,14 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 			// and blame Redis for it.
 			waitGatewayServes("public-gateway", probePath)
 			before := storeRebuilds()
-			Expect(apply(newPolicy(policyName, domain,
-				prefixLimits(probePath, "total", nil, limit, "1h")))).To(Succeed())
+			Expect(apply(newPolicy(domain,
+				prefixLimits(probePath, "total", nil, limit, 3600)))).To(Succeed())
 			waitStoreRebuilt(before)
 		}
 	})
 	AfterAll(func() {
 		if policyName != "" {
-			deletePolicies(policyName)
+			deletePolicies(domain)
 		}
 	})
 

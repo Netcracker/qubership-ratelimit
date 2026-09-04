@@ -45,8 +45,8 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 			// of the hour-long budget the burst below is about to spend.
 			waitGatewayServes("public-gateway", probePath)
 			before := storeRebuilds()
-			Expect(apply(newPolicy(policyName, domain,
-				prefixLimits(probePath, "per-path", []string{"path"}, limit, "1h")))).To(Succeed())
+			Expect(apply(newPolicy(domain,
+				prefixLimits(probePath, "per-path", []string{"path"}, limit, 3600)))).To(Succeed())
 			waitStoreRebuilt(before)
 
 			window = time.Now()
@@ -58,7 +58,7 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 	})
 	AfterAll(func() {
 		if policyName != "" {
-			deletePolicies(policyName)
+			deletePolicies(domain)
 		}
 	})
 

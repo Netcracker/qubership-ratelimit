@@ -20,11 +20,14 @@ const schemaVersion = "v1"
 // Ident names one rule's bucket space within a domain. The parts are escaped
 // like axis values: the resource schema constrains them too, but a key must
 // not depend on a validation layer the library cannot see.
+//
+// There is no policy part: a domain has exactly one policy and its name is the
+// domain, so block and rule already name a bucket space uniquely.
 type Ident struct {
-	Domain string
-	Policy string
-	Block  string
-	Rule   string
+	Namespace string
+	Domain    string
+	Block     string
+	Rule      string
 }
 
 // RatePrefix returns the constant prefix of every bucket key of one rate:
@@ -69,8 +72,8 @@ func Bucket(prefix string, axes []string) string {
 // algorithm, window, and axis combination — for enumeration and whole-rule
 // reset.
 func RulePrefix(id Ident) string {
-	return DomainPrefix(id.Domain) +
-		escape(id.Policy) + "/" + escape(id.Block) + "/" + escape(id.Rule) + ":"
+	return DomainPrefix(id.Namespace, id.Domain) +
+		escape(id.Block) + "/" + escape(id.Rule) + ":"
 }
 
 // DomainPrefix returns the prefix shared by every counter key of a domain, for
@@ -78,21 +81,27 @@ func RulePrefix(id Ident) string {
 // limited keys. Hand-building this prefix is what this package exists to
 // prevent.
 //
-// The domain is wrapped in a hash tag: a decision spans several buckets, and
-// pinning a domain's counters to one Redis Cluster slot is what lets the store
-// commit them in one atomic script. The price, accepted deliberately, is that
-// one domain's throughput is bounded by one shard; domains spread across
+// The namespace and the domain are wrapped in one hash tag: a decision spans
+// several buckets, and pinning them to one Redis Cluster slot is what lets the
+// store commit them in one atomic script. The price, accepted deliberately, is
+// that one domain's throughput is bounded by one shard; domains spread across
 // shards freely.
 //
-// An empty domain panics: Redis treats an empty "{}" as no hash tag at all,
-// the decision's buckets would scatter across slots, and the atomic script
-// would fail. The schema never produces an empty domain, so this is a caller
-// bug, not data.
-func DomainPrefix(domain string) string {
-	if domain == "" {
-		panic("key: empty domain would produce an empty hash tag and scatter a decision across cluster slots")
+// The namespace is the component's own, taken from the Downward API. A Redis
+// is dedicated to one installation, and this segment is the insurance against
+// two installations reaching the same store by mistake: the "/" separator is
+// unambiguous, being forbidden in a domain and in a namespace name alike.
+//
+// An empty namespace or domain panics: Redis treats an empty "{}" as no hash
+// tag at all, the decision's buckets would scatter across slots, and the atomic
+// script would fail. Neither is ever empty in a running component, so this is a
+// caller bug, not data.
+func DomainPrefix(namespace, domain string) string {
+	if namespace == "" || domain == "" {
+		panic("key: an empty namespace or domain would produce an empty hash tag" +
+			" and scatter a decision across cluster slots")
 	}
-	return "rl:" + schemaVersion + ":{" + escape(domain) + "}:"
+	return "rl:" + schemaVersion + ":{" + escape(namespace) + "/" + escape(domain) + "}:"
 }
 
 // escape percent-encodes the characters the key schema reserves, for axis

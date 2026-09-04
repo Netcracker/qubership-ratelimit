@@ -38,7 +38,7 @@ func TestNew_emptyStoreKnowsNoDomain(t *testing.T) {
 func TestReplace_swapsSnapshot(t *testing.T) {
 	s := New()
 
-	s.Replace(ruleSetOf(t, policyObject("private", "gateway.private")))
+	s.Replace(ruleSetOf(t, policyObject("gateway.private")))
 
 	assert.True(t, s.Load().Has("gateway.private"))
 	assert.False(t, s.Load().Has("gateway.public"))
@@ -46,7 +46,7 @@ func TestReplace_swapsSnapshot(t *testing.T) {
 
 func TestReplace_nilYieldsEmptySnapshot(t *testing.T) {
 	s := New()
-	s.Replace(ruleSetOf(t, policyObject("private", "gateway.private")))
+	s.Replace(ruleSetOf(t, policyObject("gateway.private")))
 
 	s.Replace(nil)
 
@@ -54,16 +54,17 @@ func TestReplace_nilYieldsEmptySnapshot(t *testing.T) {
 	assert.False(t, s.Load().Has("gateway.private"))
 }
 
-func TestHasDomain_twoPoliciesNamingOneDomainAreOneDomain(t *testing.T) {
+func TestHasDomain_eachDomainCarriesItsOwnEngine(t *testing.T) {
 	s := New()
 
 	s.Replace(ruleSetOf(t,
-		policyObject("alpha", "gateway.public"),
-		policyObject("zeta", "gateway.public"),
+		policyObject("gateway.public"),
+		policyObject("gateway.private"),
 	))
 
 	require.True(t, s.Load().Has("gateway.public"))
-	assert.Equal(t, 1, s.Load().Len(), "two policies naming one domain share one engine")
+	require.True(t, s.Load().Has("gateway.private"))
+	assert.Equal(t, 2, s.Load().Len())
 }
 
 func TestNeedLeaderElection_updaterRunsOnEveryReplica(t *testing.T) {

@@ -2,8 +2,8 @@ package model
 
 import "time"
 
-// Built-in descriptor keys. They exist in every domain with no mapping at
-// all; a mapping may override KeyClient and must not declare the others.
+// Built-in descriptor keys. They exist in every domain with no mappings at
+// all; a mapping entry may override KeyClient and must not declare the others.
 const (
 	// KeyPath is the request path with the query string already stripped.
 	KeyPath = "path"
@@ -19,46 +19,17 @@ const (
 	KeyToken = "token"
 )
 
-// List bounds, mirrored by the CRD schema (where they also feed the CEL cost
-// estimator). Compilation re-checks them: a library cannot assume its caller
-// validated anything.
-const (
-	MaxBlocksPerPolicy   = 64
-	MaxRulesPerBlock     = 128
-	MaxRoutesPerBlock    = 16
-	MaxMethodsPerRoute   = 9
-	MaxConditionsPerRule = 8
-	MaxCountersPerRule   = 4
-	MaxRatesPerRule      = 4
-	MaxReplacesPerRule   = 16
-	MaxGroups            = 64
-	MaxClientsPerGroup   = 1024
-	MaxMappings          = 32
-	MaxFallbacks         = 3
-)
-
-// MaxDecisionBucketsPerPolicy caps the buckets one request can collect from
-// one policy in the worst case: All sums every counting rule, FirstMatch
-// settles on its widest counting rule after every shadow rule. The schema
-// cannot check this cross-field product, so compilation enforces it — every
-// bucket is one read and possibly one write inside a single atomic store
-// script, and an unbounded worst case would let one object monopolize the
-// domain's shard.
-const MaxDecisionBucketsPerPolicy = 64
-
-// Domain-wide reference bounds. When a set of policies exceeds them, no
-// single policy is at fault, so compilation excludes nobody and reports an
-// informational domain-level problem instead; the operator's admission gate
-// holds live domains inside these bounds, and the engine's runtime backstop
-// refuses decisions over MaxDomainDecisionBuckets.
-const (
-	// MaxDomainDecisionBuckets is the worst-case bucket count one request
-	// may collect across every policy of a domain.
-	MaxDomainDecisionBuckets = 128
-
-	// MaxDomainBlocks bounds the linear target scan.
-	MaxDomainBlocks = 256
-)
+// MaxDomainDecisionBuckets is the worst-case bucket count one request may
+// collect across the domain: All sums every counting rule of a block,
+// FirstMatch settles on its widest counting rule after every shadow rule, and
+// the blocks add up. Every bucket is one read and possibly one write inside a
+// single atomic store script, so an unbounded worst case would let one object
+// monopolize the domain's shard.
+//
+// It is the only list-shaped bound in the model. Blocks, rules, axes, windows,
+// groups, and clients carry none: the object size keeps the linear target scan
+// cheap on its own, and this budget is what actually binds a decision.
+const MaxDomainDecisionBuckets = 128
 
 // PathType selects how a route's path value matches.
 type PathType string
@@ -87,12 +58,12 @@ const (
 type Operator string
 
 const (
-	OperatorEquals    Operator = "Equals"    // equality to a singleton; rejected for array keys
-	OperatorIn        Operator = "In"        // non-empty intersection with Values
-	OperatorInGroup   Operator = "InGroup"   // non-empty intersection with a named group
-	OperatorContains  Operator = "Contains"  // element membership, never a substring
-	OperatorExists    Operator = "Exists"    // the set is non-empty
-	OperatorNotExists Operator = "NotExists" // the set is empty; the key itself must be produced
+	OperatorEquals       Operator = "Equals"       // equality to a singleton; rejected for array keys
+	OperatorIn           Operator = "In"           // non-empty intersection with Values
+	OperatorInGroup      Operator = "InGroup"      // non-empty intersection with a named group
+	OperatorContains     Operator = "Contains"     // element membership, never a substring
+	OperatorExists       Operator = "Exists"       // the set is non-empty
+	OperatorDoesNotExist Operator = "DoesNotExist" // the set is empty; the key itself must be produced
 )
 
 // Behavior is what a matched rule does with its verdict.
@@ -127,18 +98,22 @@ const (
 	NormalizeLowercase Normalize = "Lowercase"
 )
 
-// Policy is one RateLimitPolicy as authored: a unit of ownership and review,
-// not of evaluation — compilation dissolves policies into a flat block set.
+// Policy is one RateLimitPolicy as authored, which is the whole of a domain:
+// its name equals its domain, so a second policy for the same domain cannot
+// exist and nothing has to arbitrate between them.
+//
+// Extraction, groups, and rules travel together for the same reason they live
+// in one object: they change in one edit and apply as one generation, so a
+// request never sees new rules over old extraction.
 type Policy struct {
-	// Name is the object name and the first segment of the counter identity
-	// (policy/block/rule), which is what makes same-named blocks in
-	// different policies independent rather than colliding.
-	Name string
-
 	Domain string
 
-	// Groups are private: visible to this policy's rules only, shadowing a
-	// same-named shared group deterministically.
+	// Mappings declare the descriptor keys this domain extracts from a token,
+	// beyond the built-ins.
+	Mappings []KeyMapping
+
+	// Groups are the named client lists the InGroup operator resolves
+	// against, visible to every rule of the policy.
 	Groups []Group
 
 	// Blocks is the spec's limits list.
@@ -187,9 +162,9 @@ type PathMatch struct {
 type Rule struct {
 	Name string
 
-	// When are identity predicates, AND-combined; path and method belong to
-	// the target and are rejected here.
-	When []Condition
+	// Matches are identity predicates, AND-combined; path and method belong
+	// to the target and are rejected here.
+	Matches []Predicate
 
 	// Counters are the bucket axes; empty means one shared bucket. A rule
 	// whose axis is absent from the request does not match.
@@ -199,18 +174,18 @@ type Rule struct {
 
 	Behavior Behavior // empty reads as BehaviorEnforce
 
-	// Replaces suppresses named rules of the same block for requests this
-	// rule matched; ModeAll only.
-	Replaces []string
+	// ReplacedRules suppresses named rules of the same block for requests
+	// this rule matched; ModeAll only.
+	ReplacedRules []string
 }
 
-// Condition is one when predicate.
-type Condition struct {
+// Predicate is one matches entry.
+type Predicate struct {
 	Key      string
 	Operator Operator
 
 	// Value serves Equals, Contains, and InGroup (the group name); Values
-	// serves In. Exists and NotExists take neither.
+	// serves In. Exists and DoesNotExist take neither.
 	Value  string
 	Values []string
 }
@@ -229,21 +204,10 @@ type Rate struct {
 	Algorithm string
 }
 
-// Mapping is one RateLimitMapping as authored: the per-domain singleton
-// declaring identity extraction and shared groups.
-type Mapping struct {
-	Domain string
-
-	Mappings []KeyMapping
-
-	// Groups are shared: visible to the rules of every policy of the domain.
-	Groups []Group
-}
-
 // KeyMapping declares one descriptor key extracted from the token.
 type KeyMapping struct {
 	// Key must not collide with the built-ins other than KeyClient, which a
-	// mapping may override.
+	// mapping entry may override.
 	Key string
 
 	// Claim is a dot path into the token payload; ClaimPath is the literal
@@ -251,8 +215,8 @@ type KeyMapping struct {
 	Claim     string
 	ClaimPath []string
 
-	Type      ValueType // empty reads as ValueString
-	Normalize Normalize // empty reads as NormalizeNone
+	Type          ValueType // empty reads as ValueString
+	Normalization Normalize // empty reads as NormalizeNone
 
 	// Fallbacks are claim dot paths tried in order; the first non-empty
 	// result wins.

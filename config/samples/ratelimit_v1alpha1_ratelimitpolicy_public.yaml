@@ -1,7 +1,9 @@
 apiVersion: ratelimit.netcracker.com/v1alpha1
 kind: RateLimitPolicy
 metadata:
-  name: order-management
+  # The name is the domain: object names are unique within a namespace, so this
+  # is what makes one policy per domain unrepresentable rather than arbitrated.
+  name: gateway.public
   labels:
     app.kubernetes.io/name: ratelimit
 spec:
@@ -10,6 +12,11 @@ spec:
   # match; a typo shows up as an "unknown rate limit domain" line in the service
   # log, which is why that line is written on every check.
   domain: gateway.public
+
+  # Which token claims become descriptor keys. client is built in — the sub
+  # claim, lower-cased — and works with no entry at all.
+  mappings:
+    - { key: roles, claim: realm_access.roles, type: StringArray }
 
   groups:
     - name: mvno-group-1
@@ -23,43 +30,43 @@ spec:
         routes:
           - path: { type: Prefix, value: /api/v1/order-management/ }
             methods: [GET]
-          - path: { type: Template, value: "/api/v1/orders/{order_id}/items" }
+          - path: { type: Template, value: "/api/v1/orders/{orderId}/items" }
       mode: FirstMatch
       rules:
         # The scraper is exempt from this block and from nothing else: a Bypass
         # rule bypasses its own block, so the ceilings below still apply.
         - name: internal-bypass
-          when:
+          matches:
             - { key: client, operator: Equals, value: prometheus }
           behavior: Bypass
 
         # Shadow tries a tighter limit over the live one: it counts and records
         # metrics, never rejects, and does not end the cascade.
         - name: mvno-group-1-trial
-          when:
+          matches:
             - { key: client, operator: InGroup, value: mvno-group-1 }
           behavior: Shadow
           rates:
-            - { requests: 50, period: 1m }
+            - { requests: 50, periodSeconds: 60 }
 
         - name: mvno-group-1
-          when:
+          matches:
             - { key: client, operator: InGroup, value: mvno-group-1 }
           # No axes: the group shares one bucket.
           counters: []
           rates:
-            - { requests: 100, period: 1m, algorithm: FixedWindow }
-            - { requests: 10000, period: 1d, algorithm: FixedWindow }
+            - { requests: 100, periodSeconds: 60, algorithm: FixedWindow }
+            - { requests: 10000, periodSeconds: 86400, algorithm: FixedWindow }
 
-        # roles is declared by the RateLimitMapping of this domain. Without that
-        # mapping this whole policy is invalid — not just this rule — and its
-        # status says so with Ready: False and MappingRequired.
+        # roles comes from the mappings above. A rule referencing a key nothing
+        # declares makes the whole generation invalid — not just this rule — and
+        # the status says so with Accepted: False and UnresolvedKeyReference.
         - name: subscriber-per-user
-          when:
+          matches:
             - { key: roles, operator: Contains, value: subscriber }
           counters: [client]
           rates:
-            - { requests: 1000, period: 1m, burst: 100 }
+            - { requests: 1000, periodSeconds: 60, burst: 100 }
 
         # No predicate, so it matches every caller who has a client value. An
         # anonymous caller has none, and a rule cannot key a bucket by an axis
@@ -68,14 +75,14 @@ spec:
         - name: per-user
           counters: [client]
           rates:
-            - { requests: 100, period: 1m }
+            - { requests: 100, periodSeconds: 60 }
 
         - name: anonymous
-          when:
-            - { key: client, operator: NotExists }
+          matches:
+            - { key: client, operator: DoesNotExist }
           counters: []
           rates:
-            - { requests: 100, period: 1m }
+            - { requests: 100, periodSeconds: 60 }
 
     # A second block, so its verdict adds to the one above: a request that lands
     # in both has to fit both.
@@ -89,8 +96,8 @@ spec:
         - name: per-user
           counters: [client]
           rates:
-            - { requests: 300, period: 1m }
-            - { requests: 20000, period: 1d, algorithm: FixedWindow }
+            - { requests: 300, periodSeconds: 60 }
+            - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
 
         # Two axes, so the bucket is per pair. Under a Prefix route the path axis
         # is the raw request path, so its cardinality is as wide as the traffic;
@@ -98,4 +105,4 @@ spec:
         - name: per-user-per-path
           counters: [client, path]
           rates:
-            - { requests: 60, period: 1m }
+            - { requests: 60, periodSeconds: 60 }

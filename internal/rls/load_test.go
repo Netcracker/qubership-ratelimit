@@ -71,7 +71,6 @@ func loadWorkerCount() int {
 // gateway actually produces.
 func loadPolicy() model.Policy {
 	return model.Policy{
-		Name:   "load",
 		Domain: "gateway.public",
 		Blocks: []model.Block{{
 			Name: "all",
@@ -124,7 +123,8 @@ func TestLoad_oneReplicaHoldsTheFloor(t *testing.T) {
 	}
 
 	counterStore, backend := loadCounterStore(t)
-	snapshot, problems := compile.Compile("gateway.public", []model.Policy{loadPolicy()}, nil)
+	p := loadPolicy()
+	snapshot, problems := compile.Compile(testNamespace, "gateway.public", &p)
 	for _, problem := range problems {
 		require.False(t, problem.Blocking, "blocking compile problem: %+v", problem)
 	}

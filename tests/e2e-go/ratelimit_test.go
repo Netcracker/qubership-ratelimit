@@ -29,8 +29,8 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 
 	BeforeAll(func() {
 		before := storeRebuilds()
-		Expect(apply(newPolicy(publicPolicy, publicDomain, totalLimits(1, "1s")))).To(Succeed())
-		Expect(apply(newPolicy(privatePolicy, privateDomain, totalLimits(1, "1s")))).To(Succeed())
+		Expect(apply(newPolicy(publicDomain, totalLimits(1, 1)))).To(Succeed())
+		Expect(apply(newPolicy(privateDomain, totalLimits(1, 1)))).To(Succeed())
 		waitStoreRebuilt(before)
 		// Both gateways are warmed: a cold gateway answers 503 on its own,
 		// and the not-429 assertions below would take that for an admission.

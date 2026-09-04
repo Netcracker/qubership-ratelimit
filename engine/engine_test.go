@@ -25,7 +25,6 @@ const domain = "gateway.public"
 func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 	t.Helper()
 	p := model.Policy{
-		Name:   "quote-api",
 		Domain: domain,
 		Groups: []model.Group{{Name: "trial", Clients: []string{"t1"}}},
 		Blocks: []model.Block{
@@ -36,10 +35,10 @@ func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes/"}}}},
 				Rules: []model.Rule{
 					{Name: "internal", Behavior: model.BehaviorBypass,
-						When: []model.Condition{
+						Matches: []model.Predicate{
 							{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus"}}},
 					{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeyClient},
-						When: []model.Condition{
+						Matches: []model.Predicate{
 							{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "trial"}},
 						Rates: []model.Rate{{Requests: 10, Period: time.Minute}}},
 					{Name: "everyone", Counters: []string{model.KeyClient},
@@ -56,7 +55,7 @@ func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 			},
 		},
 	}
-	snap, problems := compile.Compile(domain, []model.Policy{p}, nil)
+	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
 		t.Fatalf("compile problems: %v", problems)
 	}
@@ -247,42 +246,39 @@ func TestHeadersAreDeterministicAcrossRuns(t *testing.T) {
 	}
 }
 
-// TestBucketBudgetBackstop stacks three policies, each compiling exactly at
-// the per-policy budget and targeting the whole domain: together they exceed
-// what one decision may carry, and the engine refuses before the store.
+// TestBucketBudgetBackstop reaches the runtime backstop the only way that is
+// left: by editing a compiled snapshot.
+//
+// The compiler refuses a generation over the budget, so in the component this
+// error is unreachable — which is the point of checking it here. An embedder
+// that builds a snapshot by hand is outside the contract, and the backstop is
+// what keeps that mistake from monopolizing the domain's shard.
 func TestBucketBudgetBackstop(t *testing.T) {
 	periods := []time.Duration{time.Minute, time.Hour, 30 * time.Second, 10 * time.Second}
-	policies := make([]model.Policy, 0, 3)
-	for pi := range 3 {
-		rules := make([]model.Rule, 0, 16)
-		for ri := range 16 {
-			rates := make([]model.Rate, 0, len(periods))
-			for _, pd := range periods {
-				rates = append(rates, model.Rate{Requests: 100, Period: pd})
-			}
-			rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Rates: rates})
+	rules := make([]model.Rule, 0, 32)
+	for ri := range 32 {
+		rates := make([]model.Rate, 0, len(periods))
+		for _, pd := range periods {
+			rates = append(rates, model.Rate{Requests: 100, Period: pd})
 		}
-		policies = append(policies, model.Policy{
-			Name: fmt.Sprintf("p%d", pi), Domain: domain,
-			Blocks: []model.Block{{Name: "b", Rules: rules}}})
+		rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Rates: rates})
 	}
-	snap, problems := compile.Compile(domain, policies, nil)
-	for _, p := range problems {
-		if p.Blocking {
-			t.Fatalf("compile problems: %v", problems)
-		}
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
+
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("32 rules x 4 rates is exactly the budget; problems: %v", problems)
 	}
-	// The oversized set compiles whole, but not silently: the domain-level
-	// informational record is the compile-time face of the same budget.
-	domainWarned := false
-	for _, p := range problems {
-		if p.Reason == compile.ReasonDomainBudgetExceeded && p.Policy == "" {
-			domainWarned = true
-		}
+	if snap.DecisionBuckets != engine.MaxDecisionBuckets {
+		t.Fatalf("DecisionBuckets = %d, want the budget of %d",
+			snap.DecisionBuckets, engine.MaxDecisionBuckets)
 	}
-	if !domainWarned {
-		t.Fatalf("problems = %v, want an informational DomainBudgetExceeded record", problems)
-	}
+
+	// One bucket past the budget, added behind the compiler's back.
+	extra := snap.Blocks[0]
+	extra.Name = "smuggled"
+	extra.Rules = extra.Rules[:1]
+	snap.Blocks = append(snap.Blocks, extra)
 
 	e := engine.New(snap, memory.New())
 	_, err := e.Decide(t.Context(), engine.Request{Path: "/any", Method: "GET"})
@@ -296,13 +292,13 @@ func TestBucketBudgetBackstop(t *testing.T) {
 // number of applied rules.
 func cacheProbe(t *testing.T, opts ...engine.Option) *engine.Engine {
 	t.Helper()
-	p := model.Policy{Name: "probe", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{{Name: "alice-only", Counters: []string{model.KeyClient},
-			When:  []model.Condition{{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"}},
-			Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}},
+			Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"}},
+			Rates:   []model.Rate{{Requests: 100, Period: time.Minute}}}},
 	}}}
-	snap, problems := compile.Compile(domain, []model.Policy{p}, nil)
+	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
 		t.Fatalf("compile problems: %v", problems)
 	}

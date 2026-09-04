@@ -93,21 +93,19 @@ func New(snap *compile.Snapshot, s store.Store, opts ...Option) *Engine {
 }
 
 // MaxDecisionBuckets caps how many buckets one decision may carry to the
-// store, across every matched policy. Compilation already bounds each policy
-// by model.MaxDecisionBucketsPerPolicy and reports a domain over this bound
-// as an informational problem; this backstop is the hard stop behind both.
-// Every bucket is one read and possibly one write inside a single atomic
-// store script, so an unbounded decision would monopolize the domain's
-// shard.
+// store. Compilation refuses a generation whose worst case exceeds it, so this
+// backstop is unreachable in a component that compiles its own rules. Every
+// bucket is one read and possibly one write inside a single atomic store
+// script, so an unbounded decision would monopolize the domain's shard.
 const MaxDecisionBuckets = model.MaxDomainDecisionBuckets
 
 // ErrTooManyBuckets refuses a decision over MaxDecisionBuckets before the
 // store is touched. Unlike a store error, it reports a configuration
 // violation, not unavailability: an adapter must map it to a denial
-// regardless of its fail-open policy, or an oversized policy set would turn
-// the busiest paths into unlimited ones. The operator keeps the active set
-// within the budget at admission, so in that deployment this error marks a
-// bypassed gate, not a store incident.
+// regardless of its fail-open policy, or an oversized generation would turn
+// the busiest paths into unlimited ones. Compilation holds the active
+// generation within the budget, so in that deployment this error marks a
+// snapshot that bypassed the compiler, not a store incident.
 var ErrTooManyBuckets = errors.New("engine: the decision exceeds the bucket budget")
 
 // Request is one request in either of its two forms: a gateway sends the raw
@@ -140,7 +138,6 @@ type Headers struct {
 // audit stream: a shadow rule reports what it would have done without
 // affecting Allowed.
 type RuleOutcome struct {
-	Policy  string
 	Block   string
 	Rule    string
 	Shadow  bool
@@ -265,7 +262,7 @@ func ruleOutcomes(matched match.Result, buckets []store.Bucket, verdicts []store
 		from, to := i, i+len(m.Buckets)
 		i = to
 
-		outcome := RuleOutcome{Policy: m.Policy, Block: m.Block, Rule: m.Rule, Shadow: m.Shadow, Allowed: true}
+		outcome := RuleOutcome{Block: m.Block, Rule: m.Rule, Shadow: m.Shadow, Allowed: true}
 		for j := from; j < to; j++ {
 			if !verdicts[j].Allowed {
 				outcome.Allowed = false
@@ -285,10 +282,10 @@ func ruleOutcomes(matched match.Result, buckets []store.Bucket, verdicts []store
 //
 // On allow it is the minimum remaining; on refusal, the refusing bucket with
 // the longest wait — the constraint that actually binds the client. Ties
-// break lexicographically by bucket key, which is ordering by the
-// policy/block/rule triple: deterministic across replicas, so headers do not
-// jitter between them. A refusal that no waiting cures surfaces as
-// CostExceedsCapacity with no retry hint.
+// break lexicographically by bucket key, which is ordering by the block/rule
+// pair: deterministic across replicas, so headers do not jitter between them.
+// A refusal that no waiting cures surfaces as CostExceedsCapacity with no
+// retry hint.
 func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (*Headers, bool) {
 	costExceeds := false
 	if !allowed {
