@@ -96,28 +96,35 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 	})
 
 	It("keeps the counter under the documented key", func() {
-		// The key carries the block and rule, which name a bucket space on
-		// their own now that a domain has exactly one policy. Namespace and
-		// domain sit together in a hash tag, so every bucket of one decision
-		// lands on a single Cluster slot, and two installations sharing a
-		// store cannot collide.
+		// Namespace and domain sit together in one hash tag, so every bucket
+		// of a decision lands on a single Cluster slot and two installations
+		// sharing a store cannot collide. Scanning by that tag proves the
+		// grouping; the exact key below proves the rest of the layout.
 		tag := "{" + namespace + "/" + domain + "}"
 		out, err := redisCli(addresses, "--scan", "--pattern", "rl:*"+tag+"*")
 		if err != nil {
 			Skip("no redis-cli reachable through " + addresses)
 		}
-		var key string
+		var keys []string
 		for _, line := range strings.Split(out, "\n") {
 			if line = strings.TrimSpace(line); line != "" {
-				key = line
-				break
+				keys = append(keys, line)
 			}
 		}
-		Expect(key).NotTo(BeEmpty(), "no counter key under %s in Redis", tag)
-		Expect(key).To(ContainSubstring(tag),
-			"the key carries no hash tag for the namespace and domain")
-		Expect(key).To(ContainSubstring("probe/total"),
-			"the key does not carry the block and rule")
+		Expect(keys).NotTo(BeEmpty(), "no counter key under %s in Redis", tag)
+
+		// The whole documented shape: schema version, the tag, the block and
+		// rule - which name a bucket space on their own now that a domain has
+		// exactly one policy - then the algorithm and the window. This rule
+		// declares no axes, so the key ends there, every segment terminated.
+		//
+		// Asserted as an exact member rather than as a substring of whichever
+		// key came back first: the suites share gateway.public, so a scan of
+		// the domain returns their counters too, in whatever order Redis
+		// hands them over.
+		want := "rl:v1:" + tag + ":probe/total:fixedwindow:3600:"
+		Expect(keys).To(ContainElement(want),
+			"no counter at the documented key; the domain holds %v", keys)
 	})
 
 	It("keeps a spent budget across an operator restart", func() {
