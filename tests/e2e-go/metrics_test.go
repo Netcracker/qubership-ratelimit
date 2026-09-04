@@ -24,12 +24,15 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 		domain    = "gateway.public"
 		probePath = "/e2e-ratelimit"
 		limit     = 2
+
+		// The counter identity is block/rule: the policy is the singleton of
+		// its domain, so its name adds nothing a bucket key needs.
+		rule = "probe/per-path"
 	)
 	var (
-		policyName string
-		rule       string
-		window     time.Time
-		families   map[string]*dto.MetricFamily
+		applied  bool
+		window   time.Time
+		families map[string]*dto.MetricFamily
 	)
 
 	BeforeAll(func() {
@@ -37,9 +40,8 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 		// an hour long, so a retry that minted a fresh policy would find the
 		// gateway un-warmable (every probe already refused) and a rule label
 		// with no admissions behind it. Only the scrape is retried.
-		if policyName == "" {
-			policyName = fmt.Sprintf("e2e-metrics-%d", time.Now().Unix())
-			rule = policyName + "/probe/per-path"
+		if !applied {
+			applied = true
 
 			// Warmed before the policy exists: warm-up probes would come out
 			// of the hour-long budget the burst below is about to spend.
@@ -57,7 +59,7 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 		families = scrapeAllReplicas()
 	})
 	AfterAll(func() {
-		if policyName != "" {
+		if applied {
 			deletePolicies(domain)
 		}
 	})
@@ -99,8 +101,8 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 
 	It("reports the policy ready", func() {
 		Expect(gaugeValue(families, "ratelimit_policy_ready",
-			map[string]string{"policy": namespace + "/" + policyName, "reason": ""})).To(Equal(1.0),
-			"the scrape does not report %s/%s ready", namespace, policyName)
+			map[string]string{"policy": namespace + "/" + domain, "reason": ""})).To(Equal(1.0),
+			"the scrape does not report %s/%s ready", namespace, domain)
 	})
 
 	It("gauges the domain decision buckets", func() {

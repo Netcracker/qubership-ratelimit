@@ -26,9 +26,8 @@ import (
 // restores the original replica count on the way out.
 var _ = Describe("leader election", Ordered, Label("leader"), func() {
 	const (
-		policyName = "e2e-leader"
-		domain     = "gateway.public"
-		probePath  = "/e2e-leader"
+		domain    = "gateway.public"
+		probePath = "/e2e-leader"
 	)
 	var (
 		release          string

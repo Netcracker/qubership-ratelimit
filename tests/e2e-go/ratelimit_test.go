@@ -18,8 +18,6 @@ import (
 // unit test.
 var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit"), func() {
 	const (
-		publicPolicy  = "e2e-public"
-		privatePolicy = "e2e-private"
 		publicDomain  = "gateway.public"
 		privateDomain = "gateway.private"
 		// The backend status is irrelevant - what matters is 429 versus
@@ -37,7 +35,10 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 		waitGatewayServes("public-gateway", probePath)
 		waitGatewayServes("private-gateway", probePath)
 	})
-	AfterAll(func() { deletePolicies(publicPolicy, privatePolicy) })
+	// deletePolicies takes domains: a policy is named after the domain it
+	// serves, so passing anything else deletes nothing and leaks the claim
+	// into the suites that need the domain unclaimed.
+	AfterAll(func() { deletePolicies(publicDomain, privateDomain) })
 
 	It("is what the gateway is configured to call", func() {
 		// A wrong cluster name fails exactly like an unreachable operator, so

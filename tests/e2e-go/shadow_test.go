@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -20,12 +19,16 @@ var _ = Describe("shadow rules", Ordered, Label("shadow"), func() {
 	const (
 		domain    = "gateway.public"
 		probePath = "/e2e"
+
+		// The counter identity is block/rule: the policy is the singleton of
+		// its domain, so its name adds nothing a bucket key needs.
+		rule = "probe/dry-run"
 	)
-	var policyName string
+	var applied bool
 
 	BeforeAll(func() {
-		if policyName == "" {
-			policyName = fmt.Sprintf("e2e-shadow-%d", time.Now().Unix())
+		if !applied {
+			applied = true
 
 			waitGatewayServes("public-gateway", probePath)
 			limits := prefixLimits(probePath, "dry-run", nil, 1, 3600)
@@ -36,7 +39,7 @@ var _ = Describe("shadow rules", Ordered, Label("shadow"), func() {
 		}
 	})
 	AfterAll(func() {
-		if policyName != "" {
+		if applied {
 			deletePolicies(domain)
 		}
 	})
@@ -48,7 +51,6 @@ var _ = Describe("shadow rules", Ordered, Label("shadow"), func() {
 				"request %d was not admitted (got %d); a shadow rule must never refuse", i+1, code)
 		}
 
-		rule := policyName + "/probe/dry-run"
 		Eventually(func() bool {
 			families := scrapeAllReplicas()
 			return counterSum(families, "ratelimit_decisions_total",
