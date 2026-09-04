@@ -3,17 +3,18 @@
 Rate limiting for an Istio ambient mesh with two ingress gateways. The gateways call this service over the Envoy rate
 limit service (RLS) protocol; the rules arrive as `RateLimitPolicy` custom resources.
 
-| Item          | Value                                                                    |
-|---------------|--------------------------------------------------------------------------|
-| API group     | `ratelimit.netcracker.com`                                               |
+| Item          | Value                                                                       |
+|---------------|-----------------------------------------------------------------------------|
+| API group     | `ratelimit.netcracker.com`                                                  |
 | Kind          | `RateLimitPolicy` — one per domain, holding rules, identity keys and groups |
-| gRPC RLS port | 9000                                                                     |
-| Health probes | 8081                                                                     |
-| Scope         | namespaced — one installation, one namespace                             |
+| gRPC RLS port | 9000                                                                        |
+| Health probes | 8081                                                                        |
+| Scope         | namespaced — one installation, one namespace                                |
 
 **What is built today**: the resource and its validation, the lifecycle around it — atomic generations, last-good
-fallback, and the fleet view behind the `Ready` condition — and the decision engine that enforces the compiled rules. Counters live in Redis when `redis.addresses` is set, which is what makes a limit a limit of the domain rather
-than of each replica; without it each replica counts in its own memory and a limit of 100 admits 100 per replica.
+fallback, and the fleet view behind the `Ready` condition — and the decision engine that enforces the compiled rules.
+Counters live in Redis when `redis.addresses` is set, which is what makes a limit a limit of the domain rather than of
+each replica; without it each replica counts in its own memory and a limit of 100 admits 100 per replica.
 
 **What is not built**: the gateways do not verify the tokens they forward. The identity-keyed rules below extract claims
 from the `authorization` header without checking a signature, so a limit keyed on `client` or `tenant` is only as
@@ -33,12 +34,12 @@ and on the path through the routes of its block.
 Controller and RLS endpoint share one binary and one Deployment. `--mode=all|controller|rls` selects the components, so
 splitting them later is a Helm change rather than a refactor. Only `all` is exercised today.
 
-| Component       | Runs on       | Leader election | Does                                                       |
-|-----------------|---------------|-----------------|------------------------------------------------------------|
-| Store updater   | every replica | no              | recompiles a domain on any policy event                    |
-| gRPC RLS server | every replica | no              | answers a check                                            |
-| Reconciler      | leader only   | yes             | writes `Accepted`, `Ready`, `Stalled`, `replicas`          |
-| State writer    | leader only   | yes             | persists the last-good spec of a domain before a swap      |
+| Component       | Runs on       | Leader election | Does                                                  |
+|-----------------|---------------|-----------------|-------------------------------------------------------|
+| Store updater   | every replica | no              | recompiles a domain on any policy event               |
+| gRPC RLS server | every replica | no              | answers a check                                       |
+| Reconciler      | leader only   | yes             | writes `Accepted`, `Ready`, `Stalled`, `replicas`     |
+| State writer    | leader only   | yes             | persists the last-good spec of a domain before a swap |
 
 The split is a correctness requirement. `Reconcile` runs on the leader alone, so a store filled there would leave every
 other replica answering checks from an empty store — limits that apply on some pods and not others.

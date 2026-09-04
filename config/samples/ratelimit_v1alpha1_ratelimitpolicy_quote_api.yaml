@@ -57,6 +57,8 @@ spec:
       clients:
         - 00000000-0000-4000-8000-0000000000b1
 
+  # The hourly windows of the source (G1H) are commented out there and are not
+  # translated. Each would be a second entry in the rates of its rule.
   limits:
     # The API tier: groups, roles and the total. They add up in the source, which
     # is mode All — the default.
@@ -133,6 +135,3 @@ spec:
           counters: []
           rates:
             - { requests: 90, periodSeconds: 60 }
-
-    # The hourly windows of the source (G1H) are commented out there and are not
-    # translated. Each would be a second entry in the rates of its rule.
