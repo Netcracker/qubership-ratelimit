@@ -1,11 +1,13 @@
 package management
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -72,4 +74,30 @@ func TestNewApp_isBuildableTwiceInOneProcess(t *testing.T) {
 		first.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil).Code)
 	require.Equal(t, http.StatusOK,
 		second.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil).Code)
+}
+
+// fasthttp cuts an oversized body before any handler runs, so this is two
+// facts: the limit is the one this package documents rather than fiber's 4 MiB
+// default, and what the cut produces is answered as a bad request. Under the
+// platform's default handler it would be RLS-0500, telling a client branching
+// on codes that the server broke when its request was simply too large.
+func TestApp_boundsTheRequestBodyAtItsOwnLimit(t *testing.T) {
+	h := newTestAPI(t)
+	require.Equal(t, maxRequestBody, h.app.Config().BodyLimit,
+		"the guard in decodeJSON runs after the body is in memory; this is the limit")
+}
+
+func TestErrorHandler_answersAnOversizedBodyAsABadRequest(t *testing.T) {
+	app := fiber.New(fiber.Config{ErrorHandler: managementErrorHandler()})
+	app.Get("/", func(*fiber.Ctx) error { return fiber.ErrRequestEntityTooLarge })
+
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil))
+	require.NoError(t, err)
+	defer func() { require.NoError(t, response.Body.Close()) }()
+
+	require.Equal(t, http.StatusBadRequest, response.StatusCode)
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(body), CodeInvalidRequest.Code)
+	require.Contains(t, string(body), "larger than")
 }

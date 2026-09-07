@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -118,6 +119,42 @@ func queryValues(c *fiber.Ctx) url.Values {
 		values.Add(string(key), string(value))
 	}
 	return values
+}
+
+// checkQueryNames refuses a parameter the endpoint does not define.
+//
+// Reading by name and ignoring the rest is safe only where every parameter
+// narrows. Three of these widen: a misspelled dryRun executes a reset instead
+// of previewing it, a misspelled expectedRuleSetVersion drops the version pin,
+// and a misspelled limited deletes counters that are not refusing. A typo in
+// ruleId or an axis is caught anyway, because the command cannot be built
+// without them; these three fail open, which is why the whole query is
+// whitelisted. Comparison is case-sensitive: dryrun is not dryRun.
+//
+// The JSON bodies already refuse unknown fields through DisallowUnknownFields.
+// This is the same rule for the query side.
+func checkQueryNames(query url.Values, allowed ...string) *apiError {
+	known := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		known[name] = struct{}{}
+	}
+	var unknown []string
+	for name := range query {
+		if _, ok := known[name]; ok || strings.HasPrefix(name, axisPrefix) {
+			continue
+		}
+		unknown = append(unknown, name)
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	safe := make([]string, 0, len(unknown))
+	for _, name := range unknown {
+		safe = append(safe, logSafe(name))
+	}
+	return invalid("the query carries parameters this endpoint does not define: "+
+		strings.Join(safe, ", "), unknown...)
 }
 
 // requestIDOf returns the correlation id the platform resolved for this

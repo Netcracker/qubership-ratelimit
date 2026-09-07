@@ -28,7 +28,13 @@ import (
 // checked before the token is consumed: a command refused because another sweep
 // is running must not spend the look that authorized it.
 //
-// KEYS: record, lease, token (token may be empty).
+// KEYS: record, lease, and the token only when the command carries one. An
+// absent token is an absent key, never an empty string: Redis Cluster hashes
+// every declared key before running the script, an empty key hashes to slot 0
+// while the tagged ones hash to the domain's slot, and the node would refuse
+// the whole command with CROSSSLOT. A preview carries no token, so declaring a
+// placeholder for it would make previews — and with them every execution, which
+// needs a preview's token — impossible on a cluster.
 // ARGV: command, fencing, retention ms, lease ms.
 var acceptScript = goredis.NewScript(`
 local existing = redis.call('HGET', KEYS[1], 'command')
@@ -43,7 +49,7 @@ if held then
 end
 
 local token = false
-if KEYS[3] and KEYS[3] ~= '' then
+if #KEYS >= 3 then
   token = redis.call('GET', KEYS[3])
   if not token then
     return {'no_token'}
@@ -179,8 +185,11 @@ func (r *Redis) Lookup(ctx context.Context, keys Keys) (Record, error) {
 
 // Accept performs the atomic acceptance of a bulk command.
 func (r *Redis) Accept(ctx context.Context, acceptance Acceptance) (Accepted, error) {
-	res, err := acceptScript.Run(ctx, r.rdb,
-		[]string{acceptance.Keys.Record, acceptance.Keys.Lease, acceptance.Keys.Token},
+	keys := []string{acceptance.Keys.Record, acceptance.Keys.Lease}
+	if acceptance.Keys.Token != "" {
+		keys = append(keys, acceptance.Keys.Token)
+	}
+	res, err := acceptScript.Run(ctx, r.rdb, keys,
 		acceptance.Command, acceptance.Fencing,
 		Retention.Milliseconds(), acceptance.LeaseTTL.Milliseconds()).Result()
 	if err != nil {

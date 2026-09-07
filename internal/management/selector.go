@@ -30,8 +30,8 @@ const axisPrefix = "axis."
 
 // selector is a parsed, canonical selection.
 type selector struct {
-	// RuleIDs are full triples or their 1- and 2-segment prefixes (a policy, a
-	// policy/block). Empty selects every rule.
+	// RuleIDs are whole block/rule ids or the block that heads one. Empty
+	// selects every rule.
 	RuleIDs []string `json:"ruleIds,omitempty"`
 
 	Algorithm string `json:"algorithm,omitempty"`
@@ -124,6 +124,13 @@ func parseAxes(query url.Values) (map[string][]string, *apiError) {
 		axes[name] = sortedUnique(values)
 	}
 	return axes, nil
+}
+
+// selectorParams names the parameters the selection grammar defines, plus
+// whatever the endpoint adds. Axis parameters are not listed: they are named
+// after the keys of the domain, and checkQueryNames admits the whole prefix.
+func selectorParams(extra ...string) []string {
+	return append([]string{"ruleId", "algorithm", "period", "limited"}, extra...)
 }
 
 // checkRuleIDForm accepts a whole block/rule id or the block that heads it.

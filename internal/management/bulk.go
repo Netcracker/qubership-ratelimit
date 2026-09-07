@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/netcracker/qubership-ratelimit/engine/key"
 	"github.com/netcracker/qubership-ratelimit/internal/records"
 )
 
@@ -357,7 +358,7 @@ func randomID() string {
 // would put them in another slot, and every batch would fail CROSSSLOT the
 // moment the store is a Cluster.
 func recordTag(namespace, domain string) string {
-	return "rlm:v1:{" + namespace + "/" + domain + "}:"
+	return "rlm:v1:" + key.DomainTag(namespace, domain) + ":"
 }
 
 func tokenKey(namespace, domain, token string) string {

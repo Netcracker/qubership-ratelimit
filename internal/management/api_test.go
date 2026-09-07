@@ -377,3 +377,65 @@ func TestHandler_answersAnUnknownRouteInTheSameShape(t *testing.T) {
 	requireError(t, h.call(t, http.MethodGet, BasePath+"/nothing", viewerRoles(), nil),
 		http.StatusNotFound, CodeNotFound)
 }
+
+// A path filter with no method means "any method". Reading it as the engine
+// does - where a request always carries one - drops every block whose routes
+// name their methods, and an operator asking which rules guard /api/orders is
+// told the path is unlimited while two rules count it.
+func TestRules_aPathWithoutAMethodKeepsMethodRestrictedBlocks(t *testing.T) {
+	h := newTestAPI(t)
+
+	var view ruleview.RuleSetView
+	decode(t, h.call(t, http.MethodGet,
+		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders", viewerRoles(), nil),
+		http.StatusOK, &view)
+
+	blocks := make([]string, 0, len(view.Blocks))
+	for _, block := range view.Blocks {
+		blocks = append(blocks, block.Block)
+	}
+	require.Contains(t, blocks, "orders",
+		"the orders block targets this prefix for GET and POST; a listing without a method must show it")
+}
+
+// Reading parameters by name and ignoring the rest is safe only where every
+// parameter narrows. dryRun, expectedRuleSetVersion and limited widen, so a
+// typo in one of them has to be an error rather than a silently wider command.
+func TestReset_refusesAMisspelledSafetyParameter(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+
+	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice&dryrun=true",
+		"key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+	require.Equal(t, []string{"dryrun"}, body.Meta.Fields,
+		"the answer names the parameter, because the caller cannot see the whitelist")
+
+	remaining, found := h.remaining(t, "alice")
+	require.True(t, found, "a refused command must not have deleted the counter")
+	require.Equal(t, int64(2), remaining)
+}
+
+func TestQueryNames_areWhitelistedOnEveryReadEndpoint(t *testing.T) {
+	h := newTestAPI(t)
+
+	for name, target := range map[string]string{
+		"the rule listing":    "/rules?path=/api/orders&methods=GET",
+		"the counter listing": "/counters?ruleId=orders/per-client&pagesize=10",
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireError(t, h.call(t, http.MethodGet,
+				BasePath+"/domains/"+testDomain+target, viewerRoles(), nil),
+				http.StatusBadRequest, CodeInvalidRequest)
+		})
+	}
+}
+
+// The whitelist admits the axis family whole: those names come from the keys of
+// the domain, not from this package.
+func TestQueryNames_admitTheAxisFamily(t *testing.T) {
+	h := newTestAPI(t)
+
+	require.Equal(t, http.StatusOK, h.call(t, http.MethodGet,
+		BasePath+"/domains/"+testDomain+"/counters?axis.client=alice&axis.order_id=4711",
+		viewerRoles(), nil).Code)
+}

@@ -361,3 +361,74 @@ type request struct {
 func evaluate(snap *compile.Snapshot, r request) Result {
 	return Match(snap, r.Path, r.Method).Evaluate(r.Keys)
 }
+
+// BlocksByPath answers the introspection question Match cannot: which blocks
+// guard a path under any method. Match decides for one request, and a request
+// always carries a method, so a route restricting itself to GET and POST can
+// never admit the empty one.
+func TestBlocksByPath_ignoresTheMethodsARouteRestrictsItselfTo(t *testing.T) {
+	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "orders",
+		Target: model.Target{Routes: []model.Route{{
+			Path:    model.PathMatch{Type: model.PathPrefix, Value: "/api/orders"},
+			Methods: []string{"GET", "POST"},
+		}}},
+		Rules: []model.Rule{{Name: "per-client", Rates: minuteRate()}},
+	}}})
+
+	if blocks := Match(snap, "/api/orders", "").Blocks(); len(blocks) != 0 {
+		t.Fatalf("Match with no method returned %d blocks; the empty method is not one a route admits", len(blocks))
+	}
+
+	blocks := BlocksByPath(snap, "/api/orders")
+	if len(blocks) != 1 || blocks[0].Name != "orders" {
+		t.Fatalf("BlocksByPath = %v, want the orders block", blockNames(blocks))
+	}
+}
+
+// The path half is the same matcher, so the two answers cannot drift apart on
+// prefixes, exact paths, or templates.
+func TestBlocksByPath_appliesTheSamePathRules(t *testing.T) {
+	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{
+		{
+			Name: "exact",
+			Target: model.Target{Routes: []model.Route{{
+				Path: model.PathMatch{Type: model.PathExact, Value: "/api/login"},
+			}}},
+			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}},
+		},
+		{
+			Name: "template",
+			Target: model.Target{Routes: []model.Route{{
+				Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/orders/{order_id}"},
+			}}},
+			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}},
+		},
+		{
+			Name:  "everything",
+			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}},
+		},
+	}})
+
+	cases := map[string][]string{
+		"/api/login":             {"exact", "everything"},
+		"/api/orders/4711":       {"template", "everything"},
+		"/api/orders/4711/lines": {"everything"},
+		// The query string never reaches a path predicate.
+		"/api/login?next=/home": {"exact", "everything"},
+	}
+	for path, want := range cases {
+		got := blockNames(BlocksByPath(snap, path))
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("BlocksByPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func blockNames(blocks []*compile.Block) []string {
+	out := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		out = append(out, block.Name)
+	}
+	return out
+}

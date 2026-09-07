@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -154,18 +155,34 @@ func (a *API) listCounters(
 	}
 	sort.Strings(keys)
 
-	candidates, scanned, more := a.selectCandidates(ctx, snapshot, keys, sel, pageSize, after)
-	views, apiErr := a.judge(ctx, candidates, sel.LimitedOnly)
+	page := a.selectCandidates(ctx, snapshot, keys, sel, pageSize, after)
+	views, apiErr := a.judge(ctx, page.candidates, sel.LimitedOnly)
 	if apiErr != nil {
 		return CounterList{}, apiErr
 	}
 
-	list := CounterList{Items: views, Scanned: scanned}
-	if more && len(candidates) > 0 {
+	list := CounterList{Items: views, Scanned: page.scanned}
+	// The cursor is minted from the last key the walk looked at, not from the
+	// last one it kept. A page that filled its budget without a match would
+	// otherwise end the listing — a missing nextCursor is what the contract
+	// defines as the end — and a narrow filter over a busy domain would report
+	// that a counter which exists does not. Resuming from the last candidate
+	// would also rescan the tail between it and the budget.
+	if page.more {
 		list.Truncated = true
-		list.NextCursor = encodeCursor(candidates[len(candidates)-1].key, sel, now)
+		list.NextCursor = encodeCursor(page.lastScanned, sel, now)
 	}
 	return list, nil
+}
+
+// page is what one walk of the sorted keys produced: the counters it kept, how
+// many keys it looked at, whether it stopped early, and the last key it looked
+// at, which is where the next page resumes.
+type page struct {
+	candidates  []counterCandidate
+	scanned     int
+	more        bool
+	lastScanned string
 }
 
 // selectCandidates walks the sorted keys after the cursor, keeping the ones the
@@ -177,17 +194,20 @@ func (a *API) selectCandidates(
 	sel selector,
 	pageSize int,
 	after string,
-) (candidates []counterCandidate, scanned int, more bool) {
+) page {
 	index := newRateIndex(snapshot)
+	out := page{}
 
 	for _, k := range keys {
 		if after != "" && k <= after {
 			continue
 		}
-		if len(candidates) >= pageSize || scanned >= scanBudget {
-			return candidates, scanned, true
+		if len(out.candidates) >= pageSize || out.scanned >= scanBudget {
+			out.more = true
+			return out
 		}
-		scanned++
+		out.scanned++
+		out.lastScanned = k
 
 		parsed, err := parseCounterKey(a.Namespace, snapshot.Domain, k)
 		if err != nil {
@@ -217,11 +237,11 @@ func (a *API) selectCandidates(
 		if !sel.matchesAxes(axes) {
 			continue
 		}
-		candidates = append(candidates, counterCandidate{
+		out.candidates = append(out.candidates, counterCandidate{
 			key: k, ref: ref, ruleID: parsed.RuleID, axes: axes,
 		})
 	}
-	return candidates, scanned, false
+	return out
 }
 
 // judge asks the store what each candidate would do to the next request.
@@ -284,16 +304,21 @@ func counterView(candidate counterCandidate, bucket counters.Bucket, verdict cou
 	return view
 }
 
-// scanPrefix narrows the scan to what the selection can prove it needs. One full
-// rule id addresses a subtree. Anything else (several ids, a prefix form, or no
-// id at all) has to walk the domain, because the key layout puts the window
-// ahead of the axis values and a partial prefix cannot be built without the
-// escaping the key package owns.
+// scanPrefix narrows the scan to what the selection can prove it needs.
+//
+// One id addresses a subtree: a whole block/rule id its own, a lone block name
+// all of its rules. Anything else — several ids, or none — has to walk the
+// domain, because the layout puts the window ahead of the axis values and there
+// is no prefix that covers a set of rules.
 func scanPrefix(namespace, domain string, sel selector) string {
 	if len(sel.RuleIDs) == 1 {
-		if block, rule, ok := ruleview.SplitID(sel.RuleIDs[0]); ok {
+		id := sel.RuleIDs[0]
+		if block, rule, ok := ruleview.SplitID(id); ok {
 			return key.RulePrefix(key.Ident{
 				Namespace: namespace, Domain: domain, Block: block, Rule: rule})
+		}
+		if id != "" && !strings.Contains(id, "/") {
+			return key.BlockPrefix(namespace, domain, id)
 		}
 	}
 	return key.DomainPrefix(namespace, domain)

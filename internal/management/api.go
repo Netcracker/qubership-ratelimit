@@ -153,6 +153,9 @@ func (a *API) handleRules(c *fiber.Ctx) error {
 	}
 
 	query := queryValues(c)
+	if apiErr := checkQueryNames(query, "path", "method", "absent"); apiErr != nil {
+		return apiErr
+	}
 	path, method := query.Get("path"), query.Get("method")
 	if path == "" && method != "" {
 		// A method alone does not name a request, and answering the unfiltered
@@ -198,6 +201,12 @@ func selectBlocks(snapshot *compile.Snapshot, path, method string) []*compile.Bl
 		}
 		return out
 	}
+	if method == "" {
+		// An absent method is "any method" here. Match would read it as the
+		// empty method no request carries, and drop every block whose routes
+		// name theirs.
+		return match.BlocksByPath(snapshot, path)
+	}
 	return match.Match(snapshot, path, method).Blocks()
 }
 
@@ -209,6 +218,9 @@ func (a *API) handleCounters(c *fiber.Ctx) error {
 	}
 
 	query := queryValues(c)
+	if apiErr := checkQueryNames(query, selectorParams("pageSize", "cursor")...); apiErr != nil {
+		return apiErr
+	}
 	sel, apiErr := parseSelector(query)
 	if apiErr != nil {
 		return apiErr

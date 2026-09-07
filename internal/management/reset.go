@@ -92,6 +92,10 @@ func (c resetCommand) command() string {
 
 // parseReset validates the query into a command against the enforced set.
 func parseReset(snapshot *compile.Snapshot, query url.Values) (resetCommand, *apiError) {
+	if apiErr := checkQueryNames(query,
+		selectorParams("dryRun", "expectedRuleSetVersion")...); apiErr != nil {
+		return resetCommand{}, apiErr
+	}
 	sel, apiErr := parseSelector(query)
 	if apiErr != nil {
 		return resetCommand{}, apiErr

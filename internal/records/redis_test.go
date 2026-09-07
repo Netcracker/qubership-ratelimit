@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,13 +135,19 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// keySequence makes freshKeys unique by construction. A wall-clock reading is
+// not enough: two calls in one statement can land in the same nanosecond tick,
+// and then a test that means to use two records quietly uses one and fails
+// somewhere else entirely.
+var keySequence atomic.Uint64
+
 // freshKeys names one command's storage, unique per call so tests in one binary
 // never collide in a store they share.
 func freshKeys(t *testing.T) records.Keys {
 	t.Helper()
 
-	unique := fmt.Sprintf("%s-%d", strings.NewReplacer("/", "-", " ", "-").Replace(t.Name()),
-		time.Now().UnixNano())
+	unique := fmt.Sprintf("%s-%d-%d", strings.NewReplacer("/", "-", " ", "-").Replace(t.Name()),
+		time.Now().UnixNano(), keySequence.Add(1))
 	return records.Keys{
 		Record: "rlm:v1:{records-test}:idem:counter-resets:" + unique,
 		Lease:  "rlm:v1:{records-test}:sweep:" + unique,
@@ -151,5 +158,5 @@ func freshKeys(t *testing.T) records.Keys {
 // record's slot the way the real layout does.
 func counterKey(t *testing.T) string {
 	t.Helper()
-	return fmt.Sprintf("rl:v1:{records-test}:a/b/c:gcra:60:%d:", time.Now().UnixNano())
+	return fmt.Sprintf("rl:v1:{records-test}:a/b/c:gcra:60:%d-%d:", time.Now().UnixNano(), keySequence.Add(1))
 }

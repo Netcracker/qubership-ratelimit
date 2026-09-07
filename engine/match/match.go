@@ -47,6 +47,46 @@ func Match(snap *compile.Snapshot, path, method string) Candidates {
 	return out
 }
 
+// BlocksByPath lists the blocks whose target admits a path under any method,
+// in snapshot order.
+//
+// It exists for introspection, where "no method" means "any method" rather than
+// the empty method a request can never carry. Match answers for one request, so
+// a route restricting itself to GET and POST cannot admit a request whose
+// method is unset; an operator asking which rules guard a path has asked a
+// different question, and answering it with Match would report a path with two
+// rules as unlimited.
+//
+// The route matching itself is the same code, so the two answers cannot drift
+// into disagreeing about prefixes, templates, or exact paths.
+func BlocksByPath(snap *compile.Snapshot, path string) []*compile.Block {
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	out := make([]*compile.Block, 0, len(snap.Blocks))
+	for i := range snap.Blocks {
+		block := &snap.Blocks[i]
+		if targetsPath(block, path) {
+			out = append(out, block)
+		}
+	}
+	return out
+}
+
+// targetsPath reports whether any route of the block admits the path, ignoring
+// the methods the route restricts itself to.
+func targetsPath(block *compile.Block, path string) bool {
+	if len(block.Routes) == 0 {
+		return true
+	}
+	for i := range block.Routes {
+		if _, ok := matchPath(&block.Routes[i], path); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Empty reports that no block targets the request: it is allowed as it
 // stands, and identity extraction has nothing to feed.
 func (c Candidates) Empty() bool { return len(c.hits) == 0 }

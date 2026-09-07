@@ -102,3 +102,27 @@ func TestNamedAxes_refusesARuleThatDisagreesWithItsCounter(t *testing.T) {
 	_, err = parsed.namedAxes([]string{model.KeyClient, "order_id"})
 	require.Error(t, err)
 }
+
+// The management side keeps its records, sweep lease, and confirmation tokens
+// beside the counters they act on: the batch script deletes counter keys and
+// advances the record in one call. On a cluster that is legal only while both
+// hash to one slot, and a second hand-written spelling of the tag is exactly
+// how they drift apart - standalone Redis stays green the whole time.
+func TestRecordKeys_shareTheSlotOfTheCountersTheyActOn(t *testing.T) {
+	gcra, ok := algo.ByID(algo.GCRAID)
+	require.True(t, ok)
+
+	counter := key.RatePrefix(
+		key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "orders", Rule: "per-client"},
+		gcra, algo.Window{Requests: 100, Period: time.Minute, Burst: 100})
+	tag := key.DomainTag(testNamespace, testDomain)
+	require.Contains(t, counter, tag)
+
+	for name, k := range map[string]string{
+		"the idempotency record": recordKey(testNamespace, testDomain, endpointResets, "alice", "key-1"),
+		"the sweep lease":        leaseKey(testNamespace, testDomain),
+		"the confirmation token": tokenKey(testNamespace, testDomain, "ct-0123456789ab"),
+	} {
+		require.Contains(t, k, tag, "%s must hash to the domain's slot", name)
+	}
+}

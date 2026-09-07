@@ -167,6 +167,17 @@ jobs:
         run: |
           REDIS_ADDR="$(../hack/redis-cluster.sh up)"             go test -race ./store/redis/ -count=1
 
+      # The command store keeps its records, sweep lease, and confirmation
+      # tokens beside the counters they act on, and its scripts touch both in
+      # one call. Only a real cluster refuses a script whose keys hash to two
+      # slots, so only this step can catch a record key that drifted out of the
+      # domain's tag - or a script declaring a key it does not use, which an
+      # empty string turns into slot 0.
+      - name: Test the command store against a Redis Cluster
+        run: |
+          REDIS_ADDR="$(hack/redis-cluster.sh up)" \
+            go test -race ./internal/records/ -count=1
+
       - name: Upload coverage artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

@@ -60,10 +60,15 @@ func NewApp(api *API) (*fiber.App, error) {
 		WriteTimeout:          DefaultWriteTimeout,
 		IdleTimeout:           DefaultIdleTimeout,
 		DisableStartupMessage: true,
+		// The guard in decodeJSON runs after the body is already in memory, so
+		// it cannot be the limit; fiber's own default is 4 MiB, which would
+		// make the check decorative and answer an oversized body as RLS-0500,
+		// an internal fault. Bounding it here makes the two agree.
+		BodyLimit: maxRequestBody,
 		// Anything a handler did not answer itself lands here: a panic the
 		// recovery middleware turned into an error, or a route the router
 		// refused. RLS-0500 is the code such an error is reported under.
-		ErrorHandler: fibererrors.DefaultErrorHandler(CodeInternal),
+		ErrorHandler: managementErrorHandler(),
 	}).Process()
 	if err != nil {
 		return nil, fmt.Errorf("build the management app: %w", err)
@@ -156,21 +161,40 @@ func (r *Runner) Start(ctx context.Context) error {
 	return nil
 }
 
+// managementErrorHandler answers what no handler answered itself.
+//
+// Almost all of it is the platform's default under RLS-0500, which is what an
+// unhandled error is. The exception is the body limit: fasthttp cuts an
+// oversized body before any handler runs, and reporting that as an internal
+// fault would tell a client branching on codes that the server broke, when what
+// happened is that its request was too large.
+func managementErrorHandler() fiber.ErrorHandler {
+	fallback := fibererrors.DefaultErrorHandler(CodeInternal)
+	return func(c *fiber.Ctx, err error) error {
+		if errors.Is(err, fiber.ErrRequestEntityTooLarge) {
+			return invalid(fmt.Sprintf(
+				"the request body is larger than the %d bytes this API accepts", maxRequestBody)).Handle(c)
+		}
+		return fallback(c, err)
+	}
+}
+
 // listen opens the socket, honoring the platform's TLS configuration: a
 // deployment that turns TLS on turns it on for every listener at once, and the
 // one left in plaintext would be the one that matters. These endpoints lift
 // limits.
 func (r *Runner) listen() (net.Listener, error) {
-	if utils.IsTlsEnabled() {
-		listener, err := tls.Listen(r.App.Config().Network, r.Addr, utils.GetTlsConfig())
-		if err != nil {
-			return nil, fmt.Errorf("listen for TLS on %s: %w", r.Addr, err)
-		}
-		return listener, nil
-	}
+	// One socket, opened the same way either way, and wrapped when TLS is on.
+	// Taking the network from the fiber config instead would make TLS decide
+	// the address family: its default is tcp4, so turning platform TLS on would
+	// silently take this listener off an IPv6-only pod while RLS and metrics
+	// kept answering.
 	listener, err := net.Listen("tcp", r.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", r.Addr, err)
+	}
+	if utils.IsTlsEnabled() {
+		return tls.NewListener(listener, utils.GetTlsConfig()), nil
 	}
 	return listener, nil
 }
