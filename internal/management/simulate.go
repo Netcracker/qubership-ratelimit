@@ -251,7 +251,7 @@ func ruleOutcomeView(outcome engine.RuleOutcome) RuleOutcomeView {
 		mode = ruleview.ModeShadow
 	}
 	view := RuleOutcomeView{
-		ID:            ruleID(outcome.Policy, outcome.Block, outcome.Rule),
+		ID:            ruleID(outcome.Block, outcome.Rule),
 		Mode:          mode,
 		Allowed:       outcome.Allowed,
 		Algorithm:     outcome.Algorithm,

@@ -13,9 +13,9 @@ const domain = "gateway.public"
 
 // mustCompile builds a snapshot and fails the test on any problem: matcher
 // tests run on valid domains only.
-func mustCompile(t *testing.T, policies []model.Policy, m *model.Mapping) *compile.Snapshot {
+func mustCompile(t *testing.T, p model.Policy) *compile.Snapshot {
 	t.Helper()
-	snap, problems := compile.Compile(domain, policies, m)
+	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
 		t.Fatalf("compile problems: %v", problems)
 	}
@@ -36,7 +36,7 @@ func ruleNames(r Result) []string {
 
 func TestRouteMatching(t *testing.T) {
 	p := model.Policy{
-		Name: "p", Domain: domain,
+		Domain: domain,
 		Blocks: []model.Block{
 			{Name: "exact", Target: model.Target{Routes: []model.Route{
 				{Path: model.PathMatch{Type: model.PathExact, Value: "/health"}}}},
@@ -49,7 +49,7 @@ func TestRouteMatching(t *testing.T) {
 				Rules: []model.Rule{{Name: "r", Rates: minuteRate()}}},
 		},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 
 	cases := []struct {
 		name   string
@@ -86,50 +86,51 @@ func TestRouteMatching(t *testing.T) {
 }
 
 func TestOperators(t *testing.T) {
-	m := &model.Mapping{Domain: domain, Mappings: []model.KeyMapping{
+	mappings := []model.KeyMapping{
 		{Key: "roles", Claim: "roles", Type: model.ValueStringArray},
 		{Key: "tenant", Claim: "org"},
-	}}
-	when := func(c model.Condition) []model.Policy {
-		return []model.Policy{{
-			Name: "p", Domain: domain,
-			Groups: []model.Group{{Name: "vip", Clients: []string{"alice", "bob"}}},
+	}
+	withPredicate := func(c model.Predicate) model.Policy {
+		return model.Policy{
+			Domain:   domain,
+			Mappings: mappings,
+			Groups:   []model.Group{{Name: "vip", Clients: []string{"alice", "bob"}}},
 			Blocks: []model.Block{{Name: "b",
 				Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
-				Rules:  []model.Rule{{Name: "r", When: []model.Condition{c}, Rates: minuteRate()}}}},
-		}}
+				Rules:  []model.Rule{{Name: "r", Matches: []model.Predicate{c}, Rates: minuteRate()}}}},
+		}
 	}
 
 	cases := []struct {
 		name    string
-		cond    model.Condition
+		cond    model.Predicate
 		keys    map[string][]string
 		matches bool
 	}{
-		{"equals hit", model.Condition{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"},
+		{"equals hit", model.Predicate{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"},
 			map[string][]string{model.KeyClient: {"alice"}}, true},
-		{"equals miss", model.Condition{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"},
+		{"equals miss", model.Predicate{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"},
 			map[string][]string{model.KeyClient: {"bob"}}, false},
-		{"in hit", model.Condition{Key: model.KeyClient, Operator: model.OperatorIn, Values: []string{"a", "b"}},
+		{"in hit", model.Predicate{Key: model.KeyClient, Operator: model.OperatorIn, Values: []string{"a", "b"}},
 			map[string][]string{model.KeyClient: {"b"}}, true},
-		{"ingroup hit", model.Condition{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"},
+		{"ingroup hit", model.Predicate{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"},
 			map[string][]string{model.KeyClient: {"bob"}}, true},
-		{"ingroup miss", model.Condition{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"},
+		{"ingroup miss", model.Predicate{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"},
 			map[string][]string{model.KeyClient: {"eve"}}, false},
-		{"contains on array", model.Condition{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
+		{"contains on array", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
 			map[string][]string{"roles": {"user", "admin"}}, true},
-		{"contains never substring", model.Condition{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
+		{"contains never substring", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
 			map[string][]string{"roles": {"administrator"}}, false},
-		{"exists", model.Condition{Key: "tenant", Operator: model.OperatorExists},
+		{"exists", model.Predicate{Key: "tenant", Operator: model.OperatorExists},
 			map[string][]string{"tenant": {"acme"}}, true},
-		{"notexists on absent", model.Condition{Key: "tenant", Operator: model.OperatorNotExists},
+		{"notexists on absent", model.Predicate{Key: "tenant", Operator: model.OperatorDoesNotExist},
 			map[string][]string{}, true},
-		{"notexists on present", model.Condition{Key: "tenant", Operator: model.OperatorNotExists},
+		{"notexists on present", model.Predicate{Key: "tenant", Operator: model.OperatorDoesNotExist},
 			map[string][]string{"tenant": {"acme"}}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			snap := mustCompile(t, when(tc.cond), m)
+			snap := mustCompile(t, withPredicate(tc.cond))
 			got := evaluate(snap, request{Path: "/x", Method: "GET", Keys: tc.keys})
 			if (len(got.Rules) == 1) != tc.matches {
 				t.Errorf("matched = %v, want %v", ruleNames(got), tc.matches)
@@ -140,7 +141,7 @@ func TestOperators(t *testing.T) {
 
 func TestMissingAxisSkipsRule(t *testing.T) {
 	p := model.Policy{
-		Name: "p", Domain: domain,
+		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
@@ -148,7 +149,7 @@ func TestMissingAxisSkipsRule(t *testing.T) {
 				{Name: "total", Rates: minuteRate()},
 			}}},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 
 	anonymous := evaluate(snap, request{Path: "/x", Method: "GET"})
 	if got := ruleNames(anonymous); len(got) != 1 || got[0] != "total" {
@@ -166,12 +167,12 @@ func TestMissingAxisSkipsRule(t *testing.T) {
 // than guessing which value keys the bucket.
 func TestAxisRefusesAmbiguity(t *testing.T) {
 	p := model.Policy{
-		Name: "p", Domain: domain,
+		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules:  []model.Rule{{Name: "per-user", Counters: []string{model.KeyClient}, Rates: minuteRate()}}}},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 
 	got := evaluate(snap, request{Path: "/x", Method: "GET",
 		Keys: map[string][]string{model.KeyClient: {"a", "b"}}})
@@ -182,20 +183,20 @@ func TestAxisRefusesAmbiguity(t *testing.T) {
 
 func TestReplacesSuppressesUnderAll(t *testing.T) {
 	p := model.Policy{
-		Name: "p", Domain: domain,
+		Domain: domain,
 		Groups: []model.Group{{Name: "enterprise", Clients: []string{"corp"}}},
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
 				{Name: "base", Counters: []string{model.KeyClient}, Rates: minuteRate()},
 				{Name: "enterprise",
-					When:     []model.Condition{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "enterprise"}},
-					Counters: []string{model.KeyClient},
-					Rates:    []model.Rate{{Requests: 1000, Period: time.Minute}},
-					Replaces: []string{"base"}},
+					Matches:       []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "enterprise"}},
+					Counters:      []string{model.KeyClient},
+					Rates:         []model.Rate{{Requests: 1000, Period: time.Minute}},
+					ReplacedRules: []string{"base"}},
 			}}},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 
 	corp := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"corp"}}})
 	if got := ruleNames(corp); len(got) != 1 || got[0] != "enterprise" {
@@ -212,11 +213,11 @@ func TestReplacesSuppressesUnderAll(t *testing.T) {
 // time: any path, any method.
 func TestTargetlessBlockMatchesEverything(t *testing.T) {
 	p := model.Policy{
-		Name: "p", Domain: domain,
+		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Rules: []model.Rule{{Name: "total", Rates: minuteRate()}}}},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 	for _, req := range []request{
 		{Path: "/anything", Method: "GET"},
 		{Path: "/", Method: "DELETE"},
@@ -232,18 +233,18 @@ func TestTargetlessBlockMatchesEverything(t *testing.T) {
 // from nothing else.
 func TestBypassUnderAllExemptsNamedRulesOnly(t *testing.T) {
 	p := model.Policy{
-		Name: "p", Domain: domain,
+		Domain: domain,
 		Groups: []model.Group{{Name: "vip", Clients: []string{"corp"}}},
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
 				{Name: "base", Counters: []string{model.KeyClient}, Rates: minuteRate()},
 				{Name: "guard", Rates: minuteRate()},
-				{Name: "vip-exempt", Behavior: model.BehaviorBypass, Replaces: []string{"base"},
-					When: []model.Condition{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}}},
+				{Name: "vip-exempt", Behavior: model.BehaviorBypass, ReplacedRules: []string{"base"},
+					Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}}},
 			}}},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 
 	corp := evaluate(snap, request{Path: "/x", Method: "GET",
 		Keys: map[string][]string{model.KeyClient: {"corp"}}})
@@ -260,20 +261,20 @@ func TestBypassUnderAllExemptsNamedRulesOnly(t *testing.T) {
 
 func TestFirstMatchCascade(t *testing.T) {
 	p := model.Policy{
-		Name: "quote-api", Domain: domain,
+		Domain: domain,
 		Groups: []model.Group{{Name: "trial", Clients: []string{"t1"}}},
 		Blocks: []model.Block{{Name: "cascade", Mode: model.ModeFirstMatch,
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
 				{Name: "internal", Behavior: model.BehaviorBypass,
-					When: []model.Condition{{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus"}}},
+					Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus"}}},
 				{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeyClient},
-					When:  []model.Condition{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "trial"}},
-					Rates: []model.Rate{{Requests: 10, Period: time.Minute}}},
+					Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "trial"}},
+					Rates:   []model.Rate{{Requests: 10, Period: time.Minute}}},
 				{Name: "everyone", Counters: []string{model.KeyClient}, Rates: minuteRate()},
 			}}},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 	client := func(id string) request {
 		return request{Path: "/q", Method: "GET", Keys: map[string][]string{model.KeyClient: {id}}}
 	}
@@ -297,7 +298,7 @@ func TestFirstMatchCascade(t *testing.T) {
 
 func TestPathAxisAndCaptures(t *testing.T) {
 	p := model.Policy{
-		Name: "p", Domain: domain,
+		Domain: domain,
 		Blocks: []model.Block{
 			{Name: "tpl", Target: model.Target{Routes: []model.Route{
 				{Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/orders/{order_id}/items"}}}},
@@ -307,7 +308,7 @@ func TestPathAxisAndCaptures(t *testing.T) {
 				Rules: []model.Rule{{Name: "per-path", Counters: []string{model.KeyPath}, Rates: minuteRate()}}},
 		},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 
 	got := evaluate(snap, request{Path: "/api/orders/42/items", Method: "GET"})
 	if len(got.Rules) != 2 {
@@ -326,7 +327,7 @@ func TestPathAxisAndCaptures(t *testing.T) {
 
 func TestBucketsPerWindow(t *testing.T) {
 	p := model.Policy{
-		Name: "p", Domain: domain,
+		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{{Name: "r", Counters: []string{model.KeyClient}, Rates: []model.Rate{
@@ -334,7 +335,7 @@ func TestBucketsPerWindow(t *testing.T) {
 				{Requests: 10000, Period: 24 * time.Hour, Algorithm: "FixedWindow"},
 			}}}}},
 	}
-	snap := mustCompile(t, []model.Policy{p}, nil)
+	snap := mustCompile(t, p)
 
 	got := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"alice"}}})
 	buckets := got.Buckets()

@@ -33,7 +33,6 @@ import (
 // them for corruption.
 type counterKey struct {
 	RuleID string
-	Policy string
 	Block  string
 	Rule   string
 
@@ -50,8 +49,8 @@ type counterKey struct {
 }
 
 // parseCounterKey takes one counter key of a domain apart.
-func parseCounterKey(domain, k string) (counterKey, error) {
-	prefix := key.DomainPrefix(domain)
+func parseCounterKey(namespace, domain, k string) (counterKey, error) {
+	prefix := key.DomainPrefix(namespace, domain)
 	rest, found := strings.CutPrefix(k, prefix)
 	if !found {
 		return counterKey{}, fmt.Errorf("key %q does not belong to domain %q", k, domain)
@@ -67,7 +66,7 @@ func parseCounterKey(domain, k string) (counterKey, error) {
 		return counterKey{}, fmt.Errorf("key %q carries %d segments, fewer than the rule, algorithm, and period the layout requires", k, len(fields))
 	}
 
-	policy, block, rule, err := splitTriple(fields[0])
+	block, rule, err := splitRuleSegment(fields[0])
 	if err != nil {
 		return counterKey{}, fmt.Errorf("key %q: %w", k, err)
 	}
@@ -77,8 +76,7 @@ func parseCounterKey(domain, k string) (counterKey, error) {
 	}
 
 	parsed := counterKey{
-		RuleID:        ruleID(policy, block, rule),
-		Policy:        policy,
+		RuleID:        ruleID(block, rule),
 		Block:         block,
 		Rule:          rule,
 		Algorithm:     fields[1],
@@ -113,24 +111,24 @@ func (c counterKey) namedAxes(names []string) (map[string]string, error) {
 	return axes, nil
 }
 
-// splitTriple takes the escaped policy/block/rule segment apart.
-func splitTriple(segment string) (policy, block, rule string, err error) {
+// splitRuleSegment takes the escaped block/rule segment apart.
+func splitRuleSegment(segment string) (block, rule string, err error) {
 	parts := strings.Split(segment, "/")
-	if len(parts) != 3 {
-		return "", "", "", fmt.Errorf("the rule segment %q is not policy/block/rule", segment)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("the rule segment %q is not block/rule", segment)
 	}
-	out := make([]string, 3)
+	out := make([]string, 2)
 	for i, part := range parts {
 		value, err := unescapeSegment(part)
 		if err != nil {
-			return "", "", "", err
+			return "", "", err
 		}
 		if value == "" {
-			return "", "", "", fmt.Errorf("the rule segment %q carries an empty part", segment)
+			return "", "", fmt.Errorf("the rule segment %q carries an empty part", segment)
 		}
 		out[i] = value
 	}
-	return out[0], out[1], out[2], nil
+	return out[0], out[1], nil
 }
 
 // unescapeSegment reverses the percent-encoding the key schema applies to the

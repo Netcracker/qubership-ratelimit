@@ -184,8 +184,8 @@ func evaluateRule(block *compile.Block, rule *compile.Rule, sc scope) (state, []
 		undecided = map[string]struct{}{}
 	)
 
-	for i := range rule.When {
-		condition := &rule.When[i]
+	for i := range rule.Matches {
+		condition := &rule.Matches[i]
 		switch conditionState(block, condition, sc) {
 		case stateFailed:
 			return stateFailed, nil
@@ -231,7 +231,7 @@ func evaluateRule(block *compile.Block, rule *compile.Rule, sc scope) (state, []
 // conditionState evaluates one compiled condition against the scope, with the
 // same set semantics the matcher uses: a key's value is a set, and an absent
 // key is the empty set.
-func conditionState(block *compile.Block, condition *compile.Condition, sc scope) state {
+func conditionState(block *compile.Block, condition *compile.Predicate, sc scope) state {
 	values := sc.lookup(block, condition.Key)
 
 	if !values.known {
@@ -240,7 +240,7 @@ func conditionState(block *compile.Block, condition *compile.Condition, sc scope
 			switch condition.Operator {
 			case model.OperatorExists:
 				return stateSatisfied
-			case model.OperatorNotExists:
+			case model.OperatorDoesNotExist:
 				return stateFailed
 			}
 		}
@@ -262,7 +262,7 @@ func conditionState(block *compile.Block, condition *compile.Condition, sc scope
 		return boolState(slices.Contains(set, condition.Value))
 	case model.OperatorExists:
 		return boolState(len(set) > 0)
-	case model.OperatorNotExists:
+	case model.OperatorDoesNotExist:
 		return boolState(len(set) == 0)
 	}
 	return stateUndecided
@@ -297,7 +297,7 @@ func preempt(
 		case stateUndecided:
 			conditionalOn = append(conditionalOn, ruleview.ApplicabilityGate{
 				Reason: ruleview.GateMayBePreempted,
-				Rule:   ruleview.ID(block.Policy, block.Name, block.Rules[j].Name),
+				Rule:   ruleview.ID(block.Name, block.Rules[j].Name),
 			})
 		}
 	}
@@ -329,7 +329,7 @@ func preemptors(block *compile.Block, i int) []int {
 		if j == i {
 			continue
 		}
-		if slices.Contains(block.Rules[j].Replaces, block.Rules[i].Name) {
+		if slices.Contains(block.Rules[j].ReplacedRules, block.Rules[i].Name) {
 			out = append(out, j)
 		}
 	}

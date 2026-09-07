@@ -11,11 +11,13 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/ruleview"
 )
 
-const domain = "gateway.public"
+const (
+	domain    = "gateway.public"
+	namespace = "core-1-core"
+)
 
 func policy(requests int64) model.Policy {
 	return model.Policy{
-		Name:   "quote-api",
 		Domain: domain,
 		Blocks: []model.Block{{
 			Name: "cascade",
@@ -25,7 +27,7 @@ func policy(requests int64) model.Policy {
 			}}},
 			Rules: []model.Rule{{
 				Name: "everyone",
-				When: []model.Condition{{
+				Matches: []model.Predicate{{
 					Key: model.KeyClient, Operator: model.OperatorIn, Values: []string{"bob", "alice"},
 				}},
 				Counters: []string{model.KeyClient},
@@ -35,9 +37,9 @@ func policy(requests int64) model.Policy {
 	}
 }
 
-func snapshotOf(t *testing.T, policies ...model.Policy) *compile.Snapshot {
+func snapshotOf(t *testing.T, p model.Policy) *compile.Snapshot {
 	t.Helper()
-	snapshot, problems := compile.Compile(domain, policies, nil)
+	snapshot, problems := compile.Compile(namespace, domain, &p)
 	for _, problem := range problems {
 		require.False(t, problem.Blocking, "blocking compile problem: %+v", problem)
 	}
@@ -63,16 +65,6 @@ func TestVersion_changesWithTheEnforcedSet(t *testing.T) {
 		ruleview.Version(snapshotOf(t, policy(101))))
 }
 
-func TestVersion_doesNotDependOnTheOrderObjectsArrivedIn(t *testing.T) {
-	other := policy(50)
-	other.Name = "other-api"
-
-	forward := snapshotOf(t, policy(100), other)
-	backward := snapshotOf(t, other, policy(100))
-
-	require.Equal(t, ruleview.Version(forward), ruleview.Version(backward))
-}
-
 func TestVersion_isTwelveHexCharacters(t *testing.T) {
 	version := ruleview.Version(snapshotOf(t, policy(100)))
 	require.Len(t, version, 12)
@@ -83,7 +75,7 @@ func TestVersion_isTwelveHexCharacters(t *testing.T) {
 // iteration order would give two replicas two versions for one rule set.
 func TestRender_sortsConditionValueSets(t *testing.T) {
 	view := ruleview.Render(snapshotOf(t, policy(100)))
-	condition := view.Blocks[0].Rules[0].When[0]
+	condition := view.Blocks[0].Rules[0].Matches[0]
 
 	require.Equal(t, "In", condition.Operator)
 	require.Equal(t, []string{"alice", "bob"}, condition.Values)
@@ -100,15 +92,16 @@ func TestRender_carriesNoApplicabilityAnnotations(t *testing.T) {
 
 // Summary counts what the domain index shows without rendering a rule set.
 func TestSummary_countsTheEnforcedSet(t *testing.T) {
-	other := policy(50)
-	other.Name = "other-api"
-	snapshot := snapshotOf(t, policy(100), other)
+	p := policy(100)
+	second := p.Blocks[0]
+	second.Name = "second"
+	p.Blocks = append(p.Blocks, second)
+	snapshot := snapshotOf(t, p)
 
 	summary := ruleview.Summary(snapshot, "7c31a9f4e0d2")
 
 	require.Equal(t, domain, summary.Domain)
 	require.Equal(t, "7c31a9f4e0d2", summary.RuleSetVersion)
-	require.Equal(t, 2, summary.Policies)
 	require.Equal(t, 2, summary.Blocks)
 	require.Equal(t, 2, summary.Rules)
 	require.Equal(t, []string{"client", "method", "path"}, summary.EffectiveKeys)
@@ -122,15 +115,17 @@ func TestMode_rendersTheRuntimeVocabulary(t *testing.T) {
 	require.Equal(t, "bypass", ruleview.Mode(model.BehaviorBypass))
 }
 
-func TestSplitID_acceptsOnlyTheFullTriple(t *testing.T) {
-	policy, block, rule, ok := ruleview.SplitID("quote-api/cascade/everyone")
+func TestSplitID_acceptsOnlyTheWholePair(t *testing.T) {
+	block, rule, ok := ruleview.SplitID("cascade/everyone")
 	require.True(t, ok)
-	require.Equal(t, "quote-api", policy)
 	require.Equal(t, "cascade", block)
 	require.Equal(t, "everyone", rule)
 
-	for _, id := range []string{"quote-api", "quote-api/cascade", "quote-api//everyone", ""} {
-		_, _, _, ok := ruleview.SplitID(id)
+	// The three-part form is what the layout used to carry; it addresses
+	// nothing now, and accepting it would resolve to a block named after a
+	// policy that no longer exists.
+	for _, id := range []string{"cascade", "quote-api/cascade/everyone", "/everyone", "cascade/", ""} {
+		_, _, ok := ruleview.SplitID(id)
 		require.False(t, ok, "id %q", id)
 	}
 }

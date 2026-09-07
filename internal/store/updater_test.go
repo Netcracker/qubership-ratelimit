@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,28 +53,24 @@ func testScheme(t *testing.T) *runtime.Scheme {
 // testNamespace is the single business namespace an installation serves.
 const testNamespace = "biz"
 
-func policyObject(name, domain string) *v1alpha1.RateLimitPolicy {
+// policyObject builds the one policy of a domain. Its name is its domain: the
+// API server rejects any other name, so a fixture that used one would be
+// testing a state the cluster cannot produce.
+func policyObject(domain string) *v1alpha1.RateLimitPolicy {
 	return &v1alpha1.RateLimitPolicy{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: name},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace, Name: domain, Generation: 1, UID: types.UID("uid-" + domain),
+		},
 		Spec: v1alpha1.RateLimitPolicySpec{
-			Domain: domain,
+			Domain:   domain,
+			Mappings: []v1alpha1.ClaimMapping{{Key: "tenant", Claim: "org_id"}},
 			Limits: []v1alpha1.LimitBlock{{
 				Name: "api",
 				Rules: []v1alpha1.Rule{{
 					Name:  "total",
-					Rates: []v1alpha1.Rate{{Requests: 100, Period: "1m"}},
+					Rates: []v1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}},
 				}},
 			}},
-		},
-	}
-}
-
-func mappingObject(domain string) *v1alpha1.RateLimitMapping {
-	return &v1alpha1.RateLimitMapping{
-		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: domain},
-		Spec: v1alpha1.RateLimitMappingSpec{
-			Domain:   domain,
-			Mappings: []v1alpha1.ClaimMapping{{Key: "tenant", Claim: "org_id"}},
 		},
 	}
 }
@@ -83,15 +80,17 @@ func TestRuleSet_reusesTheEngineOfAnUnchangedDomain(t *testing.T) {
 	// keep its engine — and with it the warm token cache — while a changed one
 	// must get a fresh engine compiled from the new rules.
 	updater := &Updater{Counters: memory.New()}
+	compile := func(moving int32) *policy.Result {
+		return policy.Compile(policy.Input{
+			Namespace: testNamespace,
+			Policies: []v1alpha1.RateLimitPolicy{
+				policyWith("gateway.private", 10),
+				policyWith("gateway.public", moving),
+			},
+		})
+	}
 
-	first := policy.Compile(policy.Input{Policies: []v1alpha1.RateLimitPolicy{
-		policyWith("stable", 10), policyWith("moving", 10),
-	}})
-	// Both objects bind to one domain, so both live in one bundle: reuse is per
-	// domain. A second domain gives the test its unchanged half.
-	second := policy.Compile(policy.Input{Policies: []v1alpha1.RateLimitPolicy{
-		policyWith("stable", 10), policyWith("moving", 20),
-	}})
+	first, second, third := compile(10), compile(20), compile(20)
 
 	firstSet := updater.ruleSet(first, nil)
 	secondSet := updater.ruleSet(second, first.State)
@@ -99,84 +98,78 @@ func TestRuleSet_reusesTheEngineOfAnUnchangedDomain(t *testing.T) {
 	require.NotNil(t, firstSet.Engine("gateway.public"))
 	assert.NotSame(t, firstSet.Engine("gateway.public"), secondSet.Engine("gateway.public"),
 		"a changed bundle must produce a fresh engine")
+	assert.Same(t, firstSet.Engine("gateway.private"), secondSet.Engine("gateway.private"),
+		"the untouched domain keeps its engine, and with it its warm token cache")
 
-	third := policy.Compile(policy.Input{Policies: []v1alpha1.RateLimitPolicy{
-		policyWith("stable", 10), policyWith("moving", 20),
-	}})
 	thirdSet := updater.ruleSet(third, second.State)
 	assert.Same(t, secondSet.Engine("gateway.public"), thirdSet.Engine("gateway.public"),
 		"an unchanged bundle must keep its engine")
 }
 
 // policyWith is a one-rule policy whose limit is its only moving part.
-func policyWith(name string, requests int32) v1alpha1.RateLimitPolicy {
+func policyWith(domain string, requests int32) v1alpha1.RateLimitPolicy {
 	return v1alpha1.RateLimitPolicy{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "biz", Name: name, Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace, Name: domain, Generation: 1, UID: types.UID("uid-" + domain),
+		},
 		Spec: v1alpha1.RateLimitPolicySpec{
-			Domain: "gateway.public",
+			Domain:   domain,
+			Mappings: []v1alpha1.ClaimMapping{{Key: "tenant", Claim: "org_id"}},
 			Limits: []v1alpha1.LimitBlock{{Name: "b", Rules: []v1alpha1.Rule{{
 				Name:  "all",
-				Rates: []v1alpha1.Rate{{Requests: requests, Period: "1m"}},
+				Rates: []v1alpha1.Rate{{Requests: requests, PeriodSeconds: 60}},
 			}}}},
 		},
 	}
 }
 
-func TestRebuild_logsTheDomainBudgetWarning(t *testing.T) {
-	// The informational domain record is the early warning that the runtime
-	// backstop is within reach; a rebuild that swallowed it would leave refused
-	// requests as the first symptom.
-	wide := func(name string) *v1alpha1.RateLimitPolicy {
-		rules := make([]v1alpha1.Rule, 0, 16)
-		for i := range 16 {
-			rules = append(rules, v1alpha1.Rule{
-				Name: fmt.Sprintf("r%d", i),
-				Rates: []v1alpha1.Rate{
-					{Requests: 100, Period: "1m"},
-					{Requests: 100, Period: "1h"},
-					{Requests: 100, Period: "30s"},
-					{Requests: 100, Period: "10s"},
-				},
-			})
-		}
-		object := policyObject(name, "gateway.public")
-		object.Spec.Limits = []v1alpha1.LimitBlock{{Name: "b", Rules: rules}}
-		return object
+func TestRebuild_aBudgetBlockedGenerationKeepsTheLastGoodOne(t *testing.T) {
+	// The budget is blocking, so an edit over it never becomes the active
+	// generation. What must not happen is the domain losing its limits: the
+	// last-good generation keeps serving, and the rebuild says so.
+	good := policyObject("gateway.public")
+
+	oversized := *good.DeepCopy()
+	oversized.Generation = 2
+	rules := make([]v1alpha1.Rule, 0, 33)
+	for i := range 33 {
+		rules = append(rules, v1alpha1.Rule{
+			Name: fmt.Sprintf("r%d", i),
+			Rates: []v1alpha1.Rate{
+				{Requests: 100, PeriodSeconds: 60},
+				{Requests: 100, PeriodSeconds: 3600},
+				{Requests: 100, PeriodSeconds: 30},
+				{Requests: 100, PeriodSeconds: 10},
+			},
+		})
 	}
+	oversized.Spec.Limits = []v1alpha1.LimitBlock{{Name: "b", Rules: rules}}
 
 	var logged []string
 	sink := funcr.New(func(prefix, args string) {
 		logged = append(logged, prefix+args)
 	}, funcr.Options{})
 
-	// The seats are inherited from the persisted state: the domain gate never
-	// evicts a running policy, so the oversized set survives into the snapshot
-	// and the warning is its only trace.
-	objects := []*v1alpha1.RateLimitPolicy{wide("p1"), wide("p2"), wide("p3")}
-	bundle := policy.Bundle{}
-	for _, object := range objects {
-		bundle.Policies = append(bundle.Policies, policy.PolicyState{
-			Name:           object.Name,
-			GoodGeneration: object.Generation,
-			GoodSpec:       *object.Spec.DeepCopy(),
-		})
-	}
-
-	fakeClient := fakeReader(t, objects[0], objects[1], objects[2])
+	fakeClient := fakeReader(t, &oversized)
 	updater := &Updater{
-		Cache:    readerOnly{fakeClient},
-		Store:    New(),
-		Counters: memory.New(),
-		Log:      sink,
-		bundles:  map[string]policy.Bundle{"gateway.public": bundle},
+		Cache:     readerOnly{fakeClient},
+		Store:     New(),
+		Namespace: testNamespace,
+		Counters:  memory.New(),
+		Log:       sink,
+		bundles: map[string]policy.Bundle{"gateway.public": {
+			UID:            string(good.UID),
+			GoodGeneration: 1,
+			GoodSpec:       *good.Spec.DeepCopy(),
+		}},
 	}
 
 	updater.rebuild(context.Background())
 
 	require.True(t, updater.Store.Load().Has("gateway.public"),
-		"the oversized domain still serves: the record excludes nobody")
-	joined := strings.Join(logged, "\n")
-	assert.Contains(t, joined, "domain over its reference bounds")
+		"the domain keeps its last-good limits rather than losing them to a bad edit")
+	assert.Equal(t, 1, len(updater.Store.Load().Snapshot("gateway.public").Blocks))
+	assert.Contains(t, strings.Join(logged, "\n"), "policiesOnLastGood")
 }
 
 func TestPersist_sweepsTheStateOfADomainRetiredBeforeTheLease(t *testing.T) {
@@ -227,7 +220,7 @@ func TestReady_isFalseUntilTheStoreHasRules(t *testing.T) {
 func TestReady_isTrueOnceTheStoreHasBeenBuilt(t *testing.T) {
 	// One rebuild is enough: the store then reflects the namespace, whether or
 	// not any policy in it compiled.
-	source := newStubSource(t, policyObject("public", "gateway.public"))
+	source := newStubSource(t, policyObject("gateway.public"))
 	updater := &Updater{Cache: source, Store: New(), Log: logr.Discard(), Counters: memory.New()}
 	require.False(t, updater.Ready())
 
@@ -259,20 +252,26 @@ func (failingReader) List(context.Context, client.ObjectList, ...client.ListOpti
 }
 
 func TestStateView_distillsTheCompilation(t *testing.T) {
-	healthy := policyWith("healthy", 10)
-	broken := policyWith("broken", 10)
-	broken.Spec.Limits[0].Rules[0].Rates[0].Period = "bogus"
+	healthy := policyWith("gateway.public", 10)
+	broken := policyWith("gateway.private", 10)
+	broken.Spec.Limits[0].Rules[0].Rates[0].PeriodSeconds = 0
 
 	result := policy.Compile(policy.Input{
-		Policies: []v1alpha1.RateLimitPolicy{healthy, broken},
-		Mappings: []v1alpha1.RateLimitMapping{*mappingObject("gateway.public")},
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{healthy, broken},
 	})
 	view := stateView(result)
 
-	require.Len(t, view.Domains, 1)
-	assert.Equal(t, "gateway.public", view.Domains[0].Domain)
-	assert.Equal(t, 1, view.Domains[0].Blocks)
-	assert.Equal(t, 1, view.Domains[0].DecisionBuckets)
+	domains := map[string]metrics.DomainView{}
+	for _, d := range view.Domains {
+		domains[d.Domain] = d
+	}
+	require.Len(t, domains, 2)
+	assert.Equal(t, 1, domains["gateway.public"].Blocks)
+	assert.Equal(t, 1, domains["gateway.public"].DecisionBuckets)
+	assert.Equal(t, int64(1), domains["gateway.public"].AppliedGeneration)
+	assert.Zero(t, domains["gateway.private"].AppliedGeneration,
+		"a domain with nothing enforced reports generation zero")
 
 	policies := map[string]metrics.PolicyView{}
 	for _, p := range view.Policies {
@@ -280,23 +279,17 @@ func TestStateView_distillsTheCompilation(t *testing.T) {
 	}
 	require.Len(t, policies, 2)
 
-	ok := policies["biz/healthy"]
+	ok := policies["biz/gateway.public"]
 	assert.True(t, ok.Ready)
 	assert.True(t, ok.Enforced)
 	assert.Empty(t, ok.Reason)
 	assert.Zero(t, ok.GenerationLag)
-	assert.Equal(t, 1, ok.Buckets)
 
-	bad := policies["biz/broken"]
+	bad := policies["biz/gateway.private"]
 	assert.False(t, bad.Ready)
 	assert.False(t, bad.Enforced, "an invalid spec with no last-good enforces nothing")
-	assert.NotEmpty(t, bad.Reason)
+	assert.Equal(t, v1alpha1.ReasonNotCompiled, bad.Reason)
 	assert.Equal(t, int64(1), bad.GenerationLag, "with nothing enforced the whole generation trails")
-	assert.Zero(t, bad.Buckets, "an excluded policy holds no share of the budget")
-
-	require.Len(t, view.Mappings, 1)
-	assert.Equal(t, "biz/gateway.public", view.Mappings[0].Mapping)
-	assert.True(t, view.Mappings[0].Ready)
 }
 
 func TestPersist_countsAFailedDelete(t *testing.T) {
@@ -316,24 +309,25 @@ func TestPersist_countsAFailedDelete(t *testing.T) {
 func TestRebuild_prunesTheSeriesOfARenamedRule(t *testing.T) {
 	// The rebuild is where the pruner learns the active set: a series left by
 	// a renamed rule must not survive the swap.
-	metrics.Decisions.WithLabelValues("gateway.public", "gone/b/old", "ok").Inc()
+	metrics.Decisions.WithLabelValues("gateway.public", "b/old", "ok").Inc()
 
-	fakeClient := fakeReader(t, policyObject("survivor", "gateway.public"))
+	fakeClient := fakeReader(t, policyObject("gateway.public"))
 	updater := &Updater{
-		Cache:    readerOnly{fakeClient},
-		Store:    New(),
-		Counters: memory.New(),
+		Cache:     readerOnly{fakeClient},
+		Store:     New(),
+		Namespace: testNamespace,
+		Counters:  memory.New(),
 	}
 	updater.rebuild(context.Background())
 
 	assert.Zero(t, testutil.ToFloat64(
-		metrics.Decisions.WithLabelValues("gateway.public", "gone/b/old", "ok")))
+		metrics.Decisions.WithLabelValues("gateway.public", "b/old", "ok")))
 }
 
 func TestExtractionKeys_listsTokenExtractedKeysOnce(t *testing.T) {
 	result := policy.Compile(policy.Input{
-		Policies: []v1alpha1.RateLimitPolicy{policyWith("one", 10)},
-		Mappings: []v1alpha1.RateLimitMapping{*mappingObject("gateway.public")},
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{policyWith("gateway.public", 10)},
 	})
 
 	assert.ElementsMatch(t, []string{"client", "tenant"}, extractionKeys(result),

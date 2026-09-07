@@ -55,7 +55,6 @@ type CounterView struct {
 	Key string `json:"key"`
 
 	RuleID string `json:"ruleId"`
-	Policy string `json:"policy"`
 	Block  string `json:"block"`
 	Rule   string `json:"rule"`
 
@@ -148,7 +147,7 @@ func (a *API) listCounters(
 			"the configured counter store cannot enumerate keys, so counters cannot be listed")
 	}
 
-	keys, err := inspector.Keys(ctx, scanPrefix(snapshot.Domain, sel))
+	keys, err := inspector.Keys(ctx, scanPrefix(a.Namespace, snapshot.Domain, sel))
 	if err != nil {
 		a.Log.ErrorC(ctx, "failed to scan counter keys domain=%v error=%v", snapshot.Domain, err)
 		return CounterList{}, storeDown("the counter store did not answer the scan")
@@ -190,7 +189,7 @@ func (a *API) selectCandidates(
 		}
 		scanned++
 
-		parsed, err := parseCounterKey(snapshot.Domain, k)
+		parsed, err := parseCounterKey(a.Namespace, snapshot.Domain, k)
 		if err != nil {
 			// A key that does not parse belongs to another layout or another
 			// writer. It is reported once and skipped: a listing is not the
@@ -265,8 +264,7 @@ func counterView(candidate counterCandidate, bucket counters.Bucket, verdict cou
 	ref := candidate.ref
 	view := CounterView{
 		Key:           candidate.key,
-		RuleID:        ruleID(ref.block.Policy, ref.block.Name, ref.rule.Name),
-		Policy:        ref.block.Policy,
+		RuleID:        ruleID(ref.block.Name, ref.rule.Name),
 		Block:         ref.block.Name,
 		Rule:          ref.rule.Name,
 		Algorithm:     ruleview.Algorithm(ref.rate),
@@ -289,18 +287,19 @@ func counterView(candidate counterCandidate, bucket counters.Bucket, verdict cou
 // scanPrefix narrows the scan to what the selection can prove it needs. One full
 // rule id addresses a subtree. Anything else (several ids, a prefix form, or no
 // id at all) has to walk the domain, because the key layout puts the window
-// ahead of the axis values and a policy prefix cannot be built without the
+// ahead of the axis values and a partial prefix cannot be built without the
 // escaping the key package owns.
-func scanPrefix(domain string, sel selector) string {
+func scanPrefix(namespace, domain string, sel selector) string {
 	if len(sel.RuleIDs) == 1 {
-		if policy, block, rule, ok := ruleview.SplitID(sel.RuleIDs[0]); ok {
-			return key.RulePrefix(key.Ident{Domain: domain, Policy: policy, Block: block, Rule: rule})
+		if block, rule, ok := ruleview.SplitID(sel.RuleIDs[0]); ok {
+			return key.RulePrefix(key.Ident{
+				Namespace: namespace, Domain: domain, Block: block, Rule: rule})
 		}
 	}
-	return key.DomainPrefix(domain)
+	return key.DomainPrefix(namespace, domain)
 }
 
-// ruleID joins the triple that identifies a rule within a domain.
-func ruleID(policy, block, rule string) string {
-	return ruleview.ID(policy, block, rule)
+// ruleID joins the pair that identifies a rule within a domain.
+func ruleID(block, rule string) string {
+	return ruleview.ID(block, rule)
 }

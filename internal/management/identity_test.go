@@ -56,7 +56,7 @@ func TestAuthorization_gatesMutationsOnTheOperatorRole(t *testing.T) {
 	require.Equal(t, http.StatusOK, h.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil).Code)
 
 	// And is refused the mutation.
-	requireError(t, h.reset(t, "ruleId=api/orders/per-client&axis.client=alice", "key-1", viewerRoles()),
+	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice", "key-1", viewerRoles()),
 		http.StatusForbidden, CodeForbidden)
 
 	// An operator holds both: every mutation implies the right to read what it
@@ -64,7 +64,7 @@ func TestAuthorization_gatesMutationsOnTheOperatorRole(t *testing.T) {
 	require.Equal(t, http.StatusOK,
 		h.call(t, http.MethodGet, BasePath+"/domains", operatorRoles(), nil).Code)
 	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=api/orders/per-client&axis.client=alice", "key-2", operatorRoles()).Code)
+		h.reset(t, "ruleId=orders/per-client&axis.client=alice", "key-2", operatorRoles()).Code)
 }
 
 func TestAuthorization_refusesATokenWithoutRoles(t *testing.T) {

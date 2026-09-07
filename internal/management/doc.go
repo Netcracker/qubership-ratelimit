@@ -17,7 +17,7 @@
 //
 // # Blast radius
 //
-// The addressed reset takes one full policy/block/rule id and one value for
+// The addressed reset takes one whole block/rule id and one value for
 // every axis the rule declares. With the identity fully named its keys are
 // computed from the snapshot rather than scanned, so the radius is bounded by
 // construction. Anything wider is a sweep, and a sweep belongs to the

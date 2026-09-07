@@ -67,7 +67,7 @@ var (
 	// reports what it would have done, which is what a dry run is for.
 	Decisions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_decisions_total",
-		Help: "Applied rules by their own verdict; rule is the policy/block/rule triple.",
+		Help: "Applied rules by their own verdict; rule is the block/rule identity.",
 	}, []string{"domain", "rule", "outcome"})
 
 	// NearLimit counts admissions of enforcing rules that landed inside the

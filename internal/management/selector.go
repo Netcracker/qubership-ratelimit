@@ -126,16 +126,17 @@ func parseAxes(query url.Values) (map[string][]string, *apiError) {
 	return axes, nil
 }
 
-// checkRuleIDForm accepts a full triple or one of its segment prefixes.
+// checkRuleIDForm accepts a whole block/rule id or the block that heads it.
 func checkRuleIDForm(id string) *apiError {
 	parts := strings.Split(id, "/")
-	if len(parts) > 3 {
+	if len(parts) > 2 {
 		return invalid("the ruleId "+logSafe(id)+
-			" has more than the three policy/block/rule segments", "ruleId")
+			" has more than the two block/rule segments; the policy segment the layout "+
+			"used to carry is gone, because a domain has exactly one policy", "ruleId")
 	}
 	if slices.Contains(parts, "") {
 		return invalid("the ruleId "+logSafe(id)+
-			" carries an empty segment; use policy, policy/block, or policy/block/rule", "ruleId")
+			" carries an empty segment; use block or block/rule", "ruleId")
 	}
 	return nil
 }
@@ -201,15 +202,13 @@ func (s selector) matches(parsed counterKey) bool {
 	return false
 }
 
-// matchesRuleID compares by whole segments: a policy name selects its blocks,
-// never a policy whose name merely starts the same way.
+// matchesRuleID compares by whole segments: a block name selects its rules,
+// never a block whose name merely starts the same way.
 func matchesRuleID(id string, parsed counterKey) bool {
 	switch parts := strings.Split(id, "/"); len(parts) {
 	case 1:
-		return parsed.Policy == parts[0]
+		return parsed.Block == parts[0]
 	case 2:
-		return parsed.Policy == parts[0] && parsed.Block == parts[1]
-	case 3:
 		return parsed.RuleID == id
 	default:
 		return false

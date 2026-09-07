@@ -23,7 +23,6 @@ func TestDomains_reportsTheEnforcedSetAndItsVersion(t *testing.T) {
 	summary := list.Items[0]
 	require.Equal(t, testDomain, summary.Domain)
 	require.Equal(t, h.version, summary.RuleSetVersion)
-	require.Equal(t, 2, summary.Policies)
 	require.Equal(t, 3, summary.Blocks)
 	require.Equal(t, 6, summary.Rules)
 	require.Contains(t, summary.EffectiveKeys, "plan")
@@ -41,11 +40,12 @@ func TestRules_reportsTheCompiledSet(t *testing.T) {
 	require.Equal(t, h.version, view.RuleSetVersion)
 	require.Len(t, view.Blocks, 3)
 
-	// Blocks come in compiled order: by policy name, then authored position.
-	require.Equal(t, []string{"orders", "by-order", "cascade"},
+	// Blocks come in the order the one policy authored them; there is no
+	// second object to order against.
+	require.Equal(t, []string{"cascade", "orders", "by-order"},
 		[]string{view.Blocks[0].Block, view.Blocks[1].Block, view.Blocks[2].Block})
 
-	cascade := view.Blocks[2]
+	cascade := view.Blocks[0]
 	require.Equal(t, "FirstMatch", cascade.Mode, "block mode mirrors the custom resource")
 	require.Equal(t, "bypass", cascade.Rules[0].Mode, "rule mode is the runtime vocabulary")
 	require.Equal(t, []string{"client"}, cascade.Rules[2].Axes)
@@ -96,8 +96,8 @@ func TestRules_annotatesAScopedListing(t *testing.T) {
 			byID[rule.ID] = rule
 		}
 	}
-	require.Equal(t, ruleview.ApplicabilityAlways, byID["quote-api/cascade/internal"].Applicability)
-	require.Equal(t, ruleview.ApplicabilityNever, byID["quote-api/cascade/everyone"].Applicability)
+	require.Equal(t, ruleview.ApplicabilityAlways, byID["cascade/internal"].Applicability)
+	require.Equal(t, ruleview.ApplicabilityNever, byID["cascade/everyone"].Applicability)
 }
 
 func TestRules_reportsAnUnknownDomainAsNotFound(t *testing.T) {
@@ -113,7 +113,7 @@ func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?ruleId=quote-api/cascade/everyone", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone", viewerRoles(), nil),
 		http.StatusOK, &list)
 
 	require.Len(t, list.Items, 2)
@@ -121,7 +121,7 @@ func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 	require.Empty(t, list.NextCursor)
 
 	alice := list.Items[0]
-	require.Equal(t, "quote-api/cascade/everyone", alice.RuleID)
+	require.Equal(t, "cascade/everyone", alice.RuleID)
 	require.Equal(t, map[string]string{"client": "alice"}, alice.Axes)
 	require.Equal(t, "enforce", alice.Mode)
 	require.Equal(t, int64(100), alice.Limit)
@@ -134,7 +134,7 @@ func TestCounters_doNotChargeWhatTheyReport(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/quotes/1", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
-	target := BasePath + "/domains/" + testDomain + "/counters?ruleId=quote-api/cascade/everyone"
+	target := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 	var first, second CounterList
 	decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &first)
 	decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &second)
@@ -149,7 +149,7 @@ func TestCounters_limitedSelectsOnlyTheRefusingOnes(t *testing.T) {
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?ruleId=api/orders/per-client&limited=true",
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&limited=true",
 		viewerRoles(), nil), http.StatusOK, &list)
 
 	require.Len(t, list.Items, 1)
@@ -184,7 +184,7 @@ func TestCounters_axisFiltersAreOrWithinANameAndAndBetweenNames(t *testing.T) {
 
 // A counter whose rule does not declare the named axis never matches.
 func TestCounters_anAxisTheRuleLacksMatchesNothing(t *testing.T) {
-	h := newTestAPI(t, wholeDomainPolicy())
+	h := newTestAPI(t, wholeDomainBlocks()...)
 	h.spend(t, "/anything", nil, 1)
 
 	var all, filtered CounterList
@@ -203,7 +203,7 @@ func TestCounters_pagesWithACursorBoundToItsSelection(t *testing.T) {
 	for _, client := range []string{"alice", "bob", "carol", "dave"} {
 		h.spend(t, "/api/quotes/1", map[string][]string{model.KeyClient: {client}}, 1)
 	}
-	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=quote-api/cascade/everyone"
+	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 
 	var first CounterList
 	decode(t, h.call(t, http.MethodGet, base+"&pageSize=2", viewerRoles(), nil), http.StatusOK, &first)
@@ -254,7 +254,7 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 	require.Equal(t, []string{"client"}, response.ExtractedKeys)
 
 	require.Len(t, response.Rules, 1)
-	require.Equal(t, "quote-api/cascade/everyone", response.Rules[0].ID)
+	require.Equal(t, "cascade/everyone", response.Rules[0].ID)
 	require.Equal(t, "enforce", response.Rules[0].Mode)
 	require.True(t, response.Rules[0].Allowed)
 

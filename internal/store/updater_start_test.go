@@ -129,11 +129,12 @@ func startUpdater(t *testing.T, source *stubSource, ruleStore *Store) context.Ca
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	updater := &Updater{
-		Cache:    source,
-		Store:    ruleStore,
-		Debounce: 10 * time.Millisecond,
-		Log:      logr.Discard(),
-		Counters: memory.New(),
+		Cache:     source,
+		Store:     ruleStore,
+		Namespace: testNamespace,
+		Debounce:  10 * time.Millisecond,
+		Log:       logr.Discard(),
+		Counters:  memory.New(),
 	}
 	done := make(chan error, 1)
 	go func() { done <- updater.Start(ctx) }()
@@ -153,7 +154,7 @@ func TestUpdaterStart_fillsTheStoreBeforeAnyEvent(t *testing.T) {
 	// The manager syncs the cache before it starts this runnable, so the first
 	// rebuild must already see every existing policy — a replica that waited for
 	// an event would answer checks from an empty store until one arrived.
-	source := newStubSource(t, policyObject("public", "gateway.public"))
+	source := newStubSource(t, policyObject("gateway.public"))
 	ruleStore := New()
 
 	startUpdater(t, source, ruleStore)
@@ -170,7 +171,7 @@ func TestUpdaterStart_rebuildsOnAnEvent(t *testing.T) {
 	require.Eventually(t, source.informer.handlerRegistered, 2*time.Second, 5*time.Millisecond)
 	require.False(t, ruleStore.Load().Has("gateway.private"))
 
-	added := policyObject("private", "gateway.private")
+	added := policyObject("gateway.private")
 	require.NoError(t, source.Reader.(client.Client).Create(context.Background(), added))
 	source.informer.deliverAdd(t, added)
 
@@ -179,7 +180,7 @@ func TestUpdaterStart_rebuildsOnAnEvent(t *testing.T) {
 }
 
 func TestUpdaterStart_dropsADeletedPolicy(t *testing.T) {
-	removed := policyObject("private", "gateway.private")
+	removed := policyObject("gateway.private")
 	source := newStubSource(t, removed)
 	ruleStore := New()
 	startUpdater(t, source, ruleStore)
@@ -222,21 +223,19 @@ func TestUpdaterStart_reportsAFailedHandlerRegistration(t *testing.T) {
 	assert.Error(t, updater.Start(context.Background()))
 }
 
-func TestUpdaterStart_rebuildsOnAMappingEvent(t *testing.T) {
-	// A mapping decides how identity is read, so it has to trigger a rebuild too:
-	// a rule that references a mapped key comes alive on the rebuild that first
-	// sees the mapping.
+func TestUpdaterStart_rebuildsOnANewDomain(t *testing.T) {
+	// One object holds the rules, the extraction, and the groups of a domain,
+	// so one informer sees every change that can alter a snapshot — and the
+	// domain becomes known on the rebuild that first sees its policy.
 	source := newStubSource(t)
 	ruleStore := New()
 	startUpdater(t, source, ruleStore)
 	require.Eventually(t, source.informer.handlerRegistered, 2*time.Second, 5*time.Millisecond)
 
-	mapping := mappingObject("gateway.mapped")
-	require.NoError(t, source.Reader.(client.Client).Create(context.Background(), mapping))
-	source.informer.deliverAdd(t, mapping)
+	object := policyObject("gateway.mapped")
+	require.NoError(t, source.Reader.(client.Client).Create(context.Background(), object))
+	source.informer.deliverAdd(t, object)
 
-	// The domain becoming known is the whole assertion: a mapping alone claims a
-	// domain, and the keys it declares are the engine's business, not the store's.
 	assert.Eventually(t, func() bool { return ruleStore.Load().Has("gateway.mapped") },
 		2*time.Second, 5*time.Millisecond)
 }
@@ -351,13 +350,14 @@ func startUpdaterWithState(
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	updater := &Updater{
-		Cache:    source,
-		Store:    ruleStore,
-		Debounce: 10 * time.Millisecond,
-		Log:      logr.Discard(),
-		Counters: memory.New(),
-		State:    state,
-		Elected:  elected,
+		Cache:     source,
+		Store:     ruleStore,
+		Namespace: testNamespace,
+		Debounce:  10 * time.Millisecond,
+		Log:       logr.Discard(),
+		Counters:  memory.New(),
+		State:     state,
+		Elected:   elected,
 	}
 	done := make(chan error, 1)
 	go func() { done <- updater.Start(ctx) }()
@@ -381,7 +381,7 @@ func closedChannel() <-chan struct{} {
 func TestUpdaterStart_theLeaderPersistsTheStateOfEachDomain(t *testing.T) {
 	// A restart has to find out which generation is being enforced, and etcd only
 	// holds the latest one.
-	source := newStubSource(t, policyObject("public", "gateway.public"))
+	source := newStubSource(t, policyObject("gateway.public"))
 	state := newStubState()
 
 	startUpdaterWithState(t, source, New(), state, closedChannel())
@@ -394,7 +394,7 @@ func TestUpdaterStart_theLeaderPersistsTheStateOfEachDomain(t *testing.T) {
 func TestUpdaterStart_aNonLeaderReadsTheStateButNeverWritesIt(t *testing.T) {
 	// Several writers would fight over one ConfigMap for no gain: every replica
 	// computes the same bundles.
-	source := newStubSource(t, policyObject("public", "gateway.public"))
+	source := newStubSource(t, policyObject("gateway.public"))
 	state := newStubState()
 
 	// A channel that is never closed is a replica that never wins the lease.
@@ -406,7 +406,7 @@ func TestUpdaterStart_aNonLeaderReadsTheStateButNeverWritesIt(t *testing.T) {
 }
 
 func TestUpdaterStart_dropsTheStateOfARetiredDomain(t *testing.T) {
-	removed := policyObject("private", "gateway.private")
+	removed := policyObject("gateway.private")
 	source := newStubSource(t, removed)
 	state := newStubState()
 	startUpdaterWithState(t, source, New(), state, closedChannel())
@@ -424,7 +424,7 @@ func TestUpdaterStart_dropsTheStateOfARetiredDomain(t *testing.T) {
 func TestUpdaterStart_servesRulesEvenWhenTheStateIsUnreadable(t *testing.T) {
 	// Refusing to serve over an unreadable cache would turn a recoverable state
 	// into an outage: the rules themselves come from the objects.
-	source := newStubSource(t, policyObject("public", "gateway.public"))
+	source := newStubSource(t, policyObject("gateway.public"))
 	state := newStubState()
 	state.failing = true
 	ruleStore := New()
@@ -440,7 +440,7 @@ func TestUpdaterStart_persistsOnceLeadershipIsAcquired(t *testing.T) {
 	// acquired and its first rebuild writes nothing. Becoming leader has to be a
 	// trigger of its own, or the state of a namespace that then goes quiet would
 	// never be written at all.
-	source := newStubSource(t, policyObject("public", "gateway.public"))
+	source := newStubSource(t, policyObject("gateway.public"))
 	state := newStubState()
 	elected := make(chan struct{})
 	ruleStore := New()
@@ -460,7 +460,7 @@ func TestUpdaterStart_retriesAWriteThatFailed(t *testing.T) {
 	// The bundle the store holds is not the bundle that was computed. Treating a
 	// failed write as done would leave the state unwritten until something else
 	// happened to change it.
-	added := policyObject("private", "gateway.private")
+	added := policyObject("gateway.private")
 	source := newStubSource(t)
 	state := newStubState()
 	state.saveFailures = 1

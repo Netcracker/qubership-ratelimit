@@ -35,132 +35,127 @@ func (discardLogger) DebugC(context.Context, string, ...any) {}
 func (discardLogger) InfoC(context.Context, string, ...any)  {}
 func (discardLogger) ErrorC(context.Context, string, ...any) {}
 
-// testDomain is the domain every fixture binds to.
-const testDomain = "gateway.public"
+// testDomain is the domain every fixture binds to, and testNamespace is the
+// installation it belongs to: both are segments of every counter key.
+const (
+	testDomain    = "gateway.public"
+	testNamespace = "core-1-core"
+)
 
-// quotePolicy is a FirstMatch cascade: an exempt client, a premium tier, and
+// quoteBlocks is a FirstMatch cascade: an exempt client, a premium tier, and
 // everyone else. It is the shape the applicability analysis exists for — a rule
 // is reachable only if no earlier one decided first.
-func quotePolicy() model.Policy {
-	return model.Policy{
-		Name:   "quote-api",
-		Domain: testDomain,
-		Blocks: []model.Block{{
-			Name: "cascade",
-			Mode: model.ModeFirstMatch,
+func quoteBlocks() []model.Block {
+	return []model.Block{{
+		Name: "cascade",
+		Mode: model.ModeFirstMatch,
+		Target: model.Target{Routes: []model.Route{{
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes/"},
+		}}},
+		Rules: []model.Rule{
+			{
+				Name:     "internal",
+				Behavior: model.BehaviorBypass,
+				Matches: []model.Predicate{{
+					Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus",
+				}},
+			},
+			{
+				Name: "premium",
+				Matches: []model.Predicate{{
+					Key: "plan", Operator: model.OperatorEquals, Value: "premium",
+				}},
+				Counters: []string{model.KeyClient},
+				Rates:    []model.Rate{{Requests: 1000, Period: time.Minute}},
+			},
+			{
+				Name:     "everyone",
+				Counters: []string{model.KeyClient},
+				Rates:    []model.Rate{{Requests: 100, Period: time.Minute}},
+			},
+		},
+	}}
+}
+
+// orderBlocks is an All block where a narrow rule replaces a wide one, plus a
+// template block whose capture is a second counter axis.
+func orderBlocks() []model.Block {
+	return []model.Block{
+		{
+			Name: "orders",
 			Target: model.Target{Routes: []model.Route{{
-				Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes/"},
+				Path:    model.PathMatch{Type: model.PathPrefix, Value: "/api/orders"},
+				Methods: []string{http.MethodGet, http.MethodPost},
 			}}},
 			Rules: []model.Rule{
 				{
-					Name:     "internal",
-					Behavior: model.BehaviorBypass,
-					When: []model.Condition{{
-						Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus",
-					}},
+					Name:     "per-client",
+					Counters: []string{model.KeyClient},
+					Rates:    []model.Rate{{Requests: 3, Period: time.Hour}},
 				},
 				{
-					Name: "premium",
-					When: []model.Condition{{
-						Key: "plan", Operator: model.OperatorEquals, Value: "premium",
+					Name: "support",
+					Matches: []model.Predicate{{
+						Key: "roles", Operator: model.OperatorContains, Value: "support",
 					}},
-					Counters: []string{model.KeyClient},
-					Rates:    []model.Rate{{Requests: 1000, Period: time.Minute}},
-				},
-				{
-					Name:     "everyone",
-					Counters: []string{model.KeyClient},
-					Rates:    []model.Rate{{Requests: 100, Period: time.Minute}},
+					Counters:      []string{model.KeyClient},
+					ReplacedRules: []string{"per-client"},
+					Rates:         []model.Rate{{Requests: 50, Period: time.Hour}},
 				},
 			},
-		}},
-	}
-}
-
-// orderPolicy is an All block where a narrow rule replaces a wide one, plus a
-// template block whose capture is a second counter axis.
-func orderPolicy() model.Policy {
-	return model.Policy{
-		Name:   "api",
-		Domain: testDomain,
-		Blocks: []model.Block{
-			{
-				Name: "orders",
-				Target: model.Target{Routes: []model.Route{{
-					Path:    model.PathMatch{Type: model.PathPrefix, Value: "/api/orders"},
-					Methods: []string{http.MethodGet, http.MethodPost},
-				}}},
-				Rules: []model.Rule{
-					{
-						Name:     "per-client",
-						Counters: []string{model.KeyClient},
-						Rates:    []model.Rate{{Requests: 3, Period: time.Hour}},
-					},
-					{
-						Name: "support",
-						When: []model.Condition{{
-							Key: "roles", Operator: model.OperatorContains, Value: "support",
-						}},
-						Counters: []string{model.KeyClient},
-						Replaces: []string{"per-client"},
-						Rates:    []model.Rate{{Requests: 50, Period: time.Hour}},
-					},
+		},
+		{
+			Name: "by-order",
+			Target: model.Target{Routes: []model.Route{{
+				Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/orders/{order_id}"},
+			}}},
+			Rules: []model.Rule{{
+				Name:     "each",
+				Counters: []string{model.KeyClient, "order_id"},
+				Rates: []model.Rate{
+					{Requests: 5, Period: time.Minute},
+					{Requests: 20, Period: time.Hour},
 				},
-			},
-			{
-				Name: "by-order",
-				Target: model.Target{Routes: []model.Route{{
-					Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/orders/{order_id}"},
-				}}},
-				Rules: []model.Rule{{
-					Name:     "each",
-					Counters: []string{model.KeyClient, "order_id"},
-					Rates: []model.Rate{
-						{Requests: 5, Period: time.Minute},
-						{Requests: 20, Period: time.Hour},
-					},
-				}},
-			},
+			}},
 		},
 	}
 }
 
-// wholeDomainPolicy counts every request together, with no axis at all: its
+// wholeDomainBlocks counts every request together, with no axis at all: its
 // counter key is the bare rate prefix, the other case a listing and a reset
 // have to handle.
-func wholeDomainPolicy() model.Policy {
-	return model.Policy{
-		Name:   "global",
-		Domain: testDomain,
-		Blocks: []model.Block{{
-			Name: "everything",
-			Target: model.Target{Routes: []model.Route{{
-				Path: model.PathMatch{Type: model.PathPrefix, Value: "/"},
-			}}},
-			Rules: []model.Rule{{
-				Name:  "total",
-				Rates: []model.Rate{{Requests: 2, Period: time.Hour}},
-			}},
+func wholeDomainBlocks() []model.Block {
+	return []model.Block{{
+		Name: "everything",
+		Target: model.Target{Routes: []model.Route{{
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/"},
+		}}},
+		Rules: []model.Rule{{
+			Name:  "total",
+			Rates: []model.Rate{{Requests: 2, Period: time.Hour}},
 		}},
-	}
+	}}
 }
 
-// testMapping declares the identity keys the fixtures read: a scalar plan and
-// an array-valued roles.
-func testMapping() *model.Mapping {
-	return &model.Mapping{
+// testPolicy is the singleton of the domain: the blocks under test plus the
+// identity keys the fixtures read, a scalar plan and an array-valued roles.
+// Extraction and rules live in one object now, so they compile as one unit.
+func testPolicy(blocks []model.Block) model.Policy {
+	return model.Policy{
 		Domain: testDomain,
 		Mappings: []model.KeyMapping{
 			{Key: "plan", Claim: "plan"},
 			{Key: "roles", Claim: "roles", Type: model.ValueStringArray},
 		},
+		Blocks: blocks,
 	}
 }
 
 // compileSnapshot builds the snapshot the endpoints read.
-func compileSnapshot(t *testing.T, policies ...model.Policy) *compile.Snapshot {
+func compileSnapshot(t *testing.T, blocks []model.Block) *compile.Snapshot {
 	t.Helper()
-	snapshot, problems := compile.Compile(testDomain, policies, testMapping())
+	policy := testPolicy(blocks)
+	snapshot, problems := compile.Compile(testNamespace, testDomain, &policy)
 	for _, problem := range problems {
 		require.False(t, problem.Blocking, "blocking compile problem: %+v", problem)
 	}
@@ -179,13 +174,13 @@ type testAPI struct {
 	counters counters.Store
 }
 
-func newTestAPI(t *testing.T, policies ...model.Policy) *testAPI {
+func newTestAPI(t *testing.T, blocks ...model.Block) *testAPI {
 	t.Helper()
-	if len(policies) == 0 {
-		policies = []model.Policy{quotePolicy(), orderPolicy()}
+	if len(blocks) == 0 {
+		blocks = append(quoteBlocks(), orderBlocks()...)
 	}
 
-	snapshot := compileSnapshot(t, policies...)
+	snapshot := compileSnapshot(t, blocks)
 	version := ruleview.Version(snapshot)
 	counterStore := memory.New()
 	decisionEngine := engine.New(snapshot, counterStore)
@@ -197,10 +192,11 @@ func newTestAPI(t *testing.T, policies ...model.Policy) *testAPI {
 
 	commands := records.NewMemory(counterStore)
 	api := &API{
-		Rules:    rules,
-		Counters: counterStore,
-		Records:  commands,
-		Log:      discardLogger{},
+		Rules:     rules,
+		Namespace: testNamespace,
+		Counters:  counterStore,
+		Records:   commands,
+		Log:       discardLogger{},
 	}
 	app, err := NewApp(api)
 	require.NoError(t, err)
@@ -286,10 +282,10 @@ func (h *testAPI) callWith(
 
 // replaceRules swaps the enforced set, as a rollout does. Counters of rules
 // that are gone live on until their TTL, which is what makes them orphans.
-func (h *testAPI) replaceRules(t *testing.T, policies ...model.Policy) {
+func (h *testAPI) replaceRules(t *testing.T, blocks ...model.Block) {
 	t.Helper()
 
-	snapshot := compileSnapshot(t, policies...)
+	snapshot := compileSnapshot(t, blocks)
 	version := ruleview.Version(snapshot)
 	h.api.Rules.Replace(store.NewRuleSet(map[string]store.Domain{
 		testDomain: {

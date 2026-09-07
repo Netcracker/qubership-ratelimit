@@ -15,16 +15,16 @@ import (
 
 func TestSelector_canonicalizesTheSpellingsOfOneSelection(t *testing.T) {
 	first, err := parseSelector(mustQuery(t,
-		"ruleId=b/b/b&ruleId=a/a/a&axis.client=bob&axis.client=alice&period=1m&algorithm=GCRA"))
+		"ruleId=b/b&ruleId=a/a&axis.client=bob&axis.client=alice&period=1m&algorithm=GCRA"))
 	require.Nil(t, err)
 
 	second, err := parseSelector(mustQuery(t,
-		"ruleId=a/a/a&ruleId=b/b/b&ruleId=a/a/a&axis.client=alice&axis.client=bob&period=60&algorithm=gcra"))
+		"ruleId=a/a&ruleId=b/b&ruleId=a/a&axis.client=alice&axis.client=bob&period=60&algorithm=gcra"))
 	require.Nil(t, err)
 
 	require.Equal(t, first, second)
 	require.Equal(t, first.fingerprint(), second.fingerprint())
-	require.Equal(t, []string{"a/a/a", "b/b/b"}, first.RuleIDs)
+	require.Equal(t, []string{"a/a", "b/b"}, first.RuleIDs)
 	require.Equal(t, int64(60), first.PeriodSeconds)
 	require.Equal(t, "gcra", first.Algorithm)
 }
@@ -75,18 +75,17 @@ func TestCursor_isBoundToItsSelectionAndItsLifetime(t *testing.T) {
 }
 
 func TestMatchesRuleID_comparesWholeSegments(t *testing.T) {
-	parsed := counterKey{
-		RuleID: "api/orders/per-client", Policy: "api", Block: "orders", Rule: "per-client",
-	}
+	parsed := counterKey{RuleID: "orders/per-client", Block: "orders", Rule: "per-client"}
 
-	require.True(t, matchesRuleID("api", parsed))
-	require.True(t, matchesRuleID("api/orders", parsed))
-	require.True(t, matchesRuleID("api/orders/per-client", parsed))
+	// One segment names a block and selects its rules; two are the whole id.
+	require.True(t, matchesRuleID("orders", parsed))
+	require.True(t, matchesRuleID("orders/per-client", parsed))
 
 	// A prefix of a name is not a prefix of an id.
-	require.False(t, matchesRuleID("ap", parsed))
-	require.False(t, matchesRuleID("api/order", parsed))
-	require.False(t, matchesRuleID("api/orders/per", parsed))
+	require.False(t, matchesRuleID("order", parsed))
+	require.False(t, matchesRuleID("orders/per", parsed))
+	require.False(t, matchesRuleID("api/orders/per-client", parsed),
+		"the policy segment is gone; a three-part id addresses nothing")
 }
 
 func mustQuery(t *testing.T, raw string) url.Values {

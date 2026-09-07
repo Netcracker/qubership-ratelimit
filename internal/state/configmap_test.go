@@ -39,23 +39,18 @@ func newStore(t *testing.T, objects ...client.Object) (*Store, client.Client) {
 
 func testBundle() policy.Bundle {
 	return policy.Bundle{
-		Mapping: &policy.MappingState{
-			UID:            "uid-mapping",
-			GoodGeneration: 3,
-			GoodSpec:       v1alpha1.RateLimitMappingSpec{Domain: testDomain},
-		},
-		Policies: []policy.PolicyState{{
-			Name:           "orders",
-			UID:            "uid-orders",
-			GoodGeneration: 7,
-			GoodSpec: v1alpha1.RateLimitPolicySpec{
-				Domain: testDomain,
-				Limits: []v1alpha1.LimitBlock{{
-					Name:  "api",
-					Rules: []v1alpha1.Rule{{Name: "total", Rates: []v1alpha1.Rate{{Requests: 10, Period: "1m"}}}},
+		UID:            "uid-orders",
+		GoodGeneration: 7,
+		GoodSpec: v1alpha1.RateLimitPolicySpec{
+			Domain: testDomain,
+			Limits: []v1alpha1.LimitBlock{{
+				Name: "api",
+				Rules: []v1alpha1.Rule{{
+					Name:  "total",
+					Rates: []v1alpha1.Rate{{Requests: 10, PeriodSeconds: 60}},
 				}},
-			},
-		}},
+			}},
+		},
 	}
 }
 
@@ -89,12 +84,12 @@ func TestSave_overwritesAnExistingState(t *testing.T) {
 	require.NoError(t, store.Save(context.Background(), testDomain, testBundle()))
 
 	updated := testBundle()
-	updated.Policies[0].GoodGeneration = 9
+	updated.GoodGeneration = 9
 	require.NoError(t, store.Save(context.Background(), testDomain, updated))
 
 	loaded, err := store.Load(context.Background(), []string{testDomain})
 	require.NoError(t, err)
-	assert.Equal(t, int64(9), loaded[testDomain].Policies[0].GoodGeneration)
+	assert.Equal(t, int64(9), loaded[testDomain].GoodGeneration)
 }
 
 func TestLoad_aDomainWithNoStateIsAColdStart(t *testing.T) {
@@ -204,11 +199,11 @@ func oversizedBundle() policy.Bundle {
 		seed = sha256.Sum256(seed[:])
 		clients = append(clients, hex.EncodeToString(seed[:]))
 	}
-	return policy.Bundle{Policies: []policy.PolicyState{{
-		Name: "wide", UID: "uid-wide", GoodGeneration: 1,
+	return policy.Bundle{
+		UID: "uid-wide", GoodGeneration: 1,
 		GoodSpec: v1alpha1.RateLimitPolicySpec{
 			Domain: testDomain,
 			Groups: []v1alpha1.ClientGroup{{Name: "all", Clients: clients}},
 		},
-	}}}
+	}
 }

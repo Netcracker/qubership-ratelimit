@@ -69,7 +69,7 @@ func TestFailClosed_anUnreadableRecordRefusesTheCommand(t *testing.T) {
 	h.breakRecords(&brokenRecords{failLookup: true})
 
 	requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}}, "dryRun": true,
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
 	}, "key-1", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
 }
 
@@ -80,7 +80,7 @@ func TestFailClosed_anAmbiguousAcceptanceNamesItsRecovery(t *testing.T) {
 	h.breakRecords(&brokenRecords{failAccept: true})
 
 	body := requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}}, "dryRun": true,
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
 	}, "key-1", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
 	require.Contains(t, body.Message, "retry the same Idempotency-Key")
 }
@@ -88,12 +88,12 @@ func TestFailClosed_anAmbiguousAcceptanceNamesItsRecovery(t *testing.T) {
 func TestFailClosed_anUnreadableTokenRefusesTheExecution(t *testing.T) {
 	h := newTestAPI(t)
 	preview := h.preview(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}},
+		"selector": map[string]any{"ruleIds": []string{"orders"}},
 	}, "key-preview")
 
 	h.breakRecords(&brokenRecords{failToken: true})
 	requireError(t, h.bulk(t, map[string]any{
-		"selector":          map[string]any{"ruleIds": []string{"api/orders"}},
+		"selector":          map[string]any{"ruleIds": []string{"orders"}},
 		"confirmationToken": preview.ConfirmationToken,
 	}, "key-execute", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
 }
@@ -104,7 +104,7 @@ func TestFailClosed_anAddressedResetThatNeverRanCanBeRetried(t *testing.T) {
 	h := newTestAPI(t)
 	h.breakRecords(&brokenRecords{failReset: true})
 
-	body := requireError(t, h.reset(t, "ruleId=api/orders/per-client&axis.client=alice",
+	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice",
 		"key-1", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
 	require.Contains(t, body.Message, "nothing was bound")
 }
@@ -121,7 +121,7 @@ func TestFailClosed_aLostLeaseAnswersFromTheRecord(t *testing.T) {
 	h.api.Records = stealer
 
 	body := requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}}, "dryRun": true,
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
 	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
 	require.NotNil(t, body.Meta.PartialReset)
 	require.Equal(t, "id-stolen", body.ID, "the recorded outcome is the one that stands")
@@ -158,7 +158,7 @@ func TestLimited_sweepsOnlyTheCountersRefusingRightNow(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
-	selector := map[string]any{"ruleIds": []string{"api/orders"}, "limited": true}
+	selector := map[string]any{"ruleIds": []string{"orders"}, "limited": true}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
 	require.Equal(t, 1, *preview.MatchedCount, "only the refusing counter matches")
 
@@ -180,7 +180,7 @@ func TestLimited_addressedResetSkipsACounterUnderItsLimit(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=api/orders/per-client&axis.client=alice&limited=true",
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice&limited=true",
 		"key-1", operatorRoles()), http.StatusOK, &response)
 	require.Equal(t, 0, *response.ResetCount, "alice is not refusing, so nothing was reset")
 
@@ -194,7 +194,7 @@ func TestLimited_addressedResetDropsARefusingCounter(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=api/orders/per-client&axis.client=crawler&limited=true",
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.client=crawler&limited=true",
 		"key-1", operatorRoles()), http.StatusOK, &response)
 	require.Equal(t, 1, *response.ResetCount)
 

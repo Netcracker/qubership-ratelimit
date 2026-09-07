@@ -49,6 +49,12 @@ type API struct {
 	// Records binds Idempotency-Keys to the commands that claimed them.
 	Records records.Store
 
+	// Namespace is the component's own, a segment of every counter key. The
+	// management side has to build the same prefixes the decision path does, so
+	// it needs the same namespace: a mismatch would make every scan and every
+	// reset miss the live counters silently.
+	Namespace string
+
 	// Claims names the token claims the subject and its roles are read from;
 	// the zero value uses DefaultClaimNames.
 	Claims ClaimNames
@@ -253,7 +259,7 @@ func (a *API) handleReset(c *fiber.Ctx) error {
 	// Everything above can refuse without binding anything: a corrected repeat
 	// re-evaluates cleanly, with the same key if the client wants.
 	subject := subjectOf(c)
-	name := recordKey(snapshot.Domain, endpointCounters, subject.Name, idempotencyKey)
+	name := recordKey(a.Namespace, snapshot.Domain, endpointCounters, subject.Name, idempotencyKey)
 
 	response, apiErr := a.runReset(c.UserContext(), snapshot, version, command, name)
 	if apiErr != nil {

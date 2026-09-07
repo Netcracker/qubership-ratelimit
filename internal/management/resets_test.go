@@ -46,7 +46,7 @@ func TestBulk_previewMintsATokenAndDeletesNothing(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"bob"}}, 1)
 
 	result := h.preview(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}},
+		"selector": map[string]any{"ruleIds": []string{"orders"}},
 	}, "key-1")
 
 	require.True(t, result.DryRun)
@@ -57,7 +57,7 @@ func TestBulk_previewMintsATokenAndDeletesNothing(t *testing.T) {
 	require.NotEmpty(t, result.ConfirmationToken)
 	require.NotNil(t, result.ConfirmationExpiresAt)
 	require.Len(t, result.Rules, 1)
-	require.Equal(t, "api/orders/per-client", result.Rules[0].RuleID)
+	require.Equal(t, "orders/per-client", result.Rules[0].RuleID)
 	require.Equal(t, 2, *result.Rules[0].MatchedCount)
 
 	_, found := h.remaining(t, "alice")
@@ -69,7 +69,7 @@ func TestBulk_executionNeedsThePreviewsToken(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"bob"}}, 1)
 
-	selector := map[string]any{"ruleIds": []string{"api/orders"}}
+	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
 
 	var executed BulkResult
@@ -93,7 +93,7 @@ func TestBulk_refusesAnExecutionWithoutAToken(t *testing.T) {
 	h := newTestAPI(t)
 
 	requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}},
+		"selector": map[string]any{"ruleIds": []string{"orders"}},
 	}, "key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
 }
 
@@ -104,13 +104,13 @@ func TestBulk_refusesAMalformedToken(t *testing.T) {
 	h := newTestAPI(t)
 
 	requireError(t, h.bulk(t, map[string]any{
-		"selector":          map[string]any{"ruleIds": []string{"api/orders"}},
+		"selector":          map[string]any{"ruleIds": []string{"orders"}},
 		"confirmationToken": "not-a-token",
 	}, "key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
 
 	// Well-formed but unknown is the expired case.
 	requireError(t, h.bulk(t, map[string]any{
-		"selector":          map[string]any{"ruleIds": []string{"api/orders"}},
+		"selector":          map[string]any{"ruleIds": []string{"orders"}},
 		"confirmationToken": "ct-0123456789ab",
 	}, "key-2", operatorRoles()), http.StatusGone, CodeGone)
 }
@@ -119,7 +119,7 @@ func TestBulk_tokenIsSingleUse(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
-	selector := map[string]any{"ruleIds": []string{"api/orders"}}
+	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
 	execute := map[string]any{"selector": selector, "confirmationToken": preview.ConfirmationToken}
 
@@ -136,11 +136,11 @@ func TestBulk_tokenIsBoundToItsSelection(t *testing.T) {
 	h := newTestAPI(t)
 
 	preview := h.preview(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}},
+		"selector": map[string]any{"ruleIds": []string{"orders"}},
 	}, "key-preview")
 
 	requireError(t, h.bulk(t, map[string]any{
-		"selector":          map[string]any{"ruleIds": []string{"quote-api/cascade"}},
+		"selector":          map[string]any{"ruleIds": []string{"cascade"}},
 		"confirmationToken": preview.ConfirmationToken,
 	}, "key-execute", operatorRoles()), http.StatusConflict, CodeConflict)
 }
@@ -148,7 +148,7 @@ func TestBulk_tokenIsBoundToItsSelection(t *testing.T) {
 func TestBulk_tokenIsBoundToItsSubject(t *testing.T) {
 	h := newTestAPI(t)
 
-	selector := map[string]any{"ruleIds": []string{"api/orders"}}
+	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
 
 	// Another operator, holding the token they read from someone's terminal.
@@ -196,7 +196,7 @@ func TestBulk_refusesTheShapesTheFormsForbid(t *testing.T) {
 		"the domain-wide form mixed with a selector": {
 			body: map[string]any{
 				"confirmDomain": testDomain,
-				"selector":      map[string]any{"ruleIds": []string{"api/orders"}},
+				"selector":      map[string]any{"ruleIds": []string{"orders"}},
 				"dryRun":        true,
 			},
 			status: http.StatusBadRequest, code: CodeInvalidRequest,
@@ -207,13 +207,13 @@ func TestBulk_refusesTheShapesTheFormsForbid(t *testing.T) {
 		},
 		"an explicit dryRun=false": {
 			body: map[string]any{
-				"selector": map[string]any{"ruleIds": []string{"api/orders"}}, "dryRun": false,
+				"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": false,
 			},
 			status: http.StatusBadRequest, code: CodeInvalidRequest,
 		},
 		"a preview carrying a token": {
 			body: map[string]any{
-				"selector":          map[string]any{"ruleIds": []string{"api/orders"}},
+				"selector":          map[string]any{"ruleIds": []string{"orders"}},
 				"dryRun":            true,
 				"confirmationToken": "ct-whatever",
 			},
@@ -240,7 +240,7 @@ func TestBulk_refusesTheShapesTheFormsForbid(t *testing.T) {
 
 func TestBulk_needsAnIdempotencyKeyAndTheOperatorRole(t *testing.T) {
 	h := newTestAPI(t)
-	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"api/orders"}}, "dryRun": true}
+	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
 
 	requireError(t, h.bulk(t, body, "", operatorRoles()),
 		http.StatusBadRequest, CodeInvalidRequest)
@@ -252,7 +252,7 @@ func TestBulk_retryAnswersTheRecordedOutcome(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
-	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"api/orders"}}, "dryRun": true}
+	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
 
 	first := h.bulk(t, body, "key-1", operatorRoles())
 	require.Equal(t, http.StatusOK, first.Code)
@@ -268,11 +268,11 @@ func TestBulk_refusesTheSameKeyForADifferentCommand(t *testing.T) {
 	h := newTestAPI(t)
 
 	require.Equal(t, http.StatusOK, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}}, "dryRun": true,
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
 	}, "key-1", operatorRoles()).Code)
 
 	requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"quote-api"}}, "dryRun": true,
+		"selector": map[string]any{"ruleIds": []string{"cascade"}}, "dryRun": true,
 	}, "key-1", operatorRoles()), http.StatusConflict, CodeConflict)
 }
 
@@ -280,7 +280,7 @@ func TestBulk_refusesTheSameKeyForADifferentCommand(t *testing.T) {
 func TestBulk_previewAndExecutionNeedDifferentKeys(t *testing.T) {
 	h := newTestAPI(t)
 
-	selector := map[string]any{"ruleIds": []string{"api/orders"}}
+	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-1")
 
 	requireError(t, h.bulk(t, map[string]any{
@@ -295,7 +295,7 @@ func TestBulk_normalizesTheSelectionTheTokenIsBoundTo(t *testing.T) {
 	h.spend(t, "/api/orders/4711", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
 	preview := h.preview(t, map[string]any{"selector": map[string]any{
-		"ruleIds": []string{"api/by-order", "api/by-order"},
+		"ruleIds": []string{"by-order", "by-order"},
 		"period":  "1m",
 	}}, "key-preview")
 	require.Equal(t, 1, *preview.MatchedCount)
@@ -303,7 +303,7 @@ func TestBulk_normalizesTheSelectionTheTokenIsBoundTo(t *testing.T) {
 	var executed BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{
-			"ruleIds": []string{"api/by-order"},
+			"ruleIds": []string{"by-order"},
 			"period":  "60",
 		},
 		"confirmationToken": preview.ConfirmationToken,
@@ -318,16 +318,16 @@ func TestBulk_reachesCountersOfRemovedRules(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
 	// The rule leaves the enforced set while its counters live out their TTL.
-	h.replaceRules(t, quotePolicy())
+	h.replaceRules(t, quoteBlocks()...)
 
 	preview := h.preview(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders/per-client"}},
+		"selector": map[string]any{"ruleIds": []string{"orders/per-client"}},
 	}, "key-preview")
 	require.Equal(t, 1, *preview.MatchedCount, "an orphan still matches its own id")
 
 	var executed BulkResult
 	decode(t, h.bulk(t, map[string]any{
-		"selector":          map[string]any{"ruleIds": []string{"api/orders/per-client"}},
+		"selector":          map[string]any{"ruleIds": []string{"orders/per-client"}},
 		"confirmationToken": preview.ConfirmationToken,
 	}, "key-execute", operatorRoles()), http.StatusOK, &executed)
 	require.Equal(t, 1, *executed.ResetCount)
@@ -351,7 +351,7 @@ func TestBulk_refusesAnUnknownSelectorMember(t *testing.T) {
 	// than ignored.
 	request := httptest.NewRequest(http.MethodPost,
 		BasePath+"/domains/"+testDomain+"/counter-resets",
-		strings.NewReader(`{"selector":{"ruleIdsx":["api/orders"]},"dryRun":true}`))
+		strings.NewReader(`{"selector":{"ruleIdsx":["orders"]},"dryRun":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+testToken("alice@example.com", operatorRoles()))
 	request.Header.Set("Idempotency-Key", "key-1")

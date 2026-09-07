@@ -29,16 +29,16 @@ func TestParseCounterKey_roundTripsWhatTheKeyPackageBuilds(t *testing.T) {
 	}{
 		{
 			name:  "one axis",
-			ident: key.Ident{Domain: testDomain, Policy: "quote-api", Block: "cascade", Rule: "everyone"},
+			ident: key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "cascade", Rule: "everyone"},
 			axes:  []string{"alice"},
 		},
 		{
 			name:  "no axes at all",
-			ident: key.Ident{Domain: testDomain, Policy: "global", Block: "everything", Rule: "total"},
+			ident: key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "everything", Rule: "total"},
 		},
 		{
 			name:  "several axes",
-			ident: key.Ident{Domain: testDomain, Policy: "api", Block: "by-order", Rule: "each"},
+			ident: key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "by-order", Rule: "each"},
 			axes:  []string{"alice", "4711"},
 		},
 		{
@@ -46,7 +46,7 @@ func TestParseCounterKey_roundTripsWhatTheKeyPackageBuilds(t *testing.T) {
 			// claim value can carry, and an axis that forged a segment
 			// boundary would address another client's counter.
 			name:  "values carrying the reserved characters",
-			ident: key.Ident{Domain: testDomain, Policy: "api", Block: "by-order", Rule: "each"},
+			ident: key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "by-order", Rule: "each"},
 			axes:  []string{"tenant:one/two", "%3A{}"},
 		},
 	}
@@ -56,13 +56,12 @@ func TestParseCounterKey_roundTripsWhatTheKeyPackageBuilds(t *testing.T) {
 			prefix := key.RatePrefix(tc.ident, gcra, window)
 			built := key.Bucket(prefix, tc.axes)
 
-			parsed, err := parseCounterKey(testDomain, built)
+			parsed, err := parseCounterKey(testNamespace, testDomain, built)
 			require.NoError(t, err)
 
-			require.Equal(t, tc.ident.Policy, parsed.Policy)
 			require.Equal(t, tc.ident.Block, parsed.Block)
 			require.Equal(t, tc.ident.Rule, parsed.Rule)
-			require.Equal(t, ruleID(tc.ident.Policy, tc.ident.Block, tc.ident.Rule), parsed.RuleID)
+			require.Equal(t, ruleID(tc.ident.Block, tc.ident.Rule), parsed.RuleID)
 			require.Equal(t, "gcra", parsed.Algorithm)
 			require.Equal(t, int64(60), parsed.PeriodSeconds)
 			require.Equal(t, prefix, parsed.RatePrefix)
@@ -72,23 +71,28 @@ func TestParseCounterKey_roundTripsWhatTheKeyPackageBuilds(t *testing.T) {
 }
 
 func TestParseCounterKey_refusesWhatItCannotRead(t *testing.T) {
+	// The hash tag carries the namespace as well as the domain, so a key of
+	// another installation is as foreign as a key of another domain.
+	tag := "rl:v1:{" + testNamespace + "/" + testDomain + "}:"
 	cases := map[string]string{
-		"another domain":                "rl:v1:{other}:api/orders/per-client:gcra:60:alice:",
-		"a truncated key":               "rl:v1:{" + testDomain + "}:api/orders/per-client:",
-		"a two-part rule id":            "rl:v1:{" + testDomain + "}:api/orders:gcra:60:",
-		"a period that is not a number": "rl:v1:{" + testDomain + "}:api/orders/per-client:gcra:soon:",
-		"a truncated escape":            "rl:v1:{" + testDomain + "}:api/orders/per-client:gcra:60:%A:",
+		"another domain":                "rl:v1:{" + testNamespace + "/other}:orders/per-client:gcra:60:alice:",
+		"another installation":          "rl:v1:{other-ns/" + testDomain + "}:orders/per-client:gcra:60:alice:",
+		"a truncated key":               tag + "orders/per-client:",
+		"a one-part rule id":            tag + "orders:gcra:60:",
+		"a three-part rule id":          tag + "api/orders/per-client:gcra:60:",
+		"a period that is not a number": tag + "orders/per-client:gcra:soon:",
+		"a truncated escape":            tag + "orders/per-client:gcra:60:%A:",
 	}
 	for name, k := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := parseCounterKey(testDomain, k)
+			_, err := parseCounterKey(testNamespace, testDomain, k)
 			require.Error(t, err)
 		})
 	}
 }
 
 func TestNamedAxes_refusesARuleThatDisagreesWithItsCounter(t *testing.T) {
-	parsed := counterKey{RuleID: "api/orders/per-client", Axes: []string{"alice"}}
+	parsed := counterKey{RuleID: "orders/per-client", Axes: []string{"alice"}}
 
 	axes, err := parsed.namedAxes([]string{model.KeyClient})
 	require.NoError(t, err)

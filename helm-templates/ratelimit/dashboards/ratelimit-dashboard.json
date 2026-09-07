@@ -477,7 +477,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Refusals by rule",
-      "description": "Which rules refuse, at what rate. The rule label is the policy/block/rule triple, the same id the decision audit stream uses.",
+      "description": "Which rules refuse, at what rate. The rule label is the block/rule pair, the same identity the counter key carries.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1010,7 +1010,7 @@
       "id": 20,
       "type": "bargauge",
       "title": "Domain blocks",
-      "description": "Compiled blocks of the domain against the reference bound for the target scan.",
+      "description": "Compiled blocks of the domain. Observed rather than bounded: the object size keeps the target scan cheap on its own, so this is a number to watch, not a cap.",
       "gridPos": {
         "h": 8,
         "w": 6,
@@ -1025,25 +1025,7 @@
         "defaults": {
           "unit": "short",
           "decimals": 0,
-          "min": 0,
-          "max": 256,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 200
-              },
-              {
-                "color": "red",
-                "value": 256
-              }
-            ]
-          }
+          "min": 0
         }
       },
       "options": {
@@ -1068,8 +1050,8 @@
     {
       "id": 21,
       "type": "bargauge",
-      "title": "Budget by policy",
-      "description": "Each policy's worst-case share of its domain budget - the number that says which neighbor to shrink when the gate refuses an edit. The per-policy bound is 64.",
+      "title": "Enforced generation per domain",
+      "description": "The generation each domain is enforcing on this replica. It falling behind the object's metadata.generation is the same divergence the policy status reports.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1084,25 +1066,7 @@
         "defaults": {
           "unit": "short",
           "decimals": 0,
-          "min": 0,
-          "max": 64,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 50
-              },
-              {
-                "color": "red",
-                "value": 64
-              }
-            ]
-          }
+          "min": 0
         }
       },
       "options": {
@@ -1119,8 +1083,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(15, max by (policy) (ratelimit_policy_buckets{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
-          "legendFormat": "{{policy}}"
+          "expr": "topk(15, max by (domain) (ratelimit_policy_applied_generation{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "legendFormat": "{{domain}}"
         }
       ]
     },

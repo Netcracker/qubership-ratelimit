@@ -5,7 +5,6 @@ package e2e
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,11 +28,12 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 		probePath = "/e2e-redis"
 		limit     = 2
 	)
-	// The counter key carries the policy name, and a counter outlives the
-	// object that declared it - that is the property this suite exists to
-	// prove. So each run takes a name of its own; reusing one would inherit
-	// the previous run's spent budget and fail on its first request.
-	var policyName, addresses string
+	// A counter outlives the object that declared it - that is the property
+	// this suite exists to prove.
+	var (
+		applied   bool
+		addresses string
+	)
 
 	BeforeAll(func() {
 		addresses = redisAddresses()
@@ -43,8 +43,8 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 		// The fixture half runs once even across flake retries: the budget is
 		// an hour long, so a retry that minted a fresh policy would leave the
 		// gateway un-warmable behind the first attempt's spent budget.
-		if policyName == "" {
-			policyName = fmt.Sprintf("e2e-redis-%d", time.Now().Unix())
+		if !applied {
+			applied = true
 
 			// The gateway is warmed before the policy exists, not after:
 			// every warm-up probe would otherwise come out of the budget
@@ -53,14 +53,14 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 			// and blame Redis for it.
 			waitGatewayServes("public-gateway", probePath)
 			before := storeRebuilds()
-			Expect(apply(newPolicy(policyName, domain,
-				prefixLimits(probePath, "total", nil, limit, "1h")))).To(Succeed())
+			Expect(apply(newPolicy(domain,
+				prefixLimits(probePath, "total", nil, limit, 3600)))).To(Succeed())
 			waitStoreRebuilt(before)
 		}
 	})
 	AfterAll(func() {
-		if policyName != "" {
-			deletePolicies(policyName)
+		if applied {
+			deletePolicies(domain)
 		}
 	})
 
@@ -96,25 +96,35 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 	})
 
 	It("keeps the counter under the documented key", func() {
-		// The key carries the policy, block and rule so two policies naming
-		// one block cannot share a bucket, and the domain sits in a hash tag
-		// so every bucket of one decision lands on a single Cluster slot.
-		out, err := redisCli(addresses, "--scan", "--pattern", "rl:*"+policyName+"*")
+		// Namespace and domain sit together in one hash tag, so every bucket
+		// of a decision lands on a single Cluster slot and two installations
+		// sharing a store cannot collide. Scanning by that tag proves the
+		// grouping; the exact key below proves the rest of the layout.
+		tag := "{" + namespace + "/" + domain + "}"
+		out, err := redisCli(addresses, "--scan", "--pattern", "rl:*"+tag+"*")
 		if err != nil {
 			Skip("no redis-cli reachable through " + addresses)
 		}
-		var key string
+		var keys []string
 		for _, line := range strings.Split(out, "\n") {
 			if line = strings.TrimSpace(line); line != "" {
-				key = line
-				break
+				keys = append(keys, line)
 			}
 		}
-		Expect(key).NotTo(BeEmpty(), "no counter key for %s in Redis", policyName)
-		Expect(key).To(ContainSubstring("{"+domain+"}"),
-			"the key carries no hash tag for the domain")
-		Expect(key).To(ContainSubstring(policyName+"/probe/total"),
-			"the key does not carry the policy, block and rule")
+		Expect(keys).NotTo(BeEmpty(), "no counter key under %s in Redis", tag)
+
+		// The whole documented shape: schema version, the tag, the block and
+		// rule - which name a bucket space on their own now that a domain has
+		// exactly one policy - then the algorithm and the window. This rule
+		// declares no axes, so the key ends there, every segment terminated.
+		//
+		// Asserted as an exact member rather than as a substring of whichever
+		// key came back first: the suites share gateway.public, so a scan of
+		// the domain returns their counters too, in whatever order Redis
+		// hands them over.
+		want := "rl:v1:" + tag + ":probe/total:fixedwindow:3600:"
+		Expect(keys).To(ContainElement(want),
+			"no counter at the documented key; the domain holds %v", keys)
 	})
 
 	It("keeps a spent budget across an operator restart", func() {

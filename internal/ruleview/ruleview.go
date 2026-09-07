@@ -43,9 +43,8 @@ type DomainSummary struct {
 	// GET /rules reports.
 	RuleSetVersion string `json:"ruleSetVersion"`
 
-	Policies int `json:"policies"`
-	Blocks   int `json:"blocks"`
-	Rules    int `json:"rules"`
+	Blocks int `json:"blocks"`
+	Rules  int `json:"rules"`
 
 	EffectiveKeys  []string `json:"effectiveKeys"`
 	ListValuedKeys []string `json:"listValuedKeys,omitempty"`
@@ -78,8 +77,7 @@ type RuleSetView struct {
 // BlockView is one compiled limits block: the routes and the rules sharing
 // them.
 type BlockView struct {
-	Policy string `json:"policy"`
-	Block  string `json:"block"`
+	Block string `json:"block"`
 
 	// Mode is All or FirstMatch, spelled as the custom resource spells it.
 	Mode string `json:"mode"`
@@ -104,14 +102,14 @@ type RouteView struct {
 
 // RuleView is one compiled rule with its mode, axes, conditions, and windows.
 type RuleView struct {
-	// ID is policy/block/rule, the identity counters, metrics, and the audit
-	// stream share, so a rule round-trips from this listing into a reset without
-	// being reassembled.
+	// ID is block/rule, the identity counters, metrics, and the audit stream
+	// share, so a rule round-trips from this listing into a reset without being
+	// reassembled. There is no policy segment: a domain has one policy and its
+	// name is the domain.
 	ID string `json:"id"`
 
-	Policy string `json:"policy"`
-	Block  string `json:"block"`
-	Rule   string `json:"rule"`
+	Block string `json:"block"`
+	Rule  string `json:"rule"`
 
 	// Mode is the single runtime mode field; there is no second boolean to
 	// contradict it.
@@ -122,11 +120,11 @@ type RuleView struct {
 	// every one of them.
 	Axes []string `json:"axes"`
 
-	When []ConditionView `json:"when,omitempty"`
+	Matches []PredicateView `json:"matches,omitempty"`
 
-	// Replaces names the rules of the same block this rule silences when it
-	// matches: the narrow rule suppressing the wide one.
-	Replaces []string `json:"replaces,omitempty"`
+	// ReplacedRules names the rules of the same block this rule silences when
+	// it matches: the narrow rule suppressing the wide one.
+	ReplacedRules []string `json:"replacedRules,omitempty"`
 
 	Rates []RateView `json:"rates"`
 
@@ -155,10 +153,10 @@ const (
 	GateMayBePreempted     = "may_be_preempted"
 )
 
-// ConditionView is one compiled when predicate. Group indirection ends at
+// PredicateView is one compiled matches entry. Group indirection ends at
 // compile time: an InGroup renders as In with the group resolved into the value
 // set, so what is reported is the set the rule actually tests.
-type ConditionView struct {
+type PredicateView struct {
 	Key      string `json:"key"`
 	Operator string `json:"operator"`
 
@@ -191,12 +189,9 @@ func Summary(snapshot *compile.Snapshot, version string) DomainSummary {
 		EffectiveKeys:  nonNil(snapshot.EffectiveKeys),
 		ListValuedKeys: ListValuedKeys(snapshot),
 	}
-	policies := make(map[string]struct{}, len(snapshot.Blocks))
 	for i := range snapshot.Blocks {
-		policies[snapshot.Blocks[i].Policy] = struct{}{}
 		summary.Rules += len(snapshot.Blocks[i].Rules)
 	}
-	summary.Policies = len(policies)
 	return summary
 }
 
@@ -223,7 +218,6 @@ func Block(block *compile.Block) BlockView {
 		mode = model.ModeAll
 	}
 	view := BlockView{
-		Policy:   block.Policy,
 		Block:    block.Name,
 		Mode:     string(mode),
 		Captures: block.Captures,
@@ -250,17 +244,16 @@ func route(r *compile.Route) RouteView {
 // Rule renders one compiled rule.
 func Rule(block *compile.Block, rule *compile.Rule) RuleView {
 	view := RuleView{
-		ID:       ID(block.Policy, block.Name, rule.Name),
-		Policy:   block.Policy,
-		Block:    block.Name,
-		Rule:     rule.Name,
-		Mode:     Mode(rule.Behavior),
-		Axes:     nonNil(rule.Counters),
-		Replaces: rule.Replaces,
-		Rates:    make([]RateView, 0, len(rule.Rates)),
+		ID:            ID(block.Name, rule.Name),
+		Block:         block.Name,
+		Rule:          rule.Name,
+		Mode:          Mode(rule.Behavior),
+		Axes:          nonNil(rule.Counters),
+		ReplacedRules: rule.ReplacedRules,
+		Rates:         make([]RateView, 0, len(rule.Rates)),
 	}
-	for i := range rule.When {
-		view.When = append(view.When, condition(&rule.When[i]))
+	for i := range rule.Matches {
+		view.Matches = append(view.Matches, predicate(&rule.Matches[i]))
 	}
 	for i := range rule.Rates {
 		view.Rates = append(view.Rates, Rate(&rule.Rates[i]))
@@ -268,14 +261,14 @@ func Rule(block *compile.Block, rule *compile.Rule) RuleView {
 	return view
 }
 
-func condition(c *compile.Condition) ConditionView {
+func predicate(c *compile.Predicate) PredicateView {
 	// A compiled InGroup is an In whose group is already resolved; reporting
 	// the group name would name something no longer consulted at decision time.
 	operator := c.Operator
 	if operator == model.OperatorInGroup {
 		operator = model.OperatorIn
 	}
-	view := ConditionView{Key: c.Key, Operator: string(operator)}
+	view := PredicateView{Key: c.Key, Operator: string(operator)}
 	switch operator {
 	case model.OperatorEquals, model.OperatorContains:
 		view.Value = c.Value
@@ -356,19 +349,21 @@ func Version(snapshot *compile.Snapshot) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-// ID joins the triple that identifies a rule within a domain.
-func ID(policy, block, rule string) string {
-	return policy + "/" + block + "/" + rule
+// ID joins the pair that identifies a rule within a domain. The policy segment
+// the layout used to carry is gone: a domain has exactly one policy, and its
+// name is the domain itself.
+func ID(block, rule string) string {
+	return block + "/" + rule
 }
 
 // SplitID takes a rule id apart. The parts cannot contain a slash: they are
 // resource names, which the schema constrains to a DNS label.
-func SplitID(id string) (policy, block, rule string, ok bool) {
+func SplitID(id string) (block, rule string, ok bool) {
 	parts := strings.Split(id, "/")
-	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return "", "", "", false
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
 	}
-	return parts[0], parts[1], parts[2], true
+	return parts[0], parts[1], true
 }
 
 func nonNil(values []string) []string {

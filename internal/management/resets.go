@@ -47,8 +47,8 @@ func (a *API) handleBulkReset(c *fiber.Ctx) error {
 
 	ctx := c.UserContext()
 	subject := subjectOf(c)
-	keys := commandKeys(snapshot.Domain,
-		recordKey(snapshot.Domain, endpointResets, subject.Name, idempotencyKey), command)
+	keys := commandKeys(a.Namespace, snapshot.Domain,
+		recordKey(a.Namespace, snapshot.Domain, endpointResets, subject.Name, idempotencyKey), command)
 
 	record, err := a.Records.Lookup(ctx, keys)
 	if err != nil {
@@ -84,7 +84,7 @@ func (a *API) checkToken(
 	subject Subject,
 	command bulkCommand,
 ) *apiError {
-	raw, found, err := a.Records.Get(ctx, tokenKey(snapshot.Domain, command.ConfirmationToken))
+	raw, found, err := a.Records.Get(ctx, tokenKey(a.Namespace, snapshot.Domain, command.ConfirmationToken))
 	if err != nil {
 		a.Log.ErrorC(ctx, "failed to read a confirmation token error=%v", err)
 		return storeDown("the command record store did not answer; the command was not accepted")
@@ -389,7 +389,7 @@ func (a *API) mintToken(
 	if err != nil {
 		return "", time.Time{}, errorf(CodeInternal, "the confirmation token could not be encoded")
 	}
-	if err := a.Records.Put(ctx, tokenKey(domain, token), document, confirmationTTL); err != nil {
+	if err := a.Records.Put(ctx, tokenKey(a.Namespace, domain, token), document, confirmationTTL); err != nil {
 		a.Log.ErrorC(ctx, "failed to store a confirmation token error=%v", err)
 		return "", time.Time{}, storeDown("the command record store did not answer")
 	}

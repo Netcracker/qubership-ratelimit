@@ -86,9 +86,9 @@ func (s *sweeper) run(ctx context.Context, deadline time.Time) error {
 		return errors.New("the configured counter store cannot enumerate keys")
 	}
 
-	prefix := key.DomainPrefix(s.snapshot.Domain)
+	prefix := key.DomainPrefix(s.api.Namespace, s.snapshot.Domain)
 	if !s.domainWide {
-		prefix = scanPrefix(s.snapshot.Domain, s.sel)
+		prefix = scanPrefix(s.api.Namespace, s.snapshot.Domain, s.sel)
 	}
 	keys, err := inspector.Keys(ctx, prefix)
 	if err != nil {
@@ -128,7 +128,7 @@ func (s *sweeper) run(ctx context.Context, deadline time.Time) error {
 // the rule's definition, so they only ever match counters of rules currently
 // enforced.
 func (s *sweeper) consider(ctx context.Context, k string) (counterCandidate, bool) {
-	parsed, err := parseCounterKey(s.snapshot.Domain, k)
+	parsed, err := parseCounterKey(s.api.Namespace, s.snapshot.Domain, k)
 	if err != nil {
 		s.api.Log.DebugC(ctx, "skipping an unparsable counter key domain=%v reason=%v",
 			s.snapshot.Domain, err)

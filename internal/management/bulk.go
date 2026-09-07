@@ -350,23 +350,30 @@ func randomID() string {
 	return hex.EncodeToString(buf[:])
 }
 
-// Storage keys. They carry the domain's hash tag for the same reason counter
-// keys do: one slot per domain is what lets an acceptance, and every batch after
-// it, be one atomic write over the record, the lease, and the counters together.
-func tokenKey(domain, token string) string {
-	return "rlm:v1:{" + domain + "}:ct:" + token
+// Storage keys. They carry the counter keys' own hash tag, namespace and domain
+// together, for the same reason those keys carry it: one slot per domain is what
+// lets an acceptance, and every batch after it, be one atomic write over the
+// record, the lease, and the counters together. Tagging these by domain alone
+// would put them in another slot, and every batch would fail CROSSSLOT the
+// moment the store is a Cluster.
+func recordTag(namespace, domain string) string {
+	return "rlm:v1:{" + namespace + "/" + domain + "}:"
+}
+
+func tokenKey(namespace, domain, token string) string {
+	return recordTag(namespace, domain) + "ct:" + token
 }
 
 // leaseKey is the domain's sweep slot: one sweep at a time, by construction.
-func leaseKey(domain string) string {
-	return "rlm:v1:{" + domain + "}:sweep"
+func leaseKey(namespace, domain string) string {
+	return recordTag(namespace, domain) + "sweep"
 }
 
 // commandKeys names everything one bulk command touches.
-func commandKeys(domain, record string, command bulkCommand) records.Keys {
-	keys := records.Keys{Record: record, Lease: leaseKey(domain)}
+func commandKeys(namespace, domain, record string, command bulkCommand) records.Keys {
+	keys := records.Keys{Record: record, Lease: leaseKey(namespace, domain)}
 	if !command.DryRun {
-		keys.Token = tokenKey(domain, command.ConfirmationToken)
+		keys.Token = tokenKey(namespace, domain, command.ConfirmationToken)
 	}
 	return keys
 }

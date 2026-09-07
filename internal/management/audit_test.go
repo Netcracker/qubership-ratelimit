@@ -66,7 +66,7 @@ func TestAudit_recordsWhatTheMutationDid(t *testing.T) {
 
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
 	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=api/orders/per-client&axis.client=crawler", "key-1", operatorRoles()).Code)
+		h.reset(t, "ruleId=orders/per-client&axis.client=crawler", "key-1", operatorRoles()).Code)
 
 	line := log.find(t, "management mutation ")
 	for _, part := range []string{
@@ -74,7 +74,7 @@ func TestAudit_recordsWhatTheMutationDid(t *testing.T) {
 		"idempotencyKey=key-1",
 		"domain=" + testDomain,
 		"endpoint=counters",
-		"ruleId=api/orders/per-client",
+		"ruleId=orders/per-client",
 		"crawler",
 		"outcome=reset",
 		"count=1",
@@ -91,7 +91,7 @@ func TestAudit_recordsABulkAcceptance(t *testing.T) {
 	h.api.Log = log
 
 	h.preview(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"api/orders"}},
+		"selector": map[string]any{"ruleIds": []string{"orders"}},
 	}, "key-1")
 
 	line := log.find(t, "management mutation accepted")
@@ -101,7 +101,7 @@ func TestAudit_recordsABulkAcceptance(t *testing.T) {
 		"endpoint=counter-resets",
 		"command=preview-selector",
 		"dryRun=true",
-		"api/orders",
+		"orders",
 	} {
 		require.Contains(t, line.message, part)
 	}
@@ -115,7 +115,7 @@ func TestAudit_carriesTheRequestIDThroughItsContext(t *testing.T) {
 	log := &recordingLogger{}
 	h.api.Log = log
 
-	recorder := h.reset(t, "ruleId=api/orders/per-client&axis.client=alice", "key-1", operatorRoles())
+	recorder := h.reset(t, "ruleId=orders/per-client&axis.client=alice", "key-1", operatorRoles())
 	require.Equal(t, http.StatusOK, recorder.Code)
 
 	line := log.find(t, "management mutation ")
@@ -135,7 +135,7 @@ func TestAudit_carriesTheCallersRequestID(t *testing.T) {
 	h.api.Log = log
 
 	target := BasePath + "/domains/" + testDomain +
-		"/counters?ruleId=api/orders/per-client&axis.client=alice"
+		"/counters?ruleId=orders/per-client&axis.client=alice"
 	recorder := h.callWith(t, http.MethodDelete, target, operatorRoles(), nil,
 		func(request *http.Request) {
 			request.Header.Set("Idempotency-Key", "key-1")

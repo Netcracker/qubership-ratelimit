@@ -12,8 +12,8 @@ info:
 
     Principles:
     * The API mutates runtime state only (counters, audit taps). Configuration
-      (limits, rules, mappings) lives in the RateLimitPolicy and
-      RateLimitMapping custom resources - the GitOps path. There are no
+      (limits, rules, claim mappings, groups) lives in the RateLimitPolicy of
+      the domain, the one custom resource - the GitOps path. There are no
       configuration write endpoints.
     * Reads never charge counters: every read goes through the store's Peek,
       evaluated at cost=1. Judging arbitrary costs is what the simulation
@@ -82,7 +82,6 @@ paths:
                 items:
                 - domain: gateway.public
                   ruleSetVersion: 7c31a9f4e0d2
-                  policies: 2
                   blocks: 8
                   rules: 15
                   effectiveKeys:
@@ -206,8 +205,7 @@ paths:
                     listValuedKeys:
                     - roles
                     blocks:
-                    - policy: quote-api
-                      block: cascade
+                    - block: cascade
                       mode: FirstMatch
                       routes:
                       - type: Prefix
@@ -216,25 +214,23 @@ paths:
                         - GET
                         - POST
                       rules:
-                      - id: quote-api/cascade/internal
-                        policy: quote-api
+                      - id: cascade/internal
                         block: cascade
                         rule: internal
                         mode: bypass
                         axes: []
-                        when:
+                        matches:
                         - key: client
                           operator: Equals
                           value: prometheus
                         rates: []
-                      - id: quote-api/cascade/trial
-                        policy: quote-api
+                      - id: cascade/trial
                         block: cascade
                         rule: trial
                         mode: shadow
                         axes:
                         - client
-                        when:
+                        matches:
                         - key: client
                           operator: In
                           values:
@@ -245,14 +241,13 @@ paths:
                           requests: 10
                           periodSeconds: 60
                           period: 1m
-                      - id: quote-api/cascade/premium
-                        policy: quote-api
+                      - id: cascade/premium
                         block: cascade
                         rule: premium
                         mode: enforce
                         axes:
                         - client
-                        when:
+                        matches:
                         - key: plan
                           operator: In
                           values:
@@ -264,8 +259,7 @@ paths:
                           periodSeconds: 60
                           period: 1m
                           burst: 50
-                      - id: quote-api/cascade/everyone
-                        policy: quote-api
+                      - id: cascade/everyone
                         block: cascade
                         rule: everyone
                         mode: enforce
@@ -277,15 +271,13 @@ paths:
                           periodSeconds: 60
                           period: 1m
                           burst: 20
-                    - policy: quote-api
-                      block: quota
+                    - block: quota
                       mode: All
                       routes:
                       - type: Prefix
                         value: /api/quotes/
                       rules:
-                      - id: quote-api/quota/daily
-                        policy: quote-api
+                      - id: quota/daily
                         block: quota
                         rule: daily
                         mode: enforce
@@ -300,8 +292,7 @@ paths:
                           requests: 10000
                           periodSeconds: 86400
                           period: 24h
-                    - policy: quote-api
-                      block: reports
+                    - block: reports
                       mode: All
                       routes:
                       - type: Prefix
@@ -309,8 +300,7 @@ paths:
                         methods:
                         - POST
                       rules:
-                      - id: quote-api/reports/heavy
-                        policy: quote-api
+                      - id: reports/heavy
                         block: reports
                         rule: heavy
                         mode: enforce
@@ -322,29 +312,27 @@ paths:
                           requests: 5
                           periodSeconds: 60
                           period: 1m
-                      - id: quote-api/reports/gold
-                        policy: quote-api
+                      - id: reports/gold
                         block: reports
                         rule: gold
                         mode: enforce
                         axes:
                         - client
                         - path
-                        when:
+                        matches:
                         - key: plan
                           operator: In
                           values:
                           - gold
                           - platinum
-                        replaces:
+                        replacedRules:
                         - heavy
                         rates:
                         - algorithm: gcra
                           requests: 20
                           periodSeconds: 60
                           period: 1m
-                    - policy: quote-api
-                      block: services
+                    - block: services
                       mode: All
                       routes:
                       - type: Template
@@ -352,8 +340,7 @@ paths:
                       captures:
                       - service
                       rules:
-                      - id: quote-api/services/per-service
-                        policy: quote-api
+                      - id: services/per-service
                         block: services
                         rule: per-service
                         mode: enforce
@@ -364,30 +351,27 @@ paths:
                           requests: 60
                           periodSeconds: 60
                           period: 1m
-                    - policy: quote-api
-                      block: tenants
+                    - block: tenants
                       mode: All
                       routes:
                       - type: Prefix
                         value: /api/
                       rules:
-                      - id: quote-api/tenants/partner-lift
-                        policy: quote-api
+                      - id: tenants/partner-lift
                         block: tenants
                         rule: partner-lift
                         mode: bypass
                         axes: []
-                        when:
+                        matches:
                         - key: client
                           operator: In
                           values:
                           - p-1
                           - p-2
-                        replaces:
+                        replacedRules:
                         - per-tenant
                         rates: []
-                      - id: quote-api/tenants/per-tenant
-                        policy: quote-api
+                      - id: tenants/per-tenant
                         block: tenants
                         rule: per-tenant
                         mode: enforce
@@ -398,8 +382,7 @@ paths:
                           requests: 1000
                           periodSeconds: 60
                           period: 1m
-                    - policy: quote-api
-                      block: login
+                    - block: login
                       mode: All
                       routes:
                       - type: Exact
@@ -407,13 +390,12 @@ paths:
                         methods:
                         - POST
                       rules:
-                      - id: quote-api/login/anonymous
-                        policy: quote-api
+                      - id: login/anonymous
                         block: login
                         rule: anonymous
                         mode: enforce
                         axes: []
-                        when:
+                        matches:
                         - key: tenant
                           operator: NotExists
                         rates:
@@ -421,14 +403,13 @@ paths:
                           requests: 20
                           periodSeconds: 60
                           period: 1m
-                      - id: quote-api/login/authenticated
-                        policy: quote-api
+                      - id: login/authenticated
                         block: login
                         rule: authenticated
                         mode: enforce
                         axes:
                         - tenant
-                        when:
+                        matches:
                         - key: tenant
                           operator: Exists
                         rates:
@@ -436,21 +417,19 @@ paths:
                           requests: 100
                           periodSeconds: 60
                           period: 1m
-                    - policy: quote-api
-                      block: total
+                    - block: total
                       mode: All
                       routes:
                       - type: Prefix
                         value: /api/
                       rules:
-                      - id: quote-api/total/bots
-                        policy: quote-api
+                      - id: total/bots
                         block: total
                         rule: bots
                         mode: shadow
                         axes:
                         - client
-                        when:
+                        matches:
                         - key: roles
                           operator: Contains
                           value: bot
@@ -459,8 +438,7 @@ paths:
                           requests: 1
                           periodSeconds: 60
                           period: 1m
-                      - id: quote-api/total/all
-                        policy: quote-api
+                      - id: total/all
                         block: total
                         rule: all
                         mode: enforce
@@ -470,15 +448,13 @@ paths:
                           requests: 5000
                           periodSeconds: 60
                           period: 1m
-                    - policy: search-api
-                      block: search
+                    - block: search
                       mode: All
                       routes:
                       - type: Prefix
                         value: /api/search
                       rules:
-                      - id: search-api/search/per-client
-                        policy: search-api
+                      - id: search/per-client
                         block: search
                         rule: per-client
                         mode: enforce
@@ -502,8 +478,7 @@ paths:
                     listValuedKeys:
                     - roles
                     blocks:
-                    - policy: quote-api
-                      block: cascade
+                    - block: cascade
                       mode: FirstMatch
                       routes:
                       - type: Prefix
@@ -512,26 +487,24 @@ paths:
                         - GET
                         - POST
                       rules:
-                      - id: quote-api/cascade/internal
-                        policy: quote-api
+                      - id: cascade/internal
                         block: cascade
                         rule: internal
                         mode: bypass
                         axes: []
-                        when:
+                        matches:
                         - key: client
                           operator: Equals
                           value: prometheus
                         rates: []
                         applicability: never
-                      - id: quote-api/cascade/trial
-                        policy: quote-api
+                      - id: cascade/trial
                         block: cascade
                         rule: trial
                         mode: shadow
                         axes:
                         - client
-                        when:
+                        matches:
                         - key: client
                           operator: In
                           values:
@@ -543,14 +516,13 @@ paths:
                           periodSeconds: 60
                           period: 1m
                         applicability: never
-                      - id: quote-api/cascade/premium
-                        policy: quote-api
+                      - id: cascade/premium
                         block: cascade
                         rule: premium
                         mode: enforce
                         axes:
                         - client
-                        when:
+                        matches:
                         - key: plan
                           operator: In
                           values:
@@ -566,8 +538,7 @@ paths:
                         conditionalOn:
                         - reason: undecided_condition
                           key: plan
-                      - id: quote-api/cascade/everyone
-                        policy: quote-api
+                      - id: cascade/everyone
                         block: cascade
                         rule: everyone
                         mode: enforce
@@ -582,16 +553,14 @@ paths:
                         applicability: conditional
                         conditionalOn:
                         - reason: may_be_preempted
-                          rule: quote-api/cascade/premium
-                    - policy: quote-api
-                      block: quota
+                          rule: cascade/premium
+                    - block: quota
                       mode: All
                       routes:
                       - type: Prefix
                         value: /api/quotes/
                       rules:
-                      - id: quote-api/quota/daily
-                        policy: quote-api
+                      - id: quota/daily
                         block: quota
                         rule: daily
                         mode: enforce
@@ -607,8 +576,7 @@ paths:
                           periodSeconds: 86400
                           period: 24h
                         applicability: always
-                    - policy: quote-api
-                      block: reports
+                    - block: reports
                       mode: All
                       routes:
                       - type: Prefix
@@ -616,8 +584,7 @@ paths:
                         methods:
                         - POST
                       rules:
-                      - id: quote-api/reports/heavy
-                        policy: quote-api
+                      - id: reports/heavy
                         block: reports
                         rule: heavy
                         mode: enforce
@@ -632,22 +599,21 @@ paths:
                         applicability: conditional
                         conditionalOn:
                         - reason: may_be_preempted
-                          rule: quote-api/reports/gold
-                      - id: quote-api/reports/gold
-                        policy: quote-api
+                          rule: reports/gold
+                      - id: reports/gold
                         block: reports
                         rule: gold
                         mode: enforce
                         axes:
                         - client
                         - path
-                        when:
+                        matches:
                         - key: plan
                           operator: In
                           values:
                           - gold
                           - platinum
-                        replaces:
+                        replacedRules:
                         - heavy
                         rates:
                         - algorithm: gcra
@@ -658,8 +624,7 @@ paths:
                         conditionalOn:
                         - reason: undecided_condition
                           key: plan
-                    - policy: quote-api
-                      block: services
+                    - block: services
                       mode: All
                       routes:
                       - type: Template
@@ -667,8 +632,7 @@ paths:
                       captures:
                       - service
                       rules:
-                      - id: quote-api/services/per-service
-                        policy: quote-api
+                      - id: services/per-service
                         block: services
                         rule: per-service
                         mode: enforce
@@ -680,31 +644,28 @@ paths:
                           periodSeconds: 60
                           period: 1m
                         applicability: always
-                    - policy: quote-api
-                      block: tenants
+                    - block: tenants
                       mode: All
                       routes:
                       - type: Prefix
                         value: /api/
                       rules:
-                      - id: quote-api/tenants/partner-lift
-                        policy: quote-api
+                      - id: tenants/partner-lift
                         block: tenants
                         rule: partner-lift
                         mode: bypass
                         axes: []
-                        when:
+                        matches:
                         - key: client
                           operator: In
                           values:
                           - p-1
                           - p-2
-                        replaces:
+                        replacedRules:
                         - per-tenant
                         rates: []
                         applicability: never
-                      - id: quote-api/tenants/per-tenant
-                        policy: quote-api
+                      - id: tenants/per-tenant
                         block: tenants
                         rule: per-tenant
                         mode: enforce
@@ -719,8 +680,7 @@ paths:
                         conditionalOn:
                         - reason: missing_axis
                           key: tenant
-                    - policy: quote-api
-                      block: login
+                    - block: login
                       mode: All
                       routes:
                       - type: Exact
@@ -728,13 +688,12 @@ paths:
                         methods:
                         - POST
                       rules:
-                      - id: quote-api/login/anonymous
-                        policy: quote-api
+                      - id: login/anonymous
                         block: login
                         rule: anonymous
                         mode: enforce
                         axes: []
-                        when:
+                        matches:
                         - key: tenant
                           operator: NotExists
                         rates:
@@ -746,14 +705,13 @@ paths:
                         conditionalOn:
                         - reason: undecided_condition
                           key: tenant
-                      - id: quote-api/login/authenticated
-                        policy: quote-api
+                      - id: login/authenticated
                         block: login
                         rule: authenticated
                         mode: enforce
                         axes:
                         - tenant
-                        when:
+                        matches:
                         - key: tenant
                           operator: Exists
                         rates:
@@ -765,21 +723,19 @@ paths:
                         conditionalOn:
                         - reason: undecided_condition
                           key: tenant
-                    - policy: quote-api
-                      block: total
+                    - block: total
                       mode: All
                       routes:
                       - type: Prefix
                         value: /api/
                       rules:
-                      - id: quote-api/total/bots
-                        policy: quote-api
+                      - id: total/bots
                         block: total
                         rule: bots
                         mode: shadow
                         axes:
                         - client
-                        when:
+                        matches:
                         - key: roles
                           operator: Contains
                           value: bot
@@ -792,8 +748,7 @@ paths:
                         conditionalOn:
                         - reason: undecided_condition
                           key: roles
-                      - id: quote-api/total/all
-                        policy: quote-api
+                      - id: total/all
                         block: total
                         rule: all
                         mode: enforce
@@ -804,15 +759,13 @@ paths:
                           periodSeconds: 60
                           period: 1m
                         applicability: always
-                    - policy: search-api
-                      block: search
+                    - block: search
                       mode: All
                       routes:
                       - type: Prefix
                         value: /api/search
                       rules:
-                      - id: search-api/search/per-client
-                        policy: search-api
+                      - id: search/per-client
                         block: search
                         rule: per-client
                         mode: enforce
@@ -950,9 +903,8 @@ paths:
                 $ref: '#/components/schemas/CounterList'
               example:
                 items:
-                - key: 'rl:v1:{gateway.public}:quote-api/cascade/everyone:gcra:60:bob:'
-                  ruleId: quote-api/cascade/everyone
-                  policy: quote-api
+                - key: 'rl:v1:{gateway.public}:cascade/everyone:gcra:60:bob:'
+                  ruleId: cascade/everyone
                   block: cascade
                   rule: everyone
                   mode: enforce
@@ -963,9 +915,8 @@ paths:
                   limit: 100
                   remaining: 17
                   limited: false
-                - key: 'rl:v1:{gateway.public}:quote-api/cascade/everyone:gcra:60:crawler:'
-                  ruleId: quote-api/cascade/everyone
-                  policy: quote-api
+                - key: 'rl:v1:{gateway.public}:cascade/everyone:gcra:60:crawler:'
+                  ruleId: cascade/everyone
                   block: cascade
                   rule: everyone
                   mode: enforce
@@ -1035,11 +986,11 @@ paths:
       summary: Addressed reset - one rule, optionally narrowed
       description: |-
         The bounded-by-construction form. The invariant is key
-        computability: exactly one full policy/block/rule id, and one
+        computability: exactly one whole block/rule id, and one
         `axis.<name>=<value>` parameter for EVERY axis the rule declares,
         each with a single value - e.g. for a rule with axes [client, path]:
 
-            ?ruleId=quote-api/by-path/each&axis.client=alice&axis.path=/api/orders
+            ?ruleId=by-path/each&axis.client=alice&axis.path=/api/orders
 
         With the identity fully named, the keys are computed from the
         snapshot - one per window - never scanned. `algorithm`/`period`
@@ -1105,11 +1056,11 @@ paths:
       - name: ruleId
         in: query
         required: true
-        description: One full policy/block/rule triple; prefix forms are refused
+        description: One full block/rule triple; prefix forms are refused
           here.
         schema:
           type: string
-        example: quote-api/cascade/everyone
+        example: cascade/everyone
       - $ref: '#/components/parameters/algorithm'
       - $ref: '#/components/parameters/period'
       - name: limited
@@ -1175,28 +1126,28 @@ paths:
                   value:
                     dryRun: false
                     domain: gateway.public
-                    ruleId: quote-api/quota/daily
+                    ruleId: quota/daily
                     ruleSetVersion: 7c31a9f4e0d2
                     axes:
                       client: alice
                     resetCount: 2
                     keys:
-                    - 'rl:v1:{gateway.public}:quote-api/quota/daily:gcra:60:alice:'
-                    - 'rl:v1:{gateway.public}:quote-api/quota/daily:fixedwindow:86400:alice:'
+                    - 'rl:v1:{gateway.public}:quota/daily:gcra:60:alice:'
+                    - 'rl:v1:{gateway.public}:quota/daily:fixedwindow:86400:alice:'
                 preview:
                   summary: The same selection with dryRun=true - matched, not deleted,
                     no token needed
                   value:
                     dryRun: true
                     domain: gateway.public
-                    ruleId: quote-api/quota/daily
+                    ruleId: quota/daily
                     ruleSetVersion: 7c31a9f4e0d2
                     axes:
                       client: alice
                     matchedCount: 2
                     keys:
-                    - 'rl:v1:{gateway.public}:quote-api/quota/daily:gcra:60:alice:'
-                    - 'rl:v1:{gateway.public}:quote-api/quota/daily:fixedwindow:86400:alice:'
+                    - 'rl:v1:{gateway.public}:quota/daily:gcra:60:alice:'
+                    - 'rl:v1:{gateway.public}:quota/daily:fixedwindow:86400:alice:'
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
@@ -1394,14 +1345,14 @@ paths:
                     scanned: 63
                     matchedCount: 63
                     keys:
-                    - 'rl:v1:{gateway.public}:quote-api/cascade/everyone:gcra:60:crawler:'
+                    - 'rl:v1:{gateway.public}:cascade/everyone:gcra:60:crawler:'
                     truncated: true
                     rules:
-                    - ruleId: quote-api/cascade/trial
+                    - ruleId: cascade/trial
                       matchedCount: 2
-                    - ruleId: quote-api/cascade/premium
+                    - ruleId: cascade/premium
                       matchedCount: 20
-                    - ruleId: quote-api/cascade/everyone
+                    - ruleId: cascade/everyone
                       matchedCount: 41
                     confirmationToken: ct-5b8e2f9d4a10
                     confirmationExpiresAt: '2026-08-24T14:15:02Z'
@@ -1413,14 +1364,14 @@ paths:
                     scanned: 63
                     resetCount: 63
                     keys:
-                    - 'rl:v1:{gateway.public}:quote-api/cascade/everyone:gcra:60:crawler:'
+                    - 'rl:v1:{gateway.public}:cascade/everyone:gcra:60:crawler:'
                     truncated: true
                     rules:
-                    - ruleId: quote-api/cascade/trial
+                    - ruleId: cascade/trial
                       resetCount: 2
-                    - ruleId: quote-api/cascade/premium
+                    - ruleId: cascade/premium
                       resetCount: 20
-                    - ruleId: quote-api/cascade/everyone
+                    - ruleId: cascade/everyone
                       resetCount: 41
           headers:
             X-Request-Id:
@@ -1595,12 +1546,12 @@ paths:
                     scanned: 9600000
                     resetCount: 3121088
                     rules:
-                    - ruleId: quote-api/tenants/per-tenant
+                    - ruleId: tenants/per-tenant
                       resetCount: 2988040
-                    - ruleId: quote-api/total/all
+                    - ruleId: total/all
                       resetCount: 133048
                     keys:
-                    - 'rl:v1:{gateway.public}:quote-api/total/all:gcra:60:'
+                    - 'rl:v1:{gateway.public}:total/all:gcra:60:'
                     truncated: true
         '500':
           description: 'Two formally distinct answers share this status, told apart
@@ -1641,10 +1592,10 @@ paths:
                     scanned: 84000
                     resetCount: 83641
                     rules:
-                    - ruleId: quote-api/tenants/per-tenant
+                    - ruleId: tenants/per-tenant
                       resetCount: 83641
                     keys:
-                    - 'rl:v1:{gateway.public}:quote-api/tenants/per-tenant:gcra:60:acme:'
+                    - 'rl:v1:{gateway.public}:tenants/per-tenant:gcra:60:acme:'
                     truncated: true
   /simulations:
     post:
@@ -1723,7 +1674,7 @@ paths:
                   algorithm: gcra
                   periodSeconds: 60
                 rules:
-                - id: quote-api/cascade/everyone
+                - id: cascade/everyone
                   mode: enforce
                   allowed: false
                   refusalReason: rate_limited
@@ -1732,21 +1683,21 @@ paths:
                   retryAfterSeconds: 23.4
                   algorithm: gcra
                   periodSeconds: 60
-                - id: quote-api/quota/daily
+                - id: quota/daily
                   mode: enforce
                   allowed: true
                   limit: 10000
                   remaining: 8734
                   algorithm: fixedwindow
                   periodSeconds: 86400
-                - id: quote-api/tenants/per-tenant
+                - id: tenants/per-tenant
                   mode: enforce
                   allowed: true
                   limit: 1000
                   remaining: 902
                   algorithm: gcra
                   periodSeconds: 60
-                - id: quote-api/total/all
+                - id: total/all
                   mode: enforce
                   allowed: true
                   limit: 5000
@@ -1897,7 +1848,7 @@ components:
         items:
           type: string
       example:
-      - quote-api/cascade/everyone
+      - cascade/everyone
     algorithm:
       name: algorithm
       in: query
@@ -2129,12 +2080,9 @@ components:
           example: 7c31a9f4e0d2
           description: This domain's rule-set version - the same value GET /rules
             reports; it changes only with this domain's enforced set.
-        policies:
-          type: integer
-          description: Policies contributing to the domain's enforced set.
         blocks:
           type: integer
-          description: Compiled blocks across those policies.
+          description: Compiled blocks of the domain's enforced set.
         rules:
           type: integer
           description: Compiled rules across those blocks.
@@ -2207,20 +2155,14 @@ components:
     BlockView:
       type: object
       required:
-      - policy
       - block
       - mode
       - routes
       - rules
       properties:
-        policy:
-          type: string
-          description: The policy name - the first segment of the policy/block/rule
-            identity.
         block:
           type: string
-          description: The block name - the second segment of the policy/block/rule
-            identity.
+          description: The block name - the first segment of the block/rule identity.
         mode:
           type: string
           enum:
@@ -2288,20 +2230,16 @@ components:
       properties:
         id:
           type: string
-          description: policy/block/rule - the identity counters and metrics use.
-          example: quote-api/cascade/everyone
-        policy:
-          type: string
-          description: The policy name - the first segment of the policy/block/rule
-            identity.
+          description: block/rule - the identity counters and metrics use. There
+            is no policy segment, because a domain has exactly one policy and its
+            name is the domain.
+          example: cascade/everyone
         block:
           type: string
-          description: The block name - the second segment of the policy/block/rule
-            identity.
+          description: The block name - the first segment of the block/rule identity.
         rule:
           type: string
-          description: The rule name - the last segment of the policy/block/rule
-            identity.
+          description: The rule name - the last segment of the block/rule identity.
         mode:
           type: string
           enum:
@@ -2320,13 +2258,13 @@ components:
             for every declared axis; bulk selections filter by axis name.
           example:
           - client
-        when:
+        matches:
           type: array
           items:
             $ref: '#/components/schemas/ConditionView'
           description: Conditions gating the rule; group indirection is already
             resolved into value sets.
-        replaces:
+        replacedRules:
           type: array
           items:
             type: string
@@ -2463,20 +2401,14 @@ components:
             of the API compatibility contract.
         ruleId:
           type: string
-          description: The policy/block/rule triple - the identity that counters,
-            metrics, and the audit stream share.
-        policy:
-          type: string
-          description: The policy name - the first segment of the policy/block/rule
-            identity.
+          description: The block/rule identity that counters, metrics, and the audit
+            stream share.
         block:
           type: string
-          description: The block name - the second segment of the policy/block/rule
-            identity.
+          description: The block name - the first segment of the block/rule identity.
         rule:
           type: string
-          description: The rule name - the last segment of the policy/block/rule
-            identity.
+          description: The rule name - the last segment of the block/rule identity.
         algorithm:
           type: string
           description: The counting algorithm of the window (gcra, fixedwindow),
@@ -2698,7 +2630,7 @@ components:
         longest retryAfterSeconds - the constraint that actually binds the client.
         Then, on an admission, the window with the least remaining. Every remaining
         tie breaks by the lexicographically smallest counter key, which orders by
-        the policy/block/rule triple, then algorithm, then periodSeconds - the same
+        the block/rule triple, then algorithm, then periodSeconds - the same
         on every replica.'
       oneOf:
       - $ref: '#/components/schemas/RuleOutcomeAdmitted'
@@ -2811,8 +2743,8 @@ components:
       properties:
         id:
           type: string
-          example: quote-api/cascade/everyone
-          description: The policy/block/rule triple - the identity shared by counters,
+          example: cascade/everyone
+          description: The block/rule triple - the identity shared by counters,
             metrics, and audit records.
         mode:
           type: string
@@ -2875,8 +2807,8 @@ components:
       properties:
         id:
           type: string
-          example: quote-api/cascade/everyone
-          description: The policy/block/rule triple - the identity shared by counters,
+          example: cascade/everyone
+          description: The block/rule triple - the identity shared by counters,
             metrics, and audit records.
         mode:
           type: string
@@ -2939,8 +2871,8 @@ components:
       properties:
         id:
           type: string
-          example: quote-api/cascade/everyone
-          description: The policy/block/rule triple - the identity shared by counters,
+          example: cascade/everyone
+          description: The block/rule triple - the identity shared by counters,
             metrics, and audit records.
         mode:
           type: string
@@ -2995,7 +2927,7 @@ components:
         retryable refusals, by the longest retryAfterSeconds - the constraint that
         actually binds the client. Then, on an admission, the window with the least
         remaining. Every remaining tie breaks by the lexicographically smallest
-        counter key, which orders by the policy/block/rule triple, then algorithm,
+        counter key, which orders by the block/rule triple, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
       - algorithm
@@ -3036,7 +2968,7 @@ components:
         key. Then retryable refusals, by the longest retryAfterSeconds - the constraint
         that actually binds the client. Then, on an admission, the window with the
         least remaining. Every remaining tie breaks by the lexicographically smallest
-        counter key, which orders by the policy/block/rule triple, then algorithm,
+        counter key, which orders by the block/rule triple, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
       - algorithm
@@ -3082,7 +3014,7 @@ components:
         key. Then retryable refusals, by the longest retryAfterSeconds - the constraint
         that actually binds the client. Then, on an admission, the window with the
         least remaining. Every remaining tie breaks by the lexicographically smallest
-        counter key, which orders by the policy/block/rule triple, then algorithm,
+        counter key, which orders by the block/rule triple, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
       - algorithm
@@ -3424,7 +3356,7 @@ components:
           minItems: 1
           items:
             type: string
-            description: A full policy/block/rule id or a 1-2 segment prefix form.
+            description: A full block/rule id or a 1-2 segment prefix form.
           description: Full ids and 1-2 segment prefix forms mix freely.
           example:
           - quote-api/cascade
@@ -3732,7 +3664,7 @@ components:
           description: Fixed to may_be_preempted.
         rule:
           type: string
-          description: Full policy/block/rule id of the rule that may preempt this
+          description: Full block/rule id of the rule that may preempt this
             one.
     ApplicabilityGate:
       description: One gate keeping a rule conditional for the supplied partial

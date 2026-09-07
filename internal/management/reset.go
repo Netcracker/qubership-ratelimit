@@ -20,7 +20,7 @@ import (
 
 // The addressed reset: the form whose blast radius is bounded by construction.
 //
-// The invariant is key computability. One full policy/block/rule id and one
+// The invariant is key computability. One whole block/rule id and one
 // value for every axis the rule declares name a finite set of keys, one per
 // window, computed from the snapshot and never scanned. Everything
 // wider ("all paths of alice", a block, a domain) is a sweep, and a sweep
@@ -98,14 +98,14 @@ func parseReset(snapshot *compile.Snapshot, query url.Values) (resetCommand, *ap
 	}
 	if len(sel.RuleIDs) != 1 {
 		return resetCommand{}, invalid(
-			"the addressed reset takes exactly one full policy/block/rule id; wider selections are a counter-resets action",
+			"the addressed reset takes exactly one full block/rule id; wider selections are a counter-resets action",
 			"ruleId")
 	}
 	id := sel.RuleIDs[0]
-	policy, block, rule, ok := splitFullID(id)
+	block, rule, ok := splitFullID(id)
 	if !ok {
 		return resetCommand{}, invalid("the ruleId "+logSafe(id)+
-			" is not a full policy/block/rule triple; prefix forms are refused here", "ruleId")
+			" is not a full block/rule id; prefix forms are refused here", "ruleId")
 	}
 
 	command := resetCommand{Selector: sel, ExpectedVersion: query.Get("expectedRuleSetVersion")}
@@ -113,7 +113,7 @@ func parseReset(snapshot *compile.Snapshot, query url.Values) (resetCommand, *ap
 		return resetCommand{}, apiErr
 	}
 
-	command.block, command.rule = findRule(snapshot, policy, block, rule)
+	command.block, command.rule = findRule(snapshot, block, rule)
 	if command.rule == nil {
 		return resetCommand{}, notFound("no rule " + logSafe(id) + " is enforced in domain " +
 			logSafe(snapshot.Domain) + "; a rule missing here but present in a policy object means the " +
@@ -307,16 +307,16 @@ func (a *API) refusing(ctx context.Context, computed []string, command resetComm
 // across domains never produces a false conflict. The domain sits in a hash tag
 // for the same reason counter keys do: one slot per domain keeps the record and
 // the counters it describes together.
-func recordKey(domain, endpoint, subject, idempotencyKey string) string {
+func recordKey(namespace, domain, endpoint, subject, idempotencyKey string) string {
 	sum := sha256.Sum256([]byte(subject + "\x00" + idempotencyKey))
-	return "rlm:v1:{" + domain + "}:idem:" + endpoint + ":" + hex.EncodeToString(sum[:])[:32]
+	return recordTag(namespace, domain) + "idem:" + endpoint + ":" + hex.EncodeToString(sum[:])[:32]
 }
 
-// findRule locates one rule of the snapshot by its triple.
-func findRule(snapshot *compile.Snapshot, policy, block, rule string) (*compile.Block, *compile.Rule) {
+// findRule locates one rule of the snapshot by its block and name.
+func findRule(snapshot *compile.Snapshot, block, rule string) (*compile.Block, *compile.Rule) {
 	for i := range snapshot.Blocks {
 		candidate := &snapshot.Blocks[i]
-		if candidate.Policy != policy || candidate.Name != block {
+		if candidate.Name != block {
 			continue
 		}
 		for j := range candidate.Rules {
@@ -328,11 +328,13 @@ func findRule(snapshot *compile.Snapshot, policy, block, rule string) (*compile.
 	return nil, nil
 }
 
-// splitFullID accepts only the three-segment form.
-func splitFullID(id string) (policy, block, rule string, ok bool) {
+// splitFullID accepts only the whole block/rule form. The policy segment the
+// layout used to carry is gone: a domain has one policy, and its name is the
+// domain.
+func splitFullID(id string) (block, rule string, ok bool) {
 	parts := strings.Split(id, "/")
-	if len(parts) != 3 {
-		return "", "", "", false
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
 	}
-	return parts[0], parts[1], parts[2], true
+	return parts[0], parts[1], true
 }

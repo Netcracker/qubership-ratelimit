@@ -1,9 +1,8 @@
 package engine_test
 
 // The acceptance suite: every rule pattern the schema promises to express,
-// exercised end to end through the public API — full policies, a mapping
-// where the pattern needs one, real tokens, sequences of requests. Every
-// name, path, and client here is synthetic.
+// exercised end to end through the public API — a full policy, real tokens,
+// sequences of requests. Every name, path, and client here is synthetic.
 
 import (
 	"encoding/base64"
@@ -17,10 +16,11 @@ import (
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
-// engineFor compiles arbitrary synthetic policies over a fresh store.
-func engineFor(t *testing.T, m *model.Mapping, policies ...model.Policy) *engine.Engine {
+// engineFor compiles one synthetic policy — which is one domain — over a fresh
+// store.
+func engineFor(t *testing.T, p model.Policy) *engine.Engine {
 	t.Helper()
-	snap, problems := compile.Compile(domain, policies, m)
+	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
 		t.Fatalf("compile problems: %v", problems)
 	}
@@ -57,13 +57,13 @@ func prefixBlock(name string, rules ...model.Rule) model.Block {
 // Pattern 1: a shared counter over an enumerated client group — every member
 // draws from one bucket, outsiders are untouched.
 func TestAcceptanceSharedGroupBucket(t *testing.T) {
-	e := engineFor(t, nil, model.Policy{
-		Name: "widgets", Domain: domain,
+	e := engineFor(t, model.Policy{
+		Domain: domain,
 		Groups: []model.Group{{Name: "partners", Clients: []string{"partner-a", "partner-b"}}},
 		Blocks: []model.Block{prefixBlock("api", model.Rule{
-			Name:  "partners-shared",
-			When:  []model.Condition{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "partners"}},
-			Rates: []model.Rate{{Requests: 3, Period: time.Minute}},
+			Name:    "partners-shared",
+			Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "partners"}},
+			Rates:   []model.Rate{{Requests: 3, Period: time.Minute}},
 		})},
 	})
 
@@ -81,17 +81,17 @@ func TestAcceptanceSharedGroupBucket(t *testing.T) {
 
 // Pattern 2: a targeted override on top of a base limit via replaces.
 func TestAcceptanceOverrideOnTopOfBase(t *testing.T) {
-	e := engineFor(t, nil, model.Policy{
-		Name: "widgets", Domain: domain,
+	e := engineFor(t, model.Policy{
+		Domain: domain,
 		Groups: []model.Group{{Name: "vip", Clients: []string{"partner-a"}}},
 		Blocks: []model.Block{prefixBlock("api",
 			model.Rule{Name: "base", Counters: []string{model.KeyClient},
 				Rates: []model.Rate{{Requests: 2, Period: time.Minute}}},
 			model.Rule{Name: "vip",
-				When:     []model.Condition{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}},
-				Counters: []string{model.KeyClient},
-				Rates:    []model.Rate{{Requests: 5, Period: time.Minute}},
-				Replaces: []string{"base"}},
+				Matches:       []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}},
+				Counters:      []string{model.KeyClient},
+				Rates:         []model.Rate{{Requests: 5, Period: time.Minute}},
+				ReplacedRules: []string{"base"}},
 		)},
 	})
 
@@ -114,11 +114,11 @@ func TestAcceptanceOverrideOnTopOfBase(t *testing.T) {
 // Pattern 3: role tiers from an array claim — the mapping extracts the array,
 // Contains picks the tier, the tiers cascade.
 func TestAcceptanceRoleTiersFromArrayClaim(t *testing.T) {
-	m := &model.Mapping{Domain: domain, Mappings: []model.KeyMapping{
-		{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
-	}}
-	e := engineFor(t, m, model.Policy{
-		Name: "widgets", Domain: domain,
+	e := engineFor(t, model.Policy{
+		Domain: domain,
+		Mappings: []model.KeyMapping{
+			{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
+		},
 		Blocks: []model.Block{{
 			Name: "tiers",
 			Mode: model.ModeFirstMatch,
@@ -126,7 +126,7 @@ func TestAcceptanceRoleTiersFromArrayClaim(t *testing.T) {
 				{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/widgets/"}}}},
 			Rules: []model.Rule{
 				{Name: "admin-tier",
-					When:     []model.Condition{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
+					Matches:  []model.Predicate{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
 					Counters: []string{model.KeyClient},
 					Rates:    []model.Rate{{Requests: 4, Period: time.Minute}}},
 				{Name: "basic-tier", Counters: []string{model.KeyClient},
@@ -160,8 +160,8 @@ func TestAcceptanceRoleTiersFromArrayClaim(t *testing.T) {
 
 // Pattern 4: an unconditional per-API total shared by everyone.
 func TestAcceptanceUnconditionalTotal(t *testing.T) {
-	e := engineFor(t, nil, model.Policy{
-		Name: "widgets", Domain: domain,
+	e := engineFor(t, model.Policy{
+		Domain: domain,
 		Blocks: []model.Block{prefixBlock("api", model.Rule{
 			Name: "total", Rates: []model.Rate{{Requests: 3, Period: time.Minute}},
 		})},
@@ -179,8 +179,8 @@ func TestAcceptanceUnconditionalTotal(t *testing.T) {
 // the generous minute window still has room.
 func TestAcceptanceMultiWindow(t *testing.T) {
 	waitOutHourBoundary()
-	e := engineFor(t, nil, model.Policy{
-		Name: "widgets", Domain: domain,
+	e := engineFor(t, model.Policy{
+		Domain: domain,
 		Blocks: []model.Block{prefixBlock("api", model.Rule{
 			Name: "per-user", Counters: []string{model.KeyClient},
 			Rates: []model.Rate{
@@ -221,12 +221,12 @@ func TestAcceptanceTierCascade(t *testing.T) {
 // Pattern 7: anonymous-only limits via NotExists — anonymity is limited
 // tightly, identified clients pass that rule by.
 func TestAcceptanceAnonymousOnly(t *testing.T) {
-	e := engineFor(t, nil, model.Policy{
-		Name: "widgets", Domain: domain,
+	e := engineFor(t, model.Policy{
+		Domain: domain,
 		Blocks: []model.Block{prefixBlock("api",
 			model.Rule{Name: "anonymous",
-				When:  []model.Condition{{Key: model.KeyClient, Operator: model.OperatorNotExists}},
-				Rates: []model.Rate{{Requests: 2, Period: time.Minute}}},
+				Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorDoesNotExist}},
+				Rates:   []model.Rate{{Requests: 2, Period: time.Minute}}},
 			model.Rule{Name: "per-user", Counters: []string{model.KeyClient},
 				Rates: []model.Rate{{Requests: 5, Period: time.Minute}}},
 		)},
@@ -242,23 +242,21 @@ func TestAcceptanceAnonymousOnly(t *testing.T) {
 	}
 }
 
-// Pattern 8: blocks stay additive across policies — two teams' objects over
-// one domain, and a request must satisfy both.
-func TestAcceptanceAdditiveAcrossPolicies(t *testing.T) {
-	team1 := model.Policy{
-		Name: "widgets", Domain: domain,
-		Blocks: []model.Block{prefixBlock("api", model.Rule{
-			Name: "per-user", Counters: []string{model.KeyClient},
-			Rates: []model.Rate{{Requests: 5, Period: time.Minute}},
-		})},
-	}
-	team2 := model.Policy{
-		Name: "platform", Domain: domain,
-		Blocks: []model.Block{prefixBlock("guard", model.Rule{
-			Name: "total", Rates: []model.Rate{{Requests: 3, Period: time.Minute}},
-		})},
-	}
-	e := engineFor(t, nil, team1, team2)
+// Pattern 8: blocks are additive — a per-client allowance under a total
+// ceiling, and a request must satisfy both.
+func TestAcceptanceAdditiveBlocks(t *testing.T) {
+	e := engineFor(t, model.Policy{
+		Domain: domain,
+		Blocks: []model.Block{
+			prefixBlock("api", model.Rule{
+				Name: "per-user", Counters: []string{model.KeyClient},
+				Rates: []model.Rate{{Requests: 5, Period: time.Minute}},
+			}),
+			prefixBlock("guard", model.Rule{
+				Name: "total", Rates: []model.Rate{{Requests: 3, Period: time.Minute}},
+			}),
+		},
+	})
 
 	for i := range 3 {
 		if d := decide(t, e, widgets(t, "alice")); !d.Allowed {
@@ -267,13 +265,13 @@ func TestAcceptanceAdditiveAcrossPolicies(t *testing.T) {
 	}
 	d := decide(t, e, widgets(t, "alice"))
 	if d.Allowed {
-		t.Fatal("request 4 admitted: the second policy's total did not bind")
+		t.Fatal("request 4 admitted: the second block's total did not bind")
 	}
 	if d.Headers.Limit != 3 {
-		t.Errorf("headers = %+v: the denial belongs to the platform policy's total", d.Headers)
+		t.Errorf("headers = %+v: the denial belongs to the guard block's total", d.Headers)
 	}
 	if len(d.Rules) != 2 {
-		t.Errorf("rules = %+v: both policies' rules apply to one request", d.Rules)
+		t.Errorf("rules = %+v: both blocks' rules apply to one request", d.Rules)
 	}
 }
 
