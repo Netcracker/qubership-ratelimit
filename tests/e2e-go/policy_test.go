@@ -122,12 +122,24 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 			return p.Status.RuleProblems[0].Reason
 		}).Should(Equal(v1alpha1.ProblemUnresolvedKeyReference))
 
-		// Enforced as written or not at all: Accepted has to say so, and the
-		// generation must not be the active one.
+		// Enforced as written or not at all: the conditions have to say so, and
+		// the generation must not be the active one.
 		Expect(policyCondition(domain, v1alpha1.ConditionAccepted)()).To(Equal("False"),
 			"a blocking problem left Accepted true")
+		Expect(policyCondition(domain, v1alpha1.ConditionReady)()).To(Equal("False"),
+			"a blocking problem left Ready true; the generation must not be enforced")
 		Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("True"),
 			"a generation that does not compile is stuck, not merely in progress")
+
+		// The base asserted activeGeneration == 0 here, which a separate
+		// never-valid object made true. One policy per domain means this is an
+		// edit to an object that already has a good generation, so the honest
+		// assertion is that the broken one is not the enforced one.
+		p, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.Status.ObservedGeneration).To(Equal(p.Generation))
+		Expect(p.Status.ActiveGeneration).NotTo(Equal(p.Status.ObservedGeneration),
+			"a generation with a blocking problem was enforced")
 	})
 
 	It("revives that rule when the same object declares the key", func() {
