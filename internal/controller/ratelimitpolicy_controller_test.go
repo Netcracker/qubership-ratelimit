@@ -617,3 +617,87 @@ func TestPoliciesBehind_mapsTheFleetsOwnSliceToEveryPolicy(t *testing.T) {
 	assert.Empty(t, reconciler.policiesBehind(context.Background(), slice("ratelimit")),
 		"without a Service name there is no fleet to recognize")
 }
+
+// The propagation clock has to survive a second probe. meta.SetStatusCondition
+// moves LastTransitionTime only when the status changes, and both ways into a
+// rollout hold Ready at False — so without setReadyCondition rewinding it, the
+// probe after the first one reads a stamp as old as whatever came before and
+// reports ReplicaStale with Stalled true.
+//
+// The status write of the first probe is itself an event on the policy, so the
+// second probe arrives at once rather than in probeInterval. That is what makes
+// this reachable rather than theoretical.
+func TestReconcile_aSecondProbeStaysPropagatingAfterAnOutage(t *testing.T) {
+	object := testPolicy(7)
+	object.Status.Conditions = []metav1.Condition{{
+		Type:               ratelimitv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ratelimitv1alpha1.ReasonNoReplicas,
+		LastTransitionTime: metav1.Time{Time: time.Now().Add(-time.Hour)},
+		ObservedGeneration: 7,
+	}}
+	probe := &stubProbe{view: FleetView{Total: 2, Applied: 1, Behind: []string{"ratelimit-b"}}}
+	reconciler, fakeClient := newReconciler(t, probe, object)
+
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
+		"the first probe after an outage is the start of a rollout, not an hour into one")
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
+		"the second probe read a stamp from before this rollout began")
+}
+
+// The everyday path: a broken policy is fixed, and one replica lags by a
+// second. Ready goes NotCompiled to Propagating, False to False again, so the
+// day-old stamp of the breakage would carry into the rollout that repairs it.
+func TestReconcile_aSecondProbeStaysPropagatingAfterAFixedGeneration(t *testing.T) {
+	object := testPolicy(6)
+	object.Status.Conditions = []metav1.Condition{{
+		Type:               ratelimitv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ratelimitv1alpha1.ReasonNotCompiled,
+		LastTransitionTime: metav1.Time{Time: time.Now().Add(-24 * time.Hour)},
+		ObservedGeneration: 5,
+	}}
+	probe := &stubProbe{view: FleetView{Total: 2, Applied: 1, Behind: []string{"ratelimit-b"}}}
+	reconciler, fakeClient := newReconciler(t, probe, object)
+
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
+		"a generation that now compiles starts its own rollout")
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
+		"the second probe inherited the stamp of the generation that was broken")
+}
+
+// Time genuinely spent propagating still ends in ReplicaStale, which is what
+// the deadline is for: the rewind must not make the condition unreachable.
+func TestReconcile_aRolloutPastTheDeadlineIsStale(t *testing.T) {
+	object := testPolicy(7)
+	object.Status.Conditions = []metav1.Condition{{
+		Type:               ratelimitv1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ratelimitv1alpha1.ReasonPropagating,
+		LastTransitionTime: metav1.Time{Time: time.Now().Add(-propagationDeadline - time.Minute)},
+		ObservedGeneration: 7,
+	}}
+	probe := &stubProbe{view: FleetView{Total: 2, Applied: 1, Behind: []string{"ratelimit-b"}}}
+	reconciler, fakeClient := newReconciler(t, probe, object)
+
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonReplicaStale,
+		"a replica lagging past the deadline is what Stalled exists to page on")
+	stalled := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+	assert.Equal(t, metav1.ConditionTrue, stalled.Status)
+}
+
+// requireProbeReports runs one reconcile and asserts the Ready reason it wrote.
+func requireProbeReports(
+	t *testing.T,
+	reconciler *RateLimitPolicyReconciler,
+	fakeClient client.Client,
+	reason, because string,
+) {
+	t.Helper()
+
+	_, err := reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+
+	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	require.Equal(t, reason, ready.Reason, because)
+}

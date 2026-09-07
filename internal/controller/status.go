@@ -196,13 +196,10 @@ var propagationReasons = map[string]bool{
 // readyAge is how long this generation has been propagating, which is what
 // separates a rollout from a stuck one.
 //
-// The clock restarts on two events. A condition observed against an older
-// generation is a new edit, which gets its own rollout. A reason outside the
-// propagation set means propagation has not started yet: LastTransitionTime
-// only moves when the condition's *status* changes, so NoReplicas to
-// Propagating keeps a stamp that can be hours old. Without the reset, a
-// deployment scaled to zero overnight would come back and report ReplicaStale
-// on its first probe instead of a normal start.
+// It reads the stamp that setReadyCondition maintains. The two halves belong
+// together: this one refuses to count a probe that has not entered propagation
+// yet, and setReadyCondition makes sure the stamp the *next* probe reads marks
+// the moment propagation began rather than some older transition.
 func readyAge(object *v1alpha1.RateLimitPolicy, now time.Time) time.Duration {
 	condition := meta.FindStatusCondition(object.Status.Conditions, v1alpha1.ConditionReady)
 	if condition == nil || condition.ObservedGeneration != object.Generation {
@@ -212,6 +209,51 @@ func readyAge(object *v1alpha1.RateLimitPolicy, now time.Time) time.Duration {
 		return 0
 	}
 	return now.Sub(condition.LastTransitionTime.Time)
+}
+
+// setReadyCondition records Ready, restarting its LastTransitionTime whenever
+// the propagation clock has to start over.
+//
+// Ready is the one condition whose stamp is read as a clock, and
+// meta.SetStatusCondition alone cannot keep it: it moves LastTransitionTime
+// only when the *status* changes, and both starts of a rollout hold the status
+// at False. NoReplicas to Propagating is False to False, and so is NotCompiled
+// to Propagating after a broken policy is fixed. The stamp would stay as old as
+// the outage, and the probe after this one would read that age and report
+// ReplicaStale with Stalled true — the condition meant to page — for a rollout
+// one second in.
+//
+// So the clock restarts on two events: the reason entering the propagation set
+// from outside it, and a change of the condition's own ObservedGeneration,
+// which is a new edit with a rollout of its own. This departs from the letter
+// of "the last time the condition transitioned from one status to another",
+// deliberately: ObservedGeneration on the condition already gives it a
+// per-generation meaning, and a clock nobody winds is worse than a stamp that
+// means "since this generation started spreading".
+func setReadyCondition(
+	conditions *[]metav1.Condition,
+	status metav1.ConditionStatus,
+	reason, message string,
+	generation int64,
+	now time.Time,
+) {
+	if existing := meta.FindStatusCondition(*conditions, v1alpha1.ConditionReady); existing != nil &&
+		restartsPropagationClock(existing, reason, generation) {
+		// Written through the pointer into the slice, so that
+		// meta.SetStatusCondition carries it forward when it keeps the
+		// condition it already has.
+		existing.LastTransitionTime = metav1.Time{Time: now}
+	}
+	setCondition(conditions, v1alpha1.ConditionReady, status, reason, message, generation)
+}
+
+// restartsPropagationClock reports whether the age readyAge is about to measure
+// belongs to this rollout.
+func restartsPropagationClock(existing *metav1.Condition, reason string, generation int64) bool {
+	if existing.ObservedGeneration != generation {
+		return true
+	}
+	return !propagationReasons[existing.Reason] && propagationReasons[reason]
 }
 
 // setCondition records one condition, carrying the generation into the condition

@@ -104,12 +104,12 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	setAccepted(&object, outcome)
 
-	// The clock for "is this a rollout or a breakage" starts when Ready first
-	// went false for this generation, so it is read before the condition is
-	// overwritten.
+	// The clock for "is this a rollout or a breakage" starts when this
+	// generation began spreading, so it is read before the condition is
+	// overwritten and rewound by the write below.
 	judged := judge(outcome, view, probeErr, readyAge(&object, now))
-	setCondition(&object.Status.Conditions, v1alpha1.ConditionReady,
-		judged.ready, judged.readyReason, judged.readyMessage, object.Generation)
+	setReadyCondition(&object.Status.Conditions,
+		judged.ready, judged.readyReason, judged.readyMessage, object.Generation, now)
 	setCondition(&object.Status.Conditions, v1alpha1.ConditionStalled,
 		judged.stalled, judged.stalledReason, "", object.Generation)
 
