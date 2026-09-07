@@ -228,7 +228,17 @@ func TestCompile_aNameThatIsNotItsDomainIsRefused(t *testing.T) {
 	result := Compile(Input{Namespace: testNamespace, Policies: []v1alpha1.RateLimitPolicy{object}})
 
 	assert.Empty(t, result.Snapshots)
-	require.Error(t, result.Policies[client.ObjectKey{Namespace: testNamespace, Name: "something-else"}].Err)
+	outcome := result.Policies[client.ObjectKey{Namespace: testNamespace, Name: "something-else"}]
+	require.Error(t, outcome.Err)
+
+	// The condition message only summarizes, so the cause has to reach
+	// ruleProblems as well. Without it the status would read
+	// "CompilationFailed" with an empty problem list and PROBLEMS 0, and the
+	// mismatch would be nowhere to be found.
+	require.Len(t, outcome.Problems, 1)
+	assert.Equal(t, v1alpha1.ProblemInvalidSpec, outcome.Problems[0].Reason)
+	assert.Contains(t, outcome.Problems[0].Message, "something-else")
+	assert.Contains(t, outcome.Problems[0].Message, testDomain)
 }
 
 // TestCompile_oneBadDomainLeavesTheOthersAlone pins the blast radius: domains

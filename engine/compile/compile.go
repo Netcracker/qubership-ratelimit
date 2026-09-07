@@ -59,8 +59,7 @@ type Problem struct {
 // resolved, every group baked into its predicates, and every window past
 // algo.Check. It is immutable; the engine swaps whole snapshots atomically.
 type Snapshot struct {
-	Namespace string
-	Domain    string
+	Domain string
 
 	// EffectiveKeys is the domain-global key set — built-ins plus mapping
 	// keys — sorted. Block captures extend it per block, not here.
@@ -168,7 +167,7 @@ func Compile(namespace, domain string, p *model.Policy) (*Snapshot, []Problem) {
 		}}
 	}
 	if len(domain) > 63 || !domainName.MatchString(domain) {
-		return &Snapshot{Namespace: namespace, Domain: domain}, []Problem{{
+		return &Snapshot{Domain: domain}, []Problem{{
 			Reason:   ReasonInvalidSpec,
 			Message:  fmt.Sprintf("domain %q does not match %s or exceeds 63 characters", domain, domainName),
 			Blocking: true,
@@ -177,7 +176,6 @@ func Compile(namespace, domain string, p *model.Policy) (*Snapshot, []Problem) {
 
 	env, problems := compileEnvironment(domain, p)
 	snap := &Snapshot{
-		Namespace:     namespace,
 		Domain:        domain,
 		EffectiveKeys: env.effectiveKeys(),
 		Extraction:    env.extraction,

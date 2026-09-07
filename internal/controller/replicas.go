@@ -30,8 +30,8 @@ import (
 // becomes ready after its first compilation, already on the current generation.
 
 // probeTimeout bounds one replica's answer. It is short because the endpoint
-// serves a value read from memory, and a replica that cannot answer in a second
-// is not a replica that is enforcing anything either.
+// serves a value read from memory: a replica that needs longer than this is not
+// one that is answering checks either.
 const probeTimeout = 2 * time.Second
 
 // FleetView is what the leader saw when it asked the replicas.
@@ -42,9 +42,15 @@ type FleetView struct {
 	// Applied is how many of them enforce the generation asked about.
 	Applied int32
 
-	// Behind names the replicas that reported another generation, sorted, for
-	// the condition message. Only the first few are worth printing.
+	// Behind names the replicas that answered with another generation, sorted,
+	// for the condition message. Only the first few are worth printing.
 	Behind []string
+
+	// Silent names the replicas that did not answer at all. They are kept apart
+	// from Behind because the two ask for different fixes: a replica on an old
+	// generation is a propagation question, an unreachable one is a question
+	// about the metrics port or a network policy in front of it.
+	Silent []string
 }
 
 // ReplicaProbe reads the enforced generation from every ready endpoint of the
@@ -77,12 +83,12 @@ func (p *ReplicaProbe) Observe(ctx context.Context, domain string, want store.Ap
 	}
 
 	view := FleetView{Total: int32(len(endpoints))}
+	var lastErr error
 	for _, endpoint := range endpoints {
 		applied, err := p.ask(ctx, endpoint.address)
 		if err != nil {
-			// One unreachable replica is not an unobservable fleet: it is a
-			// replica that is demonstrably not enforcing the new generation.
-			view.Behind = append(view.Behind, endpoint.name)
+			lastErr = err
+			view.Silent = append(view.Silent, endpoint.name)
 			continue
 		}
 		if reported, ok := applied[domain]; ok &&
@@ -92,7 +98,18 @@ func (p *ReplicaProbe) Observe(ctx context.Context, domain string, want store.Ap
 		}
 		view.Behind = append(view.Behind, endpoint.name)
 	}
+
+	// Nobody answered, so this is a statement about the leader's reach rather
+	// than about the fleet. A network policy that admits only Prometheus to the
+	// metrics port silences every probe, and calling that a stale replica would
+	// report a working domain as Degraded. ProbeFailed says what is true: the
+	// leader cannot see.
+	if len(endpoints) > 0 && len(view.Silent) == len(endpoints) {
+		return FleetView{}, fmt.Errorf("no replica answered %s: %w", store.AppliedPath, lastErr)
+	}
+
 	sort.Strings(view.Behind)
+	sort.Strings(view.Silent)
 	return view, nil
 }
 

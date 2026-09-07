@@ -154,31 +154,61 @@ func notCompiledMessage(outcome policy.Outcome) string {
 		outcome.Generation, outcome.ActiveGeneration)
 }
 
-// behindMessage names the replicas that have not taken the generation up. It
-// prints at most a few: the list is a pointer to the pods worth looking at, not
-// an inventory.
+// behindMessage names the replicas that have not taken the generation up,
+// keeping the ones that answered with another generation apart from the ones
+// that did not answer: the first is a rollout in progress, the second points at
+// the metrics port. Each list prints at most a few names — a pointer to the pods
+// worth looking at, not an inventory.
 func behindMessage(outcome policy.Outcome, view FleetView) string {
-	const named = 3
-
 	message := fmt.Sprintf("%d of %d replicas enforce generation %d",
 		view.Applied, view.Total, outcome.ActiveGeneration)
-	if len(view.Behind) == 0 {
-		return message
+	if names := someOf(view.Behind); names != "" {
+		message += fmt.Sprintf("; %s report another", names)
 	}
-	behind := view.Behind
-	suffix := ""
-	if len(behind) > named {
-		behind, suffix = behind[:named], fmt.Sprintf(" and %d more", len(view.Behind)-named)
+	if names := someOf(view.Silent); names != "" {
+		message += fmt.Sprintf("; %s did not answer", names)
 	}
-	return fmt.Sprintf("%s; %s%s report another", message, strings.Join(behind, ", "), suffix)
+	return message
 }
 
-// readyAge is how long Ready has held its current status, which is what
-// separates a rollout from a stuck one. A condition observed against an older
-// generation restarts the clock: the new edit has its own rollout.
+// someOf renders the first few names of a list, with a count of the rest.
+func someOf(names []string) string {
+	const named = 3
+
+	if len(names) == 0 {
+		return ""
+	}
+	if len(names) <= named {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(names[:named], ", "), len(names)-named)
+}
+
+// propagationReasons are the Ready reasons that mean "this generation is on its
+// way to the replicas". Only time spent in one of them counts toward the
+// deadline that turns Propagating into ReplicaStale.
+var propagationReasons = map[string]bool{
+	v1alpha1.ReasonReconciling:  true,
+	v1alpha1.ReasonPropagating:  true,
+	v1alpha1.ReasonReplicaStale: true,
+}
+
+// readyAge is how long this generation has been propagating, which is what
+// separates a rollout from a stuck one.
+//
+// The clock restarts on two events. A condition observed against an older
+// generation is a new edit, which gets its own rollout. A reason outside the
+// propagation set means propagation has not started yet: LastTransitionTime
+// only moves when the condition's *status* changes, so NoReplicas to
+// Propagating keeps a stamp that can be hours old. Without the reset, a
+// deployment scaled to zero overnight would come back and report ReplicaStale
+// on its first probe instead of a normal start.
 func readyAge(object *v1alpha1.RateLimitPolicy, now time.Time) time.Duration {
 	condition := meta.FindStatusCondition(object.Status.Conditions, v1alpha1.ConditionReady)
 	if condition == nil || condition.ObservedGeneration != object.Generation {
+		return 0
+	}
+	if !propagationReasons[condition.Reason] {
 		return 0
 	}
 	return now.Sub(condition.LastTransitionTime.Time)

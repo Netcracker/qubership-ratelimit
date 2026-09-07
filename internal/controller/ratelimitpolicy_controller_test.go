@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -315,12 +316,20 @@ func TestReconcile_requeuesWhileTheGenerationSpreads(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, stalled.Status, "a rollout is not a breakage")
 }
 
-func TestReconcile_aHealthyGenerationNeedsNoRequeue(t *testing.T) {
-	reconciler, _ := newReconciler(t, unanimous(1), testPolicy(1))
+// A green status is not a finished job. A replica can fall behind long after
+// Ready went true — a node drains and the pod comes back on an image that
+// cannot compile the current generation — and that transition touches no
+// policy, so no event announces it. Only the interval catches it.
+func TestReconcile_re_checksTheFleetWhileTheGenerationIsHealthy(t *testing.T) {
+	reconciler, fakeClient := newReconciler(t, unanimous(1), testPolicy(1))
 
 	result, err := reconciler.Reconcile(context.Background(), testRequest())
 	require.NoError(t, err)
-	assert.Zero(t, result.RequeueAfter)
+	assert.Equal(t, probeInterval, result.RequeueAfter,
+		"a replica that falls behind after the status went green produces no event")
+
+	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status)
 }
 
 func TestReconcile_ignoresADeletedPolicy(t *testing.T) {
@@ -329,7 +338,7 @@ func TestReconcile_ignoresADeletedPolicy(t *testing.T) {
 	result, err := reconciler.Reconcile(context.Background(), testRequest())
 
 	require.NoError(t, err, "a deleted policy needs no cleanup: there are no finalizers")
-	assert.Zero(t, result.RequeueAfter)
+	assert.Zero(t, result.RequeueAfter, "there is no object left to re-check")
 }
 
 func TestReconcile_returnsTheErrorOfAFailedStatusWrite(t *testing.T) {
@@ -492,4 +501,119 @@ func TestReadyAge_restartsTheClockOnANewGeneration(t *testing.T) {
 
 	object.Status.Conditions = nil
 	assert.Zero(t, readyAge(object, now))
+}
+
+// The propagation clock only counts time spent propagating. LastTransitionTime
+// moves when the condition's status changes, not when its reason does, so a
+// deployment that sat at NoReplicas overnight carries an hours-old stamp into
+// its first probe. Counting that as propagation would report ReplicaStale, and
+// Stalled with it, on a perfectly ordinary start.
+func TestReadyAge_restartsTheClockWhenPropagationBegins(t *testing.T) {
+	now := time.Now()
+	object := testPolicy(5)
+	stampedAnHourAgo := func(reason string) {
+		object.Status.Conditions = []metav1.Condition{{
+			Type:               ratelimitv1alpha1.ConditionReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			LastTransitionTime: metav1.Time{Time: now.Add(-time.Hour)},
+			ObservedGeneration: 5,
+		}}
+	}
+
+	for _, reason := range []string{
+		ratelimitv1alpha1.ReasonNoReplicas,
+		ratelimitv1alpha1.ReasonProbeFailed,
+		ratelimitv1alpha1.ReasonAllReplicas,
+		ratelimitv1alpha1.ReasonNotCompiled,
+	} {
+		stampedAnHourAgo(reason)
+		assert.Zero(t, readyAge(object, now), "%s is not time spent propagating", reason)
+	}
+
+	for _, reason := range []string{
+		ratelimitv1alpha1.ReasonReconciling,
+		ratelimitv1alpha1.ReasonPropagating,
+		ratelimitv1alpha1.ReasonReplicaStale,
+	} {
+		stampedAnHourAgo(reason)
+		assert.InDelta(t, time.Hour, readyAge(object, now), float64(time.Second),
+			"%s is time this generation spent spreading", reason)
+	}
+}
+
+// A replica that says nothing is a different diagnosis from one that answers
+// with an old generation, and the message has to keep them apart: the first
+// points at the metrics port, the second at a rollout in flight.
+func TestReconcile_namesSilentReplicasApartFromLaggingOnes(t *testing.T) {
+	probe := &stubProbe{view: FleetView{
+		Total: 4, Applied: 2,
+		Behind: []string{"ratelimit-lagging"},
+		Silent: []string{"ratelimit-quiet"},
+	}}
+	reconciler, fakeClient := newReconciler(t, probe, testPolicy(7))
+
+	_, err := reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+
+	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	assert.Contains(t, ready.Message, "ratelimit-lagging report another")
+	assert.Contains(t, ready.Message, "ratelimit-quiet did not answer")
+}
+
+// LastCheckTime documents the freshness of the probe, and an operator reads a
+// stale one as a dead leader. A steady green status changes nothing else, so
+// without a coarse refresh the field would stand still while the leader kept
+// probing.
+func TestReconcile_refreshesTheProbeTimeOnceItLooksStale(t *testing.T) {
+	object := testPolicy(1)
+	reconciler, fakeClient := newReconciler(t, unanimous(1), object)
+
+	_, err := reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+	first := fetch(t, fakeClient).Status.Replicas.LastCheckTime
+	require.NotNil(t, first)
+
+	// Nothing moved, so the second pass leaves the stamp alone rather than
+	// writing the object on every probe.
+	_, err = reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+	assert.Equal(t, first, fetch(t, fakeClient).Status.Replicas.LastCheckTime,
+		"an unchanged status must not write once per probe")
+
+	// Aged past the bound, the stamp is refreshed even though nothing else did.
+	stored := fetch(t, fakeClient)
+	stored.Status.Replicas.LastCheckTime = &metav1.Time{Time: time.Now().Add(-2 * lastCheckMaxAge)}
+	require.NoError(t, fakeClient.Status().Update(context.Background(), stored))
+
+	_, err = reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), fetch(t, fakeClient).Status.Replicas.LastCheckTime.Time, time.Minute,
+		"a leader that keeps probing keeps the field it publishes honest")
+}
+
+// The watch is what makes scaling visible: a pod joining or leaving changes the
+// denominator of Ready without touching any policy.
+func TestPoliciesBehind_mapsTheFleetsOwnSliceToEveryPolicy(t *testing.T) {
+	reconciler, _ := newReconciler(t, unanimous(1), testPolicy(1))
+	reconciler.Service = "ratelimit"
+
+	slice := func(service string) client.Object {
+		return &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      service + "-abc",
+			Labels:    map[string]string{discoveryv1.LabelServiceName: service},
+		}}
+	}
+
+	requests := reconciler.policiesBehind(context.Background(), slice("ratelimit"))
+	require.Len(t, requests, 1)
+	assert.Equal(t, testRequest().NamespacedName, requests[0].NamespacedName)
+
+	assert.Empty(t, reconciler.policiesBehind(context.Background(), slice("some-other-service")),
+		"another Service's endpoints say nothing about who enforces these rules")
+
+	reconciler.Service = ""
+	assert.Empty(t, reconciler.policiesBehind(context.Background(), slice("ratelimit")),
+		"without a Service name there is no fleet to recognize")
 }

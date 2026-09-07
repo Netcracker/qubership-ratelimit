@@ -93,10 +93,11 @@ type Result struct {
 
 // Compile turns the policies of a namespace into one snapshot per domain.
 //
-// Compilation never fails as a whole: a policy it rejects is reported through
-// its own outcome and falls back to its last-good generation, and the rest of
-// the namespace keeps working. A single bad policy must not be able to turn the
-// limits of another gateway off.
+// One policy is one domain, so there is nothing to arbitrate inside a domain;
+// what this function keeps separate is the domains themselves. A policy it
+// rejects is reported through its own outcome and falls back to its own
+// last-good generation, and the other domains of the namespace are untouched: a
+// typo in one team's policy must not turn another gateway's limits off.
 func Compile(in Input) *Result {
 	result := &Result{
 		Snapshots: make(map[string]*enginecompile.Snapshot),
@@ -107,14 +108,25 @@ func Compile(in Input) *Result {
 	for _, object := range sortedPolicies(in.Policies) {
 		key := client.ObjectKeyFromObject(object)
 		if object.Name != object.Spec.Domain {
-			// The API server rejects such an object, so it can only arrive from
-			// a client that bypassed validation. Taking it would make the
-			// singleton a lie: two names could claim one domain.
+			// The CEL rule on the CRD rejects such an object, so it arrives
+			// only from a client that bypassed validation or from a cluster
+			// running an older CRD against this component. Taking it would make
+			// the singleton a lie: two names could claim one domain.
+			//
+			// The mismatch is recorded as a problem as well as an error. The
+			// condition message only summarizes; a status whose ruleProblems is
+			// empty and whose PROBLEMS column reads 0 would leave the cause
+			// nowhere to be found.
+			mismatch := fmt.Errorf("metadata.name %q does not equal spec.domain %q",
+				object.Name, object.Spec.Domain)
 			result.Policies[key] = Outcome{
 				UID:        string(object.UID),
 				Generation: object.Generation,
-				Err: fmt.Errorf("metadata.name %q does not equal spec.domain %q",
-					object.Name, object.Spec.Domain),
+				Err:        mismatch,
+				Problems: []v1alpha1.RuleProblem{{
+					Reason:  v1alpha1.ProblemInvalidSpec,
+					Message: mismatch.Error(),
+				}},
 			}
 			continue
 		}

@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -73,9 +74,38 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 			"the status must publish the key set the rules resolve against")
 	})
 
+	// The one property no unit test can show: a leader in a real cluster
+	// reaching /debug/applied on the other pods. Everything below reads the
+	// status that probe writes.
+	It("reports every ready replica enforcing the generation", func() {
+		Eventually(policyCondition(domain, v1alpha1.ConditionReady)).Should(Equal("True"),
+			"Ready never went true; can the leader reach /debug/applied on the other replicas?")
+		Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("False"),
+			"a fleet that agrees is not stalled")
+
+		p, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.Status.Replicas.Total).To(BeNumerically(">", 0),
+			"the leader saw no ready endpoint of its own Service")
+		Expect(p.Status.Replicas.Applied).To(Equal(p.Status.Replicas.Total),
+			"Ready is true while %d of %d replicas enforce the generation",
+			p.Status.Replicas.Applied, p.Status.Replicas.Total)
+		Expect(p.Status.Replicas.LastCheckTime).NotTo(BeNil(),
+			"the status carries no probe time, so nothing says the leader is alive")
+	})
+
 	It("shows the fleet in the printer columns", func() {
+		p, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+
+		// JSONPath cannot join the two into "3/3", so the fraction is two
+		// columns and the row has to carry both numbers along with Ready.
 		row := printedRow("ratelimitpolicies", domain)
-		Expect(row).To(ContainSubstring("1"), "kubectl output does not show the rule count")
+		Expect(row).To(ContainSubstring("True"), "the row does not show the Ready condition")
+		Expect(row).To(ContainSubstring(strconv.Itoa(int(p.Status.Replicas.Applied))),
+			"the row does not show how many replicas enforce the generation")
+		Expect(row).To(ContainSubstring(strconv.Itoa(int(p.Status.Replicas.Total))),
+			"the row does not show the ready replica count")
 	})
 
 	It("reports a rule nothing can produce a key for, and blocks its generation", func() {
@@ -148,6 +178,13 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		Eventually(generations(domain)).Should(WithTransform(
 			func(g [2]int64) bool { return g[1] > 0 && g[0] != g[1] }, BeTrue()),
 			"expected an earlier generation to stay active while the edit is refused")
+
+		// Enforcing an earlier generation is not being ready, and it is a
+		// breakage rather than a rollout: last-good converges on nothing.
+		Expect(policyCondition(domain, v1alpha1.ConditionReady)()).To(Equal("False"),
+			"a policy running last-good reported itself ready")
+		Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("True"),
+			"a generation that does not compile is stuck, not in progress")
 	})
 
 	It("rebuilds the store in the running pod when a policy is deleted", func() {

@@ -15,6 +15,10 @@ import (
 // admits camelCase, so {orderId} is a valid placeholder.
 var keyName = regexp.MustCompile(`^[a-z][a-zA-Z0-9_]*$`)
 
+// maxKeyLength caps every descriptor key name, mirroring the schema. A key can
+// serve as a counter axis, and an axis name is a segment of the counter key.
+const maxKeyLength = 63
+
 // environment is what the rules of a domain resolve against: its keys, their
 // types, its groups, and its extraction plan.
 type environment struct {
@@ -111,8 +115,9 @@ func compileKeyMapping(km model.KeyMapping) (KeyExtraction, *Problem) {
 			Blocking: true,
 		}
 	}
-	if !keyName.MatchString(km.Key) || len(km.Key) > 63 {
-		return bad("mapping key %q does not match %s or exceeds 63 characters", km.Key, keyName)
+	if !keyName.MatchString(km.Key) || len(km.Key) > maxKeyLength {
+		return bad("mapping key %q does not match %s or exceeds %d characters",
+			km.Key, keyName, maxKeyLength)
 	}
 	if km.Key == model.KeyPath || km.Key == model.KeyMethod || km.Key == model.KeyToken {
 		return bad("mapping key %q collides with a built-in", km.Key)

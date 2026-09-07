@@ -63,10 +63,14 @@ var _ = Describe("RateLimitPolicy", func() {
 	var reconciler *RateLimitPolicyReconciler
 
 	BeforeEach(func() {
+		// A stub fleet, so the healthy path reaches Ready: True against a real
+		// API server. Without a probe every generation stops at ProbeFailed,
+		// and the condition this suite exists to check would never be asserted.
 		reconciler = &RateLimitPolicyReconciler{
 			Client:    k8sClient,
 			Scheme:    k8sClient.Scheme(),
 			Namespace: envtestNamespace,
+			Probe:     unanimous(3),
 		}
 
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: envtestNamespace}}
@@ -303,15 +307,20 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(accepted.Reason).To(Equal(ratelimitv1alpha1.ReasonRulesCompiled))
 			Expect(accepted.ObservedGeneration).To(Equal(reconciled.Generation))
 
-			// Without a probe the fleet is unobserved, which is Unknown rather
-			// than a claim of unanimity nobody checked.
 			ready := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionReady)
 			Expect(ready).NotTo(BeNil())
-			Expect(ready.Reason).To(Equal(ratelimitv1alpha1.ReasonProbeFailed))
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ready.Reason).To(Equal(ratelimitv1alpha1.ReasonAllReplicas))
 
 			stalled := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
 			Expect(stalled).NotTo(BeNil())
 			Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
+
+			// The fraction the printer columns show, written by the API server
+			// rather than by a fake.
+			Expect(reconciled.Status.Replicas.Total).To(Equal(int32(3)))
+			Expect(reconciled.Status.Replicas.Applied).To(Equal(int32(3)))
+			Expect(reconciled.Status.Replicas.LastCheckTime).NotTo(BeNil())
 
 			By("keeping the spec out of the status subresource")
 			Expect(reconciled.Spec.Domain).To(Equal("gateway.public"))

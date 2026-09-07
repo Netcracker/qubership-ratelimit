@@ -11,21 +11,33 @@ import (
 	"context"
 	"time"
 
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
-// probeInterval is how often the leader re-reads the fleet while a generation
-// is still propagating. Events cover the rest: a new generation or an
-// EndpointSlice change reconciles on its own.
+// probeInterval is how often the leader re-reads the fleet. It runs on every
+// reconcile, not only while a generation spreads: a replica can fall behind
+// long after the status went green, and that transition produces no event on
+// the policy itself. Events shorten the wait rather than replace it — a new
+// generation or an EndpointSlice change reconciles on its own.
 const probeInterval = 10 * time.Second
+
+// lastCheckMaxAge bounds how stale status.replicas.lastCheckTime may look while
+// nothing else about the status moves. The field documents the freshness of the
+// probe, so a leader that keeps probing has to keep stamping it, but stamping
+// every probe would write the object every probeInterval and reconcile it again
+// on the way back. One write per domain per this interval is the compromise.
+const lastCheckMaxAge = 5 * time.Minute
 
 // RateLimitPolicyReconciler reconciles a RateLimitPolicy object.
 type RateLimitPolicyReconciler struct {
@@ -34,6 +46,11 @@ type RateLimitPolicyReconciler struct {
 
 	// Namespace is the component's own, a segment of every counter key.
 	Namespace string
+
+	// Service is the Service whose ready endpoints are the fleet. The watch on
+	// its EndpointSlices is what turns a pod joining or leaving into a
+	// reconcile; an empty name leaves the reconciler on its interval alone.
+	Service string
 
 	// State reads the persisted last-good specs, so the status reports what the
 	// engine enforces rather than what a compilation from scratch would produce.
@@ -100,14 +117,13 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		object.Status.Replicas = v1alpha1.ReplicaStatus{
 			Total:   view.Total,
 			Applied: view.Applied,
-			// Stamped below, and only when something else moved: a probe time
-			// that advanced on its own would make every reconcile a write, and
-			// every write another reconcile.
+			// Carried over first, so that comparing the status against its
+			// previous value below does not count this field as a change.
 			LastCheckTime: before.Replicas.LastCheckTime,
 		}
-	}
-	if !equalStatus(before, &object.Status) && probeErr == nil {
-		object.Status.Replicas.LastCheckTime = &metav1.Time{Time: now}
+		if !equalStatus(before, &object.Status) || staleCheckTime(before.Replicas.LastCheckTime, now) {
+			object.Status.Replicas.LastCheckTime = &metav1.Time{Time: now}
+		}
 	}
 
 	written, err := writeStatus(ctx, r.Client, &object, before, &object.Status)
@@ -127,12 +143,18 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		)
 	}
 
-	// A generation still spreading converges without an event, so the leader
-	// comes back on its own rather than leaving the status behind the fleet.
-	if judged.ready != metav1.ConditionTrue {
-		return ctrl.Result{RequeueAfter: probeInterval}, nil
-	}
-	return ctrl.Result{}, nil
+	// The fleet changes without touching the policy: a pod restarts onto an
+	// image that cannot compile the current generation and falls back to
+	// last-good, and nothing about the object moves. Requeueing only while the
+	// verdict is false would leave such a replica unnoticed until the next edit
+	// or cache resync, which is exactly what Stalled exists to catch.
+	return ctrl.Result{RequeueAfter: probeInterval}, nil
+}
+
+// staleCheckTime reports whether lastCheckTime has stood still long enough that
+// a reader would take the leader for dead.
+func staleCheckTime(last *metav1.Time, now time.Time) bool {
+	return last == nil || now.Sub(last.Time) >= lastCheckMaxAge
 }
 
 // observe asks the fleet which generation of this domain it enforces.
@@ -151,9 +173,43 @@ func (r *RateLimitPolicyReconciler) observe(
 }
 
 // SetupWithManager registers the reconciler with the manager.
+//
+// The EndpointSlice watch is what makes scaling visible: a pod joining or
+// leaving changes the denominator of Ready without touching any policy, so
+// without the watch status.replicas would hold its old fraction until the
+// interval came round.
 func (r *RateLimitPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.RateLimitPolicy{}).
+		Watches(&discoveryv1.EndpointSlice{},
+			handler.EnqueueRequestsFromMapFunc(r.policiesBehind)).
 		Named("ratelimitpolicy").
 		Complete(r)
+}
+
+// policiesBehind turns a change to the fleet's own EndpointSlice into a
+// reconcile of every policy of the namespace. Slices of other Services are
+// ignored: they say nothing about which replicas enforce these rules.
+func (r *RateLimitPolicyReconciler) policiesBehind(
+	ctx context.Context,
+	object client.Object,
+) []reconcile.Request {
+	if r.Service == "" || object.GetLabels()[discoveryv1.LabelServiceName] != r.Service {
+		return nil
+	}
+
+	var list v1alpha1.RateLimitPolicyList
+	if err := r.List(ctx, &list, client.InNamespace(object.GetNamespace())); err != nil {
+		logf.FromContext(ctx).Error(err, "failed to list the policies of a changed EndpointSlice",
+			"service", r.Service)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
+		})
+	}
+	return requests
 }

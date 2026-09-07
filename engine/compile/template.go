@@ -71,8 +71,12 @@ func (c *blockCompiler) compileTemplate(b model.Block, value string, captures ma
 			continue
 		}
 		name := s[1 : len(s)-1]
-		if !keyName.MatchString(name) {
-			c.fail(b.Name, "", ReasonInvalidSpec, "placeholder %q does not match %s", name, keyName)
+		// The same cap as a mapping key, and for the same reason: a capture is
+		// a descriptor key, it can serve as a counter axis, and an axis name
+		// becomes a segment of the counter key.
+		if !keyName.MatchString(name) || len(name) > maxKeyLength {
+			c.fail(b.Name, "", ReasonInvalidSpec,
+				"placeholder %q does not match %s or exceeds %d characters", name, keyName, maxKeyLength)
 			continue
 		}
 		if name == model.KeyPath || name == model.KeyMethod || name == model.KeyClient || name == model.KeyToken {

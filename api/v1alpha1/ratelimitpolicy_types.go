@@ -411,7 +411,9 @@ type RateLimitPolicyStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:categories=ratelimit,shortName=rlp
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
-// +kubebuilder:printcolumn:name="Replicas",type=string,JSONPath=`.status.replicas.applied`
+// JSONPath cannot join two fields into "2/3", so the fraction is two columns.
+// +kubebuilder:printcolumn:name="Applied",type=integer,JSONPath=`.status.replicas.applied`
+// +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas.total`
 // +kubebuilder:printcolumn:name="Rules",type=integer,JSONPath=`.status.rules`
 // +kubebuilder:printcolumn:name="Problems",type=integer,JSONPath=`.status.problems`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

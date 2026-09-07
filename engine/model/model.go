@@ -44,7 +44,7 @@ const (
 type Mode string
 
 const (
-	// ModeAll applies every matching rule; replaces is available for
+	// ModeAll applies every matching rule; replacedRules is available for
 	// targeted overrides.
 	ModeAll Mode = "All"
 

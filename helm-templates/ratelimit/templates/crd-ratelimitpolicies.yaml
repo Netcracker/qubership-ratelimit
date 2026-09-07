@@ -26,8 +26,11 @@ spec:
       name: Ready
       type: string
     - jsonPath: .status.replicas.applied
+      name: Applied
+      type: integer
+    - jsonPath: .status.replicas.total
       name: Replicas
-      type: string
+      type: integer
     - jsonPath: .status.rules
       name: Rules
       type: integer

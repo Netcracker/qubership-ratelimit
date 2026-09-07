@@ -365,6 +365,7 @@ func addControllers(
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Namespace: namespace,
+		Service:   serviceName(options),
 		State:     lastGood,
 	}
 	// A typed nil in an interface field is not nil, and the reconciler reads a

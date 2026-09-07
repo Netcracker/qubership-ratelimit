@@ -155,9 +155,8 @@ func TestSnapshotStillNamesTheDomain(t *testing.T) {
 	if len(problems) == 0 {
 		t.Fatal("an unresolved axis compiled without problems")
 	}
-	if snap.Domain != domain || snap.Namespace != namespace {
-		t.Errorf("snapshot = %q/%q, want the domain named even when nothing compiles",
-			snap.Namespace, snap.Domain)
+	if snap.Domain != domain {
+		t.Errorf("snapshot domain = %q, want the domain named even when nothing compiles", snap.Domain)
 	}
 	if len(snap.EffectiveKeys) == 0 {
 		t.Error("the built-in key set is missing from an invalid generation's snapshot")
@@ -285,6 +284,18 @@ func TestInvalidSpecFamily(t *testing.T) {
 		}},
 		{"bad mapping key name", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: "Bad-Name", Claim: "x"}}
+		}},
+		{"overlong mapping key", func(p *model.Policy) {
+			p.Mappings = []model.KeyMapping{{Key: "k" + strings.Repeat("x", maxKeyLength), Claim: "a"}}
+		}},
+		// A capture is a descriptor key and can serve as a counter axis, so it
+		// carries the same cap as a mapping key: the name becomes a segment of
+		// the counter key.
+		{"overlong placeholder", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{
+				Type:  model.PathTemplate,
+				Value: "/api/{" + "k" + strings.Repeat("x", maxKeyLength) + "}",
+			}
 		}},
 		{"mapping over a built-in", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: model.KeyPath, Claim: "x"}}
