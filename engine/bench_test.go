@@ -21,19 +21,19 @@ import (
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
-// benchSnapshot compiles a realistic domain: a mapping with an array claim,
-// a cascade block, and a domain total — two applied rules and three buckets
+// benchSnapshot compiles a realistic domain: an array-claim mapping, a
+// cascade block, and a domain total — two applied rules and three buckets
 // per authenticated request (the vip and admin rules do not match the bench
 // identity). Limits sit far above any benchtime iteration count, so the
 // loops measure the admitted path — the one that writes state;
 // BenchmarkDecideDenied pins the refusal path.
 func benchSnapshot(b *testing.B) *compile.Snapshot {
 	b.Helper()
-	m := &model.Mapping{Domain: domain, Mappings: []model.KeyMapping{
-		{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
-	}}
 	p := model.Policy{
-		Name: "widgets", Domain: domain,
+		Domain: domain,
+		Mappings: []model.KeyMapping{
+			{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
+		},
 		Groups: []model.Group{{Name: "vip", Clients: []string{"partner-a", "partner-b"}}},
 		Blocks: []model.Block{
 			{
@@ -42,11 +42,11 @@ func benchSnapshot(b *testing.B) *compile.Snapshot {
 					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/widgets/"}}}},
 				Rules: []model.Rule{
 					{Name: "vip", Counters: []string{model.KeyClient},
-						When:  []model.Condition{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}},
-						Rates: []model.Rate{{Requests: 1000, Period: time.Minute}}},
+						Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}},
+						Rates:   []model.Rate{{Requests: 1000, Period: time.Minute}}},
 					{Name: "admin", Counters: []string{model.KeyClient},
-						When:  []model.Condition{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
-						Rates: []model.Rate{{Requests: 500, Period: time.Minute}}},
+						Matches: []model.Predicate{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
+						Rates:   []model.Rate{{Requests: 500, Period: time.Minute}}},
 					{Name: "everyone", Counters: []string{model.KeyClient},
 						Rates: []model.Rate{
 							{Requests: 6_000_000, Period: time.Minute},
@@ -62,7 +62,7 @@ func benchSnapshot(b *testing.B) *compile.Snapshot {
 			},
 		},
 	}
-	snap, problems := compile.Compile(domain, []model.Policy{p}, m)
+	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
 		b.Fatalf("compile problems: %v", problems)
 	}
@@ -130,11 +130,11 @@ func BenchmarkDecideNoTarget(b *testing.B) {
 // exhausted by the first iteration, and every later decision is refused
 // without a state write.
 func BenchmarkDecideDenied(b *testing.B) {
-	p := model.Policy{Name: "deny", Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name:  "b",
 		Rules: []model.Rule{{Name: "one", Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
-	snap, problems := compile.Compile(domain, []model.Policy{p}, nil)
+	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
 		b.Fatalf("compile problems: %v", problems)
 	}
@@ -194,7 +194,7 @@ func BenchmarkMatchEvaluate(b *testing.B) {
 // complexity.
 func BenchmarkMatchManyBlocks(b *testing.B) {
 	const blocks = 64
-	p := model.Policy{Name: "wide", Domain: domain}
+	p := model.Policy{Domain: domain}
 	for i := range blocks {
 		routes := make([]model.Route, 0, 4)
 		for _, sub := range []string{"a", "b", "c", "d"} {
@@ -208,7 +208,7 @@ func BenchmarkMatchManyBlocks(b *testing.B) {
 				Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}},
 		})
 	}
-	snap, problems := compile.Compile(domain, []model.Policy{p}, nil)
+	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
 		b.Fatalf("compile problems: %v", problems)
 	}

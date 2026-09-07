@@ -5,14 +5,12 @@ package e2e
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	dto "github.com/prometheus/client_model/go"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
@@ -28,45 +26,36 @@ var _ = Describe("identity extraction through the gateway", Ordered, Label("jwt"
 		probePath = "/e2e"
 		limit     = 2
 	)
-	var policyName string
+	var applied bool
 
 	BeforeAll(func() {
 		// The fixture half runs once even across flake retries: the budget
-		// is an hour long, and a retry that minted a fresh policy would
+		// is an hour long, and a retry that reapplied the policy would
 		// re-count from empty buckets.
-		if policyName == "" {
-			policyName = fmt.Sprintf("e2e-jwt-%d", time.Now().Unix())
-
-			Expect(apply(&v1alpha1.RateLimitMapping{
-				TypeMeta:   typeMetaFor("RateLimitMapping"),
-				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: domain},
-				Spec: v1alpha1.RateLimitMappingSpec{
-					Domain: domain,
-					Mappings: []v1alpha1.ClaimMapping{{
-						Key: "tenant", Claim: "org_id"}},
-				},
-			})).To(Succeed())
-
-			// Warm-up probes carry no token, so the tenant rule cannot match
-			// them and the per-client budgets stay untouched - the order of
-			// warm-up and apply does not matter here.
-			waitGatewayServes("public-gateway", probePath)
-
-			limits := prefixLimits(probePath, "per-tenant", []string{"tenant"}, limit, "1h")
-			limits[0].Rules[0].When = []v1alpha1.Predicate{{
-				Key: "tenant", Operator: v1alpha1.OperatorExists}}
-			before := storeRebuilds()
-			Expect(apply(newPolicy(policyName, domain, limits))).To(Succeed())
-			waitStoreRebuilt(before)
+		if applied {
+			return
 		}
+		applied = true
+
+		// Warm-up probes carry no token, so the tenant rule cannot match
+		// them and the per-client budgets stay untouched - the order of
+		// warm-up and apply does not matter here.
+		waitGatewayServes("public-gateway", probePath)
+
+		limits := prefixLimits(probePath, "per-tenant", []string{"tenant"}, limit, 3600)
+		limits[0].Rules[0].Matches = []v1alpha1.Predicate{{
+			Key: "tenant", Operator: v1alpha1.OperatorExists}}
+
+		// The claim mapping travels in the same object as the rules that
+		// reference it: one edit, one generation, applied atomically.
+		policy := newPolicy(domain, limits)
+		policy.Spec.Mappings = []v1alpha1.ClaimMapping{{Key: "tenant", Claim: "org_id"}}
+
+		before := storeRebuilds()
+		Expect(apply(policy)).To(Succeed())
+		waitStoreRebuilt(before)
 	})
-	AfterAll(func() {
-		if policyName != "" {
-			deletePolicies(policyName)
-		}
-		_ = k8s.Delete(ctx, &v1alpha1.RateLimitMapping{
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: domain}})
-	})
+	AfterAll(func() { deletePolicies(domain) })
 
 	It("counts each client in its own bucket", func() {
 		beforeFamilies := scrapeAllReplicas()

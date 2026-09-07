@@ -11,13 +11,9 @@ import (
 // captures: block-scoped descriptor keys, sorted. A capture that shadows a
 // mapped key is the one informational finding of the compiler — inside the
 // block the capture wins, and the author should know.
-func (c *policyCompiler) compileRoutes(b model.Block) ([]Route, []string) {
+func (c *blockCompiler) compileRoutes(b model.Block) ([]Route, []string) {
 	// No routes is the documented "whole domain" form: the block matches
 	// every request, with no captures and the raw path as the axis.
-	if len(b.Target.Routes) > model.MaxRoutesPerBlock {
-		c.fail(b.Name, "", ReasonInvalidSpec, "routes exceed the limit of %d", model.MaxRoutesPerBlock)
-	}
-
 	routes := make([]Route, 0, len(b.Target.Routes))
 	captures := map[string]struct{}{}
 	for _, r := range b.Target.Routes {
@@ -32,7 +28,7 @@ func (c *policyCompiler) compileRoutes(b model.Block) ([]Route, []string) {
 	return routes, sorted
 }
 
-func (c *policyCompiler) compileRoute(b model.Block, r model.Route, captures map[string]struct{}) Route {
+func (c *blockCompiler) compileRoute(b model.Block, r model.Route, captures map[string]struct{}) Route {
 	out := Route{Type: r.Path.Type, Value: r.Path.Value}
 
 	if !strings.HasPrefix(r.Path.Value, "/") {
@@ -46,9 +42,6 @@ func (c *policyCompiler) compileRoute(b model.Block, r model.Route, captures map
 		c.fail(b.Name, "", ReasonInvalidSpec, "unknown path type %q", r.Path.Type)
 	}
 
-	if len(r.Methods) > model.MaxMethodsPerRoute {
-		c.fail(b.Name, "", ReasonInvalidSpec, "methods exceed the limit of %d", model.MaxMethodsPerRoute)
-	}
 	if len(r.Methods) > 0 {
 		out.Methods = make(map[string]struct{}, len(r.Methods))
 		for _, m := range r.Methods {
@@ -68,7 +61,7 @@ func (c *policyCompiler) compileRoute(b model.Block, r model.Route, captures map
 
 // compileTemplate splits a template into segments. A placeholder matches
 // exactly one non-empty segment; the template covers the whole path.
-func (c *policyCompiler) compileTemplate(b model.Block, value string, captures map[string]struct{}) []Segment {
+func (c *blockCompiler) compileTemplate(b model.Block, value string, captures map[string]struct{}) []Segment {
 	segments := strings.Split(strings.TrimPrefix(value, "/"), "/")
 	out := make([]Segment, 0, len(segments))
 	seen := map[string]struct{}{}
@@ -78,8 +71,12 @@ func (c *policyCompiler) compileTemplate(b model.Block, value string, captures m
 			continue
 		}
 		name := s[1 : len(s)-1]
-		if !keyName.MatchString(name) {
-			c.fail(b.Name, "", ReasonInvalidSpec, "placeholder %q does not match %s", name, keyName)
+		// The same cap as a mapping key, and for the same reason: a capture is
+		// a descriptor key, it can serve as a counter axis, and an axis name
+		// becomes a segment of the counter key.
+		if !keyName.MatchString(name) || len(name) > maxKeyLength {
+			c.fail(b.Name, "", ReasonInvalidSpec,
+				"placeholder %q does not match %s or exceeds %d characters", name, keyName, maxKeyLength)
 			continue
 		}
 		if name == model.KeyPath || name == model.KeyMethod || name == model.KeyClient || name == model.KeyToken {

@@ -88,9 +88,8 @@ func (r Result) Buckets() []store.Bucket {
 // MatchedRule is one applied rule with its counter identity, for metrics and
 // header attribution.
 type MatchedRule struct {
-	Policy string
-	Block  string
-	Rule   string
+	Block string
+	Rule  string
 
 	// Shadow mirrors the rule's behavior: its buckets count and report but
 	// never veto.
@@ -219,12 +218,12 @@ func evalFirstMatch(block *compile.Block, ctx *blockCtx) []MatchedRule {
 	return out
 }
 
-// evalAll applies every matching rule. A matching rule's replaces suppresses
-// the rules it names; for a bypass that is the whole effect — a targeted
-// exemption, never the whole block.
+// evalAll applies every matching rule. A matching rule's replacedRules
+// suppresses the rules it names; for a bypass that is the whole effect — a
+// targeted exemption, never the whole block.
 func evalAll(block *compile.Block, ctx *blockCtx) []MatchedRule {
 	var out []MatchedRule
-	var suppressed map[string]struct{} // lazy: replaces is the rare case
+	var suppressed map[string]struct{} // lazy: replacedRules is the rare case
 
 	for i := range block.Rules {
 		rule := &block.Rules[i]
@@ -234,7 +233,7 @@ func evalAll(block *compile.Block, ctx *blockCtx) []MatchedRule {
 		if rule.Behavior != model.BehaviorBypass {
 			out = append(out, matchedRule(block, rule, ctx))
 		}
-		for _, name := range rule.Replaces {
+		for _, name := range rule.ReplacedRules {
 			if suppressed == nil {
 				suppressed = map[string]struct{}{}
 			}
@@ -254,14 +253,14 @@ func evalAll(block *compile.Block, ctx *blockCtx) []MatchedRule {
 	return kept
 }
 
-// ruleMatches evaluates the when predicates and requires every counter axis
+// ruleMatches evaluates the matches predicates and requires every counter axis
 // to carry exactly one value: a bucket with nothing to key it is a rule that
 // does not match — the mechanism by which per-client rules skip anonymous
 // traffic — and a bucket with several candidate keys is an ambiguity the
 // matcher refuses to resolve by guessing.
 func ruleMatches(rule *compile.Rule, ctx *blockCtx) bool {
-	for i := range rule.When {
-		if !conditionHolds(&rule.When[i], ctx) {
+	for i := range rule.Matches {
+		if !predicateHolds(&rule.Matches[i], ctx) {
 			return false
 		}
 	}
@@ -273,7 +272,7 @@ func ruleMatches(rule *compile.Rule, ctx *blockCtx) bool {
 	return true
 }
 
-func conditionHolds(c *compile.Condition, ctx *blockCtx) bool {
+func predicateHolds(c *compile.Predicate, ctx *blockCtx) bool {
 	set := ctx.valueOf(c.Key)
 	switch c.Operator {
 	case model.OperatorEquals:
@@ -289,7 +288,7 @@ func conditionHolds(c *compile.Condition, ctx *blockCtx) bool {
 		return slices.Contains(set, c.Value)
 	case model.OperatorExists:
 		return len(set) > 0
-	case model.OperatorNotExists:
+	case model.OperatorDoesNotExist:
 		return len(set) == 0
 	}
 	return false
@@ -302,7 +301,6 @@ func matchedRule(block *compile.Block, rule *compile.Rule, ctx *blockCtx) Matche
 	}
 
 	out := MatchedRule{
-		Policy:  block.Policy,
 		Block:   block.Name,
 		Rule:    rule.Name,
 		Shadow:  rule.Behavior == model.BehaviorShadow,

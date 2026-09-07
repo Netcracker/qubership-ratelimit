@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -35,9 +34,9 @@ type InformerSource interface {
 	GetInformer(ctx context.Context, obj client.Object, opts ...cache.InformerGetOption) (cache.Informer, error)
 }
 
-// StateStore persists the last-good spec of every object of a domain. It is
-// optional: without it the operator still works, and only loses the last-good
-// specs across a restart.
+// StateStore persists the last-good spec of a domain. It is optional: without
+// it the operator still works, and only loses the last-good spec across a
+// restart.
 type StateStore interface {
 	Load(ctx context.Context, domains []string) (map[string]policy.Bundle, error)
 	Save(ctx context.Context, domain string, bundle policy.Bundle) error
@@ -59,6 +58,9 @@ type Updater struct {
 	Store    *Store
 	Debounce time.Duration
 	Log      logr.Logger
+
+	// Namespace is the component's own, a segment of every counter key.
+	Namespace string
 
 	// Counters is the store the engines count in, shared by every domain.
 	Counters counters.Store
@@ -100,6 +102,9 @@ type Updater struct {
 
 	// built reports whether the store has been filled at least once.
 	built atomic.Bool
+
+	// applied is what this replica enforces, published for the leader's probe.
+	applied appliedState
 }
 
 // Ready reports whether this replica has rules to decide with.
@@ -116,8 +121,8 @@ func (u *Updater) Ready() bool { return u.built.Load() }
 // every replica needs a populated store.
 func (u *Updater) NeedLeaderElection() bool { return false }
 
-// Start subscribes to policy and mapping events and rebuilds the store on each
-// burst. It returns when ctx is cancelled.
+// Start subscribes to policy events and rebuilds the store on each burst. It
+// returns when ctx is cancelled.
 func (u *Updater) Start(ctx context.Context) error {
 	debounce := u.Debounce
 	if debounce <= 0 {
@@ -139,28 +144,22 @@ func (u *Updater) Start(ctx context.Context) error {
 		DeleteFunc: func(obj any) { notify(obj) },
 	}
 
-	// A mapping is watched for the same reason a policy is: it decides how
-	// identity is read, and a rule that references a mapped key comes alive on
-	// the rebuild that first sees the mapping.
-	watched := []client.Object{
-		&v1alpha1.RateLimitPolicy{},
-		&v1alpha1.RateLimitMapping{},
+	// One object holds the rules, the extraction, and the groups of a domain,
+	// so one informer sees every change that can alter a snapshot.
+	object := client.Object(&v1alpha1.RateLimitPolicy{})
+	informer, err := u.Cache.GetInformer(ctx, object)
+	if err != nil {
+		return fmt.Errorf("get %T informer: %w", object, err)
 	}
-	for _, object := range watched {
-		informer, err := u.Cache.GetInformer(ctx, object)
-		if err != nil {
-			return fmt.Errorf("get %T informer: %w", object, err)
-		}
-		registration, err := informer.AddEventHandler(handler)
-		if err != nil {
-			return fmt.Errorf("add %T event handler: %w", object, err)
-		}
-		defer func() {
-			if err := informer.RemoveEventHandler(registration); err != nil {
-				u.Log.Error(err, "failed to remove event handler")
-			}
-		}()
+	registration, err := informer.AddEventHandler(handler)
+	if err != nil {
+		return fmt.Errorf("add %T event handler: %w", object, err)
 	}
+	defer func() {
+		if err := informer.RemoveEventHandler(registration); err != nil {
+			u.Log.Error(err, "failed to remove event handler")
+		}
+	}()
 
 	// The cache is synced before this runnable starts, so the first rebuild
 	// already sees every existing object; the replayed Add events then collapse
@@ -203,7 +202,7 @@ func (u *Updater) Start(ctx context.Context) error {
 }
 
 func (u *Updater) rebuild(ctx context.Context) {
-	input, err := policy.Load(ctx, u.Cache)
+	input, err := policy.Load(ctx, u.Cache, u.Namespace)
 	if err != nil {
 		// Keep the previous snapshot: stale rules are better than none, and the
 		// next event triggers another attempt.
@@ -215,12 +214,6 @@ func (u *Updater) rebuild(ctx context.Context) {
 
 	result := policy.Compile(input)
 
-	for domain, warnings := range result.Warnings {
-		for _, warning := range warnings {
-			u.Log.Info("domain over its reference bounds", "domain", domain, "warning", warning)
-		}
-	}
-
 	// Write-ahead: the state describes what the snapshot about to be installed
 	// enforces, so persisting it first makes a crash in between recoverable — the
 	// next start converges to a state that was valid when it was written.
@@ -229,6 +222,7 @@ func (u *Updater) rebuild(ctx context.Context) {
 	u.bundles = result.State
 
 	u.Store.Replace(u.ruleSet(result, previous))
+	u.applied.publish(appliedOf(result))
 	u.built.Store(true)
 	metrics.SnapshotRebuilds.WithLabelValues("ok").Inc()
 	metrics.SnapshotTimestamp.SetToCurrentTime()
@@ -249,7 +243,6 @@ type rebuildSummary struct {
 
 	policiesNotReady   int
 	policiesOnLastGood int
-	mappingsVetoed     int
 }
 
 // summarize counts the compiled result for the line a rebuild logs.
@@ -264,19 +257,14 @@ func summarize(result *policy.Result) rebuildSummary {
 	}
 	for _, outcome := range result.Policies {
 		summary.ruleProblems += len(outcome.Problems)
-		if outcome.Ready() {
+		if outcome.Enforced() {
 			continue
 		}
 		summary.policiesNotReady++
-		// A policy that is not ready but has an active generation is running on
-		// its last-good spec rather than running nothing.
+		// A policy that is not enforced but has an active generation is running
+		// on its last-good spec rather than running nothing.
 		if outcome.ActiveGeneration != 0 {
 			summary.policiesOnLastGood++
-		}
-	}
-	for _, outcome := range result.Mappings {
-		if len(outcome.RejectedBy) > 0 {
-			summary.mappingsVetoed++
 		}
 	}
 	return summary
@@ -293,7 +281,6 @@ func (s rebuildSummary) fields() []any {
 		"ruleProblems", s.ruleProblems,
 		"policiesNotReady", s.policiesNotReady,
 		"policiesOnLastGood", s.policiesOnLastGood,
-		"mappingsVetoed", s.mappingsVetoed,
 	}
 }
 
@@ -329,6 +316,23 @@ func (u *Updater) ruleSet(result *policy.Result, previous map[string]policy.Bund
 	return NewRuleSet(domains)
 }
 
+// appliedOf records the generation this replica now enforces for each domain,
+// for the leader's probe. A domain with nothing in effect is reported at
+// generation zero rather than omitted: the leader has to tell "enforcing
+// nothing" apart from "this replica has never heard of the domain".
+func appliedOf(result *policy.Result) map[string]Applied {
+	now := time.Now().UTC()
+	out := make(map[string]Applied, len(result.Policies))
+	for key, outcome := range result.Policies {
+		out[key.Name] = Applied{
+			Generation: outcome.ActiveGeneration,
+			UID:        outcome.UID,
+			AppliedAt:  now,
+		}
+	}
+	return out
+}
+
 // activeSet lists the label values the new snapshot can produce, for the
 // series pruner: domains, rule triples, and identity keys. Whatever is not
 // here belongs to a renamed or deleted object and its series are leftovers.
@@ -346,7 +350,7 @@ func activeSet(result *policy.Result) *metrics.ActiveSet {
 		for i := range snapshot.Blocks {
 			block := &snapshot.Blocks[i]
 			for _, rule := range block.Rules {
-				active.Rules[metrics.RuleID(block.Policy, block.Name, rule.Name)] = struct{}{}
+				active.Rules[metrics.RuleID(block.Name, rule.Name)] = struct{}{}
 			}
 		}
 	}
@@ -380,40 +384,47 @@ func extractionKeys(result *policy.Result) []string {
 func stateView(result *policy.Result) *metrics.StateView {
 	view := &metrics.StateView{}
 
-	buckets := map[string]int{}
-	for _, snapshot := range result.Snapshots {
-		view.Domains = append(view.Domains, metrics.DomainView{
-			Domain:          snapshot.Domain,
-			Blocks:          len(snapshot.Blocks),
-			DecisionBuckets: snapshot.DecisionBuckets,
-		})
-		// Policy names are unique within the namespace, so one map serves
-		// every domain.
-		maps.Copy(buckets, snapshot.PolicyBuckets)
-	}
-
+	active := make(map[string]int64, len(result.Policies))
 	for key, outcome := range result.Policies {
+		active[key.Name] = outcome.ActiveGeneration
+
 		lag := outcome.Generation
 		if outcome.ActiveGeneration > 0 {
 			lag = outcome.Generation - outcome.ActiveGeneration
 		}
 		view.Policies = append(view.Policies, metrics.PolicyView{
 			Policy:        key.String(),
-			Ready:         outcome.Ready(),
-			Reason:        outcome.Reason,
+			Ready:         outcome.Enforced(),
+			Reason:        notEnforcedReason(outcome),
 			Enforced:      outcome.ActiveGeneration != 0,
 			GenerationLag: lag,
 			RuleProblems:  len(outcome.Problems),
-			Buckets:       buckets[key.Name],
 		})
 	}
-	for key, outcome := range result.Mappings {
-		view.Mappings = append(view.Mappings, metrics.MappingView{
-			Mapping: key.String(),
-			Ready:   outcome.Ready(),
+
+	for domain, snapshot := range result.Snapshots {
+		view.Domains = append(view.Domains, metrics.DomainView{
+			Domain:            snapshot.Domain,
+			Blocks:            len(snapshot.Blocks),
+			DecisionBuckets:   snapshot.DecisionBuckets,
+			AppliedGeneration: active[domain],
 		})
 	}
 	return view
+}
+
+// notEnforcedReason labels the series of a policy whose latest generation is
+// not the one running. It is the replica's own view — whether the spec
+// compiles — never the fleet's, which only the leader can see.
+func notEnforcedReason(outcome policy.Outcome) string {
+	switch {
+	case outcome.Enforced():
+		return ""
+	case !outcome.Compiled():
+		return v1alpha1.ReasonNotCompiled
+	default:
+		return v1alpha1.ReasonReconciling
+	}
 }
 
 // lastGood returns the state this rebuild starts from: whatever was persisted on
@@ -542,12 +553,9 @@ func unchanged(before, after policy.Bundle) bool {
 }
 
 func domainsOf(input policy.Input) []string {
-	seen := make(map[string]struct{}, len(input.Policies)+len(input.Mappings))
+	seen := make(map[string]struct{}, len(input.Policies))
 	for i := range input.Policies {
 		seen[input.Policies[i].Spec.Domain] = struct{}{}
-	}
-	for i := range input.Mappings {
-		seen[input.Mappings[i].Spec.Domain] = struct{}{}
 	}
 	domains := make([]string, 0, len(seen))
 	for domain := range seen {

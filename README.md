@@ -3,18 +3,18 @@
 Rate limiting for an Istio ambient mesh with two ingress gateways. The gateways call this service over the Envoy rate
 limit service (RLS) protocol; the rules arrive as `RateLimitPolicy` custom resources.
 
-| Item          | Value                                                                    |
-|---------------|--------------------------------------------------------------------------|
-| API group     | `ratelimit.netcracker.com`                                               |
-| Kinds         | `RateLimitPolicy` (rules), `RateLimitMapping` (identity keys and groups) |
-| gRPC RLS port | 9000                                                                     |
-| Health probes | 8081                                                                     |
-| Scope         | namespaced — one installation, one namespace                             |
+| Item          | Value                                                                       |
+|---------------|-----------------------------------------------------------------------------|
+| API group     | `ratelimit.netcracker.com`                                                  |
+| Kind          | `RateLimitPolicy` — one per domain, holding rules, identity keys and groups |
+| gRPC RLS port | 9000                                                                        |
+| Health probes | 8081                                                                        |
+| Scope         | namespaced — one installation, one namespace                                |
 
-**What is built today**: the two resources and their validation, the lifecycle around them — atomic generations,
-last-good fallback, and the transaction gate on a mapping update — and the decision engine that enforces the compiled
-rules. Counters live in Redis when `redis.addresses` is set, which is what makes a limit a limit of the domain rather
-than of each replica; without it each replica counts in its own memory and a limit of 100 admits 100 per replica.
+**What is built today**: the resource and its validation, the lifecycle around it — atomic generations, last-good
+fallback, and the fleet view behind the `Ready` condition — and the decision engine that enforces the compiled rules.
+Counters live in Redis when `redis.addresses` is set, which is what makes a limit a limit of the domain rather than of
+each replica; without it each replica counts in its own memory and a limit of 100 admits 100 per replica.
 
 **What is not built**: the gateways do not verify the tokens they forward. The identity-keyed rules below extract claims
 from the `authorization` header without checking a signature, so a limit keyed on `client` or `tenant` is only as
@@ -34,20 +34,21 @@ and on the path through the routes of its block.
 Controller and RLS endpoint share one binary and one Deployment. `--mode=all|controller|rls` selects the components, so
 splitting them later is a Helm change rather than a refactor. Only `all` is exercised today.
 
-| Component       | Runs on       | Leader election | Does                                                       |
-|-----------------|---------------|-----------------|------------------------------------------------------------|
-| Store updater   | every replica | no              | recompiles every domain on any policy or mapping event     |
-| gRPC RLS server | every replica | no              | answers a check; a stub until the evaluator lands          |
-| Reconcilers     | leader only   | yes             | write `Accepted`, `Ready`, `ruleProblems`, `effectiveKeys` |
-| State writer    | leader only   | yes             | persists the last-good spec of each object before a swap   |
+| Component       | Runs on       | Leader election | Does                                                  |
+|-----------------|---------------|-----------------|-------------------------------------------------------|
+| Store updater   | every replica | no              | recompiles a domain on any policy event               |
+| gRPC RLS server | every replica | no              | answers a check                                       |
+| Reconciler      | leader only   | yes             | writes `Accepted`, `Ready`, `Stalled`, `replicas`     |
+| State writer    | leader only   | yes             | persists the last-good spec of a domain before a swap |
 
 The split is a correctness requirement. `Reconcile` runs on the leader alone, so a store filled there would leave every
 other replica answering checks from an empty store — limits that apply on some pods and not others.
 
 ## The resource model
 
-Policies are units of ownership and review rather than units of evaluation. Any event recompiles the whole domain, and
-after compilation there are no policies left — one flat set of blocks. Compilation is a pure function of the set of
+A domain is one object. `metadata.name` equals `spec.domain` and object names are unique within a namespace, so a
+second policy for a domain cannot be created: the API server rejects it with `AlreadyExists`, and there is no "which of
+the two wins" question to answer. Compilation is a pure function of the
 objects, so the order they arrived in, their recreation, and their timestamps change nothing.
 
 A block is a target plus rules. **Blocks always add up**: a request that lands in several has to fit the verdict of
@@ -62,15 +63,14 @@ counts per wall-clock window and resets at the boundary. A rule whose axis the r
 all — there is nothing to key the bucket by, which is what excludes an anonymous caller from a rule counting by
 `client`.
 
-`RateLimitMapping` is the singleton of its domain, and the singleton comes out of the naming rule rather than out of
-arbitration: `metadata.name` equals `spec.domain`, and object names are unique in a namespace, so a second mapping for
-one domain cannot be created. It declares how identity is read out of the JWT and holds the client groups the policies
-of the domain share. A policy does not wait for it, and does not run half-way either: a policy over built-in keys alone
-works with no mapping present, while one referencing declared keys or shared groups is invalid as a whole until the
-mapping appears.
+`spec.mappings` declares how identity is read out of the JWT and `spec.groups` holds the named client lists `InGroup`
+resolves against. Both live in the same object as the rules that reference them, which is the point of the singleton:
+they change in one edit and apply as one generation, so a request never sees new rules over old extraction. The
+built-in `client` key — the `sub` claim, lower-cased — works with no mapping at all, and an entry named `client`
+overrides it.
 
-`config/samples/` holds a full public-gateway policy, a mapping, and a production Azure API Management policy translated
-into one `RateLimitPolicy`. An envtest spec applies all of them against a real API server on every `make test`, so a
+`config/samples/` holds a full public-gateway policy and a production Azure API Management policy translated into one
+`RateLimitPolicy`. An envtest spec applies all of them against a real API server on every `make test`, so a
 sample that stopped being valid fails the build.
 
 ### A generation is enforced whole or not at all
@@ -81,82 +81,73 @@ The schema rejects what it can see; the compiler reports what needs the domain t
 | Reason                     | Weight        | Means                                                                       |
 |----------------------------|---------------|-----------------------------------------------------------------------------|
 | `UnresolvedKeyReference`   | blocking      | nothing produces the key — no built-in, no mapping, no capture              |
-| `UnresolvedGroupReference` | blocking      | `InGroup` names a group neither the policy nor the mapping defines          |
+| `UnresolvedGroupReference` | blocking      | `InGroup` names a group the policy does not define                          |
+| `UnresolvedReplacedRules`  | blocking      | `replacedRules` names a rule outside its own block                          |
 | `IncompatibleOperator`     | blocking      | the operator cannot apply to the type of the key, e.g. `Equals` on an array |
 | `InvalidCounterAxis`       | blocking      | an array key cannot key a bucket                                            |
+| `InvalidSpec`              | blocking      | a structural defect the schema cannot see, an unknown field among them      |
+| `InvalidWindow`            | blocking      | a window the counting math cannot honor                                     |
+| `DomainBudgetExceeded`     | blocking      | the worst-case decision is over 128 buckets                                 |
 | `CaptureShadowsMappedKey`  | informational | inside this block a route capture wins over the mapped key                  |
 
 One blocking entry invalidates the whole generation: not one of its rules enters the snapshot. Applying the healthy
-rules of a broken policy would be worse than applying none — a `FirstMatch` cascade missing a rule silently hands its
-traffic to the neighbours, which are stricter or looser than the author intended, and nothing in the response says so.
+rules of a broken generation would be worse than applying none — a `FirstMatch` cascade missing a rule silently hands
+its traffic to the neighbours, which are stricter or looser than the author intended, and nothing in the response says
+so.
 
-The blast radius is the policy itself. That makes the layout of a namespace a design choice: keep the safety-net total
-limits in a small policy of their own, over built-in keys, where it can hardly ever become invalid.
-
-A typo therefore costs a policy, never a trap: it gives rules that do not run, and a status that says which reference
-does not resolve.
+The blast radius is the domain, and the last-good generation keeps serving it. A typo therefore costs an answer, never
+the limits: it gives a status that says which reference does not resolve, while the rules that were running go on
+running.
 
 ## Two generations: observed and active
 
-Every object reports a pair. `observedGeneration` is the latest spec the operator has seen; `activeGeneration` is the
-one actually being enforced. They diverge when the latest edit is rejected and an earlier, last-good generation keeps
-running. `activeGeneration: 0` means nothing of this object is in effect.
+A policy reports a pair. `observedGeneration` is the latest spec the leader has seen; `activeGeneration` is the one
+actually being enforced. They diverge when the latest edit does not compile and an earlier, last-good generation keeps
+running. `activeGeneration: 0` means the domain is unprotected: nothing is in effect at all.
 
 ```console
 $ kubectl get rlp
-NAME           DOMAIN           READY   PROBLEMS   ACTIVE   AGE
-order-mgmt     gateway.public   False   1          3        5d
-api-defaults   gateway.public   True    0          7        5d
+NAME              READY   REPLICAS   RULES   PROBLEMS   AGE
+gateway.public    False   3          5       1          5d
+gateway.private   True    3          2       0          5d
 ```
 
-Reading it: `order-mgmt` generation 4 does not compile, and generation 3 is still serving traffic. The `Ready` reason
-names the fix — `MappingRequired` when the domain has no mapping at all, `UnresolvedReferences` when it has one that
-does not declare the key, `IncompatibleReferences` when the reference resolves but cannot be used that way,
-`InvalidSpec` when the spec is structurally wrong.
+Reading it: the latest generation of `gateway.public` does not compile, an earlier one is still serving its five rules,
+and `Accepted` carries the summary while `ruleProblems` carries the address of the rule at fault.
 
 Last-good specs are persisted, one gzipped ConfigMap per domain (`ratelimit-state-<domain>`), because etcd holds only
 the latest generation — which may be the rejected one. Without the copy a restart would forget what is running and turn
 a rejected edit into an outage at the next rollout. The write happens before the snapshot swap, so a crash in between
 converges to a state that was valid when it was written, and a UID check keeps a recreated object from inheriting the
-specs of its namesake. Only the leader writes; every replica reads once, at startup.
+spec of its namesake. Only the leader writes; every replica reads once, at startup.
 
-### Updating a mapping is a transaction
+### Ready is a statement about every replica
 
-A mapping is a platform resource that the policies of many teams depend on, so a new generation of it has to pass a
-gate: **it is accepted only if no policy that is running something would be left with nothing to run.**
+The leader is the only replica that writes status, but "the rules I wrote are the rules being enforced" is only true
+when every pod receiving traffic says so. The leader therefore reads `/debug/applied` from each ready endpoint of its
+own Service — read-only diagnostics on the metrics port, no mutations and no authentication — and compares the
+generation and UID each replica reports with the one it expects.
 
-```text
-candidate = built-in keys + the new mapping spec
-for each policy of the domain:
-    running before = its active spec, or nothing
-    running after  = its latest spec if valid under the candidate,
-                     else its last-good spec if valid under the candidate,
-                     else nothing
-    running before != nothing and running after == nothing  ->  veto
-```
+The denominator is the ready endpoints, not the Deployment's `spec.replicas`: a pod that is not ready receives no
+traffic, so it neither enforces anything nor belongs in the fraction. That is also what keeps `Ready` from flickering
+during a rollout — a new pod joins only once ready, and it becomes ready after its first compilation, already on the
+current generation.
 
-Any veto and the candidate is refused: `activeGeneration` stays where it was, `Ready` goes false with
-`RejectedByPolicies`, and `status.rejectedBy` names every culprit with the generation that was vetoing — which may be an
-active generation rather than the latest one, because that spec may no longer exist as written.
+`Ready` is the summary; `Stalled` separates "in progress" from "stuck", so a rollout pages nobody and a broken informer
+does:
 
-Two properties of the gate are worth stating, because they are the ones that make it usable:
+| Situation                                                    | `Ready` | `Stalled` | Reason         |
+|--------------------------------------------------------------|---------|-----------|----------------|
+| every ready replica enforces the latest generation           | True    | False     | `AllReplicas`  |
+| no replica has taken the new generation up yet               | False   | False     | `Reconciling`  |
+| some have, and the lag is under 30 s                         | False   | False     | `Propagating`  |
+| the Service has no ready endpoint                            | False   | False     | `NoReplicas`   |
+| a replica lags past the threshold: broken informer, or skew  | False   | True      | `ReplicaStale` |
+| the latest generation does not compile, last-good is running | False   | True      | `NotCompiled`  |
+| the leader could not observe the replicas at all             | Unknown | False     | `ProbeFailed`  |
 
-- **A policy already broken by its own spec has no vote.** A vote is a veto, and only the policies the candidate makes
-  worse get one. If the gate demanded validity of everything, one team's typo would freeze a platform resource for the
-  whole domain forever. Such a policy is not forgotten — it is re-checked after the candidate lands and revives as soon
-  as either side is fixed.
-- **The latest spec wins over the last-good one in "running after".** etcd is the desired state and a last-good spec is
-  a crutch, so as soon as the desired spec becomes valid under the candidate it is the one that would run. Without that
-  priority a stuck policy could never be fixed through the mapping: its stale spec would demand compatibility with
-  itself forever.
-
-A deliberately breaking change — renaming or removing a key — goes expand/contract. Add the new name alongside the old
-one (no regression, accepted), let the teams migrate, then remove the old name. The gate tells you when the second step
-is safe: until someone has migrated, it refuses the change and lists who is behind.
-
-Symmetry of responsibility: a broken policy punishes only itself, and a broken mapping punishes nobody. **Deleting** a
-mapping is outside the gate — it is a deliberate administrative act, the domain falls back to its built-in keys, and the
-policies depending on it lose validity. RBAC is the guard against doing it by accident, not the controller.
+For Argo CD: `Stalled: True` is Degraded, `Ready: True` is Healthy, everything else is Progressing. A sync wave closes
+only once every pod enforces the rules.
 
 ## Install
 
@@ -211,10 +202,10 @@ has to follow the gateway.
 
 ### The CRDs are shared
 
-`ratelimitpolicies.ratelimit.netcracker.com` and `ratelimitmappings.ratelimit.netcracker.com` are cluster-scoped, and
-every namespace installation shares those two objects. With several per-namespace releases, the releases race for their
-ownership and version. The chart annotates both with `helm.sh/resource-policy: keep` so that uninstalling one release
-does not take them — and every other namespace's policies — with it. Settle CRD upgrade ownership with the platform
+`ratelimitpolicies.ratelimit.netcracker.com` is cluster-scoped, and every namespace installation shares that one
+object. With several per-namespace releases, the releases race for its ownership and version. The chart annotates it
+with `helm.sh/resource-policy: keep` so that uninstalling one release does not take it — and every other namespace's
+policies — with it. Settle CRD upgrade ownership with the platform
 team: this is a deploy-time concern, and the service itself never touches the CRD objects.
 
 ## Develop

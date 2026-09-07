@@ -14,23 +14,31 @@ import (
 type StateView struct {
 	Domains  []DomainView
 	Policies []PolicyView
-	Mappings []MappingView
 }
 
-// DomainView carries a domain's capacity facts against the reference bounds.
+// DomainView carries a domain's capacity facts.
 type DomainView struct {
 	Domain string
 
-	// Blocks and DecisionBuckets are the numbers the domain gate compares
-	// with the reference bounds — the headroom before edits start being
-	// rejected.
-	Blocks          int
+	// Blocks is an observed number rather than a bounded one: the object size
+	// keeps the linear target scan cheap on its own, so this series exists to
+	// be watched, not to be enforced.
+	Blocks int
+
+	// DecisionBuckets is the worst case one request can collect across the
+	// domain — the headroom before an edit stops compiling.
 	DecisionBuckets int
+
+	// AppliedGeneration is the generation this replica enforces for the
+	// domain. Ready comes from the policy status, not from here; this series
+	// is for alerting on a replica that falls behind.
+	AppliedGeneration int64
 }
 
 // PolicyView is one policy's status as the compiler reported it.
 type PolicyView struct {
-	// Policy is the namespace/name key of the object.
+	// Policy is the namespace/name key of the object, which is also its
+	// domain.
 	Policy string
 
 	// Ready reports whether the latest generation is the one enforced;
@@ -48,18 +56,6 @@ type PolicyView struct {
 
 	// RuleProblems counts the diagnostics of the latest generation.
 	RuleProblems int
-
-	// Buckets is this policy's worst-case share of the domain budget — the
-	// number that says which neighbor to shrink when the gate refuses an
-	// edit.
-	Buckets int
-}
-
-// MappingView is one mapping's status.
-type MappingView struct {
-	// Mapping is the namespace/name key of the object.
-	Mapping string
-	Ready   bool
 }
 
 // stateView holds the latest published view; nil until the first rebuild.
@@ -82,18 +78,15 @@ var (
 	descPolicyRuleProblems = prometheus.NewDesc("ratelimit_policy_rule_problems",
 		"Rule diagnostics reported for the latest generation of the policy.",
 		[]string{"policy"}, nil)
-	descPolicyBuckets = prometheus.NewDesc("ratelimit_policy_buckets",
-		"Worst-case decision buckets this policy contributes to its domain budget.",
-		[]string{"policy"}, nil)
+	descPolicyAppliedGeneration = prometheus.NewDesc("ratelimit_policy_applied_generation",
+		"The generation of the domain this replica enforces.",
+		[]string{"domain"}, nil)
 	descDomainBlocks = prometheus.NewDesc("ratelimit_domain_blocks",
-		"Compiled blocks of the domain, against the reference bound of 256.",
+		"Compiled blocks of the domain. Observed rather than bounded: watch the target scan, do not cap it.",
 		[]string{"domain"}, nil)
 	descDomainBuckets = prometheus.NewDesc("ratelimit_domain_decision_buckets",
-		"Worst-case buckets one request can collect across the domain, against the runtime backstop of 128.",
+		"Worst-case buckets one request can collect across the domain, against the budget of 128.",
 		[]string{"domain"}, nil)
-	descMappingReady = prometheus.NewDesc("ratelimit_mapping_ready",
-		"Whether the latest generation of the mapping is the one enforced.",
-		[]string{"mapping"}, nil)
 )
 
 // stateCollector renders the published StateView on every scrape.
@@ -104,10 +97,9 @@ func (stateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descPolicyEnforced
 	ch <- descPolicyGenerationLag
 	ch <- descPolicyRuleProblems
-	ch <- descPolicyBuckets
+	ch <- descPolicyAppliedGeneration
 	ch <- descDomainBlocks
 	ch <- descDomainBuckets
-	ch <- descMappingReady
 }
 
 func (stateCollector) Collect(ch chan<- prometheus.Metric) {
@@ -120,6 +112,8 @@ func (stateCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.GaugeValue, float64(d.Blocks), d.Domain)
 		ch <- prometheus.MustNewConstMetric(descDomainBuckets,
 			prometheus.GaugeValue, float64(d.DecisionBuckets), d.Domain)
+		ch <- prometheus.MustNewConstMetric(descPolicyAppliedGeneration,
+			prometheus.GaugeValue, float64(d.AppliedGeneration), d.Domain)
 	}
 	for _, p := range view.Policies {
 		ch <- prometheus.MustNewConstMetric(descPolicyReady,
@@ -130,12 +124,6 @@ func (stateCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.GaugeValue, float64(p.GenerationLag), p.Policy)
 		ch <- prometheus.MustNewConstMetric(descPolicyRuleProblems,
 			prometheus.GaugeValue, float64(p.RuleProblems), p.Policy)
-		ch <- prometheus.MustNewConstMetric(descPolicyBuckets,
-			prometheus.GaugeValue, float64(p.Buckets), p.Policy)
-	}
-	for _, m := range view.Mappings {
-		ch <- prometheus.MustNewConstMetric(descMappingReady,
-			prometheus.GaugeValue, boolValue(m.Ready), m.Mapping)
 	}
 }
 

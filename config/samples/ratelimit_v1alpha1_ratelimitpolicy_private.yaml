@@ -1,7 +1,8 @@
 apiVersion: ratelimit.netcracker.com/v1alpha1
 kind: RateLimitPolicy
 metadata:
-  name: private-gateway
+  # The name is the domain, which is what makes the policy the singleton of it.
+  name: gateway.private
   labels:
     app.kubernetes.io/name: ratelimit
 spec:
@@ -16,4 +17,4 @@ spec:
       rules:
         - name: total
           rates:
-            - { requests: 500, period: 1m }
+            - { requests: 500, periodSeconds: 60 }

@@ -34,7 +34,7 @@ func TestModelVocabulary_matchesTheAPI(t *testing.T) {
 	assert.Equal(t, string(model.OperatorInGroup), string(v1alpha1.OperatorInGroup))
 	assert.Equal(t, string(model.OperatorContains), string(v1alpha1.OperatorContains))
 	assert.Equal(t, string(model.OperatorExists), string(v1alpha1.OperatorExists))
-	assert.Equal(t, string(model.OperatorNotExists), string(v1alpha1.OperatorNotExists))
+	assert.Equal(t, string(model.OperatorDoesNotExist), string(v1alpha1.OperatorDoesNotExist))
 
 	assert.Equal(t, string(model.ValueString), string(v1alpha1.ClaimTypeString))
 	assert.Equal(t, string(model.ValueStringArray), string(v1alpha1.ClaimTypeStringArray))
@@ -58,7 +58,7 @@ func TestProblemVocabulary_matchesTheAPI(t *testing.T) {
 	assert.Equal(t, string(enginecompile.ReasonCaptureShadowsMappedKey), v1alpha1.ProblemCaptureShadowsMappedKey)
 	assert.Equal(t, string(enginecompile.ReasonInvalidSpec), v1alpha1.ProblemInvalidSpec)
 	assert.Equal(t, string(enginecompile.ReasonInvalidWindow), v1alpha1.ProblemInvalidWindow)
-	assert.Equal(t, string(enginecompile.ReasonDecisionBudgetExceeded), v1alpha1.ProblemDecisionBudgetExceeded)
+	assert.Equal(t, string(enginecompile.ReasonUnresolvedReplacedRules), v1alpha1.ProblemUnresolvedReplacedRules)
 	assert.Equal(t, string(enginecompile.ReasonDomainBudgetExceeded), v1alpha1.ProblemDomainBudgetExceeded)
 }
 
@@ -66,6 +66,17 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 	burst := int32(10)
 	spec := &v1alpha1.RateLimitPolicySpec{
 		Domain: testDomain,
+		Mappings: []v1alpha1.ClaimMapping{{
+			Key:           "tenant",
+			Claim:         "org_id",
+			Type:          v1alpha1.ClaimTypeString,
+			Normalization: v1alpha1.NormalizeLowercase,
+			Fallbacks:     []string{"sub"},
+		}, {
+			Key:       "entitlements",
+			ClaimPath: []string{"https://acme.com/entitlements"},
+			Type:      v1alpha1.ClaimTypeStringArray,
+		}},
 		Groups: []v1alpha1.ClientGroup{{Name: "partners", Clients: []string{"p1", "p2"}}},
 		Limits: []v1alpha1.LimitBlock{{
 			Name: "api",
@@ -75,24 +86,31 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 				Methods: []v1alpha1.HTTPMethod{"GET", "POST"},
 			}}},
 			Rules: []v1alpha1.Rule{{
-				Name:     "per-user",
-				When:     []v1alpha1.Predicate{{Key: "client", Operator: v1alpha1.OperatorIn, Values: []string{"a"}}},
-				Counters: []string{"client"},
-				Behavior: v1alpha1.RuleBehaviorShadow,
-				Replaces: []string{"other"},
+				Name:          "per-user",
+				Matches:       []v1alpha1.Predicate{{Key: "client", Operator: v1alpha1.OperatorIn, Values: []string{"a"}}},
+				Counters:      []string{"client"},
+				Behavior:      v1alpha1.RuleBehaviorShadow,
+				ReplacedRules: []string{"other"},
 				Rates: []v1alpha1.Rate{{
-					Requests: 100, Period: "1m", Burst: &burst, Algorithm: v1alpha1.AlgorithmGCRA,
+					Requests: 100, PeriodSeconds: 60, Burst: &burst, Algorithm: v1alpha1.AlgorithmGCRA,
 				}},
 			}},
 		}},
 	}
 
-	out := modelPolicy("orders", spec)
+	out := modelPolicy(spec)
 
-	assert.Equal(t, "orders", out.Name)
+	require.NotNil(t, out)
 	assert.Equal(t, testDomain, out.Domain)
 	require.Len(t, out.Groups, 1)
 	assert.Equal(t, []string{"p1", "p2"}, out.Groups[0].Clients)
+
+	require.Len(t, out.Mappings, 2)
+	assert.Equal(t, "org_id", out.Mappings[0].Claim)
+	assert.Equal(t, model.NormalizeLowercase, out.Mappings[0].Normalization)
+	assert.Equal(t, []string{"sub"}, out.Mappings[0].Fallbacks)
+	assert.Equal(t, []string{"https://acme.com/entitlements"}, out.Mappings[1].ClaimPath)
+	assert.Equal(t, model.ValueStringArray, out.Mappings[1].Type)
 
 	require.Len(t, out.Blocks, 1)
 	block := out.Blocks[0]
@@ -105,9 +123,9 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 	rule := block.Rules[0]
 	assert.Equal(t, model.BehaviorShadow, rule.Behavior)
 	assert.Equal(t, []string{"client"}, rule.Counters)
-	assert.Equal(t, []string{"other"}, rule.Replaces)
-	require.Len(t, rule.When, 1)
-	assert.Equal(t, model.OperatorIn, rule.When[0].Operator)
+	assert.Equal(t, []string{"other"}, rule.ReplacedRules)
+	require.Len(t, rule.Matches, 1)
+	assert.Equal(t, model.OperatorIn, rule.Matches[0].Operator)
 	require.Len(t, rule.Rates, 1)
 	assert.Equal(t, int64(100), rule.Rates[0].Requests)
 	assert.Equal(t, time.Minute, rule.Rates[0].Period)
@@ -121,65 +139,35 @@ func TestModelRule_anUnsetBurstStaysZero(t *testing.T) {
 	// places, and the two would drift.
 	rule := modelRule(&v1alpha1.Rule{
 		Name:  "r",
-		Rates: []v1alpha1.Rate{{Requests: 100, Period: "1m"}},
+		Rates: []v1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}},
 	})
 
 	assert.Zero(t, rule.Rates[0].Burst)
 }
 
-func TestModelMapping_carriesTheWholeSpec(t *testing.T) {
-	out := modelMapping(&v1alpha1.RateLimitMappingSpec{
-		Domain: testDomain,
-		Mappings: []v1alpha1.ClaimMapping{{
-			Key:       "tenant",
-			Claim:     "org_id",
-			Type:      v1alpha1.ClaimTypeString,
-			Normalize: v1alpha1.NormalizeLowercase,
-			Fallbacks: []string{"sub"},
-		}, {
-			Key:       "entitlements",
-			ClaimPath: []string{"https://acme.com/entitlements"},
-			Type:      v1alpha1.ClaimTypeStringArray,
-		}},
-		Groups: []v1alpha1.ClientGroup{{Name: "partners", Clients: []string{"p1"}}},
-	})
-
-	require.NotNil(t, out)
-	require.Len(t, out.Mappings, 2)
-	assert.Equal(t, "org_id", out.Mappings[0].Claim)
-	assert.Equal(t, model.NormalizeLowercase, out.Mappings[0].Normalize)
-	assert.Equal(t, []string{"sub"}, out.Mappings[0].Fallbacks)
-	assert.Equal(t, []string{"https://acme.com/entitlements"}, out.Mappings[1].ClaimPath)
-	assert.Equal(t, model.ValueStringArray, out.Mappings[1].Type)
-	require.Len(t, out.Groups, 1)
+// TestModelPolicy_noSpecIsTheEmptyDomain pins how "no policy" reaches the
+// engine: as a nil policy rather than an empty one, which is the built-ins-only
+// domain.
+func TestModelPolicy_noSpecIsTheEmptyDomain(t *testing.T) {
+	assert.Nil(t, modelPolicy(nil))
 }
 
-func TestModelMapping_noSpecIsNoMapping(t *testing.T) {
-	// The domain running on its built-in keys is a normal state, and the engine
-	// expects it as a nil mapping rather than an empty one.
-	assert.Nil(t, modelMapping(nil))
-}
-
-func TestModelPeriod(t *testing.T) {
-	valid := map[string]time.Duration{
-		"1s":  time.Second,
-		"30s": 30 * time.Second,
-		"5m":  5 * time.Minute,
-		"1h":  time.Hour,
-		"1d":  24 * time.Hour,
+// TestModelPeriod_isPlainSeconds pins the unit the API moved to: the field name
+// carries it, the way the Kubernetes API conventions ask, so nothing parses a
+// duration string any more.
+func TestModelPeriod_isPlainSeconds(t *testing.T) {
+	cases := map[int32]time.Duration{
+		1:     time.Second,
+		30:    30 * time.Second,
+		60:    time.Minute,
+		3600:  time.Hour,
+		86400: 24 * time.Hour,
 	}
-	for input, want := range valid {
-		t.Run(input, func(t *testing.T) {
-			assert.Equal(t, want, modelPeriod(input))
+	for seconds, want := range cases {
+		rule := modelRule(&v1alpha1.Rule{
+			Name:  "r",
+			Rates: []v1alpha1.Rate{{Requests: 100, PeriodSeconds: seconds}},
 		})
-	}
-
-	// The schema rejects every one of these, so a zero here only ever reaches the
-	// engine through a client that bypassed validation — and the engine reports it
-	// as an invalid window rather than counting with it.
-	for _, input := range []string{"", "s", "0s", "1", "1w", "1m30s", "-1m", "1.5m"} {
-		t.Run("rejects "+input, func(t *testing.T) {
-			assert.Zero(t, modelPeriod(input))
-		})
+		assert.Equal(t, want, rule.Rates[0].Period)
 	}
 }

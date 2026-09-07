@@ -131,7 +131,7 @@ func extractKey(claims map[string]any, e compile.KeyExtraction) ([]string, SkipR
 		if len(values) == 0 {
 			continue
 		}
-		if e.Normalize == model.NormalizeLowercase {
+		if e.Normalization == model.NormalizeLowercase {
 			for i := range values {
 				values[i] = strings.ToLower(values[i])
 			}
