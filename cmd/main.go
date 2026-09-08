@@ -308,7 +308,7 @@ func run(options runOptions) error {
 	// released here rather than where it was built.
 	defer closeCounterStore(limiter.closer)
 
-	if err := addManagementAPI(mgr, options, limiter); err != nil {
+	if err := addManagementAPI(mgr, options, namespace, limiter); err != nil {
 		return err
 	}
 
@@ -563,7 +563,12 @@ func addRateLimitEndpoint(
 // the decision path rather than the controller — every replica serves it, for
 // the same reason every replica answers checks, and a reset against a shared
 // store takes effect wherever it lands.
-func addManagementAPI(mgr ctrl.Manager, options runOptions, limiter rateLimitEndpoint) error {
+func addManagementAPI(
+	mgr ctrl.Manager,
+	options runOptions,
+	namespace string,
+	limiter rateLimitEndpoint,
+) error {
 	if options.managementAddr == "" || options.managementAddr == "0" || limiter.rules == nil {
 		return nil
 	}
@@ -583,6 +588,7 @@ func addManagementAPI(mgr ctrl.Manager, options runOptions, limiter rateLimitEnd
 		Rules:          limiter.rules,
 		Counters:       limiter.counters,
 		Records:        limiter.records,
+		Namespace:      namespace,
 		CounterBackend: limiter.backend,
 		Log:            logging.GetLogger(loggerName + "/management"),
 	}
