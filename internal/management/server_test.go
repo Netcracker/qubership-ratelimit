@@ -101,3 +101,40 @@ func TestErrorHandler_answersAnOversizedBodyAsABadRequest(t *testing.T) {
 	require.Contains(t, string(body), CodeInvalidRequest.Code)
 	require.Contains(t, string(body), "larger than")
 }
+
+// The only acceptable end of a body is the end of the stream. Checking for a
+// second well-formed JSON value catches {}{} alone: {}garbage ends in a syntax
+// error and {}[] in a type error, and reading either as "nothing follows"
+// accepts trailing data and runs the command. It matters most for the bulk
+// reset, where the command is destructive.
+func TestDecodeJSON_refusesAnythingAfterTheValue(t *testing.T) {
+	h := newTestAPI(t)
+
+	target := BasePath + "/domains/" + testDomain + "/counter-resets"
+	post := func(t *testing.T, body, key string) *testResponse {
+		t.Helper()
+		return h.callWith(t, http.MethodPost, target, operatorRoles(), nil,
+			func(request *http.Request) {
+				request.Header.Set("Idempotency-Key", key)
+				request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+				request.Body = io.NopCloser(strings.NewReader(body))
+				request.ContentLength = int64(len(body))
+			})
+	}
+
+	valid := `{"selector":{"ruleIds":["orders"]},"dryRun":true}`
+	for name, body := range map[string]string{
+		"trailing garbage":    valid + "garbage",
+		"a trailing array":    valid + "[]",
+		"a second object":     valid + valid,
+		"a trailing NUL byte": valid + "\x00",
+	} {
+		t.Run(name, func(t *testing.T) {
+			requireError(t, post(t, body, "key-"+strings.ReplaceAll(name, " ", "-")),
+				http.StatusBadRequest, CodeInvalidRequest)
+		})
+	}
+
+	// Whitespace is not data: a body written by a shell ends in a newline.
+	require.Equal(t, http.StatusOK, post(t, valid+"\n", "key-newline").Code)
+}

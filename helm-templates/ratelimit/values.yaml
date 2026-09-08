@@ -128,8 +128,13 @@ management:
     # Service accounts allowed to reach the port, in the release namespace.
     # Empty means the private gateway alone: the management endpoints belong
     # behind an internal gateway, never on the path public traffic takes.
-    # Istio names a Gateway API gateway's service account after the gateway
-    # itself, which is where the default comes from.
+    #
+    # Istio's automated deployment names a Gateway API gateway's generated
+    # ServiceAccount after the gateway and its class, so the default is
+    # <ISTIO_PRIVATE_GATEWAY_NAME>-istio. Check it before overriding:
+    #
+    #   kubectl get pod -l gateway.networking.k8s.io/gateway-name=<gateway> \
+    #     -o jsonpath='{.items[0].spec.serviceAccountName}'
     allowedServiceAccounts: []
 
 # ============== MONITORING DELIVERY ============================

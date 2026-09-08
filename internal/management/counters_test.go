@@ -59,22 +59,37 @@ func TestSelectCandidates_resumesAfterTheLastKeyLookedAt(t *testing.T) {
 	require.Equal(t, keys[0], page.lastScanned)
 }
 
-// The listing end to end: a cursor comes back, and the page after it finds the
-// counter the first page walked past.
-func TestCounters_aPageWithoutMatchesStillPagesOn(t *testing.T) {
+// Paging end to end: each page carries a cursor, and following it reaches the
+// counters the earlier pages did not return.
+//
+// The budget case - a page that fills scanBudget without keeping anything, and
+// still has to carry a cursor - is not reachable from here: pageSize stops the
+// walk only after a candidate, so producing an empty page needs 12,000 keys.
+// The two selectCandidates tests above cover it directly.
+func TestCounters_pagesThroughEveryCounterOfARule(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"zulu"}}, 1)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alpha"}}, 1)
+	clients := []string{"alpha", "bravo", "zulu"}
+	for _, client := range clients {
+		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+	}
 
 	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=orders/per-client&pageSize=1"
 
-	var first CounterList
-	decode(t, h.call(t, http.MethodGet, base+"&axis.client=zulu", viewerRoles(), nil),
-		http.StatusOK, &first)
-
-	// alpha sorts first, so the page that keeps zulu had to walk past it.
-	require.Len(t, first.Items, 1)
-	require.Equal(t, "zulu", first.Items[0].Axes["client"])
+	seen := []string{}
+	target := base
+	for range len(clients) + 1 {
+		var page CounterList
+		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
+		for _, item := range page.Items {
+			seen = append(seen, item.Axes["client"])
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		require.True(t, page.Truncated, "a page that carries a cursor stopped early")
+		target = base + "&cursor=" + url.QueryEscape(page.NextCursor)
+	}
+	require.ElementsMatch(t, clients, seen, "paging skipped or repeated a counter")
 }
 
 // A scan that cannot narrow walks the whole domain, and on a busy one that is

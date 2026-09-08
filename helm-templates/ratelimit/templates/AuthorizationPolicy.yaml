@@ -1,7 +1,12 @@
 {{- if and .Values.management.enabled .Values.management.authorizationPolicy.enabled }}
 {{- $allowed := .Values.management.authorizationPolicy.allowedServiceAccounts }}
 {{- if not $allowed }}
-{{- $allowed = list (required "management.authorizationPolicy needs ISTIO_PRIVATE_GATEWAY_NAME, or an explicit allowedServiceAccounts list" .Values.ISTIO_PRIVATE_GATEWAY_NAME) }}
+{{- $gateway := required "management.authorizationPolicy needs ISTIO_PRIVATE_GATEWAY_NAME, or an explicit allowedServiceAccounts list" .Values.ISTIO_PRIVATE_GATEWAY_NAME }}
+{{- /* Istio's automated deployment names the generated Deployment, Service, and
+       ServiceAccount after the gateway AND its class, so a Gateway named
+       private-gateway runs as private-gateway-istio. Naming it after the
+       gateway alone denies the gateway itself. */}}
+{{- $allowed = list (printf "%s-istio" $gateway) }}
 {{- end }}
 # Who may reach the management port.
 #

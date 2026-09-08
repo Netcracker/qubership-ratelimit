@@ -3,6 +3,8 @@ package management
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/url"
 	"regexp"
 	"sort"
@@ -102,8 +104,12 @@ func decodeJSON(c *fiber.Ctx, v any) *apiError {
 	if err := decoder.Decode(v); err != nil {
 		return invalid("the request body is not valid JSON for this endpoint: " + err.Error())
 	}
-	if err := decoder.Decode(&struct{}{}); err == nil {
-		return invalid("the request body carries more than one JSON value")
+	// The only acceptable end of the body is the end of the stream. Testing for
+	// a second well-formed value catches {}{} and nothing else: {}garbage ends
+	// in a syntax error and {}[] in a type error, and treating either as "no
+	// second value" accepts trailing data and runs the command anyway.
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return invalid("the request body carries data after the JSON value")
 	}
 	return nil
 }

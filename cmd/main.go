@@ -176,8 +176,14 @@ type runOptions struct {
 func newCounterStore() counterBackend {
 	addresses := configloader.GetOrDefaultString("redis.addresses", "")
 	if addresses == "" {
+		// The records live where the counters do. Leaving them nil would start
+		// the management API with a nil store, and every mutation would panic
+		// into an RLS-0500 while the reads kept working. In-process counting is
+		// correct at one replica, and so are in-process records.
+		counters := memory.New()
 		return counterBackend{
-			store:       memory.New(),
+			store:       counters,
+			records:     records.NewMemory(counters),
 			description: "in-process, counted per replica",
 		}
 	}

@@ -171,8 +171,8 @@ paths:
         description: 'Declares identity keys KNOWN ABSENT: the key''s value set
           is empty - for a list-valued key that is the same statement as an empty
           list, which is exactly how the engine reads Exists (set non-empty) and
-          NotExists (set empty). Repeatable. An absent key decides conditions -
-          NotExists satisfied, Exists failed - and voids rules that count by it:
+          DoesNotExist (set empty). Repeatable. An absent key decides conditions -
+          DoesNotExist satisfied, Exists failed - and voids rules that count by it:
           their axis can never take a value, so applicability is never. A key both
           supplied via axis.<name> and declared absent is a contradiction (RLS-0400);
           an unknown name is refused likewise. absent alone forms an identity scope:
@@ -397,7 +397,7 @@ paths:
                         axes: []
                         matches:
                         - key: tenant
-                          operator: NotExists
+                          operator: DoesNotExist
                         rates:
                         - algorithm: gcra
                           requests: 20
@@ -695,7 +695,7 @@ paths:
                         axes: []
                         matches:
                         - key: tenant
-                          operator: NotExists
+                          operator: DoesNotExist
                         rates:
                         - algorithm: gcra
                           requests: 20
@@ -903,7 +903,7 @@ paths:
                 $ref: '#/components/schemas/CounterList'
               example:
                 items:
-                - key: 'rl:v1:{gateway.public}:cascade/everyone:gcra:60:bob:'
+                - key: 'rl:v1:{core-1-core/gateway.public}:cascade/everyone:gcra:60:bob:'
                   ruleId: cascade/everyone
                   block: cascade
                   rule: everyone
@@ -915,7 +915,7 @@ paths:
                   limit: 100
                   remaining: 17
                   limited: false
-                - key: 'rl:v1:{gateway.public}:cascade/everyone:gcra:60:crawler:'
+                - key: 'rl:v1:{core-1-core/gateway.public}:cascade/everyone:gcra:60:crawler:'
                   ruleId: cascade/everyone
                   block: cascade
                   rule: everyone
@@ -1132,8 +1132,8 @@ paths:
                       client: alice
                     resetCount: 2
                     keys:
-                    - 'rl:v1:{gateway.public}:quota/daily:gcra:60:alice:'
-                    - 'rl:v1:{gateway.public}:quota/daily:fixedwindow:86400:alice:'
+                    - 'rl:v1:{core-1-core/gateway.public}:quota/daily:gcra:60:alice:'
+                    - 'rl:v1:{core-1-core/gateway.public}:quota/daily:fixedwindow:86400:alice:'
                 preview:
                   summary: The same selection with dryRun=true - matched, not deleted,
                     no token needed
@@ -1146,8 +1146,8 @@ paths:
                       client: alice
                     matchedCount: 2
                     keys:
-                    - 'rl:v1:{gateway.public}:quota/daily:gcra:60:alice:'
-                    - 'rl:v1:{gateway.public}:quota/daily:fixedwindow:86400:alice:'
+                    - 'rl:v1:{core-1-core/gateway.public}:quota/daily:gcra:60:alice:'
+                    - 'rl:v1:{core-1-core/gateway.public}:quota/daily:fixedwindow:86400:alice:'
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
@@ -1345,7 +1345,7 @@ paths:
                     scanned: 63
                     matchedCount: 63
                     keys:
-                    - 'rl:v1:{gateway.public}:cascade/everyone:gcra:60:crawler:'
+                    - 'rl:v1:{core-1-core/gateway.public}:cascade/everyone:gcra:60:crawler:'
                     truncated: true
                     rules:
                     - ruleId: cascade/trial
@@ -1364,7 +1364,7 @@ paths:
                     scanned: 63
                     resetCount: 63
                     keys:
-                    - 'rl:v1:{gateway.public}:cascade/everyone:gcra:60:crawler:'
+                    - 'rl:v1:{core-1-core/gateway.public}:cascade/everyone:gcra:60:crawler:'
                     truncated: true
                     rules:
                     - ruleId: cascade/trial
@@ -1551,7 +1551,7 @@ paths:
                     - ruleId: total/all
                       resetCount: 133048
                     keys:
-                    - 'rl:v1:{gateway.public}:total/all:gcra:60:'
+                    - 'rl:v1:{core-1-core/gateway.public}:total/all:gcra:60:'
                     truncated: true
         '500':
           description: 'Two formally distinct answers share this status, told apart
@@ -1595,7 +1595,7 @@ paths:
                     - ruleId: tenants/per-tenant
                       resetCount: 83641
                     keys:
-                    - 'rl:v1:{gateway.public}:tenants/per-tenant:gcra:60:acme:'
+                    - 'rl:v1:{core-1-core/gateway.public}:tenants/per-tenant:gcra:60:acme:'
                     truncated: true
   /simulations:
     post:
@@ -2066,7 +2066,6 @@ components:
       required:
       - domain
       - ruleSetVersion
-      - policies
       - blocks
       - rules
       - effectiveKeys
@@ -2261,8 +2260,8 @@ components:
         matches:
           type: array
           items:
-            $ref: '#/components/schemas/ConditionView'
-          description: Conditions gating the rule; group indirection is already
+            $ref: '#/components/schemas/PredicateView'
+          description: Predicates gating the rule; group indirection is already
             resolved into value sets.
         replacedRules:
           type: array
@@ -2301,23 +2300,23 @@ components:
             is conditional: every gate that must resolve the rule''s way.'
       description: One compiled rule with its resolved mode, axes, conditions, and
         windows.
-    ConditionView:
+    PredicateView:
       description: |
-        A compiled condition - one of five operator shapes, discriminated by operator. Group indirection ends at compile time: InGroup renders as In with the group resolved into the value set. Compiled values are strings: array claims are flattened by extraction before matching. Contains is element membership in the key's value set - never a substring. Exists and NotExists are unary - they take no parameters, and a stray one is inexpressible by schema, mirroring the engine's loud arity check.
+        A compiled condition - one of five operator shapes, discriminated by operator. Group indirection ends at compile time: InGroup renders as In with the group resolved into the value set. Compiled values are strings: array claims are flattened by extraction before matching. Contains is element membership in the key's value set - never a substring. Exists and DoesNotExist are unary - they take no parameters, and a stray one is inexpressible by schema, mirroring the engine's loud arity check.
       oneOf:
-      - $ref: '#/components/schemas/ConditionEquals'
-      - $ref: '#/components/schemas/ConditionIn'
-      - $ref: '#/components/schemas/ConditionContains'
-      - $ref: '#/components/schemas/ConditionExists'
-      - $ref: '#/components/schemas/ConditionNotExists'
+      - $ref: '#/components/schemas/PredicateEquals'
+      - $ref: '#/components/schemas/PredicateIn'
+      - $ref: '#/components/schemas/PredicateContains'
+      - $ref: '#/components/schemas/PredicateExists'
+      - $ref: '#/components/schemas/PredicateDoesNotExist'
       discriminator:
         propertyName: operator
         mapping:
-          Equals: '#/components/schemas/ConditionEquals'
-          In: '#/components/schemas/ConditionIn'
-          Contains: '#/components/schemas/ConditionContains'
-          Exists: '#/components/schemas/ConditionExists'
-          NotExists: '#/components/schemas/ConditionNotExists'
+          Equals: '#/components/schemas/PredicateEquals'
+          In: '#/components/schemas/PredicateIn'
+          Contains: '#/components/schemas/PredicateContains'
+          Exists: '#/components/schemas/PredicateExists'
+          DoesNotExist: '#/components/schemas/PredicateDoesNotExist'
     RateView:
       type: object
       description: |
@@ -3509,7 +3508,7 @@ components:
       oneOf:
       - $ref: '#/components/schemas/BulkPreview'
       - $ref: '#/components/schemas/BulkResetResult'
-    ConditionEquals:
+    PredicateEquals:
       type: object
       additionalProperties: false
       required:
@@ -3530,7 +3529,7 @@ components:
           description: The single value the key must equal.
       description: 'Single-value comparison: the key''s value set is exactly the
         one given value. Rejected at compile time for array-valued keys.'
-    ConditionIn:
+    PredicateIn:
       type: object
       additionalProperties: false
       required:
@@ -3555,7 +3554,7 @@ components:
       description: 'Membership: the key''s value set intersects the given set. A
         client group (InGroup in the custom resource) is already resolved into values
         at compile time.'
-    ConditionContains:
+    PredicateContains:
       type: object
       additionalProperties: false
       required:
@@ -3577,7 +3576,7 @@ components:
             membership, never a substring.
       description: Element membership in the key's value set - never a substring.
         Meant for array claims (e.g. roles).
-    ConditionExists:
+    PredicateExists:
       type: object
       additionalProperties: false
       required:
@@ -3594,7 +3593,7 @@ components:
           description: Fixed to Exists.
       description: The key's value set is non-empty. Takes no parameters - a stray
         one is inexpressible, mirroring the engine's arity check.
-    ConditionNotExists:
+    PredicateDoesNotExist:
       type: object
       additionalProperties: false
       required:
@@ -3607,8 +3606,8 @@ components:
         operator:
           type: string
           enum:
-          - NotExists
-          description: Fixed to NotExists.
+          - DoesNotExist
+          description: Fixed to DoesNotExist.
       description: The key's value set is empty (the key itself must be declared).
         Takes no parameters - a stray one is inexpressible, mirroring the engine's
         arity check.
