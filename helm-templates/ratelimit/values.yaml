@@ -103,6 +103,35 @@ metrics:
   # parses it.
   nearLimitRatio: "0.9"
 
+# ============== MANAGEMENT API ============================
+# The operator interface: read the enforced rules, inspect live counters, and
+# reset them. Off by default, because turning it on opens a port that can lift a
+# rate limit.
+#
+# The service authenticates nobody. It reads the subject and the roles out of
+# the bearer token without verifying the signature, because the gateway's JWT
+# filter has already verified it. That holds only while nothing but the gateway
+# can reach this port, which is what authorizationPolicy is for. Enabling the
+# port without the policy leaves the endpoints open to every workload in the
+# mesh, so keep them together.
+management:
+  enabled: false
+  port: 8082
+
+  # Restrict the port to the gateways that front it. The policy denies every
+  # other source, and it is the half of this feature that makes the other half
+  # safe: turn it off only where something outside the mesh already does the
+  # same job, and say so in a review.
+  authorizationPolicy:
+    enabled: true
+
+    # Service accounts allowed to reach the port, in the release namespace.
+    # Empty means the private gateway alone: the management endpoints belong
+    # behind an internal gateway, never on the path public traffic takes.
+    # Istio names a Gateway API gateway's service account after the gateway
+    # itself, which is where the default comes from.
+    allowedServiceAccounts: []
+
 # ============== MONITORING DELIVERY ============================
 # The scrape target and the Grafana dashboard, delivered as custom resources:
 # a PodMonitor for the platform's Prometheus and a GrafanaDashboard for

@@ -13,5 +13,12 @@ spec:
       port: {{ .Values.rls.port }}
       targetPort: grpc
       protocol: TCP
+    {{- if .Values.management.enabled }}
+    - name: management
+      appProtocol: http
+      port: {{ .Values.management.port }}
+      targetPort: management
+      protocol: TCP
+    {{- end }}
   selector:
     {{- include "ratelimit.selectorLabels" . | nindent 4 }}

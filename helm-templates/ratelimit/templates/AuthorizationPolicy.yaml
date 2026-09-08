@@ -1,0 +1,45 @@
+{{- if and .Values.management.enabled .Values.management.authorizationPolicy.enabled }}
+{{- $allowed := .Values.management.authorizationPolicy.allowedServiceAccounts }}
+{{- if not $allowed }}
+{{- $allowed = list (required "management.authorizationPolicy needs ISTIO_PRIVATE_GATEWAY_NAME, or an explicit allowedServiceAccounts list" .Values.ISTIO_PRIVATE_GATEWAY_NAME) }}
+{{- end }}
+# Who may reach the management port.
+#
+# The service reads the subject and the roles out of the bearer token without
+# verifying the signature, because the gateway's JWT filter has already verified
+# it. Every workload in the mesh can mint such a token, so the only thing
+# standing between the mesh and an endpoint that lifts a rate limit is this
+# policy.
+#
+# DENY with notPrincipals rather than ALLOW: an ALLOW policy applies to the
+# whole workload, so it would have to enumerate the gRPC and metrics ports as
+# well, and a port left out of that list would stop answering. This one names a
+# single port and leaves the reachability of the others exactly as it was.
+#
+# It is enforced by ztunnel, so it holds only while the pod is in the mesh. A
+# namespace without ambient redirection or a sidecar gets a policy that matches
+# nothing, and the port is open — check the dataplane mode before relying on it.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ printf "%s-management" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+  action: DENY
+  rules:
+    - to:
+        - operation:
+            ports:
+              - "{{ .Values.management.port }}"
+      from:
+        - source:
+            notPrincipals:
+              {{- range $allowed }}
+              - cluster.local/ns/{{ $.Release.Namespace }}/sa/{{ . }}
+              {{- end }}
+{{- end }}
