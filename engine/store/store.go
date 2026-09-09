@@ -20,7 +20,7 @@ import (
 // Bucket is one counter taking part in a decision.
 type Bucket struct {
 	// Key identifies the counter. It carries the schema version, domain, the
-	// policy/block/rule triple, the algorithm, the window period, and the axis
+	// block/rule identity, the algorithm, the window period, and the axis
 	// values: renaming a rule, switching its algorithm, or changing its period
 	// starts a fresh bucket. Requests and burst are deliberately not part of
 	// the key, so tuning a limit reinterprets live state instead of resetting

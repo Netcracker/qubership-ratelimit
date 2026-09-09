@@ -77,3 +77,20 @@ of both gateways would merge into the same buckets.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Refuse a management API that would answer at random.
+
+Without redis.addresses the counters, the idempotency records, the sweep lease,
+and the confirmation tokens all live in one replica's memory. At more than one
+replica a preview lands on one pod and its confirmation on another, which has
+never heard of the token: the operator gets 404 or 409 depending on which pod
+the Service picked. The reads would look fine the whole time.
+*/}}
+{{- define "ratelimit.validateManagement" -}}
+{{- if .Values.management.enabled -}}
+{{- if and (not .Values.redis.addresses) (gt (int .Values.REPLICAS) 1) -}}
+{{- fail (printf "management.enabled needs a shared counter store above one replica: REPLICAS is %v and redis.addresses is empty, so the idempotency records and confirmation tokens would live in each replica's memory. Set redis.addresses, or REPLICAS to 1." .Values.REPLICAS) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

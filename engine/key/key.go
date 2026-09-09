@@ -76,6 +76,16 @@ func RulePrefix(id Ident) string {
 		escape(id.Block) + "/" + escape(id.Rule) + ":"
 }
 
+// BlockPrefix returns the prefix shared by every counter key of one block.
+//
+// It exists so a management scan narrowed to a block does not walk the whole
+// domain: the layout puts the rule segment first, so a block name is a real
+// prefix of its rules' keys, and only this package may build it — the escaping
+// is its own.
+func BlockPrefix(namespace, domain, block string) string {
+	return DomainPrefix(namespace, domain) + escape(block) + "/"
+}
+
 // DomainPrefix returns the prefix shared by every counter key of a domain, for
 // management-side enumeration: usage per domain and the list of currently
 // limited keys. Hand-building this prefix is what this package exists to
@@ -97,11 +107,26 @@ func RulePrefix(id Ident) string {
 // script would fail. Neither is ever empty in a running component, so this is a
 // caller bug, not data.
 func DomainPrefix(namespace, domain string) string {
+	return "rl:" + schemaVersion + ":" + DomainTag(namespace, domain) + ":"
+}
+
+// DomainTag is the Redis Cluster hash tag of a domain, braces included.
+//
+// It is exported because the counter keys are not the only state that has to
+// land in a domain's slot: the management side keeps its idempotency records,
+// sweep lease, and confirmation tokens beside the counters, and the scripts
+// that delete counters while advancing a record touch both in one call. A
+// second, hand-written spelling of this tag is a CROSSSLOT failure on a
+// cluster, and standalone Redis stays green while it hides.
+//
+// An empty namespace or domain panics for the reason DomainPrefix documents:
+// Redis reads an empty "{}" as no tag at all.
+func DomainTag(namespace, domain string) string {
 	if namespace == "" || domain == "" {
 		panic("key: an empty namespace or domain would produce an empty hash tag" +
 			" and scatter a decision across cluster slots")
 	}
-	return "rl:" + schemaVersion + ":{" + escape(namespace) + "/" + escape(domain) + "}:"
+	return "{" + escape(namespace) + "/" + escape(domain) + "}"
 }
 
 // escape percent-encodes the characters the key schema reserves, for axis

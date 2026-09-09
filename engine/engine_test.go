@@ -13,6 +13,7 @@ import (
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/engine/identity"
+	"github.com/netcracker/qubership-ratelimit/engine/match"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
@@ -435,5 +436,217 @@ func TestCacheStatsCountEligibleLookups(t *testing.T) {
 
 	if hits, misses := stats.Hits(), stats.Misses(); hits != 1 || misses != 2 {
 		t.Errorf("hits = %d, misses = %d, want 1 and 2", hits, misses)
+	}
+}
+
+// Peek answers what Decide would answer, and charges nothing. It is what the
+// management API reads through, so a listing reporting different numbers from
+// the enforcing path would be worse than no listing at all.
+func TestPeek_answersLikeDecideWithoutCharging(t *testing.T) {
+	e := newEngine(t)
+	req := engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, "alice")}
+
+	first, err := e.Peek(t.Context(), req)
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	second, err := e.Peek(t.Context(), req)
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if first.Headers == nil || second.Headers == nil {
+		t.Fatal("a matched request must carry headers")
+	}
+	if first.Headers.Remaining != second.Headers.Remaining {
+		t.Errorf("remaining moved between peeks: %d then %d",
+			first.Headers.Remaining, second.Headers.Remaining)
+	}
+
+	decided, err := e.Decide(t.Context(), req)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decided.Allowed != first.Allowed {
+		t.Errorf("Decide allowed = %v, Peek predicted %v", decided.Allowed, first.Allowed)
+	}
+	if len(decided.Rules) != len(first.Rules) {
+		t.Errorf("Decide applied %d rules, Peek %d; the two match the same way",
+			len(decided.Rules), len(first.Rules))
+	}
+
+	// Decide charged, which is the whole difference between the two.
+	after, err := e.Peek(t.Context(), req)
+	if err != nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if after.Headers.Remaining != first.Headers.Remaining-1 {
+		t.Errorf("remaining after Decide = %d, want one below the %d Peek reported",
+			after.Headers.Remaining, first.Headers.Remaining)
+	}
+}
+
+// The bucket budget is a property of the request rather than of the write, so
+// Peek refuses an oversized decision exactly as Decide does. A management read
+// that slipped past it would report numbers the enforcing path never produces.
+func TestPeek_refusesTheSameOversizedDecisionAsDecide(t *testing.T) {
+	snap := oversizedSnapshot(t)
+	e := engine.New(snap, memory.New())
+	req := engine.Request{Path: "/any", Method: "GET"}
+
+	if _, err := e.Decide(t.Context(), req); !errors.Is(err, engine.ErrTooManyBuckets) {
+		t.Fatalf("Decide error = %v, want ErrTooManyBuckets", err)
+	}
+	if _, err := e.Peek(t.Context(), req); !errors.Is(err, engine.ErrTooManyBuckets) {
+		t.Errorf("Peek error = %v, want ErrTooManyBuckets", err)
+	}
+}
+
+// oversizedSnapshot builds a domain one bucket past the budget. The compiler
+// refuses such a generation, so the extra block goes in behind its back: what
+// is under test is the engine's own backstop.
+func oversizedSnapshot(t *testing.T) *compile.Snapshot {
+	t.Helper()
+
+	periods := []time.Duration{time.Minute, time.Hour, 30 * time.Second, 10 * time.Second}
+	rules := make([]model.Rule, 0, 32)
+	for ri := range 32 {
+		rates := make([]model.Rate, 0, len(periods))
+		for _, pd := range periods {
+			rates = append(rates, model.Rate{Requests: 100, Period: pd})
+		}
+		rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Rates: rates})
+	}
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
+
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("32 rules x 4 rates is exactly the budget; problems: %v", problems)
+	}
+	extra := snap.Blocks[0]
+	extra.Name = "smuggled"
+	extra.Rules = extra.Rules[:1]
+	snap.Blocks = append(snap.Blocks, extra)
+	return snap
+}
+
+// Among refusals, a cost that never fits binds harder than one waiting cures.
+// Reporting the waiting window would send a caller back on a schedule that
+// cannot help: the hour window will refuse the same cost forever.
+func TestHeaders_capacityExceededOutranksALongerWait(t *testing.T) {
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "b",
+		Rules: []model.Rule{
+			// Exhausted after one request of cost 5, and it recovers.
+			{Name: "minute", Rates: []model.Rate{{Requests: 5, Period: time.Hour, Burst: 5}}},
+			// A cost of 5 can never fit a bucket two deep.
+			{Name: "never", Rates: []model.Rate{{Requests: 2, Period: time.Minute, Burst: 2}}},
+		},
+	}}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	e := engine.New(snap, memory.New())
+
+	decision, err := e.Decide(t.Context(), engine.Request{Path: "/any", Method: "GET", Cost: 5})
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Allowed {
+		t.Fatal("a cost of 5 against a bucket of 2 must be refused")
+	}
+	if !decision.CostExceedsCapacity {
+		t.Fatal("the refusal is a capacity one, and the decision has to say so")
+	}
+	if decision.Headers == nil {
+		t.Fatal("a refusal carries headers")
+	}
+	if decision.Headers.Limit != 2 {
+		t.Errorf("headers name the window with limit %d, want the one the cost can never fit (2)",
+			decision.Headers.Limit)
+	}
+	if decision.Headers.RetryAfter >= 0 {
+		t.Errorf("RetryAfter = %v, want no hint for a request no waiting cures",
+			decision.Headers.RetryAfter)
+	}
+}
+
+// Two windows the cost can never fit carry no retry hint to rank by, so the
+// order falls to the bucket key. Declaration order would pick the other one,
+// which is the point: the headers of a repeated refusal have to name the same
+// window every time, whatever order the rules happen to be written in.
+func TestHeaders_twoCapacityExceededWindowsTieBreakByKey(t *testing.T) {
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "b",
+		Rules: []model.Rule{
+			// First in the snapshot, and the larger key.
+			{Name: "zzz", Rates: []model.Rate{{Requests: 3, Period: time.Minute, Burst: 3}}},
+			{Name: "aaa", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Burst: 2}}},
+		},
+	}}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	e := engine.New(snap, memory.New())
+
+	for attempt := range 3 {
+		decision, err := e.Decide(t.Context(), engine.Request{Path: "/any", Method: "GET", Cost: 5})
+		if err != nil {
+			t.Fatalf("decide: %v", err)
+		}
+		if !decision.CostExceedsCapacity {
+			t.Fatal("a cost of 5 fits neither window, and the decision has to say so")
+		}
+		if decision.Headers == nil {
+			t.Fatal("a refusal carries headers")
+		}
+		if decision.Headers.Limit != 2 {
+			t.Errorf("attempt %d: headers name the window with limit %d, want the smaller key (2)",
+				attempt, decision.Headers.Limit)
+		}
+		if decision.Headers.RetryAfter >= 0 {
+			t.Errorf("attempt %d: RetryAfter = %v, want no hint for a request no waiting cures",
+				attempt, decision.Headers.RetryAfter)
+		}
+	}
+}
+
+// Blocks reports what the target phase hit, in snapshot order, which is what
+// the management API lists a path's rules from.
+func TestCandidates_blocksReportsTheTargetedOnesInOrder(t *testing.T) {
+	p := model.Policy{Domain: domain, Blocks: []model.Block{
+		{
+			Name:   "quotes",
+			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes"}}}},
+			Rules:  []model.Rule{{Name: "r", Rates: []model.Rate{{Requests: 1, Period: time.Minute}}}},
+		},
+		{
+			Name:   "orders",
+			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/orders"}}}},
+			Rules:  []model.Rule{{Name: "r", Rates: []model.Rate{{Requests: 1, Period: time.Minute}}}},
+		},
+		{
+			Name:  "everything",
+			Rules: []model.Rule{{Name: "r", Rates: []model.Rate{{Requests: 1, Period: time.Minute}}}},
+		},
+	}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+
+	targeted := match.Match(snap, "/api/quotes/1", "GET").Blocks()
+	got := make([]string, 0, len(targeted))
+	for _, block := range targeted {
+		got = append(got, block.Name)
+	}
+	want := []string{"quotes", "everything"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("Blocks() = %v, want %v in snapshot order", got, want)
+	}
+
+	if blocks := match.Match(snap, "/nothing", "GET").Blocks(); len(blocks) != 1 || blocks[0].Name != "everything" {
+		t.Errorf("a path outside every target still meets the block without one, got %v", blocks)
 	}
 }

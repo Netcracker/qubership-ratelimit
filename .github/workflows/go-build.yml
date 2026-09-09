@@ -167,6 +167,17 @@ jobs:
         run: |
           REDIS_ADDR="$(../hack/redis-cluster.sh up)"             go test -race ./store/redis/ -count=1
 
+      # The command store keeps its records, sweep lease, and confirmation
+      # tokens beside the counters they act on, and its scripts touch both in
+      # one call. Only a real cluster refuses a script whose keys hash to two
+      # slots, so only this step can catch a record key that drifted out of the
+      # domain's tag - or a script declaring a key it does not use, which an
+      # empty string turns into slot 0.
+      - name: Test the command store against a Redis Cluster
+        run: |
+          REDIS_ADDR="$(hack/redis-cluster.sh up)" \
+            go test -race ./internal/records/ -count=1
+
       - name: Upload coverage artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -190,6 +201,49 @@ jobs:
           persist-credentials: false
       - name: Lint the chart against every resource profile
         run: make helm-lint
+
+      # The management port is safe only behind its AuthorizationPolicy, and the
+      # policy is only worth anything if it names the identity the gateway
+      # actually runs as. Istio's automated deployment appends the gateway class
+      # to the name, so a principal built from the gateway name alone denies the
+      # gateway itself - and nothing in a lint or a unit test can see that.
+      - name: Check what the management AuthorizationPolicy allows
+        run: |
+          rendered=$(helm template t helm-templates/ratelimit \
+            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            --set management.enabled=true \
+            --show-only templates/AuthorizationPolicy.yaml)
+          echo "$rendered"
+          echo "$rendered" | grep -q 'sa/private-gateway-istio' || {
+            echo "::error::the policy does not allow the private gateway's service account"
+            exit 1
+          }
+
+      # The port and the policy ship together: a release that opens the port
+      # without the policy leaves endpoints that lift rate limits reachable by
+      # every workload in the mesh.
+      - name: Check that the management port is never rendered alone
+        run: |
+          set -o pipefail
+          manifests=$(helm template t helm-templates/ratelimit \
+            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            --set management.enabled=true)
+          echo "$manifests" | grep -q 'management-bind-address' || {
+            echo "::error::management.enabled did not render the port"; exit 1; }
+          echo "$manifests" | grep -q 'kind: AuthorizationPolicy' || {
+            echo "::error::the management port rendered without its AuthorizationPolicy"; exit 1; }
+
+      # In-process counting keeps the idempotency records and confirmation
+      # tokens in one replica's memory, so a preview and its confirmation can
+      # land on different pods.
+      - name: Check that management refuses the in-process store above one replica
+        run: |
+          if helm template t helm-templates/ratelimit \
+            -f helm-templates/ratelimit/resource-profiles/prod.yaml \
+            --set management.enabled=true >/dev/null 2>&1; then
+            echo "::error::two replicas without redis.addresses rendered a management API"
+            exit 1
+          fi
       - name: Regenerate the manifests and the chart CRDs
         run: make sync-helm-crds
       - name: Fail on drift between the generated files and the commit

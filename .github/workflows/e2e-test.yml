@@ -145,6 +145,7 @@ jobs:
             --set image.repository=ratelimit \
             --set image.tag=e2e \
             --set redis.addresses=e2e-redis:6379 \
+            --set management.enabled=true \
             --wait --timeout 5m
 
       - name: Deploy the probe backend

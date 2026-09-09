@@ -73,7 +73,7 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 			"the scrape carries no refused checks")
 	})
 
-	It("attributes the refusal to its policy/block/rule triple", func() {
+	It("attributes the refusal to its block/rule identity", func() {
 		Expect(hasSeries(families, "ratelimit_decisions_total",
 			map[string]string{"domain": domain, "outcome": "over_limit", "rule": rule})).To(BeTrue(),
 			"the scrape does not attribute the refusal to %s", rule)

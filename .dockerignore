@@ -10,10 +10,12 @@
 !**/go.mod
 !**/go.sum
 
-# The Redis store embeds its counting script. Nothing referenced that package
-# until the operator selected the shared store, so the missing file surfaced as a
-# build failure rather than as a missing feature.
+# The Redis store embeds its counting script.
 !engine/store/redis/*.lua
+
+# The management API embeds the OpenAPI document it serves, so the file has to
+# reach the build context
+!internal/management/openapi.yaml
 
 # configloader's YAML property source reads this next to the binary.
 !application.yaml

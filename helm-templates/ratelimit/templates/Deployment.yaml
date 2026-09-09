@@ -1,3 +1,4 @@
+{{- include "ratelimit.validateManagement" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,6 +45,9 @@ spec:
             - --rls-bind-address=:{{ .Values.rls.port }}
             - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
+            {{- if .Values.management.enabled }}
+            - --management-bind-address=:{{ .Values.management.port }}
+            {{- end }}
             # The Service whose ready endpoints are this component's replicas.
             # The leader reads the enforced generation from each of them, which
             # is what the Ready condition of a policy reports.
@@ -95,6 +99,11 @@ spec:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
+            {{- if .Values.management.enabled }}
+            - name: management
+              containerPort: {{ .Values.management.port }}
+              protocol: TCP
+            {{- end }}
           # On delete the pod leaves the Endpoints at once, but the gateways
           # keep sending checks until xDS catches up. The pause keeps the
           # process serving through that window, so a rolling restart refuses
