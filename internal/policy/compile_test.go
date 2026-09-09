@@ -2,11 +2,14 @@ package policy
 
 import (
 	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
@@ -286,4 +289,135 @@ func TestCompile_theBucketBudgetBlocksTheGeneration(t *testing.T) {
 	assert.Zero(t, outcome.ActiveGeneration, "a budget-blocked generation enforces nothing")
 	assert.Contains(t, outcome.Err.Error(), v1alpha1.ProblemDomainBudgetExceeded)
 	assert.Empty(t, result.Snapshots[testDomain].Blocks)
+}
+
+// The schema skew tests. A cluster can run a CRD newer than this build: the
+// API server then stores fields this build's schema does not define, and a
+// typed decode drops them without a word. What must not happen is enforcing
+// the remainder as if it were the spec.
+
+// unstructuredPolicy renders an object the way the API server stores it, with
+// extra is merged into its spec - the fields a newer schema would define.
+func unstructuredPolicy(t *testing.T, object v1alpha1.RateLimitPolicy, extra map[string]any) *unstructured.Unstructured {
+	t.Helper()
+	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&object)
+	require.NoError(t, err)
+	stored := &unstructured.Unstructured{Object: content}
+	stored.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicy"))
+
+	spec, found, err := unstructured.NestedMap(stored.Object, "spec")
+	require.NoError(t, err)
+	require.True(t, found)
+	maps.Copy(spec, extra)
+	require.NoError(t, unstructured.SetNestedMap(stored.Object, spec, "spec"))
+	return stored
+}
+
+func TestDecode_namesTheFieldsThisSchemaDoesNotDefine(t *testing.T) {
+	stored := unstructuredPolicy(t, policyObject(
+		v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}}),
+		map[string]any{"burstProfile": "steady"})
+
+	decoded, skew, err := Decode(stored)
+	require.NoError(t, err, "an object with an unknown field is still readable")
+
+	require.Len(t, skew, 1)
+	assert.Equal(t, v1alpha1.ProblemInvalidSpec, skew[0].Reason)
+	assert.Contains(t, skew[0].Message, "burstProfile",
+		"the message has to name the field, which is the only clue the author gets")
+	assert.Equal(t, testDomain, decoded.Spec.Domain,
+		"the part that decoded is still there, because the status is written on it")
+}
+
+func TestDecode_isSilentOnAnObjectThisSchemaFullyDefines(t *testing.T) {
+	stored := unstructuredPolicy(t, policyObject(
+		v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}}), nil)
+
+	_, skew, err := Decode(stored)
+	require.NoError(t, err)
+	assert.Empty(t, skew)
+}
+
+// TestCompile_anUnknownFieldKeepsTheLastGoodGenerationServing is the whole
+// point of the strict decode: the decoded spec compiles perfectly well, and
+// enforcing it anyway would enforce something nobody wrote.
+func TestCompile_anUnknownFieldKeepsTheLastGoodGenerationServing(t *testing.T) {
+	good := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
+
+	newer := *good.DeepCopy()
+	newer.Generation = 2
+
+	result := Compile(Input{
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{newer},
+		Skew: map[client.ObjectKey][]v1alpha1.RuleProblem{
+			key(): {{Reason: v1alpha1.ProblemInvalidSpec, Message: `unknown field "spec.burstProfile"`}},
+		},
+		State: map[string]Bundle{testDomain: {
+			UID: "uid-1", GoodGeneration: 1, GoodSpec: good.Spec,
+		}},
+	})
+
+	outcome := result.Policies[key()]
+	assert.False(t, outcome.Compiled(), "a spec this build cannot read whole is not a spec it may enforce")
+	assert.Equal(t, int64(1), outcome.ActiveGeneration, "the last-good generation keeps serving")
+	require.Len(t, outcome.Problems, 1)
+	assert.Equal(t, v1alpha1.ProblemInvalidSpec, outcome.Problems[0].Reason)
+	require.Len(t, result.Snapshots[testDomain].Blocks, 1,
+		"the snapshot is the last-good one, not the partially decoded latest")
+}
+
+// TestCompile_anUnknownFieldWithNoLastGoodEnforcesNothing is the other half:
+// with nothing to fall back to the domain is claimed and empty. The decoded
+// spec would have compiled to one working block, which is exactly the outcome
+// that must not happen.
+func TestCompile_anUnknownFieldWithNoLastGoodEnforcesNothing(t *testing.T) {
+	object := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
+
+	result := Compile(Input{
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{object},
+		Skew: map[client.ObjectKey][]v1alpha1.RuleProblem{
+			key(): {{Reason: v1alpha1.ProblemInvalidSpec, Message: `unknown field "spec.burstProfile"`}},
+		},
+	})
+
+	outcome := result.Policies[key()]
+	assert.False(t, outcome.Compiled())
+	assert.Zero(t, outcome.ActiveGeneration)
+	assert.Zero(t, outcome.Rules)
+	require.NotNil(t, result.Snapshots[testDomain],
+		"the domain is claimed, which is not the same as unknown")
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
+}
+
+// TestCompile_anUnknownEnumValueIsRefusedByTheCompiler is the skew a strict
+// decode cannot catch: the field is one this schema defines, and only its
+// value is from a newer vocabulary. The compiler is what refuses it, and the
+// reason is the same one.
+func TestCompile_anUnknownEnumValueIsRefusedByTheCompiler(t *testing.T) {
+	good := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
+
+	newer := *good.DeepCopy()
+	newer.Generation = 2
+	newer.Spec.Limits[0].Target = &v1alpha1.Target{
+		Routes: []v1alpha1.Route{{
+			Path: v1alpha1.PathMatch{Type: "GlobMatch", Value: "/orders"},
+		}},
+	}
+
+	result := Compile(Input{
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{newer},
+		State: map[string]Bundle{testDomain: {
+			UID: "uid-1", GoodGeneration: 1, GoodSpec: good.Spec,
+		}},
+	})
+
+	outcome := result.Policies[key()]
+	assert.False(t, outcome.Compiled())
+	assert.Equal(t, int64(1), outcome.ActiveGeneration, "the last-good generation keeps serving")
+	require.NotEmpty(t, outcome.Problems)
+	assert.Equal(t, v1alpha1.ProblemInvalidSpec, outcome.Problems[0].Reason)
+	assert.Contains(t, outcome.Problems[0].Message, "GlobMatch")
 }

@@ -31,8 +31,9 @@ On every request the gateway sends one flat descriptor — `path`, the `authoriz
 `x-request-id`. Those are the inputs the schema is written against: a rule matches on identity read out of the token,
 and on the path through the routes of its block.
 
-Controller and RLS endpoint share one binary and one Deployment. `--mode=all|controller|rls` selects the components, so
-splitting them later is a Helm change rather than a refactor. Only `all` is exercised today.
+Controller and RLS endpoint share one binary and one Deployment, and every replica runs both. Leader election is always
+on, and the replica signs the lease with its own pod name, which the chart passes as `POD_NAME` through the Downward
+API. Only status writes are gated by it.
 
 | Component       | Runs on       | Leader election | Does                                                  |
 |-----------------|---------------|-----------------|-------------------------------------------------------|

@@ -37,9 +37,12 @@ type DomainView struct {
 
 // PolicyView is one policy's status as the compiler reported it.
 type PolicyView struct {
-	// Policy is the namespace/name key of the object, which is also its
-	// domain.
-	Policy string
+	// Domain is the domain the policy serves, which under one policy per
+	// domain is also the object's name. The series are labelled by it rather
+	// than by namespace/name: the cache is scoped to one namespace, so the
+	// prefix was the same on every series and carried nothing, while every
+	// other series in this file already joins on the domain.
+	Domain string
 
 	// Ready reports whether the latest generation is the one enforced;
 	// Reason names why not, empty when ready.
@@ -54,9 +57,20 @@ type PolicyView struct {
 	// one; zero when the latest is enforced.
 	GenerationLag int64
 
-	// RuleProblems counts the diagnostics of the latest generation.
-	RuleProblems int
+	// BlockingProblems and InfoProblems count the diagnostics of the latest
+	// generation by severity. They are separate because they mean opposite
+	// things to an alert: one blocking problem is a generation nobody
+	// enforces, while an informational one is a note the author may have
+	// meant.
+	BlockingProblems int
+	InfoProblems     int
 }
+
+// Severities of ratelimit_policy_rule_problems.
+const (
+	SeverityBlocking = "blocking"
+	SeverityInfo     = "info"
+)
 
 // stateView holds the latest published view; nil until the first rebuild.
 var stateView atomic.Pointer[StateView]
@@ -68,16 +82,17 @@ func PublishState(view *StateView) { stateView.Store(view) }
 var (
 	descPolicyReady = prometheus.NewDesc("ratelimit_policy_ready",
 		"Whether the latest generation of the policy is the one enforced; reason is empty when it is.",
-		[]string{"policy", "reason"}, nil)
+		[]string{"domain", "reason"}, nil)
 	descPolicyEnforced = prometheus.NewDesc("ratelimit_policy_enforced",
 		"Whether any generation of the policy is enforced at all.",
-		[]string{"policy"}, nil)
+		[]string{"domain"}, nil)
 	descPolicyGenerationLag = prometheus.NewDesc("ratelimit_policy_generation_lag",
 		"How far the enforced generation trails the latest one.",
-		[]string{"policy"}, nil)
+		[]string{"domain"}, nil)
 	descPolicyRuleProblems = prometheus.NewDesc("ratelimit_policy_rule_problems",
-		"Rule diagnostics reported for the latest generation of the policy.",
-		[]string{"policy"}, nil)
+		"Rule diagnostics reported for the latest generation of the policy. "+
+			"Severity blocking means the generation is not enforced; info is a note about one that is.",
+		[]string{"domain", "severity"}, nil)
 	descPolicyAppliedGeneration = prometheus.NewDesc("ratelimit_policy_applied_generation",
 		"The generation of the domain this replica enforces.",
 		[]string{"domain"}, nil)
@@ -117,13 +132,18 @@ func (stateCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for _, p := range view.Policies {
 		ch <- prometheus.MustNewConstMetric(descPolicyReady,
-			prometheus.GaugeValue, boolValue(p.Ready), p.Policy, p.Reason)
+			prometheus.GaugeValue, boolValue(p.Ready), p.Domain, p.Reason)
 		ch <- prometheus.MustNewConstMetric(descPolicyEnforced,
-			prometheus.GaugeValue, boolValue(p.Enforced), p.Policy)
+			prometheus.GaugeValue, boolValue(p.Enforced), p.Domain)
 		ch <- prometheus.MustNewConstMetric(descPolicyGenerationLag,
-			prometheus.GaugeValue, float64(p.GenerationLag), p.Policy)
+			prometheus.GaugeValue, float64(p.GenerationLag), p.Domain)
+		// Both severities are reported even at zero: an alert on "no blocking
+		// problems" needs the series to exist while the domain is healthy,
+		// which is exactly when the count is zero.
 		ch <- prometheus.MustNewConstMetric(descPolicyRuleProblems,
-			prometheus.GaugeValue, float64(p.RuleProblems), p.Policy)
+			prometheus.GaugeValue, float64(p.BlockingProblems), p.Domain, SeverityBlocking)
+		ch <- prometheus.MustNewConstMetric(descPolicyRuleProblems,
+			prometheus.GaugeValue, float64(p.InfoProblems), p.Domain, SeverityInfo)
 	}
 }
 

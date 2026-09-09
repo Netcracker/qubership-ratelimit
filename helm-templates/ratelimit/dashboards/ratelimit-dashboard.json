@@ -349,7 +349,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(min by (policy) (ratelimit_policy_ready{cluster=~\"$cluster\", namespace=~\"$namespace\"}) == 0) or vector(0)",
+          "expr": "count(min by (domain) (ratelimit_policy_ready{cluster=~\"$cluster\", namespace=~\"$namespace\"}) == 0) or vector(0)",
           "legendFormat": ""
         }
       ]
@@ -942,8 +942,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min by (policy) (ratelimit_policy_ready{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
-          "legendFormat": "{{policy}}"
+          "expr": "min by (domain) (ratelimit_policy_ready{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "{{domain}}"
         }
       ]
     },

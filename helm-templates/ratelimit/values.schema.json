@@ -6,7 +6,6 @@
   "description": "JSON Schema for ratelimit.",
   "required": [
     "image",
-    "mode",
     "rls",
     "redis",
     "ISTIO_PUBLIC_GATEWAY_NAME",
@@ -55,23 +54,6 @@
           ]
         }
       }
-    },
-    "mode": {
-      "type": "string",
-      "title": "Components to run",
-      "description": "all runs the controller and the rate limit service in one Deployment. controller and rls exist for a future split; only all is exercised today.",
-      "enum": [
-        "all",
-        "controller",
-        "rls"
-      ],
-      "default": "all"
-    },
-    "leaderElect": {
-      "type": "boolean",
-      "title": "Leader election",
-      "description": "Gates status writes only. The rate limit endpoint and its rule store run on every replica.",
-      "default": true
     },
     "logLevel": {
       "type": "string",

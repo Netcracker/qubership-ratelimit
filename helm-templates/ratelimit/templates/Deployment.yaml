@@ -41,7 +41,6 @@ spec:
             - /usr/bin/entrypoint.sh
           args:
             - /app/ratelimit
-            - --mode={{ .Values.mode }}
             - --rls-bind-address=:{{ .Values.rls.port }}
             - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
             - --metrics-bind-address=:{{ .Values.metrics.port }}
@@ -52,10 +51,13 @@ spec:
             # The leader reads the enforced generation from each of them, which
             # is what the Ready condition of a policy reports.
             - --service-name={{ include "ratelimit.fullname" . }}
-            {{- if .Values.leaderElect }}
-            - --leader-elect
-            {{- end }}
           env:
+            # The name this replica signs the leader election lease with, and
+            # the name the status conditions use for the replicas that lag.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: LOGGING_LEVEL_ROOT
               value: '{{ lower .Values.logLevel }}'
             # The namespace this installation serves. It is what keeps the

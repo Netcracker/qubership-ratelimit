@@ -30,6 +30,13 @@ type Input struct {
 
 	Policies []v1alpha1.RateLimitPolicy
 
+	// Skew names, per object, the fields the stored object carries that this
+	// build's schema does not define. An entry keeps its object out of the
+	// enforced set whatever the decoded part of the spec would compile to,
+	// because the decoded part is not the spec: it is the subset of it this
+	// build could read.
+	Skew map[client.ObjectKey][]v1alpha1.RuleProblem
+
 	// State is the persisted last-good state, keyed by domain. An empty map is a
 	// cold start: the latest specs are validated, and there is nothing to fall
 	// back to.
@@ -130,7 +137,8 @@ func Compile(in Input) *Result {
 			}
 			continue
 		}
-		outcome, snapshot, bundle := compileDomain(in.Namespace, object, in.State[object.Spec.Domain])
+		outcome, snapshot, bundle := compileDomain(
+			in.Namespace, object, in.State[object.Spec.Domain], in.Skew[key])
 		result.Policies[key] = outcome
 		result.Snapshots[object.Spec.Domain] = snapshot
 		result.State[object.Spec.Domain] = bundle
@@ -148,16 +156,11 @@ func compileDomain(
 	namespace string,
 	object *v1alpha1.RateLimitPolicy,
 	previous Bundle,
+	skew []v1alpha1.RuleProblem,
 ) (Outcome, *enginecompile.Snapshot, Bundle) {
 	domain := object.Spec.Domain
 
-	snapshot, problems := enginecompile.Compile(namespace, domain, modelPolicy(&object.Spec))
-	outcome := Outcome{
-		UID:        string(object.UID),
-		Generation: object.Generation,
-		Problems:   ruleProblems(problems),
-		Err:        blockingError(problems),
-	}
+	snapshot, outcome := latestGeneration(namespace, object, skew)
 
 	if outcome.Compiled() {
 		outcome.ActiveGeneration = object.Generation
@@ -185,6 +188,39 @@ func compileDomain(
 	}
 	outcome.ActiveGeneration = good.GoodGeneration
 	return withContribution(outcome, fallback), fallback, *good
+}
+
+// latestGeneration compiles the generation the object carries, or refuses it
+// unread when the object holds fields this build's schema does not define.
+//
+// A skewed object is never compiled. The decoded spec would compile - the
+// unknown fields are gone from it - and it would compile to something the
+// author did not write: an added field is as likely to narrow a rule as to
+// widen it, and enforcing the remainder is a guess either way. The snapshot
+// that stands in for it is the one an empty spec produces, so the domain is
+// claimed and enforces nothing until either the object or this build changes.
+func latestGeneration(
+	namespace string,
+	object *v1alpha1.RateLimitPolicy,
+	skew []v1alpha1.RuleProblem,
+) (*enginecompile.Snapshot, Outcome) {
+	outcome := Outcome{
+		UID:        string(object.UID),
+		Generation: object.Generation,
+	}
+	if len(skew) > 0 {
+		empty, _ := enginecompile.Compile(namespace, object.Spec.Domain,
+			modelPolicy(&v1alpha1.RateLimitPolicySpec{Domain: object.Spec.Domain}))
+		outcome.Problems = skew
+		outcome.Err = fmt.Errorf("%d %s this schema does not define (%s)",
+			len(skew), plural(len(skew), "field"), v1alpha1.ProblemInvalidSpec)
+		return empty, outcome
+	}
+
+	snapshot, problems := enginecompile.Compile(namespace, object.Spec.Domain, modelPolicy(&object.Spec))
+	outcome.Problems = ruleProblems(problems)
+	outcome.Err = blockingError(problems)
+	return snapshot, outcome
 }
 
 // withContribution records what the active generation put into the snapshot,

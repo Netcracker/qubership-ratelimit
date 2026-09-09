@@ -13,6 +13,7 @@ import (
 
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -80,15 +81,26 @@ type FleetProbe interface {
 func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	var object v1alpha1.RateLimitPolicy
-	if err := r.Get(ctx, req.NamespacedName, &object); err != nil {
+	// Read unstructured and decode here, for the reason policy.Load gives: a
+	// typed read drops what this build does not know, and the status this
+	// reconciler writes is where that has to be reported.
+	stored := &unstructured.Unstructured{}
+	stored.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicy"))
+	if err := r.Get(ctx, req.NamespacedName, stored); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	decoded, _, err := policy.Decode(stored)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	object := *decoded
 
 	result, err := compile(ctx, r.Client, r.State, r.Namespace, object.Spec.Domain)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// The skew of this object comes back through the same load every other
+	// policy's does, so the outcome already carries it.
 	outcome := result.Policies[req.NamespacedName]
 
 	now := time.Now()
@@ -179,8 +191,12 @@ func (r *RateLimitPolicyReconciler) observe(
 // without the watch status.replicas would hold its old fraction until the
 // interval came round.
 func (r *RateLimitPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Watched unstructured, so that this kind has one informer and it is the
+	// one whose objects keep every field they were stored with.
+	watched := &unstructured.Unstructured{}
+	watched.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicy"))
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.RateLimitPolicy{}).
+		For(watched).
 		Watches(&discoveryv1.EndpointSlice{},
 			handler.EnqueueRequestsFromMapFunc(r.policiesBehind)).
 		Named("ratelimitpolicy").

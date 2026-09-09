@@ -117,6 +117,19 @@ const (
 	ProblemCaptureShadowsMappedKey = "CaptureShadowsMappedKey"
 )
 
+// BlockingProblem reports whether a reason keeps its generation out of the
+// enforced set.
+//
+// The compiler carries the same bit on every problem it raises, but
+// RuleProblem does not: the status lists root causes for an author, who reads
+// the reason rather than a boolean. The severity is a property of the reason
+// alone - every one of them is blocking except the shadowed capture - so a
+// reader that needs it derives it here rather than storing a second copy in
+// the object.
+func BlockingProblem(reason string) bool {
+	return reason != ProblemCaptureShadowsMappedKey
+}
+
 // Descriptor keys the engine produces on its own. A mapping entry cannot
 // declare them, and a predicate cannot match path, method or token: routes
 // select paths and methods, and the token is an input the engine decodes

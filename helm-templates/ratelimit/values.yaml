@@ -8,11 +8,6 @@ image:
   pullPolicy: IfNotPresent
 
 # ============== SERVICE ============================
-# Components this Deployment runs: all, controller or rls. Controller and RLS
-# engine share one binary today; the flag exists so that splitting them into two
-# Deployments is a values change rather than a code change.
-mode: all
-
 # REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
 # the resource profile, not here — one source of truth, so the defaults cannot
 # drift away from the profiles. values.schema.json requires them, so installing
@@ -22,10 +17,6 @@ mode: all
 # Every replica answers rate limit checks; only status writes are leader-gated,
 # so scaling REPLICAS out needs no other change. GOMEMLIMIT is derived from
 # MEMORY_LIMIT, so it governs the Go heap and not only the cgroup ceiling.
-
-# Leader election gates status writes only. The rate limit endpoint and its rule
-# store run on every replica, so scaling out does not depend on this setting.
-leaderElect: true
 
 # Passed as LOGGING_LEVEL_ROOT: the platform logger resolves its root level
 # from the logging.level.root property; LOG_LEVEL only applies before the

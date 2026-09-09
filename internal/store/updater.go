@@ -401,13 +401,15 @@ func stateView(result *policy.Result) *metrics.StateView {
 		if outcome.ActiveGeneration > 0 {
 			lag = outcome.Generation - outcome.ActiveGeneration
 		}
+		blocking, info := countProblems(outcome.Problems)
 		view.Policies = append(view.Policies, metrics.PolicyView{
-			Policy:        key.String(),
-			Ready:         outcome.Enforced(),
-			Reason:        notEnforcedReason(outcome),
-			Enforced:      outcome.ActiveGeneration != 0,
-			GenerationLag: lag,
-			RuleProblems:  len(outcome.Problems),
+			Domain:           key.Name,
+			Ready:            outcome.Enforced(),
+			Reason:           notEnforcedReason(outcome),
+			Enforced:         outcome.ActiveGeneration != 0,
+			GenerationLag:    lag,
+			BlockingProblems: blocking,
+			InfoProblems:     info,
 		})
 	}
 
@@ -420,6 +422,19 @@ func stateView(result *policy.Result) *metrics.StateView {
 		})
 	}
 	return view
+}
+
+// countProblems splits a generation's diagnostics into the two severities the
+// metric reports.
+func countProblems(problems []v1alpha1.RuleProblem) (blocking, info int) {
+	for _, problem := range problems {
+		if v1alpha1.BlockingProblem(problem.Reason) {
+			blocking++
+			continue
+		}
+		info++
+	}
+	return blocking, info
 }
 
 // notEnforcedReason labels the series of a policy whose latest generation is
