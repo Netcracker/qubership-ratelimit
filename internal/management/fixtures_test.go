@@ -121,6 +121,16 @@ func orderBlocks() []model.Block {
 	}
 }
 
+// widerOrders is orderBlocks with a second window on per-client: the rollout
+// that changes both the rule set version and the keys the rule addresses, which
+// is what a replay must not pick up.
+func widerOrders() []model.Block {
+	blocks := orderBlocks()
+	blocks[0].Rules[0].Rates = append(blocks[0].Rules[0].Rates,
+		model.Rate{Requests: 100, Period: 24 * time.Hour, Algorithm: "FixedWindow"})
+	return blocks
+}
+
 // wholeDomainBlocks counts every request together, with no axis at all: its
 // counter key is the bare rate prefix, the other case a listing and a reset
 // have to handle.
@@ -347,6 +357,15 @@ func testToken(subject string, roles []string) string {
 	if err != nil {
 		panic(err)
 	}
+	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+}
+
+// tokenWithClaims builds a bearer token carrying an arbitrary payload, for the
+// claim shapes testToken's fixed one cannot express.
+func tokenWithClaims(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	payload, err := json.Marshal(claims)
+	require.NoError(t, err)
 	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
 }
 

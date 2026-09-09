@@ -35,12 +35,12 @@ type Memory struct {
 }
 
 type entry struct {
-	command  string
-	fencing  string
-	terminal bool
-	progress Progress
-	outcome  Outcome
-
+	command   string
+	fencing   string
+	terminal  bool
+	progress  Progress
+	outcome   Outcome
+	answer    []byte
 	expiresAt time.Time
 }
 
@@ -187,7 +187,8 @@ func (m *Memory) Reset(ctx context.Context, addressed Addressed) (AddressedOutco
 
 	if existing := m.record(addressed.Record); existing != nil {
 		return AddressedOutcome{
-			Replayed: true, Command: existing.command, Count: existing.progress.Reset,
+			Replayed: true, Command: existing.command,
+			Count: existing.progress.Reset, Answer: existing.answer,
 		}, nil
 	}
 
@@ -205,9 +206,10 @@ func (m *Memory) Reset(ctx context.Context, addressed Addressed) (AddressedOutco
 		command:   addressed.Command,
 		terminal:  true,
 		progress:  Progress{Reset: len(live)},
+		answer:    addressed.Answer,
 		expiresAt: m.now().Add(Retention),
 	}
-	return AddressedOutcome{Command: addressed.Command, Count: len(live)}, nil
+	return AddressedOutcome{Command: addressed.Command, Count: len(live), Answer: addressed.Answer}, nil
 }
 
 // live reports which of the keys exist right now, so a reset can say what it
@@ -268,6 +270,7 @@ func (m *Memory) read(keys Keys) Record {
 		Terminal: record.terminal,
 		Outcome:  cloneOutcome(record.outcome),
 		Progress: clone(record.progress),
+		Answer:   record.answer,
 		Fencing:  record.fencing,
 	}
 	if held, ok := m.lease(keys.Lease); ok {

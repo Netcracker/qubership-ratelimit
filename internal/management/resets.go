@@ -278,8 +278,12 @@ func (a *API) standing(
 	}
 	if record.Alive() {
 		// The sweep is running. There is no body to give: come back for the
-		// outcome once the lease can no longer be alive.
-		c.Set(fiber.HeaderRetryAfter, retryAfterSeconds(record.LeaseTTL))
+		// outcome, soon. The lease is an upper bound on the sweep rather than
+		// an estimate of it, so handing it over would send a client that
+		// honors the header away for over a minute to collect an outcome
+		// recorded in the first few seconds. The retry is the poll, so it gets
+		// a poll interval, never longer than the lease that bounds the answer.
+		c.Set(fiber.HeaderRetryAfter, retryAfterSeconds(min(pollInterval, record.LeaseTTL)))
 		c.Set(fiber.HeaderXContentTypeOptions, "nosniff")
 		// No body: the answer is "not yet", and the outcome is what the next
 		// retry comes for.

@@ -44,6 +44,17 @@ const sweepDeadline = time.Minute
 // therefore conclude the walker is dead without racing it.
 const leaseTTL = sweepDeadline + 15*time.Second
 
+// pollInterval is how long a 202 asks a caller to wait before coming back for
+// the outcome.
+//
+// It is a poll interval rather than the remaining lease, which is an upper
+// bound on the sweep and not an estimate of it: real sweeps finish in seconds,
+// so handing over the lease would send a client that honors the header away for
+// over a minute to collect an outcome recorded at second three. The 409 for a
+// competing command keeps the lease, because there the wait really is until the
+// other sweep can no longer hold the domain.
+const pollInterval = 5 * time.Second
+
 // keySampleLimit bounds the key list an answer carries. The counts are always
 // exact; the sample is there to recognize what was swept, and no client
 // benefits from being handed a hundred thousand keys.

@@ -204,7 +204,7 @@ func (a *API) simulate(ctx context.Context, request SimulationRequest) (Simulati
 		a.Log.ErrorC(ctx, "failed to simulate a request domain=%v error=%v", request.Domain, err)
 		return SimulationResponse{}, storeDown("the counter store did not answer the simulation")
 	}
-	return simulationResponse(decision, time.Now().UTC()), nil
+	return simulationResponse(decision, a.now().UTC()), nil
 }
 
 func simulationResponse(decision engine.Decision, at time.Time) SimulationResponse {

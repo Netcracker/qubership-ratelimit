@@ -107,6 +107,11 @@ type Record struct {
 	// is what a finalizing retry discloses.
 	Progress Progress
 
+	// Answer is the body an addressed reset returned, present once its record
+	// is terminal. A retry replays it rather than rebuilding one against a
+	// snapshot that may have moved since.
+	Answer []byte
+
 	// Fencing is the token of the sweep that owns this command.
 	Fencing string
 
@@ -208,6 +213,11 @@ type Addressed struct {
 	// deletes nothing.
 	Delete []string
 	DryRun bool
+
+	// Answer is the body this command is about to return, stored with the
+	// binding so a retry is answered from the record rather than rebuilt from
+	// a snapshot that may have moved on.
+	Answer []byte
 }
 
 // AddressedOutcome is what an addressed reset did, or what it did the first
@@ -222,6 +232,11 @@ type AddressedOutcome struct {
 
 	// Count is the number of keys deleted, or matched on a preview.
 	Count int
+
+	// Answer is the body the first call returned, present on a replay. A retry
+	// answers from it, so the rule set version and the key list it carries are
+	// the ones the command actually acted on.
+	Answer []byte
 }
 
 // Store keeps the records, tokens, and leases of the mutating endpoints.

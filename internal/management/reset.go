@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/engine/key"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
@@ -233,11 +234,24 @@ func (a *API) runReset(
 		}
 	}
 
+	// The body is rendered before the store call, so the record carries the
+	// answer this command gave rather than one rebuilt later from a snapshot
+	// that has moved on. Count is the one field the store fills in.
+	answer := ResetResponse{
+		Domain:         snapshot.Domain,
+		RuleID:         command.Selector.RuleIDs[0],
+		RuleSetVersion: version,
+		Axes:           command.AxesByName,
+		Keys:           drop,
+		DryRun:         command.DryRun,
+	}
+
 	outcome, err := a.Records.Reset(ctx, records.Addressed{
 		Record:  name,
 		Command: command.command(),
 		Delete:  drop,
 		DryRun:  command.DryRun,
+		Answer:  answer.recorded(),
 	})
 	if err != nil {
 		a.Log.ErrorC(ctx, "failed to run an addressed reset domain=%v ruleId=%v error=%v",
@@ -250,14 +264,7 @@ func (a *API) runReset(
 			"this Idempotency-Key is already bound to a different command; a new command needs a new key")
 	}
 
-	response := ResetResponse{
-		Domain:         snapshot.Domain,
-		RuleID:         command.Selector.RuleIDs[0],
-		RuleSetVersion: version,
-		Axes:           command.AxesByName,
-		Keys:           computed,
-		DryRun:         command.DryRun,
-	}
+	response := answer
 	count := outcome.Count
 	if command.DryRun {
 		response.MatchedCount = &count
@@ -341,4 +348,86 @@ func splitFullID(id string) (block, rule string, ok bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+// replayReset answers a retry from its record, and reports whether it did.
+//
+// The binding an Idempotency-Key carries is a hash of the canonical command,
+// which the query alone determines: the snapshot decides what a command may do,
+// never what it is. So a retry can be recognized, and answered, before the
+// enforced set is consulted at all.
+//
+// A record without a stored answer predates this field. It falls through to the
+// ordinary path, which still replays the count from the store; only the body is
+// rebuilt.
+func (a *API) replayReset(c *fiber.Ctx, query url.Values, name string) (bool, *apiError) {
+	binding, apiErr := resetBinding(query)
+	if apiErr != nil {
+		// A query this malformed cannot name a command, so it cannot be a
+		// retry of one either. The ordinary path reports what is wrong with it.
+		return false, nil
+	}
+
+	record, err := a.Records.Lookup(c.UserContext(), records.Keys{Record: name})
+	if err != nil {
+		a.Log.ErrorC(c.UserContext(), "failed to read a reset record error=%v", err)
+		return false, storeDown("the counter store did not answer the idempotency lookup")
+	}
+	if !record.Found || !record.Terminal || len(record.Answer) == 0 {
+		return false, nil
+	}
+	if record.Command != binding {
+		return false, conflict(ConflictCommandMismatch,
+			"this Idempotency-Key is already bound to a different command; a new command needs a new key")
+	}
+
+	// The stored body carries everything the first call decided; the count is
+	// the store's own number, recorded beside it.
+	var response ResetResponse
+	if err := json.Unmarshal(record.Answer, &response); err != nil {
+		a.Log.ErrorC(c.UserContext(), "failed to read a recorded reset answer error=%v", err)
+		return false, errorf(CodeInternal, "the recorded answer of this command cannot be read")
+	}
+	count := record.Progress.Reset
+	if response.DryRun {
+		response.MatchedCount = &count
+	} else {
+		response.ResetCount = &count
+	}
+	return true, apiErrorOf(writeJSON(c, response))
+}
+
+// resetBinding is the canonical command hash of a reset query, computed without
+// the snapshot: it is what an Idempotency-Key binds to.
+func resetBinding(query url.Values) (string, *apiError) {
+	sel, apiErr := parseSelector(query)
+	if apiErr != nil {
+		return "", apiErr
+	}
+	command := resetCommand{Selector: sel, ExpectedVersion: query.Get("expectedRuleSetVersion")}
+	if apiErr := parseEnumTrue(query, "dryRun", &command.DryRun); apiErr != nil {
+		return "", apiErr
+	}
+	return command.command(), nil
+}
+
+// apiErrorOf carries a write failure back in this package's error shape.
+func apiErrorOf(err error) *apiError {
+	if err == nil {
+		return nil
+	}
+	return errorf(CodeInternal, "failed to write the recorded answer: "+err.Error())
+}
+
+// recorded renders the half of the body that is settled before the store runs:
+// the domain, the rule, the version this command was judged against, the axes,
+// and the keys it addressed. The count is the store's to report, so it is left
+// out here and filled in on replay from the record.
+func (r ResetResponse) recorded() []byte {
+	r.MatchedCount, r.ResetCount = nil, nil
+	body, err := json.Marshal(r)
+	if err != nil {
+		panic("management: the reset response failed to marshal: " + err.Error())
+	}
+	return body
 }

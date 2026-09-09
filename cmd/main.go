@@ -561,6 +561,41 @@ func addRateLimitEndpoint(
 	return endpoint, nil
 }
 
+// managementClaims names the claims the subject and its roles are read from.
+// Both accept a dotted path, because an IdP often nests the roles: Keycloak
+// issues them under realm_access.roles.
+func managementClaims() management.ClaimNames {
+	return management.ClaimNames{
+		Subject: configloader.GetOrDefaultString("management.claims.subject",
+			management.DefaultClaimNames.Subject),
+		Roles: configloader.GetOrDefaultString("management.claims.roles",
+			management.DefaultClaimNames.Roles),
+	}
+}
+
+// managementRoles maps the role names the IdP issues onto the two this API
+// authorizes against. Both properties are comma-separated lists, and both
+// default to the canonical name, which is what a deployment issuing "viewer"
+// and "operator" already has.
+func managementRoles() management.RoleMapping {
+	return management.RoleMapping{
+		Viewer:   csv(configloader.GetOrDefaultString("management.roles.viewer", management.RoleViewer)),
+		Operator: csv(configloader.GetOrDefaultString("management.roles.operator", management.RoleOperator)),
+	}
+}
+
+// csv splits a comma-separated property, dropping the empty entries a trailing
+// comma or a blank value leaves behind.
+func csv(value string) []string {
+	var out []string
+	for item := range strings.SplitSeq(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 // addManagementAPI registers the control interface, on its own listener.
 //
 // It is off unless an address is configured, and the address is never the one
@@ -595,6 +630,8 @@ func addManagementAPI(
 		Counters:       limiter.counters,
 		Records:        limiter.records,
 		Namespace:      namespace,
+		Claims:         managementClaims(),
+		Roles:          managementRoles(),
 		CounterBackend: limiter.backend,
 		Log:            logging.GetLogger(loggerName + "/management"),
 	}

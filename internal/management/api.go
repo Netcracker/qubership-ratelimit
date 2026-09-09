@@ -56,8 +56,12 @@ type API struct {
 	Namespace string
 
 	// Claims names the token claims the subject and its roles are read from;
-	// the zero value uses DefaultClaimNames.
+	// the zero value uses DefaultClaimNames. Either name may be a dotted path.
 	Claims ClaimNames
+
+	// Roles maps the role names the IdP issues onto viewer and operator. The
+	// zero value expects the canonical names in the token.
+	Roles RoleMapping
 
 	// Replica names this pod for the status endpoint and for the operations it
 	// owns; empty falls back to POD_NAME and then the hostname.
@@ -111,7 +115,7 @@ func (a *API) Register(router fiber.Router) {
 	group := router.Group(BasePath)
 	group.Use(withRequestID)
 	group.Use(recover.New())
-	group.Use(withIdentity(claims))
+	group.Use(withIdentity(claims, a.Roles))
 
 	group.Get("/domains", requireRole(RoleViewer, a.handleDomains))
 	group.Get("/domains/:domain/rules", requireRole(RoleViewer, a.handleRules))
@@ -258,7 +262,25 @@ func (a *API) handleReset(c *fiber.Ctx) error {
 		return apiErr
 	}
 
-	command, apiErr := parseReset(snapshot, queryValues(c))
+	query := queryValues(c)
+	subject := subjectOf(c)
+	name := recordKey(a.Namespace, snapshot.Domain, endpointCounters, subject.Name, idempotencyKey)
+
+	// The record is read before the snapshot is consulted, because a completed
+	// command must not start failing after the fact. A window added to the rule
+	// would otherwise make the replay list a key the command never deleted, the
+	// rule leaving the enforced set would answer 404, and a pinned version would
+	// answer 409 for work that already ran. A replay is answered from what was
+	// recorded, and only a new command is judged against what is enforced now.
+	replayed, apiErr := a.replayReset(c, query, name)
+	if apiErr != nil {
+		return apiErr
+	}
+	if replayed {
+		return nil
+	}
+
+	command, apiErr := parseReset(snapshot, query)
 	if apiErr != nil {
 		return apiErr
 	}
@@ -270,8 +292,6 @@ func (a *API) handleReset(c *fiber.Ctx) error {
 
 	// Everything above can refuse without binding anything: a corrected repeat
 	// re-evaluates cleanly, with the same key if the client wants.
-	subject := subjectOf(c)
-	name := recordKey(a.Namespace, snapshot.Domain, endpointCounters, subject.Name, idempotencyKey)
 
 	response, apiErr := a.runReset(c.UserContext(), snapshot, version, command, name)
 	if apiErr != nil {

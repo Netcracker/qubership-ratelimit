@@ -184,7 +184,7 @@ func TestReset_refusesWhatItCannotAddress(t *testing.T) {
 
 func TestReset_needsALogSafeIdempotencyKey(t *testing.T) {
 	h := newTestAPI(t)
-	query := "ruleId=orders/per-client&axis.client=alice"
+	query := addressAlice
 
 	requireError(t, h.reset(t, query, "", operatorRoles()),
 		http.StatusBadRequest, CodeInvalidRequest)
@@ -312,4 +312,70 @@ func TestReset_recordsTheBodyItAnswered(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
 	require.Equal(t, "orders/per-client", response.RuleID)
 	require.Equal(t, recorder.Header().Get("Content-Type"), "application/json")
+}
+
+// addressAlice is the one addressed command these replay tests repeat.
+const addressAlice = "ruleId=orders/per-client&axis.client=alice"
+
+// A retry answers from the record, not from the snapshot serving now.
+//
+// Rebuilding the body would break three promises at once when the rule set
+// moves between the call and its retry: a window added to the rule makes the
+// replay list a key the command never deleted, the rule leaving the enforced
+// set answers 404 before the record is consulted, and a pinned version answers
+// 409 for a command that already ran.
+func TestReset_replaysTheBodyItRecordedAfterTheRuleSetMoved(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+
+	query := addressAlice
+	var first ResetResponse
+	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &first)
+	require.Equal(t, 1, *first.ResetCount)
+	require.NotEmpty(t, first.Keys)
+
+	// A rollout adds a window to the same rule, which changes both the version
+	// and the key set the rule would address now.
+	h.replaceRules(t, widerOrders()...)
+	require.NotEqual(t, first.RuleSetVersion, h.version, "the fixture must actually move the rule set")
+
+	var replay ResetResponse
+	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &replay)
+	require.Equal(t, first, replay, "a retry gets the body the command actually produced")
+}
+
+// The version pin is a check on a new command. A completed one does not start
+// failing because the set moved after it ran.
+func TestReset_aPinnedRetryStillReplays(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+
+	query := addressAlice + "&expectedRuleSetVersion=" + h.version
+	var first ResetResponse
+	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &first)
+
+	h.replaceRules(t, widerOrders()...)
+
+	var replay ResetResponse
+	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &replay)
+	require.Equal(t, first, replay, "the pin judges a new command, never one already recorded")
+}
+
+// A rule that left the enforced set answers 404 for a new command, and still
+// replays for one that already ran.
+func TestReset_replaysEvenWhenTheRuleIsGone(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+
+	query := addressAlice
+	var first ResetResponse
+	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &first)
+
+	h.replaceRules(t, wholeDomainBlocks()...)
+
+	requireError(t, h.reset(t, query, "key-2", operatorRoles()), http.StatusNotFound, CodeNotFound)
+
+	var replay ResetResponse
+	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &replay)
+	require.Equal(t, first, replay)
 }

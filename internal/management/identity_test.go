@@ -76,7 +76,7 @@ func TestAuthorization_refusesATokenWithoutRoles(t *testing.T) {
 func TestSubject_readsASingleRoleClaimAsWellAsAList(t *testing.T) {
 	subject, err := subjectFromToken(
 		"header."+encodePayload(map[string]any{"sub": "alice", "roles": "operator"})+".sig",
-		DefaultClaimNames)
+		DefaultClaimNames, RoleMapping{})
 	require.NoError(t, err)
 	require.Equal(t, "alice", subject.Name)
 	require.Equal(t, []string{"operator"}, subject.Roles)
@@ -89,7 +89,7 @@ func TestSubject_takesTheClaimNamesFromConfiguration(t *testing.T) {
 	})
 
 	subject, err := subjectFromToken("header."+payload+".sig",
-		ClaimNames{Subject: "preferred_username", Roles: "groups"})
+		ClaimNames{Subject: "preferred_username", Roles: "groups"}, RoleMapping{})
 	require.NoError(t, err)
 	require.Equal(t, "alice", subject.Name)
 	require.Equal(t, []string{"rl-operator"}, subject.Roles)
@@ -136,4 +136,63 @@ func encodePayload(claims map[string]any) string {
 		panic(err)
 	}
 	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+// An IdP rarely issues "viewer" and "operator" verbatim. Without the mapping a
+// deployment whose realm calls them ratelimit-operator gets 403 on every call,
+// and nothing in the service can change that.
+func TestRoleMapping_translatesTheRolesAnIdPIssues(t *testing.T) {
+	mapping := RoleMapping{
+		Viewer:   []string{"ratelimit-viewer", "sre"},
+		Operator: []string{"ratelimit-operator"},
+	}
+
+	require.Equal(t, []string{RoleOperator}, mapping.canonical([]string{"ratelimit-operator"}))
+	require.Equal(t, []string{RoleViewer}, mapping.canonical([]string{"sre"}))
+	require.Equal(t, []string{RoleViewer, RoleOperator},
+		mapping.canonical([]string{"sre", "ratelimit-operator"}))
+
+	// A role on neither list is dropped rather than passed through: authorizing
+	// against a name nobody configured is how a role from another system
+	// becomes a grant here.
+	require.Empty(t, mapping.canonical([]string{"operator", "admin"}),
+		"the canonical names are not implicitly accepted once a mapping exists")
+}
+
+// A deployment whose IdP already issues the canonical names configures nothing.
+func TestRoleMapping_withoutListsKeepsTheTokensRoles(t *testing.T) {
+	require.Equal(t, []string{RoleOperator, "unrelated"},
+		RoleMapping{}.canonical([]string{RoleOperator, "unrelated"}))
+}
+
+// Keycloak issues realm roles under realm_access.roles. Reading only top-level
+// claims would leave that deployment with no roles at all.
+func TestSubjectFromToken_readsANestedRolesClaim(t *testing.T) {
+	token := tokenWithClaims(t, map[string]any{
+		"sub": "alice@example.com",
+		"realm_access": map[string]any{
+			"roles": []any{"ratelimit-operator", "offline_access"},
+		},
+	})
+
+	subject, err := subjectFromToken(token,
+		ClaimNames{Subject: "sub", Roles: "realm_access.roles"},
+		RoleMapping{Operator: []string{"ratelimit-operator"}})
+
+	require.Nil(t, err)
+	require.Equal(t, "alice@example.com", subject.Name)
+	require.True(t, subject.Can(RoleOperator))
+}
+
+// A dotted path that walks into something that is not an object yields no
+// roles, rather than reaching for a claim of the same name one level up.
+func TestSubjectFromToken_aPathThatDoesNotResolveGrantsNothing(t *testing.T) {
+	token := tokenWithClaims(t, map[string]any{"sub": "alice", "roles": []any{"operator"}})
+
+	subject, err := subjectFromToken(token,
+		ClaimNames{Subject: "sub", Roles: "realm_access.roles"}, RoleMapping{})
+
+	require.Nil(t, err)
+	require.Empty(t, subject.Roles)
+	require.False(t, subject.Can(RoleViewer))
 }

@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -40,6 +41,10 @@ func (s Subject) Can(role string) bool {
 
 // ClaimNames says which claims carry the subject and its roles. IdPs disagree
 // about both, so the names are configuration rather than a constant.
+//
+// Either name may be a dotted path, because the roles of a realm often sit
+// nested: Keycloak issues them under realm_access.roles, and reading only
+// top-level claims would leave that deployment with no roles at all.
 type ClaimNames struct {
 	Subject string
 	Roles   string
@@ -47,6 +52,40 @@ type ClaimNames struct {
 
 // DefaultClaimNames are the usual spellings.
 var DefaultClaimNames = ClaimNames{Subject: "sub", Roles: "roles"}
+
+// RoleMapping translates the role names an IdP issues into the two this API
+// authorizes against.
+//
+// An IdP rarely issues "viewer" and "operator" verbatim. Without a mapping the
+// token has to carry those exact strings, and a deployment whose IdP issues
+// ratelimit-operator gets 403 on every call with nothing in the service able to
+// change it.
+//
+// Empty lists keep the canonical names, which is what a deployment that already
+// issues them wants. A role held on neither list is dropped rather than passed
+// through: authorizing against a name nobody configured is how a role from
+// another system becomes a grant here.
+type RoleMapping struct {
+	Viewer   []string
+	Operator []string
+}
+
+// canonical maps the roles a token carries onto the ones this API knows.
+func (m RoleMapping) canonical(issued []string) []string {
+	if len(m.Viewer) == 0 && len(m.Operator) == 0 {
+		return issued
+	}
+	var out []string
+	for _, role := range issued {
+		switch {
+		case slices.Contains(m.Operator, role):
+			out = append(out, RoleOperator)
+		case slices.Contains(m.Viewer, role):
+			out = append(out, RoleViewer)
+		}
+	}
+	return out
+}
 
 // withIdentity reads the caller out of the bearer token and refuses the request
 // without one.
@@ -58,14 +97,14 @@ var DefaultClaimNames = ClaimNames{Subject: "sub", Roles: "roles"}
 // instead. The 401 below is hygiene, not defense: it keeps an unauthenticated
 // call from being processed, but it would not stop a forged token if the
 // ingress requirement were broken.
-func withIdentity(claims ClaimNames) fiber.Handler {
+func withIdentity(claims ClaimNames, roles RoleMapping) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		token, ok := bearerToken(c)
 		if !ok {
 			return errorf(CodeUnauthorized,
 				"no bearer token on the request; call through the platform gateway")
 		}
-		subject, err := subjectFromToken(token, claims)
+		subject, err := subjectFromToken(token, claims, roles)
 		if err != nil {
 			// The token is unreadable rather than merely unsigned. The detail
 			// never quotes the token: it is a live credential.
@@ -100,7 +139,7 @@ func requireRole(role string, next fiber.Handler) fiber.Handler {
 
 // subjectFromToken decodes the JWT payload. The signature is the gateway's
 // business; this only reads.
-func subjectFromToken(token string, claims ClaimNames) (Subject, error) {
+func subjectFromToken(token string, claims ClaimNames, roles RoleMapping) (Subject, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return Subject{}, errBadToken
@@ -115,11 +154,25 @@ func subjectFromToken(token string, claims ClaimNames) (Subject, error) {
 	}
 
 	subject := Subject{}
-	if name, ok := body[claims.Subject].(string); ok {
+	if name, ok := claimAt(body, claims.Subject).(string); ok {
 		subject.Name = name
 	}
-	subject.Roles = stringsOf(body[claims.Roles])
+	subject.Roles = roles.canonical(stringsOf(claimAt(body, claims.Roles)))
 	return subject, nil
+}
+
+// claimAt walks a dotted path into the payload. A path of one segment is an
+// ordinary top-level claim, which is what most IdPs issue.
+func claimAt(body map[string]any, path string) any {
+	var value any = body
+	for segment := range strings.SplitSeq(path, ".") {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil
+		}
+		value = object[segment]
+	}
+	return value
 }
 
 // errBadToken is the one error subjectFromToken reports: what exactly was

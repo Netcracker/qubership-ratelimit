@@ -126,11 +126,12 @@ return 'ok'
 // intermediate steps.
 //
 // KEYS: record, then the computed counter keys.
-// ARGV: command, retention ms, dryRun flag.
+// ARGV: command, retention ms, dryRun flag, the answer body.
 var resetScript = goredis.NewScript(`
 local existing = redis.call('HGET', KEYS[1], 'command')
 if existing then
-  return {'replayed', existing, redis.call('HGET', KEYS[1], 'count')}
+  return {'replayed', existing, redis.call('HGET', KEYS[1], 'count'),
+          redis.call('HGET', KEYS[1], 'answer')}
 end
 
 local count = 0
@@ -142,9 +143,10 @@ for i = 2, #KEYS do
   end
 end
 
-redis.call('HSET', KEYS[1], 'command', ARGV[1], 'terminal', '1', 'count', tostring(count))
+redis.call('HSET', KEYS[1], 'command', ARGV[1], 'terminal', '1',
+           'count', tostring(count), 'answer', ARGV[4])
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
-return {'done', ARGV[1], tostring(count)}
+return {'done', ARGV[1], tostring(count), ARGV[4]}
 `)
 
 // Redis keeps records in the shared counter store.
@@ -297,7 +299,7 @@ func (r *Redis) Reset(ctx context.Context, addressed Addressed) (AddressedOutcom
 
 	keys := append([]string{addressed.Record}, addressed.Delete...)
 	res, err := resetScript.Run(ctx, r.rdb, keys,
-		addressed.Command, Retention.Milliseconds(), dryRun).Result()
+		addressed.Command, Retention.Milliseconds(), dryRun, addressed.Answer).Result()
 	if err != nil {
 		return AddressedOutcome{}, fmt.Errorf("records: reset %s: %w", addressed.Record, err)
 	}
@@ -306,8 +308,8 @@ func (r *Redis) Reset(ctx context.Context, addressed Addressed) (AddressedOutcom
 	if err != nil {
 		return AddressedOutcome{}, err
 	}
-	if len(reply) < 3 {
-		return AddressedOutcome{}, fmt.Errorf("records: reset answered %d values, not 3", len(reply))
+	if len(reply) < 4 {
+		return AddressedOutcome{}, fmt.Errorf("records: reset answered %d values, not 4", len(reply))
 	}
 	command, _ := reply[1].(string)
 	count, _ := reply[2].(string)
@@ -316,7 +318,12 @@ func (r *Redis) Reset(ctx context.Context, addressed Addressed) (AddressedOutcom
 	if err != nil {
 		return AddressedOutcome{}, fmt.Errorf("records: reset answered a count that is not a number: %q", count)
 	}
-	return AddressedOutcome{Replayed: verdict == "replayed", Command: command, Count: parsed}, nil
+	// A record written before this field existed replays without one, and the
+	// caller falls back to rebuilding the body.
+	answer, _ := reply[3].(string)
+	return AddressedOutcome{
+		Replayed: verdict == "replayed", Command: command, Count: parsed, Answer: []byte(answer),
+	}, nil
 }
 
 // Put stores a confirmation token under a TTL.
@@ -350,6 +357,9 @@ func recordOf(fields map[string]string) (Record, error) {
 		Command:  fields["command"],
 		Fencing:  fields["fencing"],
 		Terminal: fields["terminal"] == "1",
+	}
+	if raw := fields["answer"]; raw != "" {
+		record.Answer = []byte(raw)
 	}
 	if raw := fields["progress"]; raw != "" {
 		if err := json.Unmarshal([]byte(raw), &record.Progress); err != nil {
