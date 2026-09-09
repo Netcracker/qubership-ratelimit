@@ -263,6 +263,13 @@ func (a *API) handleReset(c *fiber.Ctx) error {
 	}
 
 	query := queryValues(c)
+	// The whitelist runs ahead of the replay: an unknown parameter is refused
+	// whether or not the key has been seen, so the promise it makes does not
+	// depend on which call of a retried pair arrives.
+	if apiErr := checkQueryNames(query, selectorParams("dryRun", "expectedRuleSetVersion")...); apiErr != nil {
+		return apiErr
+	}
+
 	subject := subjectOf(c)
 	name := recordKey(a.Namespace, snapshot.Domain, endpointCounters, subject.Name, idempotencyKey)
 

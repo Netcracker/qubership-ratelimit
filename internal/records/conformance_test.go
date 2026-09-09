@@ -313,6 +313,38 @@ func runConformance(t *testing.T, build factory) {
 		require.Len(t, found, 1)
 	})
 
+	// The answer is what a replay is built from: the API renders the body once
+	// and hands it here, so a retry gets the bytes the first call gave rather
+	// than a body rebuilt from a rule set that has moved on. It crosses the
+	// wire as a hash field in Redis and as a value in the memory store, and a
+	// renamed field on either side would break every replay while the cases
+	// above stayed green.
+	t.Run("the addressed reset carries its answer back to the replay", func(t *testing.T) {
+		commands, counters := build(t)
+		k := freshKeys(t)
+		live := spend(t, counters, counterKey(t))
+		answer := []byte(`{"domain":"gateway.public","ruleId":"orders/per-client"}`)
+
+		first, err := commands.Reset(t.Context(), records.Addressed{
+			Record: k.Record, Command: "command-a", Delete: []string{live}, Answer: answer,
+		})
+		require.NoError(t, err)
+		require.False(t, first.Replayed)
+
+		record, err := commands.Lookup(t.Context(), k)
+		require.NoError(t, err)
+		require.True(t, record.Found)
+		require.True(t, record.Terminal)
+		require.Equal(t, answer, record.Answer)
+
+		second, err := commands.Reset(t.Context(), records.Addressed{
+			Record: k.Record, Command: "command-a", Delete: []string{live}, Answer: answer,
+		})
+		require.NoError(t, err)
+		require.True(t, second.Replayed)
+		require.Equal(t, answer, second.Answer)
+	})
+
 	t.Run("the addressed reset reports the command a key is bound to", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)

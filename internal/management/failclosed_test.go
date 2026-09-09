@@ -183,6 +183,10 @@ func TestLimited_addressedResetSkipsACounterUnderItsLimit(t *testing.T) {
 	decode(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice&limited=true",
 		"key-1", operatorRoles()), http.StatusOK, &response)
 	require.Equal(t, 0, *response.ResetCount, "alice is not refusing, so nothing was reset")
+	// keys reports what the command addressed, one per window of the rule;
+	// narrowing it to the refusing subset would leave the body saying the
+	// command never looked at the counter it skipped.
+	require.Len(t, response.Keys, 1, "keys is the computed list, not the subset limited kept")
 
 	remaining, found := h.remaining(t, "alice")
 	require.True(t, found)

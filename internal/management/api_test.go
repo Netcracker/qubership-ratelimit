@@ -415,6 +415,23 @@ func TestReset_refusesAMisspelledSafetyParameter(t *testing.T) {
 	require.Equal(t, int64(2), remaining)
 }
 
+// The whitelist is checked ahead of the replay, so a retry carrying an unknown
+// parameter is refused exactly as the first call would have been. Answering it
+// from the record instead would make the same query legal or illegal depending
+// on whether the key had been seen.
+func TestReset_refusesAMisspelledSafetyParameterOnARetryToo(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+
+	const selector = "ruleId=orders/per-client&axis.client=alice"
+	var first ResetResponse
+	decode(t, h.reset(t, selector, "key-1", operatorRoles()), http.StatusOK, &first)
+
+	body := requireError(t, h.reset(t, selector+"&dryrun=true", "key-1", operatorRoles()),
+		http.StatusBadRequest, CodeInvalidRequest)
+	require.Equal(t, []string{"dryrun"}, body.Meta.Fields)
+}
+
 func TestQueryNames_areWhitelistedOnEveryReadEndpoint(t *testing.T) {
 	h := newTestAPI(t)
 

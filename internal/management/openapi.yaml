@@ -2220,7 +2220,6 @@ components:
       type: object
       required:
       - id
-      - policy
       - block
       - rule
       - mode
@@ -2383,7 +2382,6 @@ components:
       required:
       - key
       - ruleId
-      - policy
       - block
       - rule
       - algorithm

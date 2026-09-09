@@ -571,6 +571,47 @@ func TestHeaders_capacityExceededOutranksALongerWait(t *testing.T) {
 	}
 }
 
+// Two windows the cost can never fit carry no retry hint to rank by, so the
+// order falls to the bucket key. Declaration order would pick the other one,
+// which is the point: the headers of a repeated refusal have to name the same
+// window every time, whatever order the rules happen to be written in.
+func TestHeaders_twoCapacityExceededWindowsTieBreakByKey(t *testing.T) {
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "b",
+		Rules: []model.Rule{
+			// First in the snapshot, and the larger key.
+			{Name: "zzz", Rates: []model.Rate{{Requests: 3, Period: time.Minute, Burst: 3}}},
+			{Name: "aaa", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Burst: 2}}},
+		},
+	}}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	e := engine.New(snap, memory.New())
+
+	for attempt := range 3 {
+		decision, err := e.Decide(t.Context(), engine.Request{Path: "/any", Method: "GET", Cost: 5})
+		if err != nil {
+			t.Fatalf("decide: %v", err)
+		}
+		if !decision.CostExceedsCapacity {
+			t.Fatal("a cost of 5 fits neither window, and the decision has to say so")
+		}
+		if decision.Headers == nil {
+			t.Fatal("a refusal carries headers")
+		}
+		if decision.Headers.Limit != 2 {
+			t.Errorf("attempt %d: headers name the window with limit %d, want the smaller key (2)",
+				attempt, decision.Headers.Limit)
+		}
+		if decision.Headers.RetryAfter >= 0 {
+			t.Errorf("attempt %d: RetryAfter = %v, want no hint for a request no waiting cures",
+				attempt, decision.Headers.RetryAfter)
+		}
+	}
+}
+
 // Blocks reports what the target phase hit, in snapshot order, which is what
 // the management API lists a path's rules from.
 func TestCandidates_blocksReportsTheTargetedOnesInOrder(t *testing.T) {

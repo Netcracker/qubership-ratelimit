@@ -237,12 +237,16 @@ func (a *API) runReset(
 	// The body is rendered before the store call, so the record carries the
 	// answer this command gave rather than one rebuilt later from a snapshot
 	// that has moved on. Count is the one field the store fills in.
+	//
+	// Keys is the computed list, never the subset `limited` narrowed it to: the
+	// field reports the keys the command addressed, one per window of the rule,
+	// and the count is where "what was actually reset" lives.
 	answer := ResetResponse{
 		Domain:         snapshot.Domain,
 		RuleID:         command.Selector.RuleIDs[0],
 		RuleSetVersion: version,
 		Axes:           command.AxesByName,
-		Keys:           drop,
+		Keys:           computed,
 		DryRun:         command.DryRun,
 	}
 

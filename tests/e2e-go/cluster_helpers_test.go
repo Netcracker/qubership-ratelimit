@@ -151,6 +151,30 @@ func gatewayGet(gateway, path string, headers map[string]string) int {
 	return gatewayBurst(gateway, path, 1, headers)[0]
 }
 
+// gatewayGetBody sends one request through a gateway and returns the body
+// with the status code; 0 stands for a transport error, as gatewayGet does.
+// The bursts above discard bodies, which is all a rate-limit code needs; an
+// API answer has to be read.
+func gatewayGetBody(gateway, path string, headers map[string]string) (string, int) {
+	pod, port := gatewayEndpoint(gateway)
+	addr, stop := forwardToPod(pod, port)
+	defer stop()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+path, nil)
+	Expect(err).NotTo(HaveOccurred())
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return err.Error(), 0
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	Expect(err).NotTo(HaveOccurred())
+	return string(body), resp.StatusCode
+}
+
 // gatewayBurst mirrors curl_gw_burst: one port-forward, sequential requests,
 // one status code each.
 func gatewayBurst(gateway, path string, count int, headers map[string]string) []int {

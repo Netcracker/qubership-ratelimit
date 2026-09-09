@@ -336,6 +336,8 @@ func (h *testAPI) send(t *testing.T, request *http.Request) *testResponse {
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 
+	validateAgainstSpec(t, request, response.StatusCode, response.Header, body)
+
 	return &testResponse{Code: response.StatusCode, Body: bytes.NewBuffer(body), header: response.Header}
 }
 
