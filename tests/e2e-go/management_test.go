@@ -32,11 +32,10 @@ import (
 // change.
 var _ = Describe("the management port through the private gateway", Ordered, Label("management"), func() {
 	const (
-		domain    = "gateway.management"
-		probePath = "/e2e-management"
-		route     = "e2e-management"
-		outsider  = "e2e-management-outsider"
-		basePath  = "/ratelimit/v1"
+		domain   = "gateway.management"
+		route    = "e2e-management"
+		outsider = "e2e-management-outsider"
+		basePath = "/ratelimit/v1"
 	)
 	var (
 		applied bool
@@ -49,7 +48,6 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			Skip("the release runs without management.enabled; the chart renders no management port")
 		}
 
-		waitGatewayServes("private-gateway", probePath)
 		Expect(apply(newPolicy(domain, totalLimits(10, 60)))).To(Succeed())
 		applied = true
 
@@ -59,10 +57,13 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		// through the gateway's identity, not a port-forward.
 		Expect(apply(managementRoute(route, basePath, port))).To(Succeed())
 
-		// A route takes a moment to reach the gateway, and an unauthenticated
-		// probe cannot tell "not routed yet" from "routed": both answer 404
-		// through the gateway. The warm-up therefore carries the token and
-		// waits for the answer the first spec reads.
+		// The single gate, on the path the specs actually use. There is no
+		// waitGatewayServes warm-up first, because this suite routes no probe
+		// to the echo backend: the mesh fallback answers an unrouted path with
+		// a 503 forever, so a warm-up on a path outside the echo route never
+		// reaches a terminal code. Waiting for the real 200 covers both a cold
+		// gateway and a route that has not reached it yet, and it carries the
+		// token because the unauthenticated answer is a 401 either way.
 		Eventually(func() int {
 			_, code := gatewayGetBody("private-gateway", basePath+"/domains",
 				map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")})
