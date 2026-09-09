@@ -26,8 +26,6 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/xrequestid"
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/ctxmanager"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
-	discoveryv1 "k8s.io/api/discovery/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -35,7 +33,6 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -338,6 +335,7 @@ func newManager(
 			ExtraHandlers: map[string]http.Handler{store.AppliedPath: applied},
 		},
 		HealthProbeBindAddress: options.probeAddr,
+		Client:                 controller.ClientOptions(),
 		// Always on. Only status writes are leader-gated - the rate limit
 		// endpoint and its store run on every replica - and a status writer
 		// that is not elected is two replicas writing conditions over each
@@ -345,40 +343,12 @@ func newManager(
 		LeaderElection:                      true,
 		LeaderElectionID:                    "ratelimit.netcracker.com",
 		LeaderElectionResourceLockInterface: lock,
-		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				// Unstructured, so that the objects reaching the compiler carry
-				// every field they were stored with. A typed informer decodes
-				// leniently and drops what this build's schema does not define,
-				// which would enforce a newer object as the subset of itself
-				// this build happens to understand. Registering the typed kind
-				// as well would put a second informer and a second copy of
-				// every object behind the same watch.
-				policyInformerObject(): {
-					Namespaces: map[string]cache.Config{namespace: {}},
-				},
-				// The leader reads the ready endpoints of its own Service to
-				// learn which replicas enforce which generation. Only the
-				// controller needs them, and only in its own namespace.
-				&discoveryv1.EndpointSlice{}: {
-					Namespaces: map[string]cache.Config{namespace: {}},
-				},
-			},
-			ReaderFailOnMissingInformer: true,
-		},
+		Cache:                               controller.CacheOptions(namespace),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create manager: %w", err)
 	}
 	return mgr, nil
-}
-
-// policyInformerObject names the kind the policy informer caches, in the
-// unstructured form the compiler reads it in.
-func policyInformerObject() client.Object {
-	object := &unstructured.Unstructured{}
-	object.SetGroupVersionKind(ratelimitv1alpha1.GroupVersion.WithKind("RateLimitPolicy"))
-	return object
 }
 
 // leaderIdentity is the name this replica signs the lease with: the pod's own

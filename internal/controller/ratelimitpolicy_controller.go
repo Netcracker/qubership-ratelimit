@@ -13,7 +13,6 @@ import (
 
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -84,8 +83,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// Read unstructured and decode here, for the reason policy.Load gives: a
 	// typed read drops what this build does not know, and the status this
 	// reconciler writes is where that has to be reported.
-	stored := &unstructured.Unstructured{}
-	stored.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicy"))
+	stored := policy.Object()
 	if err := r.Get(ctx, req.NamespacedName, stored); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -193,10 +191,8 @@ func (r *RateLimitPolicyReconciler) observe(
 func (r *RateLimitPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Watched unstructured, so that this kind has one informer and it is the
 	// one whose objects keep every field they were stored with.
-	watched := &unstructured.Unstructured{}
-	watched.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicy"))
 	return ctrl.NewControllerManagedBy(mgr).
-		For(watched).
+		For(policy.Object()).
 		Watches(&discoveryv1.EndpointSlice{},
 			handler.EnqueueRequestsFromMapFunc(r.policiesBehind)).
 		Named("ratelimitpolicy").
@@ -214,8 +210,11 @@ func (r *RateLimitPolicyReconciler) policiesBehind(
 		return nil
 	}
 
-	var list v1alpha1.RateLimitPolicyList
-	if err := r.List(ctx, &list, client.InNamespace(object.GetNamespace())); err != nil {
+	// Unstructured, like every other read of this kind: it is the only informer
+	// there is, and a typed list would ask the cache for one it does not have.
+	// Nothing here reads the spec - the names are what become requests.
+	list := policy.ObjectList()
+	if err := r.List(ctx, list, client.InNamespace(object.GetNamespace())); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to list the policies of a changed EndpointSlice",
 			"service", r.Service)
 		return nil

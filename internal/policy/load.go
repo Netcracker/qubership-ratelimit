@@ -12,6 +12,25 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
+// Object and ObjectList name the kind in the form every reader of it uses.
+//
+// There is one such form on purpose. The informer this process runs is the
+// unstructured one, and a caller that asks the cache for the typed kind does
+// not get an error: a read fails, and GetInformer quietly starts a second
+// informer with a second cached copy of every policy. Both are far from where
+// the mistake reads, so the shape lives here rather than at each call site.
+func Object() *unstructured.Unstructured {
+	object := &unstructured.Unstructured{}
+	object.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicy"))
+	return object
+}
+
+func ObjectList() *unstructured.UnstructuredList {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicyList"))
+	return list
+}
+
 // Load reads every policy the reader can see.
 //
 // Both the updater and the reconciler compile from this same input, which is what
@@ -25,9 +44,8 @@ import (
 // understand, which is neither what the author wrote nor a refusal they can
 // see. See Decode.
 func Load(ctx context.Context, reader client.Reader, namespace string) (Input, error) {
-	var list unstructured.UnstructuredList
-	list.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicyList"))
-	if err := reader.List(ctx, &list); err != nil {
+	list := ObjectList()
+	if err := reader.List(ctx, list); err != nil {
 		return Input{}, fmt.Errorf("list RateLimitPolicy: %w", err)
 	}
 
