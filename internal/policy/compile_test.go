@@ -428,6 +428,35 @@ func TestCompile_anUnknownFieldWithNoLastGoodEnforcesNothing(t *testing.T) {
 	assert.Empty(t, result.Snapshots[testDomain].Blocks)
 }
 
+// TestCompile_anUnknownFieldDoesNotFallBackToItsOwnGeneration covers the window
+// of a CRD change. A replica whose watch still served the previous schema read
+// this generation with the new field pruned, compiled the remainder, and
+// persisted it as last-good; the re-list then brought the field and the skew.
+// That bundle is the partial enforcement the refusal exists to prevent, so the
+// domain enforces nothing rather than falling back to it.
+func TestCompile_anUnknownFieldDoesNotFallBackToItsOwnGeneration(t *testing.T) {
+	object := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
+	object.Generation = 2
+
+	result := Compile(Input{
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{object},
+		Skew: map[client.ObjectKey][]v1alpha1.RuleProblem{
+			key(): {{Reason: v1alpha1.ProblemInvalidSpec, Message: `unknown field "spec.burstProfile"`}},
+		},
+		State: map[string]Bundle{testDomain: {
+			UID: "uid-1", GoodGeneration: 2, GoodSpec: object.Spec,
+		}},
+	})
+
+	outcome := result.Policies[key()]
+	assert.False(t, outcome.Compiled())
+	assert.Zero(t, outcome.ActiveGeneration, "a bundle of the skewed generation itself came from a pruned read")
+	assert.Zero(t, outcome.Rules)
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
+	assert.Empty(t, result.State[testDomain].UID, "the pruned bundle is not carried forward")
+}
+
 // TestCompile_anUnknownEnumValueIsRefusedByTheCompiler is the skew a strict
 // decode cannot catch: the field is one this schema defines, and only its
 // value is from a newer vocabulary. The compiler is what refuses it, and the

@@ -179,6 +179,16 @@ func compileDomain(
 	if good == nil {
 		return outcome, snapshot, Bundle{}
 	}
+	if len(skew) > 0 && good.GoodGeneration == object.Generation {
+		// A bundle persisted for the generation that now reads as skewed was
+		// compiled from a pruned view of it. The API server serves an object
+		// under the schema its handler holds, so an informer whose watch
+		// predates a CRD change reads a new field pruned, compiles the
+		// remainder, and persists it as the last-good of this generation; the
+		// re-list then brings the field and the skew. That bundle is the guess
+		// this refusal exists to prevent, so it does not serve either.
+		return outcome, snapshot, Bundle{}
+	}
 
 	fallback, fallbackProblems := enginecompile.Compile(namespace, domain, modelPolicy(&good.GoodSpec))
 	if blockingError(fallbackProblems) != nil {
