@@ -156,10 +156,14 @@ type RuleOutcome struct {
 	// refusal reasons a caller has to tell apart, and no retry hint applies.
 	CostExceedsCapacity bool
 
-	// Limit, Remaining, and RetryAfter come from the rule's own strictest
-	// bucket, chosen by the same tie-break the response headers use — the
-	// numbers behind near-limit metrics and per-rule audit records.
+	// Limit, Capacity, Remaining, and RetryAfter come from the rule's own
+	// strictest bucket, chosen by the same tie-break the response headers use
+	// — the numbers behind near-limit metrics and per-rule audit records.
+	// Limit is the window's requests, the number the headers carry; Capacity
+	// is what Remaining counts down from: the burst of a GCRA window, which
+	// defaults to its requests, and the requests of a fixed window.
 	Limit      int64
+	Capacity   int64
 	Remaining  int64
 	RetryAfter time.Duration
 
@@ -326,6 +330,7 @@ func ruleOutcomes(matched match.Result, buckets []store.Bucket, verdicts []store
 		}
 		if best := strictestIndex(buckets, verdicts, from, to, outcome.Allowed, false); best >= 0 {
 			outcome.Limit = buckets[best].Window.Requests
+			outcome.Capacity = bucketCapacity(buckets[best].Window)
 			outcome.Remaining = verdicts[best].Remaining
 			outcome.RetryAfter = verdicts[best].RetryAfter
 			outcome.Algorithm = algorithmName(buckets[best].Algorithm)
@@ -334,6 +339,16 @@ func ruleOutcomes(matched match.Result, buckets []store.Bucket, verdicts []store
 		out = append(out, outcome)
 	}
 	return out
+}
+
+// bucketCapacity is the number a window's remaining counts down from: the
+// burst of a GCRA window, resolved by the compiler to its requests when the
+// author set none, and the requests of a window whose algorithm has no burst.
+func bucketCapacity(w algo.Window) int64 {
+	if w.Burst > 0 {
+		return w.Burst
+	}
+	return w.Requests
 }
 
 // aggregate picks the strictest enforcing bucket for the response headers.
