@@ -322,6 +322,10 @@ func TestInvalidSpecFamily(t *testing.T) {
 		{"template with a double slash", func(p *model.Policy) {
 			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/a//b"}
 		}},
+		// The root alone is one empty segment; the root path is an Exact route.
+		{"template of the root alone", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/"}
+		}},
 		{"mapping over a built-in", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: model.KeyPath, Claim: "x"}}
 		}},
