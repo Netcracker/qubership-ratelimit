@@ -19,6 +19,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
 // The management port is reachable through the private gateway and nowhere
@@ -51,6 +53,12 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		Expect(apply(newPolicy(domain, totalLimits(10, 60)))).To(Succeed())
 		applied = true
 
+		// The listing reads the snapshot a replica swaps in once the generation
+		// compiles, and the gateway may reach any replica, so the policy has to
+		// be enforced everywhere before a listing can be expected to carry it.
+		Eventually(policyCondition(domain, v1alpha1.ConditionReady)).WithTimeout(2*time.Minute).
+			Should(Equal("True"), "the policy of this suite never became Ready")
+
 		// The chart ships no HTTPRoute: on the platform the route to an
 		// internal API is the deployer's, not this chart's. The suite makes
 		// its own so the request travels the path the policy is written for -
@@ -61,15 +69,22 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		// waitGatewayServes warm-up first, because this suite routes no probe
 		// to the echo backend: the mesh fallback answers an unrouted path with
 		// a 503 forever, so a warm-up on a path outside the echo route never
-		// reaches a terminal code. Waiting for the real 200 covers both a cold
-		// gateway and a route that has not reached it yet, and it carries the
-		// token because the unauthenticated answer is a 401 either way.
-		Eventually(func() int {
-			_, code := gatewayGetBody("private-gateway", basePath+"/domains",
+		// reaches a terminal code. Waiting for a listing that carries the
+		// domain covers a cold gateway, a route that has not reached it yet,
+		// and a replica that has not swapped the snapshot in, and it carries
+		// the token because the unauthenticated answer is a 401 either way. A
+		// bare 200 used to be the gate, and a listing without the domain
+		// passed it.
+		Eventually(func() []string {
+			body, code := gatewayGetBody("private-gateway", basePath+"/domains",
 				map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")})
-			return code
-		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Equal(http.StatusOK),
-			"the private gateway never routed %s to the management port", basePath)
+			if code != http.StatusOK {
+				return nil
+			}
+			domains, _ := listedDomains(body)
+			return domains
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(ContainElement(domain),
+			"the private gateway never served a listing with %s through %s", domain, basePath)
 	})
 	AfterAll(func() {
 		if applied {
@@ -86,17 +101,8 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		Expect(code).To(Equal(http.StatusOK),
 			"the gateway did not reach the management port; body: %s", body)
 
-		var listing struct {
-			Items []struct {
-				Domain string `json:"domain"`
-			} `json:"items"`
-		}
-		Expect(json.Unmarshal([]byte(body), &listing)).To(Succeed(), "body: %s", body)
-
-		domains := make([]string, 0, len(listing.Items))
-		for _, item := range listing.Items {
-			domains = append(domains, item.Domain)
-		}
+		domains, err := listedDomains(body)
+		Expect(err).NotTo(HaveOccurred(), "body: %s", body)
 		Expect(domains).To(ContainElement(domain),
 			"the listing does not carry the domain this suite applied")
 	})
@@ -134,6 +140,23 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 
 // managementPort reports the container port the release exposes for the
 // management API, 0 when the chart rendered without it.
+// listedDomains reads the domain names out of a listing body.
+func listedDomains(body string) ([]string, error) {
+	var listing struct {
+		Items []struct {
+			Domain string `json:"domain"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(body), &listing); err != nil {
+		return nil, err
+	}
+	domains := make([]string, 0, len(listing.Items))
+	for _, item := range listing.Items {
+		domains = append(domains, item.Domain)
+	}
+	return domains, nil
+}
+
 func managementPort() int32 {
 	pods := operatorPods()
 	Expect(pods).NotTo(BeEmpty(), "no running replica to read the ports of")
