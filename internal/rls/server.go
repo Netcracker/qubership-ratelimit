@@ -60,8 +60,8 @@ const (
 	valueTruncated       = "[truncated]"
 
 	// DefaultNearLimitRatio is the margin behind the near-limit series: an
-	// admission counts as near when the rule has consumed this share of its
-	// limit.
+	// admission counts as near when the rule has consumed this share of the
+	// capacity of its window.
 	DefaultNearLimitRatio = 0.9
 
 	// refusalLogPerSecond bounds the refusal log. Refusals arrive at traffic
@@ -311,15 +311,18 @@ func (s *Server) observeDecision(domain string, decision engine.Decision) {
 }
 
 // nearLimit reports whether an admission landed inside the margin: with a
-// ratio of 0.9, remaining at or under a tenth of the limit. The epsilon
-// absorbs the binary-fraction error of the ratio arithmetic — without it,
-// 100*(1-0.9) lands just under 10 and the exact-boundary request slips out
-// of the margin. It scales with the limit because the float grid does too:
-// an absolute epsilon drowns below the grid step once the limit is large,
-// while a relative one stays far under a single request for any real limit.
+// ratio of 0.9, remaining at or under a tenth of the capacity. The margin is
+// a share of the capacity because remaining counts down from it: for a
+// window of 1000 with a burst of 100, remaining never exceeds 100, and the
+// margin is 10. The epsilon absorbs the binary-fraction error of the ratio
+// arithmetic — without it, 100*(1-0.9) lands just under 10 and the
+// exact-boundary request slips out of the margin. It scales with the
+// capacity because the float grid does too: an absolute epsilon drowns below
+// the grid step once the capacity is large, while a relative one stays far
+// under a single request for any real capacity.
 func nearLimit(rule engine.RuleOutcome, ratio float64) bool {
-	limit := float64(rule.Limit)
-	return rule.Limit > 0 && float64(rule.Remaining) <= limit*(1-ratio)+limit*1e-12
+	capacity := float64(rule.Capacity)
+	return rule.Capacity > 0 && float64(rule.Remaining) <= capacity*(1-ratio)+capacity*1e-12
 }
 
 // logRefusal keeps a sampled trace of ordinary over-limit refusals — the

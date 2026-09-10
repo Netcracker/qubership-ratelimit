@@ -71,13 +71,14 @@ var (
 	}, []string{"domain", "rule", "outcome"})
 
 	// NearLimit counts admissions of enforcing rules that landed inside the
-	// configured margin of their limit — the precursor of over_limit. Shadow
-	// rules stay out: their readout is the shadow_over_limit outcome, and a
-	// dry run near an experimental limit is not a precursor of client-visible
-	// refusals.
+	// configured margin of their window's capacity — the precursor of
+	// over_limit. The capacity is the burst of a GCRA window or the requests
+	// of a fixed one. Shadow rules stay out: their readout is the
+	// shadow_over_limit outcome, and a dry run near an experimental limit is
+	// not a precursor of client-visible refusals.
 	NearLimit = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_near_limit_total",
-		Help: "Admissions of enforcing rules within the near-limit margin of the limit.",
+		Help: "Admissions of enforcing rules within the near-limit margin of the window's capacity.",
 	}, []string{"domain", "rule"})
 
 	// Refusals counts denials that are not a limit at work: the bucket-budget

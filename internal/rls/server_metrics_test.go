@@ -299,11 +299,57 @@ func histogramSamples(t *testing.T, vec *prometheus.HistogramVec, labels ...stri
 func TestNearLimit_theExactBoundaryCounts(t *testing.T) {
 	// 100*(1-0.9) computes to just under 10 in binary floating point; the
 	// epsilon keeps the canonical "90% consumed" request inside the margin.
-	rule := engine.RuleOutcome{Limit: 100, Remaining: 10}
+	rule := engine.RuleOutcome{Limit: 100, Capacity: 100, Remaining: 10}
 	assert.True(t, nearLimit(rule, 0.9), "remaining exactly at the margin is near")
 
 	rule.Remaining = 11
 	assert.False(t, nearLimit(rule, 0.9), "one request earlier is not")
+}
+
+// The margin is a share of the capacity remaining counts down from: for a
+// window of 1000 with a burst of 100, remaining never exceeds 100, and the
+// margin is 10 whatever the limit says.
+func TestNearLimit_theMarginIsAShareOfTheCapacity(t *testing.T) {
+	cases := map[string]struct {
+		rule engine.RuleOutcome
+		near bool
+	}{
+		"a full burst bucket of a wide window": {engine.RuleOutcome{Limit: 1000, Capacity: 100, Remaining: 99}, false},
+		"a tenth of the burst left":            {engine.RuleOutcome{Limit: 1000, Capacity: 100, Remaining: 10}, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.near, nearLimit(tc.rule, 0.9), "nearLimit(%+v, 0.9)", tc.rule)
+		})
+	}
+}
+
+// The first admission of a fresh bucket with a burst of 100 on 1000 requests
+// is not near the limit: 99 of a capacity of 100 are left. It used to count,
+// because the margin was a tenth of the requests, 100, which every admission
+// of such a window satisfies.
+func TestShouldRateLimit_aFullBurstBucketIsNotNearItsLimit(t *testing.T) {
+	const domain = "gateway.public"
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "b",
+		Rules: []model.Rule{{Name: "wide",
+			Rates: []model.Rate{{Requests: 1000, Period: time.Minute, Burst: 100}}}},
+	}}}
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, p))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	near := func() float64 {
+		return testutil.ToFloat64(metrics.NearLimit.WithLabelValues(domain, "b/wide"))
+	}
+	got := delta(near, func() {
+		resp, err := server.ShouldRateLimit(context.Background(),
+			request(domain, map[string]string{"path": "/api"}))
+		require.NoError(t, err)
+		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
+	})
+	assert.Equal(t, 0.0, got, "the first request of a fresh bucket with 99 of 100 left is not near the limit")
 }
 
 func TestShouldRateLimit_samplesTheStoreErrorLog(t *testing.T) {
@@ -330,7 +376,7 @@ func TestNearLimit_theBoundaryHoldsAtLargeLimits(t *testing.T) {
 	// At a billion the float grid step near the threshold is coarser than any
 	// absolute epsilon; the relative one keeps the canonical 90%-consumed
 	// request inside the margin at every scale.
-	rule := engine.RuleOutcome{Limit: 1_000_000_000, Remaining: 100_000_000}
+	rule := engine.RuleOutcome{Limit: 1_000_000_000, Capacity: 1_000_000_000, Remaining: 100_000_000}
 	assert.True(t, nearLimit(rule, 0.9))
 
 	rule.Remaining++

@@ -650,3 +650,39 @@ func TestCandidates_blocksReportsTheTargetedOnesInOrder(t *testing.T) {
 		t.Errorf("a path outside every target still meets the block without one, got %v", blocks)
 	}
 }
+
+// A rule outcome carries the capacity its remaining counts down from, next to
+// the limit the headers carry: the burst of a GCRA window, and the requests
+// of a fixed window, which has no burst. The near-limit margin is a share of
+// that capacity.
+func TestRuleOutcomeCarriesTheCapacityOfItsWindow(t *testing.T) {
+	p := model.Policy{
+		Domain: domain,
+		Blocks: []model.Block{{
+			Name: "api",
+			Target: model.Target{Routes: []model.Route{
+				{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/"}}}},
+			Rules: []model.Rule{
+				{Name: "burst", Rates: []model.Rate{{Requests: 1000, Period: time.Minute, Burst: 100}}},
+				{Name: "fixed", Rates: []model.Rate{{Requests: 100, Period: time.Minute, Algorithm: "FixedWindow"}}},
+			},
+		}},
+	}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	e := engine.New(snap, memory.New())
+
+	d := decide(t, e, engine.Request{Path: "/api/orders", Method: "GET"})
+	if len(d.Rules) != 2 {
+		t.Fatalf("rules = %+v, want the two rules of the block", d.Rules)
+	}
+	want := map[string][2]int64{"burst": {1000, 100}, "fixed": {100, 100}}
+	for _, r := range d.Rules {
+		limit, capacity := want[r.Rule][0], want[r.Rule][1]
+		if r.Limit != limit || r.Capacity != capacity {
+			t.Errorf("rule %s: limit = %d, capacity = %d, want %d and %d", r.Rule, r.Limit, r.Capacity, limit, capacity)
+		}
+	}
+}
