@@ -120,10 +120,14 @@ paths:
         With `path` (and optionally `method`) the view is filtered to the
         blocks whose targets match that request - the engine's own route
         matcher, not a naive prefix compare, so segment-based Prefix and
-        Template captures behave exactly as they do on traffic. This is the
-        static answer to "which rules guard this API"; feed the resulting
-        rule ids into the counters listing with `limited=true` to see which
-        of them hold refusals right now.
+        Template captures behave exactly as they do on traffic. In a scoped
+        listing the matched route also decides each block's captures: a
+        capture it produces is known with its value, a capture no admitting
+        route produces is known-absent, and without `method` a capture the
+        admitting routes disagree on stays undecided. This is the static
+        answer to "which rules guard this API"; feed the resulting rule ids
+        into the counters listing with `limited=true` to see which of them
+        hold refusals right now.
 
         The response names the ruleSetVersion of the snapshot it renders; the addressed DELETE accepts it as expectedRuleSetVersion to refuse acting on a set the operator has not seen.
 
@@ -134,6 +138,8 @@ paths:
         in: query
         required: false
         description: Filter to blocks whose targets match this request path.
+          In a scoped listing the matched route also decides each block's
+          captures (see axis.<name>).
         schema:
           type: string
         example: /api/orders
@@ -157,8 +163,14 @@ paths:
           e.g. ?axis.client=alice&axis.roles=support&axis.roles=operator. Unnamed
           keys stay unknown. Every rule then carries applicability and, when conditional,
           conditionalOn. Valid names are the domain''s effectiveKeys and the blocks''
-          captures; an unknown name is refused (RLS-0400), never ignored. Orthogonal
-          to path/method, which filter blocks rather than annotate rules.'
+          captures; an unknown name is refused (RLS-0400), never ignored. With
+          path, the matched route decides the blocks'' captures before the
+          annotation: a capture it produces is known with its value, one it does
+          not produce is known-absent, without method a capture the routes
+          disagree on stays undecided, and a capture declared here against what
+          the route decides is a contradiction (RLS-0400). A capture that shadows
+          a mapped key is the exception: the route''s value wins where the route
+          produces one, and the identity''s value applies where it does not.'
         schema:
           type: string
         example: alice
@@ -174,8 +186,9 @@ paths:
           DoesNotExist (set empty). Repeatable. An absent key decides conditions -
           DoesNotExist satisfied, Exists failed - and voids rules that count by it:
           their axis can never take a value, so applicability is never. A key both
-          supplied via axis.<name> and declared absent is a contradiction (RLS-0400);
-          an unknown name is refused likewise. absent alone forms an identity scope:
+          supplied via axis.<name> and declared absent is a contradiction (RLS-0400),
+          and so is a capture declared absent that the route matched by path
+          produces; an unknown name is refused likewise. absent alone forms an identity scope:
           the applicability annotations appear even when no axis.<name> is supplied.'
         schema:
           type: array

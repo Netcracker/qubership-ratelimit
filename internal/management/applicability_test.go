@@ -124,8 +124,9 @@ func TestApplicability_anAbsentKeyVoidsTheRulesReadingIt(t *testing.T) {
 	require.Equal(t, ruleview.ApplicabilityAlways, rules["cascade/everyone"].Applicability)
 }
 
-// A block's captures are produced by any request that reaches its template
-// route, so an axis over one is available even though its value is unknown.
+// A capture every route of a block produces is carried by any request that
+// reaches the block, so an axis over one is available even though its value
+// is unknown; by-order has one template route and nothing else.
 func TestApplicability_captureAxesCountAsAvailable(t *testing.T) {
 	rules := annotationsFor(t, "axis.client=alice")
 	require.Equal(t, ruleview.ApplicabilityAlways, rules["by-order/each"].Applicability)

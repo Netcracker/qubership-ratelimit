@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 
@@ -98,6 +99,221 @@ func TestRules_annotatesAScopedListing(t *testing.T) {
 	}
 	require.Equal(t, ruleview.ApplicabilityAlways, byID["cascade/internal"].Applicability)
 	require.Equal(t, ruleview.ApplicabilityNever, byID["cascade/everyone"].Applicability)
+}
+
+// annotation is the part of a rule view the applicability tests compare.
+type annotation struct {
+	Applicability string
+	ConditionalOn []ruleview.ApplicabilityGate
+}
+
+func annotationsByID(view ruleview.RuleSetView) map[string]annotation {
+	out := map[string]annotation{}
+	for _, block := range view.Blocks {
+		for _, rule := range block.Rules {
+			out[rule.ID] = annotation{Applicability: rule.Applicability, ConditionalOn: rule.ConditionalOn}
+		}
+	}
+	return out
+}
+
+// The route the path matches decides a capture: through the prefix route no
+// order_id reaches the cascade, so items-per-order never applies and
+// orders-per-client always does; through the template route it is the
+// reverse. Without a path the capture is open, and absent=order_id decides it
+// the way the prefix route does; without a method it stays open where the
+// routes disagree. The listing used to report items-per-order as always for
+// every path, against what the simulation of the same request decided.
+func TestRules_judgesACaptureKeyedRuleTheWayADecisionWould(t *testing.T) {
+	h := newTestAPI(t, orderCascadeBlocks()...)
+	const items, perClient = "order-ops/items-per-order", "order-ops/orders-per-client"
+	always := annotation{Applicability: ruleview.ApplicabilityAlways}
+	never := annotation{Applicability: ruleview.ApplicabilityNever}
+
+	cases := map[string]struct {
+		query string
+		want  map[string]annotation
+	}{
+		"the prefix route carries no capture": {
+			query: "path=/api/orders&method=POST&axis.client=dave",
+			want:  map[string]annotation{items: never, perClient: always},
+		},
+		"the template route carries the capture": {
+			query: "path=/api/orders/42/items&method=GET&axis.client=dave",
+			want:  map[string]annotation{items: always, perClient: never},
+		},
+		"the caller repeats what the route decided": {
+			query: "path=/api/orders/42/items&method=GET&axis.client=dave&axis.order_id=42",
+			want:  map[string]annotation{items: always, perClient: never},
+		},
+		"no path leaves the capture open": {
+			query: "axis.client=dave",
+			want: map[string]annotation{
+				items: {
+					Applicability: ruleview.ApplicabilityConditional,
+					ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateUndecidedCondition, Key: "order_id"}},
+				},
+				perClient: {
+					Applicability: ruleview.ApplicabilityConditional,
+					ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateMayBePreempted, Rule: items}},
+				},
+			},
+		},
+		"known-absent decides it without a path": {
+			query: "axis.client=dave&absent=order_id",
+			want:  map[string]annotation{items: never, perClient: always},
+		},
+		"known-absent agreeing with the prefix route": {
+			query: "path=/api/orders&method=POST&axis.client=dave&absent=order_id",
+			want:  map[string]annotation{items: never, perClient: always},
+		},
+		"no method leaves a capture the routes disagree on open": {
+			query: "path=/api/orders/42/items&axis.client=dave",
+			want: map[string]annotation{
+				items: {
+					Applicability: ruleview.ApplicabilityConditional,
+					ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateUndecidedCondition, Key: "order_id"}},
+				},
+				perClient: {
+					Applicability: ruleview.ApplicabilityConditional,
+					ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateMayBePreempted, Rule: items}},
+				},
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var view ruleview.RuleSetView
+			decode(t, h.call(t, http.MethodGet,
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil), http.StatusOK, &view)
+			require.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
+		})
+	}
+}
+
+// A capture the caller declares has to agree with what the route decides; a
+// contradiction is refused with the parameter named, because one of the two
+// is a typo.
+func TestRules_refusesACaptureThatContradictsThePath(t *testing.T) {
+	h := newTestAPI(t, orderCascadeBlocks()...)
+
+	cases := map[string]struct{ query, field string }{
+		"a value on a route that produces none": {
+			query: "path=/api/orders&method=POST&axis.client=dave&axis.order_id=42", field: "axis.order_id",
+		},
+		"a value other than the one the route produced": {
+			query: "path=/api/orders/42/items&method=GET&axis.client=dave&axis.order_id=7", field: "axis.order_id",
+		},
+		"known-absent on a route that produces it": {
+			query: "path=/api/orders/42/items&method=GET&axis.client=dave&absent=order_id", field: "absent",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := requireError(t, h.call(t, http.MethodGet,
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil),
+				http.StatusBadRequest, CodeInvalidRequest)
+			require.Equal(t, []string{tc.field}, body.Meta.Fields, "GET /rules?%s", tc.query)
+		})
+	}
+}
+
+// A capture that shadows a mapped key is judged as in a decision: on the
+// prefix route the identity's plan applies and is not refused as a
+// contradiction, on the template route the route's plan replaces it, and
+// where the method picks the route the plan is open.
+func TestRules_judgesAShadowedKeyByTheRouteThatProducesIt(t *testing.T) {
+	h := newTestAPI(t, planCascadeBlocks()...)
+	const silverOnly, perClient = "plan-ops/silver-only", "plan-ops/per-client"
+	always := annotation{Applicability: ruleview.ApplicabilityAlways}
+	never := annotation{Applicability: ruleview.ApplicabilityNever}
+	open := map[string]annotation{
+		silverOnly: {
+			Applicability: ruleview.ApplicabilityConditional,
+			ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateUndecidedCondition, Key: "plan"}},
+		},
+		perClient: {
+			Applicability: ruleview.ApplicabilityConditional,
+			ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateMayBePreempted, Rule: silverOnly}},
+		},
+	}
+
+	cases := map[string]struct {
+		query string
+		want  map[string]annotation
+	}{
+		"the identity's plan applies on the prefix route": {
+			query: "path=/plans&method=POST&axis.client=dave&axis.plan=gold",
+			want:  map[string]annotation{silverOnly: never, perClient: always},
+		},
+		"no plan from either side leaves the rule open": {
+			query: "path=/plans&method=POST&axis.client=dave",
+			want:  open,
+		},
+		"the route's plan replaces the identity's on the template route": {
+			query: "path=/plans/silver/items&method=GET&axis.client=dave&axis.plan=gold",
+			want:  map[string]annotation{silverOnly: always, perClient: never},
+		},
+		"the method picks the route, so the plan is open": {
+			query: "path=/plans/silver/items&axis.client=dave&axis.plan=gold",
+			want:  open,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var view ruleview.RuleSetView
+			decode(t, h.call(t, http.MethodGet,
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil), http.StatusOK, &view)
+			require.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
+		})
+	}
+}
+
+// A listing scoped by a complete identity and a simulation of the same request
+// agree on which rules apply: the rules the listing marks always are the rules
+// the simulation applies, whichever route the request takes into the cascade.
+func TestRules_alwaysAgreesWithTheSimulation(t *testing.T) {
+	h := newTestAPI(t, orderCascadeBlocks()...)
+
+	cases := map[string]struct{ path, method string }{
+		"through the prefix route":   {path: "/api/orders", method: http.MethodPost},
+		"through the template route": {path: "/api/orders/42/items", method: http.MethodGet},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var view ruleview.RuleSetView
+			decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?path="+tc.path+
+				"&method="+tc.method+"&axis.client=dave", viewerRoles(), nil), http.StatusOK, &view)
+			var simulation SimulationResponse
+			decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+				Domain: testDomain, Path: tc.path, Method: tc.method,
+				Keys: map[string][]string{"client": {"dave"}},
+			}), http.StatusOK, &simulation)
+
+			require.Equal(t, appliedRuleIDs(simulation), alwaysRuleIDs(view), "%s %s", tc.method, tc.path)
+		})
+	}
+}
+
+func alwaysRuleIDs(view ruleview.RuleSetView) []string {
+	annotations := annotationsByID(view)
+	out := make([]string, 0, len(annotations))
+	for id, rule := range annotations {
+		if rule.Applicability == ruleview.ApplicabilityAlways {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func appliedRuleIDs(simulation SimulationResponse) []string {
+	out := make([]string, 0, len(simulation.Rules))
+	for _, rule := range simulation.Rules {
+		out = append(out, rule.ID)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestRules_reportsAnUnknownDomainAsNotFound(t *testing.T) {

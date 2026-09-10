@@ -121,6 +121,67 @@ func orderBlocks() []model.Block {
 	}
 }
 
+// orderCascadeBlocks is a FirstMatch cascade reached through a prefix route
+// that produces no capture and through a template route that produces one,
+// with the capture-keyed rule ahead of the per-client one: the two routes of
+// the example policy's orders block, the prefix route first so that under any
+// method the route depends on the method.
+func orderCascadeBlocks() []model.Block {
+	return []model.Block{{
+		Name: "order-ops",
+		Mode: model.ModeFirstMatch,
+		Target: model.Target{Routes: []model.Route{
+			{
+				Path:    model.PathMatch{Type: model.PathPrefix, Value: "/api/orders"},
+				Methods: []string{http.MethodPost, http.MethodPut},
+			},
+			{Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/orders/{order_id}/items"}},
+		}},
+		Rules: []model.Rule{
+			{
+				Name:     "items-per-order",
+				Matches:  []model.Predicate{{Key: "order_id", Operator: model.OperatorExists}},
+				Counters: []string{"order_id"},
+				Rates:    []model.Rate{{Requests: 10, Period: time.Minute}},
+			},
+			{
+				Name:     "orders-per-client",
+				Counters: []string{model.KeyClient},
+				Rates:    []model.Rate{{Requests: 50, Period: time.Minute}},
+			},
+		},
+	}}
+}
+
+// planCascadeBlocks is a FirstMatch cascade whose template capture shadows the
+// mapped key plan: through the template route the capture is the plan of the
+// request, through the prefix route, first so that the method picks the route,
+// the identity's plan applies. The first rule tests the value, so which plan
+// the block sees decides it.
+func planCascadeBlocks() []model.Block {
+	return []model.Block{{
+		Name: "plan-ops",
+		Mode: model.ModeFirstMatch,
+		Target: model.Target{Routes: []model.Route{
+			{Path: model.PathMatch{Type: model.PathPrefix, Value: "/plans"}, Methods: []string{http.MethodPost}},
+			{Path: model.PathMatch{Type: model.PathTemplate, Value: "/plans/{plan}/items"}},
+		}},
+		Rules: []model.Rule{
+			{
+				Name:     "silver-only",
+				Matches:  []model.Predicate{{Key: "plan", Operator: model.OperatorEquals, Value: "silver"}},
+				Counters: []string{model.KeyClient},
+				Rates:    []model.Rate{{Requests: 10, Period: time.Minute}},
+			},
+			{
+				Name:     "per-client",
+				Counters: []string{model.KeyClient},
+				Rates:    []model.Rate{{Requests: 50, Period: time.Minute}},
+			},
+		},
+	}}
+}
+
 // widerOrders is orderBlocks with a second window on per-client: the rollout
 // that changes both the rule set version and the keys the rule addresses, which
 // is what a replay must not pick up.
