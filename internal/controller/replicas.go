@@ -26,8 +26,10 @@ import (
 // The denominator is the ready endpoints of the Service, not the Deployment's
 // replica count: a pod that is not ready receives no traffic, so it neither
 // enforces anything nor belongs in the fraction. That is also what keeps Ready
-// from flickering during a rollout — a new pod joins only once ready, and it
-// becomes ready after its first compilation, already on the current generation.
+// from flickering during a rollout: a pod enters the fraction only once ready,
+// which is after its first compilation and so already on the current
+// generation, and leaves it once it is terminating or no longer ready,
+// whichever the Service reports first.
 
 // probeTimeout bounds one replica's answer. It is short because the endpoint
 // serves a value read from memory: a replica that needs longer than this is not
@@ -134,6 +136,17 @@ func (p *ReplicaProbe) endpoints(ctx context.Context) ([]endpoint, error) {
 	for i := range slices.Items {
 		for _, e := range slices.Items[i].Endpoints {
 			if e.Conditions.Ready != nil && !*e.Conditions.Ready {
+				continue
+			}
+			// A terminating pod is out of the fraction even if it is still
+			// Ready. The check above covers it on a default Service, where
+			// the endpoint controller drops ready and keeps serving true; it
+			// does not on a Service with publishNotReadyAddresses, which
+			// reports every address ready and would leave a draining pod in
+			// the denominator until it died. The two conditions mean
+			// different things and only this one answers "is this pod on its
+			// way out".
+			if e.Conditions.Terminating != nil && *e.Conditions.Terminating {
 				continue
 			}
 			if len(e.Addresses) == 0 {

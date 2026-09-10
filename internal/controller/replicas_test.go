@@ -70,6 +70,16 @@ func ready(pod string) discoveryv1.Endpoint {
 	}
 }
 
+// draining is an endpoint of a pod that is shutting down and is still reported
+// ready. A default Service does not produce this - it drops ready and keeps
+// serving - but one with publishNotReadyAddresses does, and that is the shape
+// the terminating check exists for.
+func draining(pod string) discoveryv1.Endpoint {
+	e := ready(pod)
+	e.Conditions.Terminating = new(true)
+	return e
+}
+
 // answers replies with one generation for every caller.
 func answers(t *testing.T, applied map[string]store.Applied) http.HandlerFunc {
 	t.Helper()
@@ -264,4 +274,32 @@ type failingReader struct{ client.Reader }
 
 func (failingReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
 	return assert.AnError
+}
+
+// TestObserve_aTerminatingReplicaLeavesTheFraction pins the guard. A draining
+// pod that is still reported ready answers the probe with whatever it
+// enforces, so counting it would drag applied below total for the length of a
+// rollout and flicker Ready on a change nobody made to the rules.
+func TestObserve_aTerminatingReplicaLeavesTheFraction(t *testing.T) {
+	probe := fleet(t, answers(t, appliedBy(7)),
+		ready("ratelimit-new"), draining("ratelimit-old"))
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7))
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), view.Total, "a terminating pod is not part of the fleet")
+	assert.Equal(t, int32(1), view.Applied)
+	assert.Empty(t, view.Behind)
+}
+
+// The same pod on an older generation: without the terminating check this is
+// the flicker, because it reports a generation that will never advance.
+func TestObserve_aTerminatingReplicaOnAnOldGenerationIsNotBehind(t *testing.T) {
+	probe := fleet(t, answers(t, appliedBy(6)), draining("ratelimit-old"))
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7))
+
+	require.NoError(t, err)
+	assert.Zero(t, view.Total)
+	assert.Empty(t, view.Behind, "a pod on its way out is not a propagation problem")
 }

@@ -295,6 +295,14 @@ func run(options runOptions) error {
 		return err
 	}
 
+	// ratelimit_leader marks the scrape that carries the status series. It is
+	// set once and never cleared: controller-runtime ends the process when a
+	// held lease is lost, so a replica that stops leading stops scraping.
+	go func() {
+		<-mgr.Elected()
+		metrics.SetLeader(true)
+	}()
+
 	setupLog.Infof("starting service namespace=%v leaderIdentity=%v", namespace, leaderIdentity())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		return fmt.Errorf("run manager: %w", err)

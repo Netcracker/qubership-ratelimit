@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
@@ -332,6 +333,11 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(reconciled.Status.Replicas.Applied).To(Equal(int32(3)))
 			Expect(reconciled.Status.Replicas.LastCheckTime).NotTo(BeNil())
 
+			// The REPLICAS column reads this one field, because a printer
+			// column is a JSONPath expression and JSONPath cannot join two
+			// numbers into a fraction.
+			Expect(reconciled.Status.Replicas.Summary).To(Equal("3/3"))
+
 			By("keeping the spec out of the status subresource")
 			Expect(reconciled.Spec.Domain).To(Equal("gateway.public"))
 		})
@@ -383,6 +389,22 @@ var _ = Describe("RateLimitPolicy", func() {
 			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 			Consistently(recorder.Events).ShouldNot(Receive())
+		})
+
+		It("forgets the series of a deleted policy", func() {
+			// The reconcile of a policy that is gone is the only place the
+			// leader learns to stop reporting it. Without this an alert on a
+			// stalled domain fires forever on an object nobody can fix.
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.retired"}
+			Expect(create(policyWith(name.Name, blockWith("api", ruleWith("total"))))).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(scrapedDomains()).To(ContainElement(name.Name))
+
+			Expect(k8sClient.Delete(ctx, policyWith(name.Name))).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(scrapedDomains()).NotTo(ContainElement(name.Name))
 		})
 
 		It("writes the rule problems the API server accepts", func() {
@@ -548,6 +570,26 @@ var _ = Describe("the manager's cache", Ordered, func() {
 		Expect(informers).NotTo(BeNil())
 	})
 })
+
+// scrapedDomains names the domains the leader's own series currently carry.
+func scrapedDomains() []string {
+	families, err := ctrlmetrics.Registry.Gather()
+	Expect(err).NotTo(HaveOccurred())
+	var domains []string
+	for _, family := range families {
+		if family.GetName() != "ratelimit_policy_replicas" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			for _, label := range m.GetLabel() {
+				if label.GetName() == "domain" {
+					domains = append(domains, label.GetValue())
+				}
+			}
+		}
+	}
+	return domains
+}
 
 // drain empties the recorder so a spec only sees the events it caused.
 func drain(recorder *events.FakeRecorder) {
