@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"time"
@@ -168,8 +169,15 @@ func (p *ReplicaProbe) ask(ctx context.Context, address string) (map[string]stor
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
-	url := "http://" + net.JoinHostPort(address, strconv.Itoa(p.Port)) + store.AppliedPath
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// The metrics port speaks plain HTTP by the chart's contract, the way
+	// Prometheus scrapes it; whether the hop between two pods is encrypted is
+	// the mesh's decision, not this client's.
+	target := url.URL{
+		Scheme: "http",
+		Host:   net.JoinHostPort(address, strconv.Itoa(p.Port)),
+		Path:   store.AppliedPath,
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, err
 	}

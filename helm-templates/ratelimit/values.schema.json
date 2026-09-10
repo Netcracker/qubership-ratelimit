@@ -207,7 +207,7 @@
         },
         "nearLimitRatio": {
           "$ref": "#/definitions/numberOrString",
-          "description": "Share of a rule's limit consumed before an admission counts as near-limit; a ratio in (0, 1).",
+          "description": "Share of the capacity of a rule's window consumed before an admission counts as near-limit, the burst of a GCRA window or the requests of a fixed one; a ratio in (0, 1).",
           "default": "0.9"
         }
       }

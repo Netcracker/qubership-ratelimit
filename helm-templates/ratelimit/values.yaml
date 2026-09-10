@@ -90,7 +90,8 @@ healthProbe:
 metrics:
   port: 8080
   # An admission counts as near-limit once the rule has consumed this share of
-  # its limit. Quoted so YAML cannot reshape the number before the service
+  # the capacity of its window: the burst of a GCRA window, the requests of a
+  # fixed one. Quoted so YAML cannot reshape the number before the service
   # parses it.
   nearLimitRatio: "0.9"
 
