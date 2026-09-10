@@ -70,6 +70,22 @@ func setAccepted(object *v1alpha1.RateLimitPolicy, outcome policy.Outcome) {
 		object.Generation)
 }
 
+// turnedNotCompiled reports whether this reconcile is the one that found a new
+// generation failing to compile.
+//
+// It is what keeps the event to one per generation. A reconcile runs on its
+// interval whether or not anything moved, so emitting on "Accepted is false"
+// would put a Warning on the object every ten seconds for as long as the
+// author left it broken. The generation the previous condition was written
+// for is what distinguishes a new failure from the same one still standing.
+func turnedNotCompiled(before *v1alpha1.RateLimitPolicyStatus, generation int64) bool {
+	previous := meta.FindStatusCondition(before.Conditions, v1alpha1.ConditionAccepted)
+	if previous == nil {
+		return true
+	}
+	return previous.Status != metav1.ConditionFalse || previous.ObservedGeneration != generation
+}
+
 // fleetStatus is the pair of conditions that answer "are the rules I wrote the
 // rules being enforced, and if not, is that a rollout or a breakage".
 type fleetStatus struct {

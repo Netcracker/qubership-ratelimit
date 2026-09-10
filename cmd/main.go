@@ -401,6 +401,7 @@ func addControllers(
 		Namespace: namespace,
 		Service:   serviceName(options),
 		State:     lastGood,
+		Events:    mgr.GetEventRecorder("ratelimit"),
 	}
 	// A typed nil in an interface field is not nil, and the reconciler reads a
 	// missing probe as "the fleet cannot be observed".

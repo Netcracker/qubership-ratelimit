@@ -110,6 +110,23 @@ var _ = Describe("leader election", Ordered, Label("leader"), func() {
 			"no live replica acquired the lease")
 	})
 
+	// The identity on the lease is the pod name, not a hostname with a random
+	// suffix. Nothing else in the suite would notice the difference, because
+	// every other use of it splits on "_" and a name with no "_" survives that
+	// unchanged - so the helper would keep working while the property it
+	// depends on was gone.
+	It("signs the lease with the holder's pod name", func() {
+		holder := leaseHolderPod()
+		Expect(holder).NotTo(BeEmpty(), "no replica holds the lease")
+
+		var pod corev1.Pod
+		Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: holder}, &pod)).To(Succeed(),
+			"the lease identity %q is not the name of a pod", holder)
+		Expect(pod.Name).To(Equal(holder))
+		Expect(holder).NotTo(ContainSubstring("_"),
+			"the identity carries controller-runtime's random suffix, so POD_NAME is not reaching it")
+	})
+
 	It("answers checks on every replica, not just the leader", func() {
 		// Every pod serves the Service. A store filled only on the leader
 		// betrays itself in the follower's log: a replica with an empty store
@@ -196,7 +213,14 @@ var _ = Describe("leader election", Ordered, Label("leader"), func() {
 	})
 })
 
-// leaseHolderPod is the pod half of the lease holder, which is "<pod>_<uuid>".
+// leaseHolderPod is the identity on the lease, which is the holder's pod name
+// and nothing else.
+//
+// The service signs the lease with POD_NAME from the Downward API rather than
+// letting controller-runtime sign it with the hostname and a random suffix.
+// That is what makes this equal to a pod name a caller can Get, and what makes
+// the replicas the status names comparable with the replica holding the lease.
+// leaseHolderIsAPodName pins the equality.
 func leaseHolderPod() string {
 	var lease coordinationv1.Lease
 	if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "ratelimit.netcracker.com"},
@@ -206,7 +230,7 @@ func leaseHolderPod() string {
 	if lease.Spec.HolderIdentity == nil {
 		return ""
 	}
-	return strings.SplitN(*lease.Spec.HolderIdentity, "_", 2)[0]
+	return *lease.Spec.HolderIdentity
 }
 
 // burstClean sends four requests and reports whether the gateway admitted

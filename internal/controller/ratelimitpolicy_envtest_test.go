@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -67,16 +68,19 @@ func predicateRule(name string, predicates ...ratelimitv1alpha1.Predicate) ratel
 
 var _ = Describe("RateLimitPolicy", func() {
 	var reconciler *RateLimitPolicyReconciler
+	var recorder *events.FakeRecorder
 
 	BeforeEach(func() {
 		// A stub fleet, so the healthy path reaches Ready: True against a real
 		// API server. Without a probe every generation stops at ProbeFailed,
 		// and the condition this suite exists to check would never be asserted.
+		recorder = events.NewFakeRecorder(16)
 		reconciler = &RateLimitPolicyReconciler{
 			Client:    k8sClient,
 			Scheme:    k8sClient.Scheme(),
 			Namespace: envtestNamespace,
 			Probe:     unanimous(3),
+			Events:    recorder,
 		}
 
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: envtestNamespace}}
@@ -332,6 +336,55 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(reconciled.Spec.Domain).To(Equal("gateway.public"))
 		})
 
+		// The counterpart of the persist-error event in internal/state: a
+		// generation the author cannot see refused anywhere else. The condition
+		// says the same thing, but nobody watches conditions on an object they
+		// have already applied.
+		It("raises one Warning per generation that does not compile", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.events"}
+			broken := policyWith(name.Name, blockWith("api", predicateRule("per-plan",
+				ratelimitv1alpha1.Predicate{Key: "plan", Operator: ratelimitv1alpha1.OperatorExists})))
+			Expect(create(broken)).To(Succeed())
+
+			drain(recorder)
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var raised string
+			Eventually(recorder.Events).Should(Receive(&raised))
+			Expect(raised).To(ContainSubstring("Warning"))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ReasonNotCompiled))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ProblemUnresolvedKeyReference))
+
+			By("staying quiet while the same generation keeps failing")
+			// A reconcile runs on its interval whether or not anything moved, so
+			// without the generation guard this would put a Warning on the object
+			// every ten seconds for as long as the author left it broken.
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(recorder.Events).ShouldNot(Receive())
+
+			By("raising it again for the next generation")
+			Expect(k8sClient.Get(ctx, name, broken)).To(Succeed())
+			broken.Spec.Limits[0].Rules[0].Matches[0].Key = "tier"
+			Expect(k8sClient.Update(ctx, broken)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(recorder.Events).Should(Receive(&raised))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ReasonNotCompiled))
+		})
+
+		It("stays quiet on a generation that compiles", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.quiet"}
+			Expect(create(policyWith(name.Name, blockWith("api", ruleWith("total"))))).To(Succeed())
+
+			drain(recorder)
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(recorder.Events).ShouldNot(Receive())
+		})
+
 		It("writes the rule problems the API server accepts", func() {
 			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.private"}
 			Expect(create(policyWith(name.Name, blockWith("api", predicateRule("per-plan",
@@ -495,6 +548,17 @@ var _ = Describe("the manager's cache", Ordered, func() {
 		Expect(informers).NotTo(BeNil())
 	})
 })
+
+// drain empties the recorder so a spec only sees the events it caused.
+func drain(recorder *events.FakeRecorder) {
+	for {
+		select {
+		case <-recorder.Events:
+		default:
+			return
+		}
+	}
+}
 
 // managerUnderTest is the started manager of the cache specs above.
 var managerUnderTest ctrl.Manager

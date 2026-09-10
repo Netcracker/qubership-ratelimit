@@ -329,6 +329,43 @@ func TestDecode_namesTheFieldsThisSchemaDoesNotDefine(t *testing.T) {
 		"the part that decoded is still there, because the status is written on it")
 }
 
+// TestDecode_ignoresFieldsOutsideTheSpec pins where the strict pass stops. The
+// status belongs to this component and moves with every release: during a
+// rolling upgrade the new leader writes a field the old replicas have no
+// schema for, and treating that as skew would stop the whole fleet taking new
+// generations until the rollout ended. Metadata belongs to the API server and
+// grows on its own schedule.
+func TestDecode_ignoresFieldsOutsideTheSpec(t *testing.T) {
+	stored := unstructuredPolicy(t, policyObject(
+		v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}}), nil)
+
+	require.NoError(t, unstructured.SetNestedField(stored.Object,
+		"tomorrow", "status", "futureField"))
+	require.NoError(t, unstructured.SetNestedField(stored.Object,
+		"tomorrow", "metadata", "futureField"))
+
+	decoded, skew, err := Decode(stored)
+	require.NoError(t, err)
+	assert.Empty(t, skew, "only the spec is this build's to be strict about")
+	assert.Equal(t, testDomain, decoded.Spec.Domain)
+}
+
+// TestDecode_reportsTheSpecFieldWithItsPath keeps the message useful: the
+// author gets the path, not just the leaf.
+func TestDecode_reportsTheSpecFieldWithItsPath(t *testing.T) {
+	stored := unstructuredPolicy(t, policyObject(
+		v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}}),
+		map[string]any{"burstProfile": "steady"})
+	require.NoError(t, unstructured.SetNestedField(stored.Object,
+		"tomorrow", "status", "futureField"))
+
+	_, skew, err := Decode(stored)
+	require.NoError(t, err)
+
+	require.Len(t, skew, 1, "the status field must not be counted alongside the spec one")
+	assert.Contains(t, skew[0].Message, `spec.burstProfile`)
+}
+
 func TestDecode_isSilentOnAnObjectThisSchemaFullyDefines(t *testing.T) {
 	stored := unstructuredPolicy(t, policyObject(
 		v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}}), nil)

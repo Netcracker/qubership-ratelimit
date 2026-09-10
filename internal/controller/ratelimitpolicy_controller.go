@@ -11,9 +11,11 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -60,6 +62,10 @@ type RateLimitPolicyReconciler struct {
 	// Ready cannot be established and reports ProbeFailed, which is the honest
 	// answer for a leader that cannot see the fleet.
 	Probe FleetProbe
+
+	// Events records the Warning a generation that does not compile raises.
+	// It may be nil, which leaves the condition and the log as the only trace.
+	Events events.EventRecorder
 }
 
 // FleetProbe reports which replicas enforce which generation of a domain.
@@ -113,6 +119,8 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	object.Status.Rules = int32(outcome.Rules)
 
 	setAccepted(&object, outcome)
+	// Read against the status as it was, before the write below overwrites it.
+	newlyBroken := !outcome.Compiled() && turnedNotCompiled(before, object.Generation)
 
 	// The clock for "is this a rollout or a breakage" starts when this
 	// generation began spreading, so it is read before the condition is
@@ -139,6 +147,13 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	written, err := writeStatus(ctx, r.Client, &object, before, &object.Status)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if newlyBroken && r.Events != nil {
+		// After the write, not before: an event for a status that failed to
+		// land would report a refusal nobody can see on the object.
+		r.Events.Eventf(&object, nil, corev1.EventTypeWarning,
+			v1alpha1.ReasonNotCompiled, "Compile",
+			"generation %d does not compile: %s", object.Generation, outcome.Err)
 	}
 	if written {
 		log.Info("policy reconciled",

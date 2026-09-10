@@ -21,9 +21,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
@@ -122,9 +124,10 @@ func (s *Store) Save(ctx context.Context, domain string, bundle policy.Bundle) e
 
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: s.namespace,
-			Name:      Name(domain),
-			Labels:    s.labelsFor(domain),
+			Namespace:       s.namespace,
+			Name:            Name(domain),
+			Labels:          s.labelsFor(domain),
+			OwnerReferences: ownerReferences(domain, bundle),
 		},
 		BinaryData: map[string][]byte{DataKey: encoded},
 	}
@@ -141,11 +144,39 @@ func (s *Store) Save(ctx context.Context, domain string, bundle policy.Bundle) e
 		return fmt.Errorf("read state of domain %q before writing it: %w", domain, err)
 	}
 	existing.Labels = s.labelsFor(domain)
+	existing.OwnerReferences = ownerReferences(domain, bundle)
 	existing.BinaryData = map[string][]byte{DataKey: encoded}
 	if err := s.client.Update(ctx, &existing); err != nil {
 		return fmt.Errorf("write state of domain %q: %w", domain, err)
 	}
 	return nil
+}
+
+// ownerReferences points the ConfigMap at the policy whose spec it holds, so
+// that deleting the policy takes its bundle with it.
+//
+// The sweep in the updater stays: it is what clears a domain retired while
+// somebody else held the lease, and garbage collection only covers the case
+// where the object itself is gone. What this adds is the case the sweep cannot
+// see, a policy deleted while no leader is running.
+//
+// The reference is the policy's name and UID, which the bundle already
+// carries, and the name of a policy is its domain. BlockOwnerDeletion is left
+// off deliberately: it would make every write of this ConfigMap need update on
+// the ratelimitpolicies/finalizers subresource, for a bundle whose loss costs
+// a fallback spec and nothing else.
+func ownerReferences(domain string, bundle policy.Bundle) []metav1.OwnerReference {
+	if bundle.UID == "" {
+		return nil
+	}
+	controller := true
+	return []metav1.OwnerReference{{
+		APIVersion: v1alpha1.GroupVersion.String(),
+		Kind:       "RateLimitPolicy",
+		Name:       domain,
+		UID:        types.UID(bundle.UID),
+		Controller: &controller,
+	}}
 }
 
 // Delete drops the state of a domain that no longer has objects. Without it the
