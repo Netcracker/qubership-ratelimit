@@ -57,19 +57,32 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		// through the gateway's identity, not a port-forward.
 		Expect(apply(managementRoute(route, basePath, port))).To(Succeed())
 
-		// The single gate, on the path the specs actually use. There is no
+		// The single gate, on the answer the specs actually read. There is no
 		// waitGatewayServes warm-up first, because this suite routes no probe
 		// to the echo backend: the mesh fallback answers an unrouted path with
 		// a 503 forever, so a warm-up on a path outside the echo route never
-		// reaches a terminal code. Waiting for the real 200 covers both a cold
-		// gateway and a route that has not reached it yet, and it carries the
-		// token because the unauthenticated answer is a 401 either way.
-		Eventually(func() int {
-			_, code := gatewayGetBody("private-gateway", basePath+"/domains",
+		// reaches a terminal code. It carries the token because the
+		// unauthenticated answer is a 401 either way.
+		//
+		// The condition is the domain, not the status code. Three things
+		// arrive at their own pace here - a cold gateway, the route reaching
+		// it, and the policy reaching the rule store this API reads - and a
+		// 200 only covers the first two: the listing answers 200 with an empty
+		// set for as long as the store is still rebuilding, which on a fast
+		// runner is exactly where the first spec used to land.
+		Eventually(func() []string {
+			body, code := gatewayGetBody("private-gateway", basePath+"/domains",
 				map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")})
-			return code
-		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Equal(http.StatusOK),
-			"the private gateway never routed %s to the management port", basePath)
+			if code != http.StatusOK {
+				return nil
+			}
+			domains, err := listedDomains(body)
+			if err != nil {
+				return nil
+			}
+			return domains
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(ContainElement(domain),
+			"the private gateway never served %s with the domain this suite applied", basePath)
 	})
 	AfterAll(func() {
 		if applied {
@@ -86,17 +99,8 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		Expect(code).To(Equal(http.StatusOK),
 			"the gateway did not reach the management port; body: %s", body)
 
-		var listing struct {
-			Items []struct {
-				Domain string `json:"domain"`
-			} `json:"items"`
-		}
-		Expect(json.Unmarshal([]byte(body), &listing)).To(Succeed(), "body: %s", body)
-
-		domains := make([]string, 0, len(listing.Items))
-		for _, item := range listing.Items {
-			domains = append(domains, item.Domain)
-		}
+		domains, err := listedDomains(body)
+		Expect(err).NotTo(HaveOccurred(), "body: %s", body)
 		Expect(domains).To(ContainElement(domain),
 			"the listing does not carry the domain this suite applied")
 	})
@@ -253,4 +257,23 @@ func runInNamespace(name string, command []string) string {
 	}).WithTimeout(3*time.Minute).Should(Succeed(), "the probe pod never finished")
 
 	return podLogs(name, nil)
+}
+
+// listedDomains reads the domains out of a GET /domains body. It is shared by
+// the readiness gate and the spec so that the two agree on what "the listing
+// carries the domain" means.
+func listedDomains(body string) ([]string, error) {
+	var listing struct {
+		Items []struct {
+			Domain string `json:"domain"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(body), &listing); err != nil {
+		return nil, err
+	}
+	domains := make([]string, 0, len(listing.Items))
+	for _, item := range listing.Items {
+		domains = append(domains, item.Domain)
+	}
+	return domains, nil
 }
