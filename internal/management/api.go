@@ -183,25 +183,34 @@ func (a *API) handleRules(c *fiber.Ctx) error {
 		view.EffectiveKeys = []string{}
 	}
 
-	for _, block := range selectBlocks(snapshot, path, method) {
-		rendered := ruleview.Block(block)
+	for _, target := range selectTargets(snapshot, path, method) {
+		rendered := ruleview.Block(target.Block)
 		if sc.present {
-			annotate(block, &rendered, sc)
+			question := sc
+			if path != "" {
+				question, apiErr = sc.forTarget(target)
+				if apiErr != nil {
+					return apiErr
+				}
+			}
+			annotate(target.Block, &rendered, question)
 		}
 		view.Blocks = append(view.Blocks, rendered)
 	}
 	return writeJSON(c, view)
 }
 
-// selectBlocks filters the snapshot to the blocks targeting one request, using
+// selectTargets filters the snapshot to the blocks targeting one request, using
 // the engine's own route matcher: a second implementation of segment-based
 // prefixes and template captures is exactly where a filter drifts from what is
-// enforced.
-func selectBlocks(snapshot *compile.Snapshot, path, method string) []*compile.Block {
+// enforced. With a path each target also carries what the matched route decided
+// about the block's captures; without one every block is listed and no capture
+// is decided.
+func selectTargets(snapshot *compile.Snapshot, path, method string) []match.Target {
 	if path == "" {
-		out := make([]*compile.Block, 0, len(snapshot.Blocks))
+		out := make([]match.Target, 0, len(snapshot.Blocks))
 		for i := range snapshot.Blocks {
-			out = append(out, &snapshot.Blocks[i])
+			out = append(out, match.Target{Block: &snapshot.Blocks[i]})
 		}
 		return out
 	}
@@ -209,9 +218,9 @@ func selectBlocks(snapshot *compile.Snapshot, path, method string) []*compile.Bl
 		// An absent method is "any method" here. Match would read it as the
 		// empty method no request carries, and drop every block whose routes
 		// name theirs.
-		return match.BlocksByPath(snapshot, path)
+		return match.TargetsByPath(snapshot, path)
 	}
-	return match.Match(snapshot, path, method).Blocks()
+	return match.Match(snapshot, path, method).Targets()
 }
 
 // handleCounters lists live counters without charging them.

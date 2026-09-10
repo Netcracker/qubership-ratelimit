@@ -1,11 +1,13 @@
 package management
 
 import (
+	"maps"
 	"net/url"
 	"slices"
 	"sort"
 
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
+	"github.com/netcracker/qubership-ratelimit/engine/match"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 	"github.com/netcracker/qubership-ratelimit/internal/ruleview"
 )
@@ -39,6 +41,11 @@ type scope struct {
 	// rule is annotated: an annotation without a question would be an assertion
 	// about every possible client.
 	present bool
+
+	// effective marks the identity keys the domain declares. A capture of the
+	// same name shadows the key inside its block, and where the route produced
+	// no capture the identity's value applies.
+	effective map[string]struct{}
 }
 
 // parseScope reads the identity scope out of a rules query.
@@ -54,7 +61,10 @@ func parseScope(snapshot *compile.Snapshot, query url.Values) (scope, *apiError)
 		listValued[name] = struct{}{}
 	}
 
-	sc := scope{values: map[string][]string{}, declared: map[string]struct{}{}}
+	sc := scope{values: map[string][]string{}, declared: map[string]struct{}{}, effective: map[string]struct{}{}}
+	for _, name := range snapshot.EffectiveKeys {
+		sc.effective[name] = struct{}{}
+	}
 
 	for parameter, raw := range query {
 		name, found := cutAxisParameter(parameter)
@@ -141,8 +151,7 @@ type keyValues struct {
 	values []string
 
 	// nonEmpty marks a key whose presence is guaranteed even though its value
-	// is not known: a block's template captures are produced by any request
-	// that reaches the route.
+	// is not known: a built-in, or a capture every route of the block produces.
 	nonEmpty bool
 }
 
@@ -155,10 +164,87 @@ func (s scope) lookup(block *compile.Block, name string) keyValues {
 		// caller's route question, not their identity question.
 		return keyValues{nonEmpty: true}
 	}
-	if slices.Contains(block.Captures, name) {
+	if capturedByEveryRoute(block, name) {
 		return keyValues{nonEmpty: true}
 	}
 	return keyValues{}
+}
+
+// capturedByEveryRoute reports whether every route of the block is a template
+// producing the capture, so that any request reaching the block carries it. A
+// request that reaches the block through a prefix or an exact route carries no
+// capture, so for such a block the path of the request decides.
+func capturedByEveryRoute(block *compile.Block, name string) bool {
+	if len(block.Routes) == 0 {
+		return false
+	}
+	for i := range block.Routes {
+		produced := slices.ContainsFunc(block.Routes[i].Segments, func(segment compile.Segment) bool {
+			return segment.Capture == name
+		})
+		if !produced {
+			return false
+		}
+	}
+	return true
+}
+
+// forTarget narrows the scope to the request a path names, by what the target
+// phase decided about the block's captures: a capture the matched route
+// produced becomes a known value, a capture no deciding route produces
+// becomes known-absent, and one the method would decide is left as the caller
+// declared it, or open. A capture the caller declared as well has to agree
+// with the route; a contradiction is refused rather than resolved either way,
+// because one of the two is a typo. A capture that shadows an identity key is
+// never a contradiction: inside the block the route's value replaces the
+// identity's where the route produced one, the identity's value applies where
+// it did not, and where the method decides the route the key is open.
+func (s scope) forTarget(target match.Target) (scope, *apiError) {
+	out := scope{
+		values: maps.Clone(s.values), declared: maps.Clone(s.declared), present: s.present, effective: s.effective,
+	}
+	if out.values == nil {
+		out.values = map[string][]string{}
+	}
+	if out.declared == nil {
+		out.declared = map[string]struct{}{}
+	}
+	for _, name := range target.Block.Captures {
+		_, identity := s.effective[name]
+		if slices.Contains(target.Undecided, name) {
+			if identity {
+				delete(out.values, name)
+				delete(out.declared, name)
+			}
+			continue
+		}
+		value, produced := target.Captures[name]
+		if identity {
+			if produced {
+				out.values[name] = []string{value}
+				out.declared[name] = struct{}{}
+			}
+			continue
+		}
+		var decided []string
+		if produced {
+			decided = []string{value}
+		}
+		if supplied, ok := s.values[name]; ok {
+			if !slices.Equal(supplied, decided) {
+				field, shown := axisPrefix+name, axisPrefix+logSafe(name)
+				if supplied == nil {
+					field, shown = "absent", "absent="+logSafe(name)
+				}
+				return scope{}, invalid("path decides capture "+logSafe(name)+
+					" through the route it matches; drop "+shown+" or path", field)
+			}
+			continue
+		}
+		out.values[name] = decided
+		out.declared[name] = struct{}{}
+	}
+	return out, nil
 }
 
 // annotate fills the applicability annotations of one rendered block.

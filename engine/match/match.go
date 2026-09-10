@@ -60,31 +60,127 @@ func Match(snap *compile.Snapshot, path, method string) Candidates {
 // The route matching itself is the same code, so the two answers cannot drift
 // into disagreeing about prefixes, templates, or exact paths.
 func BlocksByPath(snap *compile.Snapshot, path string) []*compile.Block {
+	targets := TargetsByPath(snap, path)
+	out := make([]*compile.Block, 0, len(targets))
+	for _, target := range targets {
+		out = append(out, target.Block)
+	}
+	return out
+}
+
+// Target is one block the target phase selected for a request, with what the
+// selection decided about the block's captures.
+type Target struct {
+	Block *compile.Block
+
+	// Captures holds the values the matched route produced, by name. A capture
+	// of the block that is missing here is absent for the request, unless
+	// Undecided names it.
+	Captures map[string]string
+
+	// Undecided lists the captures whose presence or value depends on the
+	// method, for a selection made under any method: the routes that can decide
+	// the request for the path disagree about them. It is empty for a selection
+	// made for one method.
+	Undecided []string
+}
+
+// Targets lists the targeted blocks with their captures, in snapshot order.
+// The captures are the ones the rule phase evaluates against, so a rule keyed
+// on one is judged the way a decision would judge it.
+func (c Candidates) Targets() []Target {
+	out := make([]Target, 0, len(c.hits))
+	for i := range c.hits {
+		out = append(out, Target{Block: c.hits[i].block, Captures: c.hits[i].captures})
+	}
+	return out
+}
+
+// TargetsByPath lists the blocks whose target admits the path under any
+// method, with their captures, in snapshot order. The captures are decided as
+// far as the path alone decides them: a capture that every route able to
+// decide the request produces with one value is in Captures, a capture none
+// of them produces is absent, and the rest are undecided until the method
+// picks the route.
+func TargetsByPath(snap *compile.Snapshot, path string) []Target {
 	if i := strings.IndexByte(path, '?'); i >= 0 {
 		path = path[:i]
 	}
-	out := make([]*compile.Block, 0, len(snap.Blocks))
+	out := make([]Target, 0, len(snap.Blocks))
 	for i := range snap.Blocks {
-		block := &snap.Blocks[i]
-		if targetsPath(block, path) {
-			out = append(out, block)
+		if target, ok := targetByPath(&snap.Blocks[i], path); ok {
+			out = append(out, target)
 		}
 	}
 	return out
 }
 
-// targetsPath reports whether any route of the block admits the path, ignoring
-// the methods the route restricts itself to.
-func targetsPath(block *compile.Block, path string) bool {
+// targetByPath judges one block under any method. The routes that can decide
+// a request for the path are compared on every capture of the block. A route
+// admitting the path decides the methods it names that no earlier admitting
+// route named, and a route with no method restriction decides every method
+// left, so no route after it can win: that is the choice matchTarget makes for
+// one method, taken over all of them.
+func targetByPath(block *compile.Block, path string) (Target, bool) {
 	if len(block.Routes) == 0 {
-		return true
+		return Target{Block: block}, true
 	}
+	var (
+		deciders int
+		claimed  = map[string]struct{}{}
+		values   = map[string]string{}
+		produced = map[string]int{}
+		conflict = map[string]struct{}{}
+	)
 	for i := range block.Routes {
-		if _, ok := matchPath(&block.Routes[i], path); ok {
-			return true
+		route := &block.Routes[i]
+		captures, ok := matchPath(route, path)
+		if !ok {
+			continue
+		}
+		if len(route.Methods) > 0 {
+			left := false
+			for method := range route.Methods {
+				if _, taken := claimed[method]; !taken {
+					claimed[method] = struct{}{}
+					left = true
+				}
+			}
+			if !left {
+				continue
+			}
+		}
+		deciders++
+		for name, value := range captures {
+			if previous, seen := values[name]; seen && previous != value {
+				conflict[name] = struct{}{}
+			}
+			values[name] = value
+			produced[name]++
+		}
+		if len(route.Methods) == 0 {
+			break
 		}
 	}
-	return false
+	if deciders == 0 {
+		return Target{}, false
+	}
+	target := Target{Block: block}
+	for _, name := range block.Captures {
+		_, conflicted := conflict[name]
+		switch {
+		case produced[name] == deciders && !conflicted:
+			if target.Captures == nil {
+				target.Captures = map[string]string{}
+			}
+			target.Captures[name] = values[name]
+		case produced[name] == 0:
+			// No deciding route produces it: absent for the request.
+		default:
+			target.Undecided = append(target.Undecided, name)
+		}
+	}
+	return target, true
 }
 
 // Empty reports that no block targets the request: it is allowed as it

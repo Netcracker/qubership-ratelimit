@@ -1,6 +1,8 @@
 package match
 
 import (
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -429,6 +431,118 @@ func blockNames(blocks []*compile.Block) []string {
 	out := make([]string, 0, len(blocks))
 	for _, block := range blocks {
 		out = append(out, block.Name)
+	}
+	return out
+}
+
+// A block's captures are decided by the route the request matches, so a
+// request reaching the block through a prefix route carries none of them.
+// Under any method the routes that can decide the request are compared: a
+// capture they all produce with one value is decided, one they disagree on is
+// left for the method to settle, and a route with no method restriction ahead
+// of the others decides every method by itself.
+func TestTargetsByPath_decidesCapturesByTheRoutesThatCanDecide(t *testing.T) {
+	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{
+		{
+			Name: "orders",
+			Target: model.Target{Routes: []model.Route{
+				{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/orders"}, Methods: []string{"POST", "PUT"}},
+				{Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/orders/{order_id}/items"}},
+			}},
+			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}},
+		},
+		{
+			Name: "items",
+			Target: model.Target{Routes: []model.Route{
+				{Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/items/{item_id}"}},
+				{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"}, Methods: []string{"POST"}},
+			}},
+			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}},
+		},
+		{
+			Name: "pairs",
+			Target: model.Target{Routes: []model.Route{
+				{Path: model.PathMatch{Type: model.PathTemplate, Value: "/pairs/{a}/{b}"}, Methods: []string{"GET"}},
+				{Path: model.PathMatch{Type: model.PathTemplate, Value: "/pairs/{b}/{a}"}, Methods: []string{"POST"}},
+			}},
+			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}},
+		},
+	}})
+
+	cases := map[string]struct {
+		path      string
+		block     string
+		captures  map[string]string
+		undecided []string
+	}{
+		"only the prefix route admits the path": {
+			path: "/api/orders", block: "orders",
+		},
+		"the prefix route decides its methods and the template the rest": {
+			path: "/api/orders/42/items", block: "orders", undecided: []string{"order_id"},
+		},
+		"an unrestricted template ahead decides every method": {
+			path: "/api/items/7", block: "items", captures: map[string]string{"item_id": "7"},
+		},
+		"two templates on disjoint methods produce different values": {
+			path: "/pairs/1/2", block: "pairs", undecided: []string{"a", "b"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			targets := TargetsByPath(snap, tc.path)
+			if len(targets) != 1 || targets[0].Block.Name != tc.block {
+				t.Fatalf("TargetsByPath(%q) = %v, want the %s block alone", tc.path, targetNames(targets), tc.block)
+			}
+			if got := targets[0].Captures; !maps.Equal(got, tc.captures) {
+				t.Errorf("TargetsByPath(%q) captures = %v, want %v", tc.path, got, tc.captures)
+			}
+			if got := targets[0].Undecided; !slices.Equal(got, tc.undecided) {
+				t.Errorf("TargetsByPath(%q) undecided = %v, want %v", tc.path, got, tc.undecided)
+			}
+		})
+	}
+}
+
+// For one request the target phase picks one route, and the captures are that
+// route's: the prefix route produces none, and the template route behind it
+// produces the capture for the methods the prefix route does not name.
+func TestTargets_carryTheCapturesOfTheMatchedRoute(t *testing.T) {
+	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "orders",
+		Target: model.Target{Routes: []model.Route{
+			{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/orders"}, Methods: []string{"POST", "PUT"}},
+			{Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/orders/{order_id}/items"}},
+		}},
+		Rules: []model.Rule{{Name: "r", Rates: minuteRate()}},
+	}}})
+
+	cases := map[string]struct {
+		path, method string
+		captures     map[string]string
+	}{
+		"a path the template admits": {
+			path: "/api/orders/42/items", method: "GET", captures: map[string]string{"order_id": "42"},
+		},
+		"a path only the prefix admits": {path: "/api/orders", method: "POST"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			targets := Match(snap, tc.path, tc.method).Targets()
+			if len(targets) != 1 {
+				t.Fatalf("Match(%q, %s).Targets() = %v, want one target", tc.path, tc.method, targetNames(targets))
+			}
+			if got := targets[0].Captures; !maps.Equal(got, tc.captures) {
+				t.Errorf("Match(%q, %s).Targets()[0].Captures = %v, want %v", tc.path, tc.method, got, tc.captures)
+			}
+		})
+	}
+}
+
+func targetNames(targets []Target) []string {
+	out := make([]string, 0, len(targets))
+	for _, target := range targets {
+		out = append(out, target.Block.Name)
 	}
 	return out
 }
