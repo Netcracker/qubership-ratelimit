@@ -297,6 +297,35 @@ func TestInvalidSpecFamily(t *testing.T) {
 				Value: "/api/{" + "k" + strings.Repeat("x", maxKeyLength) + "}",
 			}
 		}},
+		// A segment is a literal or a single placeholder. A brace outside a
+		// placeholder used to compile into a literal that only a request
+		// carrying the braces verbatim matched, and the rule behind it was
+		// silently never applied.
+		{"placeholder with a prefix", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/x{id}"}
+		}},
+		{"placeholder with a suffix", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{id}x"}
+		}},
+		{"unclosed placeholder", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{id"}
+		}},
+		{"unopened placeholder", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/id}"}
+		}},
+		// A slash at the end or two in a row is refused as an empty segment.
+		// It used to compile into an empty literal, and the template then
+		// matched only a path with an empty segment in the same place.
+		{"template with a trailing slash", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{id}/"}
+		}},
+		{"template with a double slash", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/a//b"}
+		}},
+		// The root alone is one empty segment; the root path is an Exact route.
+		{"template of the root alone", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/"}
+		}},
 		{"mapping over a built-in", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: model.KeyPath, Claim: "x"}}
 		}},
