@@ -59,14 +59,31 @@ func (c *blockCompiler) compileRoute(b model.Block, r model.Route, captures map[
 	return out
 }
 
-// compileTemplate splits a template into segments. A placeholder matches
-// exactly one non-empty segment; the template covers the whole path.
+// compileTemplate splits a template into segments. A segment is a literal or
+// a single {placeholder}; a placeholder matches exactly one non-empty segment
+// of the path, and the template covers the whole path.
 func (c *blockCompiler) compileTemplate(b model.Block, value string, captures map[string]struct{}) []Segment {
 	segments := strings.Split(strings.TrimPrefix(value, "/"), "/")
 	out := make([]Segment, 0, len(segments))
 	seen := map[string]struct{}{}
-	for _, s := range segments {
+	for i, s := range segments {
+		if s == "" {
+			// A slash at the end or two in a row makes an empty segment, and a
+			// template with one matches only a path with an empty segment in
+			// the same place. The root path is an Exact route, not a template.
+			c.fail(b.Name, "", ReasonInvalidSpec,
+				"template %q: segment %d is empty, a slash at the end or two in a row", value, i+1)
+			continue
+		}
 		if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
+			// A brace outside a single placeholder is a placeholder the author
+			// got wrong: as a literal it matches only a request that carries
+			// the braces verbatim.
+			if strings.ContainsAny(s, "{}") {
+				c.fail(b.Name, "", ReasonInvalidSpec,
+					"template %q: segment %q is neither a literal nor a single {placeholder}", value, s)
+				continue
+			}
 			out = append(out, Segment{Literal: s})
 			continue
 		}
