@@ -220,7 +220,7 @@ var _ = Describe("leader election", Ordered, Label("leader"), func() {
 // letting controller-runtime sign it with the hostname and a random suffix.
 // That is what makes this equal to a pod name a caller can Get, and what makes
 // the replicas the status names comparable with the replica holding the lease.
-// leaseHolderIsAPodName pins the equality.
+// The spec "signs the lease with the holder's pod name" pins the equality.
 func leaseHolderPod() string {
 	var lease coordinationv1.Lease
 	if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "ratelimit.netcracker.com"},
