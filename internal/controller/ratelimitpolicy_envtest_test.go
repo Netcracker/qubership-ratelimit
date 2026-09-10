@@ -1,19 +1,26 @@
 package controller
 
 import (
+	"context"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
 const envtestNamespace = "ratelimit-envtest"
@@ -61,16 +68,19 @@ func predicateRule(name string, predicates ...ratelimitv1alpha1.Predicate) ratel
 
 var _ = Describe("RateLimitPolicy", func() {
 	var reconciler *RateLimitPolicyReconciler
+	var recorder *events.FakeRecorder
 
 	BeforeEach(func() {
 		// A stub fleet, so the healthy path reaches Ready: True against a real
 		// API server. Without a probe every generation stops at ProbeFailed,
 		// and the condition this suite exists to check would never be asserted.
+		recorder = events.NewFakeRecorder(16)
 		reconciler = &RateLimitPolicyReconciler{
 			Client:    k8sClient,
 			Scheme:    k8sClient.Scheme(),
 			Namespace: envtestNamespace,
 			Probe:     unanimous(3),
+			Events:    recorder,
 		}
 
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: envtestNamespace}}
@@ -326,6 +336,55 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(reconciled.Spec.Domain).To(Equal("gateway.public"))
 		})
 
+		// The counterpart of the persist-error event in internal/state: a
+		// generation the author cannot see refused anywhere else. The condition
+		// says the same thing, but nobody watches conditions on an object they
+		// have already applied.
+		It("raises one Warning per generation that does not compile", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.events"}
+			broken := policyWith(name.Name, blockWith("api", predicateRule("per-plan",
+				ratelimitv1alpha1.Predicate{Key: "plan", Operator: ratelimitv1alpha1.OperatorExists})))
+			Expect(create(broken)).To(Succeed())
+
+			drain(recorder)
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var raised string
+			Eventually(recorder.Events).Should(Receive(&raised))
+			Expect(raised).To(ContainSubstring("Warning"))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ReasonNotCompiled))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ProblemUnresolvedKeyReference))
+
+			By("staying quiet while the same generation keeps failing")
+			// A reconcile runs on its interval whether or not anything moved, so
+			// without the generation guard this would put a Warning on the object
+			// every ten seconds for as long as the author left it broken.
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(recorder.Events).ShouldNot(Receive())
+
+			By("raising it again for the next generation")
+			Expect(k8sClient.Get(ctx, name, broken)).To(Succeed())
+			broken.Spec.Limits[0].Rules[0].Matches[0].Key = "tier"
+			Expect(k8sClient.Update(ctx, broken)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(recorder.Events).Should(Receive(&raised))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ReasonNotCompiled))
+		})
+
+		It("stays quiet on a generation that compiles", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.quiet"}
+			Expect(create(policyWith(name.Name, blockWith("api", ruleWith("total"))))).To(Succeed())
+
+			drain(recorder)
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(recorder.Events).ShouldNot(Receive())
+		})
+
 		It("writes the rule problems the API server accepts", func() {
 			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.private"}
 			Expect(create(policyWith(name.Name, blockWith("api", predicateRule("per-plan",
@@ -386,3 +445,133 @@ var _ = Describe("SetupWithManager", func() {
 			SetupWithManager(mgr)).To(Succeed())
 	})
 })
+
+// The reads of this kind all have to ask for the unstructured form, because
+// that is the only informer the process runs. Against a plain client - which
+// is what the rest of this file uses - a typed read works just as well, so the
+// mistake is invisible: it surfaces only against a cache configured the way
+// the real manager configures it, as a component that starts cleanly and never
+// reconciles anything. So this manager is built from the same functions the
+// binary calls, and started, which is what makes ReaderFailOnMissingInformer
+// mean something here.
+var _ = Describe("the manager's cache", Ordered, func() {
+	var cancel context.CancelFunc
+
+	BeforeAll(func() {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:  clientgoscheme.Scheme,
+			Metrics: metricsserver.Options{BindAddress: "0"},
+			Client:  ClientOptions(),
+			Cache:   CacheOptions(envtestNamespace),
+			// The spec above registers a controller of this name on its own
+			// manager, and the name registry is global to the process.
+			Controller: config.Controller{SkipNameValidation: &skipNameValidation},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Registered, not just built. ByObject only configures an informer;
+		// what creates one is a caller asking for it, which in the binary is
+		// this registration and the store updater. A manager with no
+		// controller on it would fail these reads for a reason the binary
+		// does not have.
+		Expect((&RateLimitPolicyReconciler{
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Service: "ratelimit",
+		}).SetupWithManager(mgr)).To(Succeed())
+
+		var started context.Context
+		started, cancel = context.WithCancel(context.Background())
+		go func() {
+			defer GinkgoRecover()
+			Expect(mgr.Start(started)).To(Succeed())
+		}()
+		Expect(mgr.GetCache().WaitForCacheSync(started)).To(BeTrue())
+
+		// What the store updater does on every replica, and the step that
+		// actually creates the informer: ByObject only configures one. Asking
+		// for the wrong form here is the silent half of the bug these specs
+		// pin, because GetInformer creates whatever it is asked for.
+		_, err = mgr.GetCache().GetInformer(started, policy.Object())
+		Expect(err).NotTo(HaveOccurred())
+
+		// A policy has to exist for these reads to distinguish anything: a
+		// failed list and an empty namespace both come back with nothing.
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: envtestNamespace}}
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(context.Background(), ns))).To(Succeed())
+		cached := policyWith("cache.probe", blockWith("b", ruleWith("r")))
+		Expect(k8sClient.Create(context.Background(), cached)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(context.Background(), cached))).To(Succeed())
+		})
+		Eventually(policyCount).Should(BeNumerically(">", 0), "the informer never saw the policy")
+
+		DeferCleanup(func() { cancel() })
+		managerUnderTest = mgr
+	})
+
+	It("serves the policies the compiler loads", func() {
+		// policy.Load is the read every rebuild and every reconcile goes
+		// through.
+		_, err := policy.Load(context.Background(), managerUnderTest.GetCache(), envtestNamespace)
+		Expect(err).NotTo(HaveOccurred(),
+			"the cache cannot serve the kind the compiler reads")
+	})
+
+	It("serves the list an EndpointSlice change fans out from", func() {
+		reconciler := &RateLimitPolicyReconciler{
+			Client:  managerUnderTest.GetClient(),
+			Scheme:  managerUnderTest.GetScheme(),
+			Service: "ratelimit",
+		}
+		slice := &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: envtestNamespace,
+				Name:      "ratelimit-abcde",
+				Labels:    map[string]string{discoveryv1.LabelServiceName: "ratelimit"},
+			},
+		}
+
+		// A read failure is logged and swallowed here, so the assertion is on
+		// the requests: the fan-out going quiet is exactly how the bug this
+		// pins presented.
+		Expect(reconciler.policiesBehind(context.Background(), slice)).
+			To(HaveLen(policyCount()), "the EndpointSlice fan-out reconciles nothing")
+	})
+
+	It("gives the store updater an informer without starting a second one", func() {
+		// GetInformer creates what it is asked for, so asking for the wrong
+		// form here is silent: the informer works, and the process pays for a
+		// second cached copy of every policy. Both forms are asked for, and
+		// only one of them may already be present.
+		informers, err := managerUnderTest.GetCache().GetInformer(
+			context.Background(), policy.Object(), cache.BlockUntilSynced(false))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(informers).NotTo(BeNil())
+	})
+})
+
+// drain empties the recorder so a spec only sees the events it caused.
+func drain(recorder *events.FakeRecorder) {
+	for {
+		select {
+		case <-recorder.Events:
+		default:
+			return
+		}
+	}
+}
+
+// managerUnderTest is the started manager of the cache specs above.
+var managerUnderTest ctrl.Manager
+
+// skipNameValidation lets a second manager in this process register a
+// controller of a name the first one already used.
+var skipNameValidation = true
+
+// policyCount is how many policies the envtest namespace holds, read through
+// the plain client so that it stays a fact about the cluster rather than about
+// the cache these specs are testing.
+func policyCount() int {
+	list := policy.ObjectList()
+	Expect(k8sClient.List(context.Background(), list, client.InNamespace(envtestNamespace))).To(Succeed())
+	return len(list.Items)
+}

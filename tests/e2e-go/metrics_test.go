@@ -101,8 +101,8 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 
 	It("reports the policy ready", func() {
 		Expect(gaugeValue(families, "ratelimit_policy_ready",
-			map[string]string{"policy": namespace + "/" + domain, "reason": ""})).To(Equal(1.0),
-			"the scrape does not report %s/%s ready", namespace, domain)
+			map[string]string{"domain": domain, "reason": ""})).To(Equal(1.0),
+			"the scrape does not report %s ready", domain)
 	})
 
 	It("gauges the domain decision buckets", func() {

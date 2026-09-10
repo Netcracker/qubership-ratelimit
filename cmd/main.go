@@ -26,13 +26,13 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/xrequestid"
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/ctxmanager"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
-	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -52,15 +52,6 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/state"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 	// +kubebuilder:scaffold:imports
-)
-
-// Modes select which components this process runs. Controller and RLS engine
-// share one binary and one Deployment today; the flag exists so that splitting
-// them later is a Helm change rather than a refactor.
-const (
-	modeAll        = "all"
-	modeController = "controller"
-	modeRLS        = "rls"
 )
 
 // loggerName prefixes every log line this service writes. Sub-loggers are
@@ -84,18 +75,14 @@ func init() {
 }
 
 func main() {
-	var mode string
 	var probeAddr string
 	var metricsAddr string
 	var rlsAddr string
 	var managementAddr string
 	var serviceName string
-	var enableLeaderElection bool
 	var storeDebounce time.Duration
 	var drainTimeout time.Duration
 
-	flag.StringVar(&mode, "mode", modeAll,
-		"Components to run: all, controller (status writes only) or rls (rate limit endpoint only).")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
 		"The address the Prometheus metrics endpoint binds to. \"0\" disables it.")
@@ -106,9 +93,6 @@ func main() {
 	flag.StringVar(&serviceName, "service-name", "",
 		"The Service whose ready endpoints are this component's replicas. The leader reads the enforced "+
 			"generation from each of them to decide whether a policy is Ready. Defaults to microservice.name.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
-		"Enable leader election. Only status writes are leader-gated; the rate limit endpoint "+
-			"and its store run on every replica.")
 	flag.DurationVar(&storeDebounce, "store-debounce", store.DefaultDebounce,
 		"How long to collect resource events before rebuilding the rule store.")
 	flag.DurationVar(&drainTimeout, "rls-drain-timeout", rls.DefaultDrainTimeout,
@@ -130,15 +114,13 @@ func main() {
 	klog.SetLogger(logrLogger)
 
 	options := runOptions{
-		mode:                 mode,
-		probeAddr:            probeAddr,
-		metricsAddr:          metricsAddr,
-		rlsAddr:              rlsAddr,
-		managementAddr:       managementAddr,
-		serviceName:          serviceName,
-		enableLeaderElection: enableLeaderElection,
-		storeDebounce:        storeDebounce,
-		drainTimeout:         drainTimeout,
+		probeAddr:      probeAddr,
+		metricsAddr:    metricsAddr,
+		rlsAddr:        rlsAddr,
+		managementAddr: managementAddr,
+		serviceName:    serviceName,
+		storeDebounce:  storeDebounce,
+		drainTimeout:   drainTimeout,
 	}
 	if err := run(options); err != nil {
 		setupLog.Errorf("service exited with an error: %v", err)
@@ -149,16 +131,14 @@ func main() {
 // runOptions collects what the flags decided. It replaces a parameter list
 // that had grown past the point where a caller could tell two strings apart.
 type runOptions struct {
-	mode           string
 	probeAddr      string
 	metricsAddr    string
 	rlsAddr        string
 	managementAddr string
 	serviceName    string
 
-	enableLeaderElection bool
-	storeDebounce        time.Duration
-	drainTimeout         time.Duration
+	storeDebounce time.Duration
+	drainTimeout  time.Duration
 }
 
 // newCounterStore picks where the counters live, and returns the client whose
@@ -259,18 +239,11 @@ func getCloudNamespace() (string, error) {
 
 // run wires the process together and hands it to the manager.
 //
-// Each component is set up by its own function, and each of those decides for
-// itself whether this mode wants it. That keeps the shape of the process
-// readable here — namespace, manager, controllers, endpoint, probes — instead
-// of interleaving three modes' worth of conditionals.
+// Every replica runs both halves: the controller that writes status and the
+// rate limit endpoint that answers checks. Each component is set up by its own
+// function, which keeps the shape of the process readable here - namespace,
+// manager, controllers, endpoint, probes.
 func run(options runOptions) error {
-	runController := options.mode == modeAll || options.mode == modeController
-	runRLS := options.mode == modeAll || options.mode == modeRLS
-	if !runController && !runRLS {
-		return fmt.Errorf("unknown --mode %q, expected one of %q, %q, %q",
-			options.mode, modeAll, modeController, modeRLS)
-	}
-
 	namespace, err := getCloudNamespace()
 	if err != nil {
 		return err
@@ -281,7 +254,7 @@ func run(options runOptions) error {
 	// the manager exists. The holder is what lets one refer to the other.
 	applied := &deferredHandler{}
 
-	mgr, err := newManager(options, namespace, runController, applied)
+	mgr, err := newManager(options, namespace, applied)
 	if err != nil {
 		return err
 	}
@@ -300,12 +273,12 @@ func run(options runOptions) error {
 		"app.kubernetes.io/managed-by": managedBy,
 	}, newLogrLogger().WithName("state"), mgr.GetEventRecorder("ratelimit"))
 
-	if err := addControllers(mgr, options, namespace, lastGood, runController); err != nil {
+	if err := addControllers(mgr, options, namespace, lastGood); err != nil {
 		return err
 	}
 	// +kubebuilder:scaffold:builder
 
-	limiter, err := addRateLimitEndpoint(mgr, options, namespace, lastGood, runRLS)
+	limiter, err := addRateLimitEndpoint(mgr, options, namespace, lastGood)
 	if err != nil {
 		return err
 	}
@@ -322,8 +295,7 @@ func run(options runOptions) error {
 		return err
 	}
 
-	setupLog.Infof("starting service mode=%v namespace=%v leaderElection=%v",
-		options.mode, namespace, options.enableLeaderElection && runController)
+	setupLog.Infof("starting service namespace=%v leaderIdentity=%v", namespace, leaderIdentity())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		return fmt.Errorf("run manager: %w", err)
 	}
@@ -336,10 +308,23 @@ func run(options runOptions) error {
 func newManager(
 	options runOptions,
 	namespace string,
-	runController bool,
 	applied http.Handler,
 ) (ctrl.Manager, error) {
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	config := ctrl.GetConfigOrDie()
+
+	// The lease is held under the pod's own name. Left to itself
+	// controller-runtime signs the lease with the hostname plus a random
+	// suffix, which is the pod name only by coincidence of how kubelet sets
+	// the hostname, and never matches it once a pod sets hostname or
+	// subdomain. The status messages name the replicas that lag by pod name,
+	// so a reader comparing them against the lease holder has to be looking at
+	// the same identifier.
+	lock, err := leaderLock(config, namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	mgr, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: options.metricsAddr,
@@ -350,29 +335,56 @@ func newManager(
 			ExtraHandlers: map[string]http.Handler{store.AppliedPath: applied},
 		},
 		HealthProbeBindAddress: options.probeAddr,
-		// Only status writes are leader-gated. In rls mode nothing is, so the
-		// process does not compete for a lease it would never use.
-		LeaderElection:   options.enableLeaderElection && runController,
-		LeaderElectionID: "ratelimit.netcracker.com",
-		Cache: cache.Options{
-			ByObject: map[client.Object]cache.ByObject{
-				&ratelimitv1alpha1.RateLimitPolicy{}: {
-					Namespaces: map[string]cache.Config{namespace: {}},
-				},
-				// The leader reads the ready endpoints of its own Service to
-				// learn which replicas enforce which generation. Only the
-				// controller needs them, and only in its own namespace.
-				&discoveryv1.EndpointSlice{}: {
-					Namespaces: map[string]cache.Config{namespace: {}},
-				},
-			},
-			ReaderFailOnMissingInformer: true,
-		},
+		Client:                 controller.ClientOptions(),
+		// Always on. Only status writes are leader-gated - the rate limit
+		// endpoint and its store run on every replica - and a status writer
+		// that is not elected is two replicas writing conditions over each
+		// other, so there is no deployment this is right to switch off.
+		LeaderElection:                      true,
+		LeaderElectionID:                    "ratelimit.netcracker.com",
+		LeaderElectionResourceLockInterface: lock,
+		Cache:                               controller.CacheOptions(namespace),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create manager: %w", err)
 	}
 	return mgr, nil
+}
+
+// leaderIdentity is the name this replica signs the lease with: the pod's own
+// name, from the Downward API. It is empty outside a pod, where there is no
+// pod name to borrow.
+func leaderIdentity() string {
+	return os.Getenv("POD_NAME")
+}
+
+// leaderLock builds the lease this replica competes for, signed with the pod
+// name. It returns a nil lock when POD_NAME is unset, which hands the choice
+// of identity back to controller-runtime: outside a pod - a local run, an
+// envtest - the hostname is the only name there is, and refusing to start
+// would make the binary unrunnable off-cluster for no gain.
+//
+// The renew deadline mirrors controller-runtime's own default, because it only
+// sizes the client timeout of the lock; the manager keeps timing the election
+// itself.
+func leaderLock(config *rest.Config, namespace string) (resourcelock.Interface, error) {
+	identity := leaderIdentity()
+	if identity == "" {
+		setupLog.Warnf("POD_NAME is not set, so the lease is signed with the hostname")
+		return nil, nil
+	}
+	lock, err := resourcelock.NewFromKubeconfig(
+		resourcelock.LeasesResourceLock,
+		namespace,
+		"ratelimit.netcracker.com",
+		resourcelock.ResourceLockConfig{Identity: identity},
+		config,
+		10*time.Second,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create the leader election lock: %w", err)
+	}
+	return lock, nil
 }
 
 // addControllers registers the reconcilers that write object status. They are
@@ -382,17 +394,14 @@ func addControllers(
 	options runOptions,
 	namespace string,
 	lastGood *state.Store,
-	enabled bool,
 ) error {
-	if !enabled {
-		return nil
-	}
 	reconciler := &controller.RateLimitPolicyReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Namespace: namespace,
 		Service:   serviceName(options),
 		State:     lastGood,
+		Events:    mgr.GetEventRecorder("ratelimit"),
 	}
 	// A typed nil in an interface field is not nil, and the reconciler reads a
 	// missing probe as "the fleet cannot be observed".
@@ -476,8 +485,8 @@ type rateLimitEndpoint struct {
 	backend string
 	shared  bool
 
-	// applied answers the leader's probe. It is nil in controller mode, where
-	// this process enforces nothing and has nothing to report.
+	// applied answers the leader's probe with the generation this replica
+	// enforces.
 	applied http.Handler
 }
 
@@ -513,12 +522,7 @@ func addRateLimitEndpoint(
 	options runOptions,
 	namespace string,
 	lastGood *state.Store,
-	enabled bool,
 ) (rateLimitEndpoint, error) {
-	if !enabled {
-		return rateLimitEndpoint{}, nil
-	}
-
 	backend := newCounterStore()
 	endpoint := rateLimitEndpoint{closer: backend.closer}
 	setupLog.Infof("counter store selected backend=%v", backend.description)
@@ -610,7 +614,7 @@ func addManagementAPI(
 	namespace string,
 	limiter rateLimitEndpoint,
 ) error {
-	if options.managementAddr == "" || options.managementAddr == "0" || limiter.rules == nil {
+	if options.managementAddr == "" || options.managementAddr == "0" {
 		return nil
 	}
 
@@ -619,8 +623,8 @@ func addManagementAPI(
 		// definition, and the management API assumes a shared one: records,
 		// confirmation tokens, and operations live beside the counters, so with
 		// several replicas a retry that lands elsewhere finds nothing. The chart
-		// keeps replicas at one in this mode; this line is what a deployment
-		// that got it wrong will find in its log.
+		// keeps replicas at one in this configuration; this line is what a
+		// deployment that got it wrong will find in its log.
 		setupLog.Warnf("management API is serving over the in-process counter store; " +
 			"it is correct at one replica only, like the limits themselves")
 	}

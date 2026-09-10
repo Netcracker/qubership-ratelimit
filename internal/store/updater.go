@@ -147,7 +147,12 @@ func (u *Updater) Start(ctx context.Context) error {
 
 	// One object holds the rules, the extraction, and the groups of a domain,
 	// so one informer sees every change that can alter a snapshot.
-	object := client.Object(&v1alpha1.RateLimitPolicy{})
+	//
+	// Unstructured, and that is not a detail: GetInformer creates the informer
+	// it is asked for, so asking for the typed kind here would quietly start a
+	// second informer and a second cached copy of every policy alongside the
+	// unstructured one the rest of the process reads.
+	object := client.Object(policy.Object())
 	informer, err := u.Cache.GetInformer(ctx, object)
 	if err != nil {
 		return fmt.Errorf("get %T informer: %w", object, err)
@@ -401,13 +406,15 @@ func stateView(result *policy.Result) *metrics.StateView {
 		if outcome.ActiveGeneration > 0 {
 			lag = outcome.Generation - outcome.ActiveGeneration
 		}
+		blocking, info := countProblems(outcome.Problems)
 		view.Policies = append(view.Policies, metrics.PolicyView{
-			Policy:        key.String(),
-			Ready:         outcome.Enforced(),
-			Reason:        notEnforcedReason(outcome),
-			Enforced:      outcome.ActiveGeneration != 0,
-			GenerationLag: lag,
-			RuleProblems:  len(outcome.Problems),
+			Domain:           key.Name,
+			Ready:            outcome.Enforced(),
+			Reason:           notEnforcedReason(outcome),
+			Enforced:         outcome.ActiveGeneration != 0,
+			GenerationLag:    lag,
+			BlockingProblems: blocking,
+			InfoProblems:     info,
 		})
 	}
 
@@ -420,6 +427,19 @@ func stateView(result *policy.Result) *metrics.StateView {
 		})
 	}
 	return view
+}
+
+// countProblems splits a generation's diagnostics into the two severities the
+// metric reports.
+func countProblems(problems []v1alpha1.RuleProblem) (blocking, info int) {
+	for _, problem := range problems {
+		if v1alpha1.BlockingProblem(problem.Reason) {
+			blocking++
+			continue
+		}
+		info++
+	}
+	return blocking, info
 }
 
 // notEnforcedReason labels the series of a policy whose latest generation is

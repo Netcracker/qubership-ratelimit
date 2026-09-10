@@ -11,9 +11,11 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -60,6 +62,10 @@ type RateLimitPolicyReconciler struct {
 	// Ready cannot be established and reports ProbeFailed, which is the honest
 	// answer for a leader that cannot see the fleet.
 	Probe FleetProbe
+
+	// Events records the Warning a generation that does not compile raises.
+	// It may be nil, which leaves the condition and the log as the only trace.
+	Events events.EventRecorder
 }
 
 // FleetProbe reports which replicas enforce which generation of a domain.
@@ -80,15 +86,25 @@ type FleetProbe interface {
 func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	var object v1alpha1.RateLimitPolicy
-	if err := r.Get(ctx, req.NamespacedName, &object); err != nil {
+	// Read unstructured and decode here, for the reason policy.Load gives: a
+	// typed read drops what this build does not know, and the status this
+	// reconciler writes is where that has to be reported.
+	stored := policy.Object()
+	if err := r.Get(ctx, req.NamespacedName, stored); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	decoded, _, err := policy.Decode(stored)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	object := *decoded
 
 	result, err := compile(ctx, r.Client, r.State, r.Namespace, object.Spec.Domain)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// The skew of this object comes back through the same load every other
+	// policy's does, so the outcome already carries it.
 	outcome := result.Policies[req.NamespacedName]
 
 	now := time.Now()
@@ -103,6 +119,8 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	object.Status.Rules = int32(outcome.Rules)
 
 	setAccepted(&object, outcome)
+	// Read against the status as it was, before the write below overwrites it.
+	newlyBroken := !outcome.Compiled() && turnedNotCompiled(before, object.Generation)
 
 	// The clock for "is this a rollout or a breakage" starts when this
 	// generation began spreading, so it is read before the condition is
@@ -129,6 +147,13 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	written, err := writeStatus(ctx, r.Client, &object, before, &object.Status)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if newlyBroken && r.Events != nil {
+		// After the write, not before: an event for a status that failed to
+		// land would report a refusal nobody can see on the object.
+		r.Events.Eventf(&object, nil, corev1.EventTypeWarning,
+			v1alpha1.ReasonNotCompiled, "Compile",
+			"generation %d does not compile: %s", object.Generation, outcome.Err)
 	}
 	if written {
 		log.Info("policy reconciled",
@@ -179,8 +204,10 @@ func (r *RateLimitPolicyReconciler) observe(
 // without the watch status.replicas would hold its old fraction until the
 // interval came round.
 func (r *RateLimitPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Watched unstructured, so that this kind has one informer and it is the
+	// one whose objects keep every field they were stored with.
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.RateLimitPolicy{}).
+		For(policy.Object()).
 		Watches(&discoveryv1.EndpointSlice{},
 			handler.EnqueueRequestsFromMapFunc(r.policiesBehind)).
 		Named("ratelimitpolicy").
@@ -198,8 +225,11 @@ func (r *RateLimitPolicyReconciler) policiesBehind(
 		return nil
 	}
 
-	var list v1alpha1.RateLimitPolicyList
-	if err := r.List(ctx, &list, client.InNamespace(object.GetNamespace())); err != nil {
+	// Unstructured, like every other read of this kind: it is the only informer
+	// there is, and a typed list would ask the cache for one it does not have.
+	// Nothing here reads the spec - the names are what become requests.
+	list := policy.ObjectList()
+	if err := r.List(ctx, list, client.InNamespace(object.GetNamespace())); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to list the policies of a changed EndpointSlice",
 			"service", r.Service)
 		return nil

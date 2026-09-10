@@ -43,13 +43,15 @@ spec:
             - /usr/bin/entrypoint.sh
           args:
             - /app/ratelimit
-            - --mode=all
-            - --leader-elect
             - --health-probe-bind-address=:8081
             - --rls-bind-address=:9000
           env:
             - name: LOG_LEVEL
               value: info
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: CLOUD_NAMESPACE
               valueFrom:
                 fieldRef:

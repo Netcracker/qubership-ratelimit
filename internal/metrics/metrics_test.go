@@ -26,9 +26,9 @@ func TestStateCollector_rendersThePublishedView(t *testing.T) {
 			Domain: "gateway.public", Blocks: 3, DecisionBuckets: 65, AppliedGeneration: 7,
 		}},
 		Policies: []PolicyView{
-			{Policy: "biz/gateway.public", Ready: true, Enforced: true},
-			{Policy: "biz/gateway.private", Reason: "NotCompiled", Enforced: true,
-				GenerationLag: 1, RuleProblems: 2},
+			{Domain: "gateway.public", Ready: true, Enforced: true, InfoProblems: 1},
+			{Domain: "gateway.private", Reason: "NotCompiled", Enforced: true,
+				GenerationLag: 1, BlockingProblems: 2},
 		},
 	})
 	defer PublishState(nil)
@@ -45,20 +45,22 @@ ratelimit_domain_decision_buckets{domain="gateway.public"} 65
 ratelimit_policy_applied_generation{domain="gateway.public"} 7
 # HELP ratelimit_policy_enforced Whether any generation of the policy is enforced at all.
 # TYPE ratelimit_policy_enforced gauge
-ratelimit_policy_enforced{policy="biz/gateway.private"} 1
-ratelimit_policy_enforced{policy="biz/gateway.public"} 1
+ratelimit_policy_enforced{domain="gateway.private"} 1
+ratelimit_policy_enforced{domain="gateway.public"} 1
 # HELP ratelimit_policy_generation_lag How far the enforced generation trails the latest one.
 # TYPE ratelimit_policy_generation_lag gauge
-ratelimit_policy_generation_lag{policy="biz/gateway.private"} 1
-ratelimit_policy_generation_lag{policy="biz/gateway.public"} 0
+ratelimit_policy_generation_lag{domain="gateway.private"} 1
+ratelimit_policy_generation_lag{domain="gateway.public"} 0
 # HELP ratelimit_policy_ready Whether the latest generation of the policy is the one enforced; reason is empty when it is.
 # TYPE ratelimit_policy_ready gauge
-ratelimit_policy_ready{policy="biz/gateway.private",reason="NotCompiled"} 0
-ratelimit_policy_ready{policy="biz/gateway.public",reason=""} 1
-# HELP ratelimit_policy_rule_problems Rule diagnostics reported for the latest generation of the policy.
+ratelimit_policy_ready{domain="gateway.private",reason="NotCompiled"} 0
+ratelimit_policy_ready{domain="gateway.public",reason=""} 1
+# HELP ratelimit_policy_rule_problems Rule diagnostics reported for the latest generation of the policy. Severity blocking means the generation is not enforced; info is a note about one that is.
 # TYPE ratelimit_policy_rule_problems gauge
-ratelimit_policy_rule_problems{policy="biz/gateway.private"} 2
-ratelimit_policy_rule_problems{policy="biz/gateway.public"} 0
+ratelimit_policy_rule_problems{domain="gateway.private",severity="blocking"} 2
+ratelimit_policy_rule_problems{domain="gateway.private",severity="info"} 0
+ratelimit_policy_rule_problems{domain="gateway.public",severity="blocking"} 0
+ratelimit_policy_rule_problems{domain="gateway.public",severity="info"} 1
 `
 	require.NoError(t, testutil.CollectAndCompare(stateCollector{}, strings.NewReader(expected)))
 }

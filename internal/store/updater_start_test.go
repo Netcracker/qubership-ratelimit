@@ -12,6 +12,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -106,11 +107,19 @@ type stubSource struct {
 	client.Reader
 	informer *stubInformer
 	getError error
+
+	// asked records the object the updater subscribed with. GetInformer
+	// creates whatever it is handed, so asking for the typed kind would start
+	// a second informer beside the unstructured one every read of this kind
+	// uses - which costs a second cached copy of every policy and shows up
+	// nowhere else.
+	asked client.Object
 }
 
 func (s *stubSource) GetInformer(
-	context.Context, client.Object, ...cache.InformerGetOption,
+	_ context.Context, object client.Object, _ ...cache.InformerGetOption,
 ) (cache.Informer, error) {
+	s.asked = object
 	if s.getError != nil {
 		return nil, s.getError
 	}
@@ -478,4 +487,22 @@ func TestUpdaterStart_retriesAWriteThatFailed(t *testing.T) {
 
 	assert.Eventually(t, func() bool { return len(state.savedDomains()) == 1 },
 		2*time.Second, 5*time.Millisecond)
+}
+
+// TestUpdaterStart_subscribesToTheUnstructuredInformer pins which form of the
+// kind the updater subscribes with.
+//
+// GetInformer creates the informer it is asked for rather than failing, so the
+// typed kind here would work: the store would rebuild, every test would pass,
+// and the process would carry a second informer and a second cached copy of
+// every policy for the life of the pod.
+func TestUpdaterStart_subscribesToTheUnstructuredInformer(t *testing.T) {
+	source := newStubSource(t, policyObject("gateway.public"))
+	startUpdater(t, source, New())
+
+	require.Eventually(t, func() bool { return source.asked != nil },
+		2*time.Second, 5*time.Millisecond)
+	assert.IsType(t, &unstructured.Unstructured{}, source.asked,
+		"the updater must share the one informer the rest of the process reads")
+	assert.Equal(t, "RateLimitPolicy", source.asked.GetObjectKind().GroupVersionKind().Kind)
 }

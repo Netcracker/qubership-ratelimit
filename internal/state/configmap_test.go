@@ -207,3 +207,45 @@ func oversizedBundle() policy.Bundle {
 		},
 	}
 }
+
+// TestSave_ownsTheConfigMapFromThePolicy pins the garbage collection path:
+// deleting a policy has to take its last-good bundle with it, including when
+// no leader is running to sweep.
+func TestSave_ownsTheConfigMapFromThePolicy(t *testing.T) {
+	store, fakeClient := newStore(t)
+
+	require.NoError(t, store.Save(context.Background(), testDomain, testBundle()))
+
+	var configMap corev1.ConfigMap
+	key := client.ObjectKey{Namespace: testNamespace, Name: Name(testDomain)}
+	require.NoError(t, fakeClient.Get(context.Background(), key, &configMap))
+
+	require.Len(t, configMap.OwnerReferences, 1)
+	owner := configMap.OwnerReferences[0]
+	assert.Equal(t, "RateLimitPolicy", owner.Kind)
+	assert.Equal(t, v1alpha1.GroupVersion.String(), owner.APIVersion)
+	assert.Equal(t, testDomain, owner.Name, "the name of a policy is its domain")
+	assert.Equal(t, "uid-orders", string(owner.UID),
+		"the UID is the bundle's own, so a recreated policy does not adopt its namesake's state")
+	assert.Nil(t, owner.BlockOwnerDeletion,
+		"blocking deletion would need update on the finalizers subresource")
+}
+
+// TestSave_movesTheOwnerToARecreatedPolicy covers the update path: an existing
+// ConfigMap keeps pointing at whichever object the bundle now belongs to.
+func TestSave_movesTheOwnerToARecreatedPolicy(t *testing.T) {
+	store, fakeClient := newStore(t)
+	require.NoError(t, store.Save(context.Background(), testDomain, testBundle()))
+
+	recreated := testBundle()
+	recreated.UID = "uid-recreated"
+	require.NoError(t, store.Save(context.Background(), testDomain, recreated))
+
+	var configMap corev1.ConfigMap
+	key := client.ObjectKey{Namespace: testNamespace, Name: Name(testDomain)}
+	require.NoError(t, fakeClient.Get(context.Background(), key, &configMap))
+
+	require.Len(t, configMap.OwnerReferences, 1)
+	assert.Equal(t, "uid-recreated", string(configMap.OwnerReferences[0].UID),
+		"a stale owner would leave the bundle orphaned when the old object is collected")
+}

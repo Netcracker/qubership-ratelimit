@@ -275,17 +275,17 @@ func TestStateView_distillsTheCompilation(t *testing.T) {
 
 	policies := map[string]metrics.PolicyView{}
 	for _, p := range view.Policies {
-		policies[p.Policy] = p
+		policies[p.Domain] = p
 	}
 	require.Len(t, policies, 2)
 
-	ok := policies["biz/gateway.public"]
+	ok := policies["gateway.public"]
 	assert.True(t, ok.Ready)
 	assert.True(t, ok.Enforced)
 	assert.Empty(t, ok.Reason)
 	assert.Zero(t, ok.GenerationLag)
 
-	bad := policies["biz/gateway.private"]
+	bad := policies["gateway.private"]
 	assert.False(t, bad.Ready)
 	assert.False(t, bad.Enforced, "an invalid spec with no last-good enforces nothing")
 	assert.Equal(t, v1alpha1.ReasonNotCompiled, bad.Reason)
