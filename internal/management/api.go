@@ -244,15 +244,15 @@ func (a *API) handleCounters(c *fiber.Ctx) error {
 	}
 
 	now := a.now()
-	after := ""
+	start := ""
 	if raw := query.Get("cursor"); raw != "" {
-		after, apiErr = decodeCursor(raw, sel, now)
+		start, apiErr = decodeCursor(raw, sel, now)
 		if apiErr != nil {
 			return apiErr
 		}
 	}
 
-	list, apiErr := a.listCounters(c.UserContext(), snapshot, sel, pageSize, after, now)
+	list, apiErr := a.listCounters(c.UserContext(), snapshot, sel, pageSize, start, now)
 	if apiErr != nil {
 		return apiErr
 	}

@@ -58,11 +58,12 @@ func TestCursor_isBoundToItsSelectionAndItsLifetime(t *testing.T) {
 	other, _ := parseSelector(mustQuery(t, "axis.client=bob"))
 	now := time.Now()
 
-	token := encodeCursor("rl:v1:{d}:a/b/c:gcra:60:alice:", sel, now)
+	const step = "127.0.0.1:6379@42"
+	token := encodeCursor(step, sel, now)
 
-	after, err := decodeCursor(token, sel, now)
+	decoded, err := decodeCursor(token, sel, now)
 	require.Nil(t, err)
-	require.Equal(t, "rl:v1:{d}:a/b/c:gcra:60:alice:", after)
+	require.Equal(t, step, decoded, "the store cursor survives the round trip")
 
 	_, err = decodeCursor(token, other, now)
 	require.NotNil(t, err, "a cursor of another selection is refused")

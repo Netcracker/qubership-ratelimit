@@ -15,6 +15,7 @@ package storetest
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,7 +53,9 @@ func Run(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"ResetClearsState", resetClearsState},
 		{"VerdictPerBucketInOrder", verdictPerBucketInOrder},
 		{"FixedWindowCounts", fixedWindowCounts},
-		{"KeysListsUnderPrefix", keysListsUnderPrefix},
+		{"ScanListsEveryKeyUnderThePrefix", scanListsEveryKeyUnderThePrefix},
+		{"ScanOfAnEmptyPrefixEndsWithNoKeys", scanOfAnEmptyPrefixEndsWithNoKeys},
+		{"ScanRejectsANonPositiveLimit", scanRejectsANonPositiveLimit},
 	}
 	for _, tc := range subtests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -254,23 +257,79 @@ func fixedWindowCounts(t *testing.T, f *fixture) {
 	}
 }
 
-func keysListsUnderPrefix(t *testing.T, f *fixture) {
-	insp, ok := f.s.(store.Inspector)
-	if !ok {
-		t.Skip("store does not implement Inspector")
-	}
-	a := f.bucket("a", "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false)
-	b := f.bucket("b", "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false)
-	f.decide([]store.Bucket{a, b}, 1)
+// maxScanSteps caps a walk of the conformance suite. A live store shared with
+// other tests holds keys outside the prefix, and a step of a few keys over
+// such a keyspace is mostly empty; the cap is far above what that takes, so
+// that a walk which never ends fails instead of hanging.
+const maxScanSteps = 100000
 
-	keys, err := insp.Keys(f.t.Context(), f.uniq)
-	if err != nil {
-		t.Fatalf("Keys: %v", err)
+// Seven keys walked three at a time, and then one at a time, the smallest
+// step there is: every key comes back, and nothing outside the prefix does.
+// On the in-process store the first walk crosses two step boundaries and
+// the second six.
+func scanListsEveryKeyUnderThePrefix(t *testing.T, f *fixture) {
+	insp := f.inspector()
+	buckets := make([]store.Bucket, 0, 7)
+	for i := range 7 {
+		buckets = append(buckets,
+			f.bucket(fmt.Sprintf("k%d", i), "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false))
 	}
-	for _, want := range []string{a.Key, b.Key} {
-		if !slices.Contains(keys, want) {
-			t.Errorf("Keys(%q) = %v, missing %q", f.uniq, keys, want)
+	f.decide(buckets, 1)
+
+	for _, limit := range []int{3, 1} {
+		seen := scanWalk(t, insp, f.uniq, limit)
+		for _, b := range buckets {
+			if !slices.Contains(seen, b.Key) {
+				t.Errorf("Scan(%q) walk with limit %d = %v, missing %q", f.uniq, limit, seen, b.Key)
+			}
 		}
+		for _, k := range seen {
+			if !strings.HasPrefix(k, f.uniq) {
+				t.Errorf("Scan(%q) walk with limit %d returned %q, a key outside the prefix", f.uniq, limit, k)
+			}
+		}
+	}
+}
+
+func scanOfAnEmptyPrefixEndsWithNoKeys(t *testing.T, f *fixture) {
+	prefix := f.uniq + ":nothing:"
+	if seen := scanWalk(t, f.inspector(), prefix, 3); len(seen) != 0 {
+		t.Errorf("Scan(%q) walk = %v, want no keys", prefix, seen)
+	}
+}
+
+func scanRejectsANonPositiveLimit(t *testing.T, f *fixture) {
+	insp := f.inspector()
+	for _, limit := range []int{0, -1} {
+		if _, _, err := insp.Scan(f.t.Context(), f.uniq, "", limit); err == nil {
+			t.Errorf("Scan(%q, \"\", %d) = no error, want one", f.uniq, limit)
+		}
+	}
+}
+
+// scanWalk follows Scan from an empty cursor to the end and returns every key
+// the steps returned, in step order, failing on a step that is not sorted or
+// a walk that outruns maxScanSteps.
+func scanWalk(t *testing.T, insp store.Inspector, prefix string, limit int) []string {
+	t.Helper()
+	var seen []string
+	cursor := ""
+	for step := 1; ; step++ {
+		keys, next, err := insp.Scan(t.Context(), prefix, cursor, limit)
+		if err != nil {
+			t.Fatalf("Scan(%q, %q, %d) at step %d: %v", prefix, cursor, limit, step, err)
+		}
+		if !slices.IsSorted(keys) {
+			t.Errorf("Scan(%q, %q, %d) at step %d = %v, want the step sorted", prefix, cursor, limit, step, keys)
+		}
+		seen = append(seen, keys...)
+		if next == "" {
+			return seen
+		}
+		if step >= maxScanSteps {
+			t.Fatalf("Scan(%q) walk did not end within %d steps; the last cursor is %q", prefix, step, next)
+		}
+		cursor = next
 	}
 }
 
@@ -305,6 +364,17 @@ func (f *fixture) bucket(name, algoName string, w algo.Window, shadow bool) stor
 		Window:    w,
 		Shadow:    shadow,
 	}
+}
+
+// inspector returns the store's Inspector, skipping the subtest of a store
+// that has none.
+func (f *fixture) inspector() store.Inspector {
+	f.t.Helper()
+	insp, ok := f.s.(store.Inspector)
+	if !ok {
+		f.t.Skip("store does not implement Inspector")
+	}
+	return insp
 }
 
 func (f *fixture) decide(buckets []store.Bucket, cost int64) []store.Verdict {

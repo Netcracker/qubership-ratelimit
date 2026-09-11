@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -19,7 +20,8 @@ import (
 // the command actually did.
 
 // deadlineAfter makes the walk run out of time once it has consulted the clock
-// the given number of times: one for the deadline itself, then one per key.
+// the given number of times: one for the deadline itself, one before each
+// store step, and one per key.
 func (h *testAPI) deadlineAfter(t *testing.T, checks int) {
 	t.Helper()
 
@@ -163,9 +165,10 @@ func TestBulk_deadlineIsRecordedWithItsDisclosure(t *testing.T) {
 		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
 	}
 
-	// The clock jumps past the deadline after the walk has counted one key, so
-	// the failure discloses progress rather than zeroes.
-	h.deadlineAfter(t, 2)
+	// The clock is consulted for the deadline, then before the first step, then
+	// before each key; it jumps past the deadline once the walk has counted
+	// one key, so the failure discloses that key rather than zeroes.
+	h.deadlineAfter(t, 3)
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
@@ -173,6 +176,7 @@ func TestBulk_deadlineIsRecordedWithItsDisclosure(t *testing.T) {
 
 	require.NotNil(t, body.Meta.PartialReset)
 	require.True(t, body.Meta.PartialReset.DryRun)
+	require.Equal(t, 1, body.Meta.PartialReset.Scanned, "keys walked before the deadline")
 	require.NotNil(t, body.Meta.PartialReset.MatchedCount)
 	require.Contains(t, body.Message, "narrow")
 
@@ -182,6 +186,45 @@ func TestBulk_deadlineIsRecordedWithItsDisclosure(t *testing.T) {
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
 	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
 	require.Equal(t, body.ID, replay.ID)
+}
+
+// The walk reads the store step by step and carries its batch across the
+// steps: 1300 counters of one block are three steps of the store, and the
+// preview counts every one of them once.
+func TestBulk_aPreviewWalksEveryStepOfALargeBlock(t *testing.T) {
+	h := newTestAPI(t)
+	const clients = 1300
+	for i := range clients {
+		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {fmt.Sprintf("client-%04d", i)}}, 1)
+	}
+
+	var preview BulkResult
+	decode(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", operatorRoles()), http.StatusOK, &preview)
+
+	require.Equal(t, clients, preview.Scanned, "keys the walk examined")
+	require.NotNil(t, preview.MatchedCount)
+	require.Equal(t, clients, *preview.MatchedCount, "counters the selection matched")
+}
+
+// A step that returns no key gives the per-key check nothing to run on, so
+// the deadline is also checked before every step: a walk over empty steps
+// stops at the deadline instead of running to the end of the store.
+func TestBulk_theDeadlineIsCheckedBeforeEveryStep(t *testing.T) {
+	h := newTestAPI(t)
+	h.api.Counters = &emptySteps{Store: h.counters, until: 5}
+
+	// The clock is consulted for the deadline and before the first step; the
+	// check before the second step finds the deadline passed.
+	h.deadlineAfter(t, 2)
+
+	body := requireError(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+
+	require.NotNil(t, body.Meta.PartialReset)
+	require.Equal(t, 0, body.Meta.PartialReset.Scanned, "no key was walked before the deadline")
 }
 
 // A failed sweep frees the domain: the lease is released with the outcome, so

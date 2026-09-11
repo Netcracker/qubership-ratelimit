@@ -224,17 +224,36 @@ func (m *Memory) live(ctx context.Context, keys []string) ([]string, error) {
 
 	out := make([]string, 0, len(keys))
 	for _, k := range keys {
-		// A bucket key is the prefix of its own subtree, so this addresses
-		// exactly one counter.
-		found, err := inspector.Keys(ctx, k)
+		found, err := exists(ctx, inspector, k)
 		if err != nil {
 			return nil, err
 		}
-		if slices.Contains(found, k) {
+		if found {
 			out = append(out, k)
 		}
 	}
 	return out, nil
+}
+
+// exists reports whether the counter key k is live. A bucket key is the
+// prefix of its own subtree and sorts first in it, so the in-process store
+// finds it in the first step; the walk continues because the contract lets
+// a step return no key before the end.
+func exists(ctx context.Context, inspector counters.Inspector, k string) (bool, error) {
+	cursor := ""
+	for {
+		found, next, err := inspector.Scan(ctx, k, cursor, 64)
+		if err != nil {
+			return false, err
+		}
+		if slices.Contains(found, k) {
+			return true, nil
+		}
+		if next == "" {
+			return false, nil
+		}
+		cursor = next
+	}
 }
 
 // Put stores a confirmation token under a TTL.

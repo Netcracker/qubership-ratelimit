@@ -245,17 +245,18 @@ const cursorTTL = 10 * time.Minute
 
 // cursor is an opaque continuation. It carries the selection it was minted for
 // so that presenting it with different filters is refused rather than silently
-// answered with a different listing.
+// answered with a different listing. Step is the store's own cursor of the
+// next step to read.
 type cursor struct {
-	After       string `json:"k"`
+	Step        string `json:"c,omitempty"`
 	Fingerprint string `json:"f"`
 	ExpiresAt   int64  `json:"e"`
 }
 
-// encodeCursor mints the continuation after the given key.
-func encodeCursor(after string, s selector, now time.Time) string {
+// encodeCursor mints the continuation that resumes at the store cursor step.
+func encodeCursor(step string, s selector, now time.Time) string {
 	buf, err := json.Marshal(cursor{
-		After:       after,
+		Step:        step,
 		Fingerprint: s.fingerprint(),
 		ExpiresAt:   now.Add(cursorTTL).Unix(),
 	})
@@ -282,7 +283,7 @@ func decodeCursor(raw string, s selector, now time.Time) (string, *apiError) {
 	if now.Unix() > parsed.ExpiresAt {
 		return "", invalid("the cursor has expired; restart the listing", "cursor")
 	}
-	return parsed.After, nil
+	return parsed.Step, nil
 }
 
 func sortedUnique(values []string) []string {

@@ -11,6 +11,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -104,14 +105,39 @@ type Store interface {
 	Reset(ctx context.Context, keys []string) error
 }
 
+// ErrBadCursor reports a cursor that Scan did not mint for this prefix on
+// this store: malformed, or naming a node the store no longer has. The
+// caller restarts its walk from an empty cursor.
+var ErrBadCursor = errors.New("store: the cursor is not a continuation of this scan")
+
 // Inspector is the management-side view of counter state, separate from Store
 // so the decision path never carries enumeration it does not need. A store
 // implementation is free to provide both.
 type Inspector interface {
-	// Keys lists the counter keys that currently exist under a prefix.
-	// Expensive by design: callers are management endpoints, never the
-	// decision path.
-	Keys(ctx context.Context, prefix string) ([]string, error)
+	// Scan lists the live keys under prefix one step at a time, so that a
+	// caller holds one step of keys at once however many the prefix covers.
+	//
+	// A walk starts with an empty cursor; each step returns the cursor of the
+	// next one, and an empty next ends the walk. A cursor is opaque and valid
+	// for the same prefix on the same store; one the store cannot resume, a
+	// malformed one or one minted for a node the store no longer has, is
+	// refused with [ErrBadCursor].
+	//
+	// limit is the work one step asks for; a limit below 1 is refused with an
+	// error. A step
+	// returns about that many keys, sorted; a store that reads whole hash
+	// table slots (Redis SCAN) may return somewhat more, so a caller sizes
+	// its memory by limit plus that margin. A step may also return no keys
+	// before the walk ends, where the prefix's keys are sparse in a keyspace
+	// the store shares with other data.
+	//
+	// The walk is live rather than a snapshot: a key that exists for the
+	// whole walk is returned at least once, and a key created, expired, or
+	// deleted during it may be missed or returned twice. That holds for a
+	// walk along the chain of cursors the steps return; a step resumed with
+	// an earlier cursor has no such promise. Expensive by design: callers
+	// are management endpoints, never the decision path.
+	Scan(ctx context.Context, prefix, cursor string, limit int) (keys []string, next string, err error)
 }
 
 // GuardBuckets applies the cheap edge of the caller contract, shared by every

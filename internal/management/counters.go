@@ -2,8 +2,8 @@ package management
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +14,8 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/ruleview"
 )
 
-// scanBudget bounds the keys one call examines.
+// scanBudget bounds the keys one call examines, exactly on a store whose step
+// is exact and within the step's margin on one whose step is a hint.
 //
 // The size of a selection cannot be known in advance, because a scan does not
 // count matches cheaply. Work is bounded instead of predicted: a page stops at
@@ -22,8 +23,16 @@ import (
 // busy domain into a short page rather than a request that never returns.
 const scanBudget = 12_000
 
-// defaultPageSize and maxPageSize bound one page of counters. Each page costs
-// one Peek across its keys.
+// maxScanSteps bounds the store round trips of one page. The budget counts
+// keys the store returned, and on a keyspace shared with other data a step
+// can return no key of the prefix at all; a long stretch of such steps would
+// never fill the budget. A page stops at this many steps whatever it found,
+// and says where to resume. A step asks for the room left on the page, so
+// this many steps of the default page cover the scan budget.
+const maxScanSteps = 128
+
+// defaultPageSize and maxPageSize bound the size a page asks for. Each page
+// costs one Peek across its keys.
 const (
 	defaultPageSize = 100
 	maxPageSize     = 500
@@ -34,8 +43,9 @@ type CounterList struct {
 	Items []CounterView `json:"items"`
 
 	// NextCursor is the only signal that more follows. A page can be short
-	// mid-collection when the scan budget fills first, so page fill says
-	// nothing.
+	// mid-collection when the scan budget or the step cap fills first, and
+	// on a store whose step is a hint it can run a little over the page
+	// size, so page fill says nothing.
 	NextCursor string `json:"nextCursor,omitempty"`
 
 	Truncated bool `json:"truncated,omitempty"`
@@ -137,7 +147,7 @@ func (a *API) listCounters(
 	snapshot *compile.Snapshot,
 	sel selector,
 	pageSize int,
-	after string,
+	start string,
 	now time.Time,
 ) (CounterList, *apiError) {
 	inspector, ok := a.Counters.(counters.Inspector)
@@ -148,100 +158,165 @@ func (a *API) listCounters(
 			"the configured counter store cannot enumerate keys, so counters cannot be listed")
 	}
 
-	keys, err := inspector.Keys(ctx, scanPrefix(a.Namespace, snapshot.Domain, sel))
+	page, err := a.selectCandidates(ctx, snapshot, inspector, sel, pageSize, start)
 	if err != nil {
+		if errors.Is(err, counters.ErrBadCursor) {
+			// The listing checks the fingerprint and the age of a cursor; the
+			// store cursor inside it is checked by the store, and its refusal
+			// is a bad request, not an outage.
+			return CounterList{}, invalid("the store cannot resume the cursor; restart the listing", "cursor")
+		}
 		a.Log.ErrorC(ctx, "failed to scan counter keys domain=%v error=%v", snapshot.Domain, err)
 		return CounterList{}, storeDown("the counter store did not answer the scan")
 	}
-	sort.Strings(keys)
 
-	page := a.selectCandidates(ctx, snapshot, keys, sel, pageSize, after)
 	views, apiErr := a.judge(ctx, page.candidates, sel.LimitedOnly)
 	if apiErr != nil {
 		return CounterList{}, apiErr
 	}
 
 	list := CounterList{Items: views, Scanned: page.scanned}
-	// The cursor is minted from the last key the walk looked at, not from the
-	// last one it kept. A page that filled its budget without a match would
-	// otherwise end the listing — a missing nextCursor is what the contract
-	// defines as the end — and a narrow filter over a busy domain would report
-	// that a counter which exists does not. Resuming from the last candidate
-	// would also rescan the tail between it and the budget.
 	if page.more {
 		list.Truncated = true
-		list.NextCursor = encodeCursor(page.lastScanned, sel, now)
+		list.NextCursor = encodeCursor(page.resume, sel, now)
 	}
 	return list, nil
 }
 
-// page is what one walk of the sorted keys produced: the counters it kept, how
-// many keys it looked at, whether it stopped early, and the last key it looked
-// at, which is where the next page resumes.
+// page is what one walk produced: the counters it kept, how many keys it
+// looked at, whether it stopped with steps unread, and the store cursor the
+// next page resumes with.
 type page struct {
-	candidates  []counterCandidate
-	scanned     int
-	more        bool
-	lastScanned string
+	candidates []counterCandidate
+	scanned    int
+	more       bool
+	resume     string
 }
 
-// selectCandidates walks the sorted keys after the cursor, keeping the ones the
-// selection admits, and stops at the page size or the scan budget.
+// pageWalk is one page being assembled: the selection it applies, the store
+// cursor of the next step, and what it has kept so far.
+type pageWalk struct {
+	api      *API
+	snapshot *compile.Snapshot
+	index    rateIndex
+	sel      selector
+	pageSize int
+	next     string
+	out      page
+}
+
+// take consumes the keys of one whole step, keeping what the selection
+// admits.
+func (w *pageWalk) take(ctx context.Context, keys []string) {
+	for _, k := range keys {
+		w.out.scanned++
+		if candidate, ok := w.api.admit(ctx, w.snapshot, w.index, w.sel, k); ok {
+			w.out.candidates = append(w.out.candidates, candidate)
+		}
+	}
+}
+
+// full reports whether the page has no room for another step: the page size
+// or the scan budget is reached, or the step cap.
+func (w *pageWalk) full(steps int) bool {
+	return len(w.out.candidates) >= w.pageSize || w.out.scanned >= scanBudget || steps >= maxScanSteps
+}
+
+// room is how many keys the next step asks for: what the page size and the
+// scan budget leave, so that a store whose step is exact fills the page and
+// the budget exactly, and one whose step is a hint exceeds them by that
+// hint's margin at most.
+func (w *pageWalk) room() int {
+	return min(w.pageSize-len(w.out.candidates), scanBudget-w.out.scanned)
+}
+
+// stopped returns the page cut short with steps unread, resuming at next.
+func (w *pageWalk) stopped() page {
+	w.out.more, w.out.resume = true, w.next
+	return w.out
+}
+
+// selectCandidates walks the store from the cursor start one whole step at a
+// time, keeping the keys the selection admits, and stops between steps once
+// the page size, the scan budget, or the step cap is reached.
+//
+// A page never stops inside a step, and its cursor is the store's own cursor
+// of the step after it: the store returns every key only to a walk along the
+// chain of cursors it returns, so a page that reread a step with an earlier
+// cursor could miss or repeat a key after the store rearranged its keyspace.
+// Each step asks for the room left on the page, which keeps the page at the
+// page size on a store whose step is exact and a little past it on one whose
+// step is a hint. The cursor is minted from where the walk stopped, not from
+// the last key it kept: a page that filled its budget without a match would
+// otherwise end the listing, since a missing nextCursor is what the contract
+// defines as the end, and a narrow filter over a busy domain would report
+// that a counter which exists does not.
 func (a *API) selectCandidates(
 	ctx context.Context,
 	snapshot *compile.Snapshot,
-	keys []string,
+	inspector counters.Inspector,
 	sel selector,
 	pageSize int,
-	after string,
-) page {
-	index := newRateIndex(snapshot)
-	out := page{}
+	start string,
+) (page, error) {
+	w := &pageWalk{api: a, snapshot: snapshot, index: newRateIndex(snapshot), sel: sel, pageSize: pageSize, next: start}
+	prefix := scanPrefix(a.Namespace, snapshot.Domain, sel)
 
-	for _, k := range keys {
-		if after != "" && k <= after {
-			continue
+	for steps := 0; ; steps++ {
+		if w.full(steps) {
+			return w.stopped(), nil
 		}
-		if len(out.candidates) >= pageSize || out.scanned >= scanBudget {
-			out.more = true
-			return out
-		}
-		out.scanned++
-		out.lastScanned = k
-
-		parsed, err := parseCounterKey(a.Namespace, snapshot.Domain, k)
+		keys, next, err := inspector.Scan(ctx, prefix, w.next, w.room())
 		if err != nil {
-			// A key that does not parse belongs to another layout or another
-			// writer. It is reported once and skipped: a listing is not the
-			// place to fail the whole call over one foreign key.
-			a.Log.DebugC(ctx, "skipping an unparsable counter key domain=%v reason=%v",
-				snapshot.Domain, err)
-			continue
+			return page{}, err
 		}
-		if !sel.matches(parsed) {
-			continue
+		w.take(ctx, keys)
+		if next == "" {
+			return w.out, nil
 		}
-		ref, enforced := index[parsed.RatePrefix]
-		if !enforced {
-			// A rollout removed the rule while its counters live out their TTL.
-			// There is nothing in the serving snapshot to render them against, so
-			// they are skipped; they were examined, and scanned says so.
-			continue
-		}
-		axes, err := parsed.namedAxes(ref.rule.Counters)
-		if err != nil {
-			a.Log.DebugC(ctx, "skipping a counter whose axes do not fit its rule domain=%v reason=%v",
-				snapshot.Domain, err)
-			continue
-		}
-		if !sel.matchesAxes(axes) {
-			continue
-		}
-		out.candidates = append(out.candidates, counterCandidate{
-			key: k, ref: ref, ruleID: parsed.RuleID, axes: axes,
-		})
+		w.next = next
 	}
-	return out
+}
+
+// admit applies the selection to one scanned key: the key has to parse, match
+// the key-level filters, belong to a rule of the enforced set, and carry axes
+// the identity filters admit.
+func (a *API) admit(
+	ctx context.Context,
+	snapshot *compile.Snapshot,
+	index rateIndex,
+	sel selector,
+	k string,
+) (counterCandidate, bool) {
+	parsed, err := parseCounterKey(a.Namespace, snapshot.Domain, k)
+	if err != nil {
+		// A key that does not parse belongs to another layout or another
+		// writer. It is reported once and skipped: a listing is not the
+		// place to fail the whole call over one foreign key.
+		a.Log.DebugC(ctx, "skipping an unparsable counter key domain=%v reason=%v",
+			snapshot.Domain, err)
+		return counterCandidate{}, false
+	}
+	if !sel.matches(parsed) {
+		return counterCandidate{}, false
+	}
+	ref, enforced := index[parsed.RatePrefix]
+	if !enforced {
+		// A rollout removed the rule while its counters live out their TTL.
+		// There is nothing in the serving snapshot to render them against, so
+		// they are skipped; they were examined, and scanned says so.
+		return counterCandidate{}, false
+	}
+	axes, err := parsed.namedAxes(ref.rule.Counters)
+	if err != nil {
+		a.Log.DebugC(ctx, "skipping a counter whose axes do not fit its rule domain=%v reason=%v",
+			snapshot.Domain, err)
+		return counterCandidate{}, false
+	}
+	if !sel.matchesAxes(axes) {
+		return counterCandidate{}, false
+	}
+	return counterCandidate{key: k, ref: ref, ruleID: parsed.RuleID, axes: axes}, true
 }
 
 // judge asks the store what each candidate would do to the next request.

@@ -10,7 +10,7 @@
 // quantities the script will return.
 //
 // Expiry is lazy: state is dropped when touched past its deadline, and swept
-// during Keys. An entry nobody touches again lingers until then — acceptable
+// during Scan. An entry nobody touches again lingers until then — acceptable
 // for a fixture, wrong for production.
 package memory
 
@@ -137,24 +137,37 @@ func (s *Store) Reset(ctx context.Context, keys []string) error {
 	return nil
 }
 
-// Keys lists live keys under a prefix and sweeps expired entries on the way.
-func (s *Store) Keys(ctx context.Context, prefix string) ([]string, error) {
+// Scan implements [store.Inspector] in key order: a step returns the smallest
+// limit keys under prefix above cursor, and the last of them as the cursor of
+// the next step. Any string resumes the walk after itself, so the store
+// never returns [store.ErrBadCursor]. Expired entries met on the way are
+// swept. One step reads and sorts the whole map, so it costs the map's size
+// however small limit is; that is the fixture's price for a cursor that
+// survives any change of the map.
+func (s *Store) Scan(_ context.Context, prefix, cursor string, limit int) ([]string, string, error) {
+	if limit < 1 {
+		return nil, "", fmt.Errorf("memory: scan: limit must be at least 1, got %d", limit)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	nowUS := s.now().UnixMicro()
-	var out []string
+	var above []string
 	for k, e := range s.m {
 		if e.deadline <= nowUS {
 			delete(s.m, k)
 			continue
 		}
-		if strings.HasPrefix(k, prefix) {
-			out = append(out, k)
+		if k > cursor && strings.HasPrefix(k, prefix) {
+			above = append(above, k)
 		}
 	}
-	sort.Strings(out)
-	return out, nil
+	sort.Strings(above)
+	if len(above) <= limit {
+		return above, "", nil
+	}
+	keys := above[:limit]
+	return keys, keys[limit-1], nil
 }
 
 func (s *Store) evalAll(buckets []store.Bucket, cost int64) ([]outcome, error) {

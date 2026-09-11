@@ -1,6 +1,7 @@
 package memory_test
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -76,15 +77,63 @@ func TestStateExpires(t *testing.T) {
 	if _, err := s.Decide(t.Context(), buckets, 1); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	keys, err := s.Keys(t.Context(), "exp:")
+	keys, _, err := s.Scan(t.Context(), "exp:", "", 10)
 	if err != nil || len(keys) != 2 {
-		t.Fatalf("Keys = %v, %v; want both live keys", keys, err)
+		t.Fatalf("Scan(\"exp:\") = %v, %v; want both live keys", keys, err)
 	}
 
 	time.Sleep(1200 * time.Millisecond)
 
-	keys, err = s.Keys(t.Context(), "exp:")
+	keys, _, err = s.Scan(t.Context(), "exp:", "", 10)
 	if err != nil || len(keys) != 0 {
-		t.Fatalf("Keys = %v, %v after the windows drained; want none", keys, err)
+		t.Fatalf("Scan(\"exp:\") = %v, %v after the windows drained; want none", keys, err)
+	}
+}
+
+// The fixture walks in key order and each step ends on its last key, so a
+// walk of five keys two at a time is three steps that repeat nothing, and a
+// step with room to spare is the last one.
+func TestScan_walksInKeyOrderWithoutARepeat(t *testing.T) {
+	s := memory.New()
+	want := []string{"walk:{d}:a", "walk:{d}:b", "walk:{d}:c", "walk:{d}:d", "walk:{d}:e"}
+	for _, k := range want {
+		bucket := store.Bucket{Key: k, Algorithm: algo.GCRAID,
+			Window: algo.Window{Requests: 10, Period: time.Hour, Burst: 10}}
+		if _, err := s.Decide(t.Context(), []store.Bucket{bucket}, 1); err != nil {
+			t.Fatalf("Decide(%q): %v", k, err)
+		}
+	}
+
+	var steps [][]string
+	cursor := ""
+	for {
+		keys, next, err := s.Scan(t.Context(), "walk:", cursor, 2)
+		if err != nil {
+			t.Fatalf("Scan(\"walk:\", %q, 2): %v", cursor, err)
+		}
+		steps = append(steps, keys)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+
+	wantSteps := [][]string{
+		{"walk:{d}:a", "walk:{d}:b"},
+		{"walk:{d}:c", "walk:{d}:d"},
+		{"walk:{d}:e"},
+	}
+	if !reflect.DeepEqual(steps, wantSteps) {
+		t.Errorf("Scan(\"walk:\") steps = %v, want %v", steps, wantSteps)
+	}
+
+	// Any string is a cursor: the walk resumes after it in key order, whether
+	// or not it is a key of the store.
+	keys, _, err := s.Scan(t.Context(), "walk:", "walk:{d}:bb", 2)
+	if err != nil {
+		t.Fatalf("Scan(\"walk:\", \"walk:{d}:bb\", 2): %v", err)
+	}
+	if want := []string{"walk:{d}:c", "walk:{d}:d"}; !reflect.DeepEqual(keys, want) {
+		t.Errorf("Scan(\"walk:\", \"walk:{d}:bb\", 2) = %v, want %v", keys, want)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"maps"
-	"sort"
 	"time"
 
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -26,6 +25,10 @@ import (
 // Larger batches cost fewer round trips; smaller ones keep the recorded
 // progress closer to the truth when a walk is cut short.
 const sweepBatch = 256
+
+// sweepScanStep is how many keys one store step of the walk asks for: the
+// keys a walk holds of the store at once, whatever the domain's size.
+const sweepScanStep = 512
 
 // errDeadline reports a walk that ran out of its deadline. It is separate from
 // a defect because its recovery is: narrow the selection.
@@ -53,6 +56,9 @@ type sweeper struct {
 
 	progress records.Progress
 	rules    map[string]int
+
+	// batch holds the candidates judged since the last commit.
+	batch []counterCandidate
 }
 
 // newSweeper prepares a walk over the selection.
@@ -72,6 +78,7 @@ func (a *API) newSweeper(
 		domainWide: command.DomainWide,
 		execute:    !command.DryRun,
 		rules:      map[string]int{},
+		batch:      make([]counterCandidate, 0, sweepBatch),
 	}
 }
 
@@ -90,13 +97,33 @@ func (s *sweeper) run(ctx context.Context, deadline time.Time) error {
 	if !s.domainWide {
 		prefix = scanPrefix(s.api.Namespace, s.snapshot.Domain, s.sel)
 	}
-	keys, err := inspector.Keys(ctx, prefix)
-	if err != nil {
-		return err
+	cursor := ""
+	for {
+		// The deadline is checked before every step as well as before every
+		// key: on a keyspace shared with other data a step can return no key
+		// of the prefix, and a long stretch of such steps would otherwise run
+		// past the deadline with no key to check it on.
+		if s.api.now().After(deadline) {
+			return errDeadline
+		}
+		keys, next, err := inspector.Scan(ctx, prefix, cursor, sweepScanStep)
+		if err != nil {
+			return err
+		}
+		if err := s.walk(ctx, keys, deadline); err != nil {
+			return err
+		}
+		if next == "" {
+			return s.commitBatch(ctx, s.batch)
+		}
+		cursor = next
 	}
-	sort.Strings(keys)
+}
 
-	batch := make([]counterCandidate, 0, sweepBatch)
+// walk judges the keys of one step, batching the candidates and committing
+// the batch whenever it fills; it stops with errDeadline when the clock runs
+// out between two keys.
+func (s *sweeper) walk(ctx context.Context, keys []string, deadline time.Time) error {
 	for _, k := range keys {
 		if s.api.now().After(deadline) {
 			return errDeadline
@@ -108,16 +135,16 @@ func (s *sweeper) run(ctx context.Context, deadline time.Time) error {
 			continue
 		}
 
-		batch = append(batch, candidate)
-		if len(batch) < sweepBatch {
+		s.batch = append(s.batch, candidate)
+		if len(s.batch) < sweepBatch {
 			continue
 		}
-		if err := s.commitBatch(ctx, batch); err != nil {
+		if err := s.commitBatch(ctx, s.batch); err != nil {
 			return err
 		}
-		batch = batch[:0]
+		s.batch = s.batch[:0]
 	}
-	return s.commitBatch(ctx, batch)
+	return nil
 }
 
 // consider applies the filters that need nothing but the key and the snapshot.

@@ -19,6 +19,7 @@ import (
 	_ "embed"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -112,37 +113,130 @@ func (s *Store) Reset(ctx context.Context, keys []string) error {
 	return nil
 }
 
-// Keys lists live keys under a prefix with SCAN — on a cluster, per master
-// node. Expensive by design; callers are management endpoints.
-func (s *Store) Keys(ctx context.Context, prefix string) ([]string, error) {
-	match := escapeGlob(prefix) + "*"
-	var (
-		mu  sync.Mutex
-		out []string
-	)
-	scan := func(ctx context.Context, c goredis.Cmdable) error {
-		iter := c.Scan(ctx, 0, match, 512).Iterator()
-		for iter.Next(ctx) {
-			mu.Lock()
-			out = append(out, iter.Val())
-			mu.Unlock()
-		}
-		return iter.Err()
+// Scan implements [store.Inspector] with one SCAN per step. On a Cluster the
+// walk reads the one master that owns the prefix's hash tag, where every key
+// of a domain lives, and every master in address order when the prefix has
+// no tag. The cursor names the node it belongs to, so a cursor minted before
+// a slot moved or a master left is refused with [store.ErrBadCursor] rather
+// than resumed on the wrong node.
+func (s *Store) Scan(ctx context.Context, prefix, cursor string, limit int) ([]string, string, error) {
+	if limit < 1 {
+		return nil, "", fmt.Errorf("redis: scan: limit must be at least 1, got %d", limit)
+	}
+	nodes, err := s.scanNodes(ctx, prefix)
+	if err != nil {
+		return nil, "", fmt.Errorf("redis: scan: %w", err)
+	}
+	node, pos, err := parseScanCursor(cursor, nodes)
+	if err != nil {
+		return nil, "", err
 	}
 
-	var err error
-	if cc, ok := s.rdb.(*goredis.ClusterClient); ok {
-		err = cc.ForEachMaster(ctx, func(ctx context.Context, node *goredis.Client) error {
-			return scan(ctx, node)
-		})
-	} else {
-		err = scan(ctx, s.rdb)
+	match := escapeGlob(prefix) + "*"
+	for {
+		keys, next, err := nodes[node].client.Scan(ctx, pos, match, int64(limit)).Result()
+		if err != nil {
+			return nil, "", fmt.Errorf("redis: scan: %w", err)
+		}
+		sort.Strings(keys)
+		switch {
+		case next != 0:
+			return keys, formatScanCursor(nodes[node].addr, next), nil
+		case node+1 < len(nodes):
+			// This master is exhausted. When its last SCAN returned keys,
+			// they are the step and the cursor names the next master's start;
+			// when it returned none, the step goes on with the next master.
+			node, pos = node+1, 0
+			if len(keys) > 0 {
+				return keys, formatScanCursor(nodes[node].addr, 0), nil
+			}
+		default:
+			return keys, "", nil
+		}
 	}
+}
+
+// scanNode is one master a walk reads. addr is empty on a standalone or
+// Sentinel deployment, where there is one node and nothing to name.
+type scanNode struct {
+	addr   string
+	client goredis.Cmdable
+}
+
+// scanNodes resolves the masters a walk of prefix reads, in the order the
+// cursor counts them.
+func (s *Store) scanNodes(ctx context.Context, prefix string) ([]scanNode, error) {
+	cc, ok := s.rdb.(*goredis.ClusterClient)
+	if !ok {
+		return []scanNode{{client: s.rdb}}, nil
+	}
+	if hasHashTag(prefix) {
+		owner, err := cc.MasterForKey(ctx, prefix)
+		if err != nil {
+			return nil, err
+		}
+		return []scanNode{{addr: owner.Options().Addr, client: owner}}, nil
+	}
+
+	var (
+		mu    sync.Mutex
+		nodes []scanNode
+	)
+	err := cc.ForEachMaster(ctx, func(_ context.Context, master *goredis.Client) error {
+		mu.Lock()
+		defer mu.Unlock()
+		nodes = append(nodes, scanNode{addr: master.Options().Addr, client: master})
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("redis: keys: %w", err)
+		return nil, err
 	}
-	sort.Strings(out)
-	return out, nil
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].addr < nodes[j].addr })
+	return nodes, nil
+}
+
+// hasHashTag reports whether Redis Cluster hashes s by a tag: a non-empty
+// stretch between the first "{" and the first "}" after it. A prefix with a
+// tag names one slot, and every key under the prefix lives on that slot's
+// master, because the key's first tag is the prefix's.
+func hasHashTag(s string) bool {
+	_, rest, opened := strings.Cut(s, "{")
+	if !opened {
+		return false
+	}
+	tag, _, closed := strings.Cut(rest, "}")
+	return closed && tag != ""
+}
+
+// formatScanCursor carries a SCAN cursor together with the address of the
+// node it belongs to; a node without an address carries the cursor alone.
+func formatScanCursor(addr string, pos uint64) string {
+	if addr == "" {
+		return strconv.FormatUint(pos, 10)
+	}
+	return addr + "@" + strconv.FormatUint(pos, 10)
+}
+
+// parseScanCursor reads a cursor back into the index of its node among nodes
+// and its SCAN position. An empty cursor starts the walk on the first node.
+func parseScanCursor(cursor string, nodes []scanNode) (node int, pos uint64, err error) {
+	if cursor == "" {
+		return 0, 0, nil
+	}
+	addr, digits := "", cursor
+	if i := strings.LastIndexByte(cursor, '@'); i >= 0 {
+		addr, digits = cursor[:i], cursor[i+1:]
+	}
+	pos, err = strconv.ParseUint(digits, 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("redis: scan: %w", store.ErrBadCursor)
+	}
+	for i, n := range nodes {
+		if n.addr == addr {
+			return i, pos, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("redis: scan: %w", store.ErrBadCursor)
 }
 
 // parseReply turns the script's flat integer array into verdicts, in bucket
