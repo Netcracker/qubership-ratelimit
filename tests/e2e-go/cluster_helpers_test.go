@@ -25,12 +25,18 @@ import (
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
-// operatorDeployment resolves the release's Deployment name - the bash suites'
-// OPERATOR_SVC, discovered from the running pods rather than assumed.
+// operatorDeployment resolves the release's Deployment by its labels rather
+// than by name. The Deployment is named after the chart, the Service has a
+// fixed name, and the release can be called anything - CI names it
+// ratelimit-baseline so that the suite cannot mistake a name derived from the
+// release for a fixed one. None of those three is safe to assume from
+// another, and the instance label this used to return is the release name.
 func operatorDeployment() string {
-	pods := operatorPods()
-	Expect(pods).NotTo(BeEmpty(), "no running ratelimit pod in %s", namespace)
-	return pods[0].Labels["app.kubernetes.io/instance"]
+	var deployments appsv1.DeploymentList
+	Expect(k8s.List(ctx, &deployments, client.InNamespace(namespace),
+		client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"})).To(Succeed())
+	Expect(deployments.Items).To(HaveLen(1), "expected one ratelimit Deployment in %s", namespace)
+	return deployments.Items[0].Name
 }
 
 func operatorPods() []corev1.Pod {
