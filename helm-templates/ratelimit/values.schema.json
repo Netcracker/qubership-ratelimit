@@ -26,7 +26,7 @@
     "fullnameOverride": {
       "type": "string",
       "title": "Full name override",
-      "description": "Replaces the generated name of the Deployment, Service, ServiceAccount and RBAC pair. The Service name is part of the gRPC cluster address in the EnvoyFilter, so overriding it rewrites that address too."
+      "description": "Replaces the generated name of the Deployment, ServiceAccount and RBAC pair. The Service keeps its fixed name, ratelimit: a satellite computes the RLS address from it and cannot know how the baseline was named."
     },
     "image": {
       "type": "object",
@@ -438,6 +438,18 @@
         }
       },
       "additionalProperties": false
+    },
+    "BASELINE_ORIGIN": {
+      "type": "string",
+      "title": "Baseline origin namespace",
+      "description": "Set by the deployer on a satellite namespace of a composite, naming the baseline's origin namespace. Empty means this release is a standalone installation or the baseline itself. When set, only the gateway filters render and they send checks to the baseline's ratelimit Service.",
+      "default": ""
+    },
+    "BASELINE_CONTROLLER": {
+      "type": "string",
+      "title": "Baseline controller namespace",
+      "description": "The controller namespace of a blue-green baseline, where its shared components run. Takes precedence over BASELINE_ORIGIN as the namespace of the ratelimit Service a satellite sends checks to.",
+      "default": ""
     }
   },
   "definitions": {

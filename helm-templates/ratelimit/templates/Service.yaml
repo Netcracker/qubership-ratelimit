@@ -1,7 +1,8 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "ratelimit.fullname" . }}
+  name: {{ include "ratelimit.serviceName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "ratelimit.labels" . | nindent 4 }}
@@ -22,3 +23,4 @@ spec:
     {{- end }}
   selector:
     {{- include "ratelimit.selectorLabels" . | nindent 4 }}
+{{- end }}

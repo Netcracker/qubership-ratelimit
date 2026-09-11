@@ -168,9 +168,34 @@ differ from their siblings only by running two replicas.
 `MEMORY_LIMIT` is not only a cgroup ceiling: the platform's `memlimit` package derives `GOMEMLIMIT` from it at startup,
 so it governs when the Go heap starts collecting.
 
-The chart installs a `ServiceAccount`, a `Role` and `RoleBinding` pair, a `Deployment`, a `Service`, both CRDs, and one
+The chart installs a `ServiceAccount`, a `Role` and `RoleBinding` pair, a `Deployment`, a `Service`, the CRD, and one
 `EnvoyFilter` per enabled gateway. It installs no `ClusterRole` and no `ClusterRoleBinding`. The `Role` also carries
 `configmaps` in its own namespace, for the last-good state described above.
+
+The `Service` is named `ratelimit` whatever the release is called, and `fullnameOverride` does not rename it. A
+satellite computes the RLS address from that name and the baseline's namespace, so the name cannot depend on how the
+baseline was installed.
+
+An empty `redis.addresses` selects the in-process counter store, which counts per replica. The chart accepts it only
+with `REPLICAS: 1`; any other count fails the render with `in-process store needs exactly one replica; set
+redis.addresses`, because a limit of 100 across three replicas would admit 300.
+
+### Composite installations
+
+A business application is installed either into one namespace or as a composite: one baseline namespace plus
+satellites, each with its own gateway. Every gateway of the composite sends the same domains, the component runs in the
+baseline alone, and a satellite gets the gateway filters and nothing else.
+
+The chart reads the deployer's composite variables, the same ones `core-operator` renders by:
+
+| `BASELINE_ORIGIN` | Renders                                                        | Filters send checks to             |
+|-------------------|----------------------------------------------------------------|------------------------------------|
+| empty             | everything: standalone install, or the baseline of a composite | `ratelimit.<own namespace>:9000`   |
+| set               | the `EnvoyFilter` objects only, no CRD, workload, or RBAC      | `ratelimit.<BASELINE_ORIGIN>:9000` |
+
+`BASELINE_CONTROLLER` names the controller namespace of a blue-green baseline, where its shared components run, and
+takes precedence over `BASELINE_ORIGIN` as the target namespace when set. The e2e workflow and the local install above
+run in the first row.
 
 The gateway names are not this chart's to choose. They are deployment parameters shared with
 `qubership-core-mesh-config`, the chart that creates the `Gateway` objects, and the deployer injects the same set into

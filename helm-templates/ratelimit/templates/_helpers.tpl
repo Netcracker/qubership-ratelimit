@@ -21,6 +21,54 @@ and the RBAC pair, so the gRPC cluster address in the EnvoyFilter resolves.
 {{- default (include "ratelimit.fullname" .) .Values.serviceAccount.name -}}
 {{- end -}}
 
+{{/*
+Which of the composite's namespaces this release lands in.
+
+A business application is installed either into one namespace or as a
+composite: one baseline namespace plus satellites, each with its own gateway.
+The component runs in the baseline alone; a satellite gets the gateway filters
+and nothing else, and its filters send checks to the baseline's Service.
+
+The signal is the deployer's BASELINE_ORIGIN, and it is the one core-operator
+itself renders by: a namespace with BASELINE_ORIGIN set is a satellite, and
+the value is the baseline's namespace. A namespace without it is the baseline,
+or a standalone installation - and those two render the same objects, which
+is why there is no third value here.
+
+For a blue-green baseline the shared components run in its controller
+namespace, so BASELINE_CONTROLLER takes precedence when set. That is the
+resolution control-plane uses for the same question.
+*/}}
+{{- define "ratelimit.mode" -}}
+{{- if .Values.BASELINE_ORIGIN -}}satellite{{- else -}}baseline{{- end -}}
+{{- end -}}
+
+{{/*
+The namespace whose Service the gateway filters send checks to: this one, or
+the baseline's for a satellite.
+*/}}
+{{- define "ratelimit.serviceNamespace" -}}
+{{- if .Values.BASELINE_ORIGIN -}}
+{{- coalesce .Values.BASELINE_CONTROLLER .Values.BASELINE_ORIGIN -}}
+{{- else -}}
+{{- .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The Service is named ratelimit whatever the release is called. A satellite
+namespace of a composite runs no component of its own: its gateway filters
+send checks to the baseline's Service, and the address they compute has only
+the baseline's namespace to go on. A name derived from the release would leave
+the satellite guessing at how the baseline was installed.
+
+The leader reads its fleet through this Service too, so the Deployment passes
+the same name as --service-name.
+*/}}
+{{- define "ratelimit.serviceName" -}}
+ratelimit
+{{- end -}}
+
 {{- define "ratelimit.labels" -}}
 app.kubernetes.io/name: {{ include "ratelimit.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -54,7 +102,7 @@ FQDN of the RLS Service — the :authority the gateway's gRPC calls carry, and
 the host half of the rlsCluster name.
 */}}
 {{- define "ratelimit.rlsAuthority" -}}
-{{- printf "%s.%s.svc.cluster.local" (include "ratelimit.fullname" .) .Release.Namespace -}}
+{{- printf "%s.%s.svc.cluster.local" (include "ratelimit.serviceName" .) (include "ratelimit.serviceNamespace" .) -}}
 {{- end -}}
 
 {{/*
@@ -79,18 +127,17 @@ of both gateways would merge into the same buckets.
 {{- end -}}
 
 {{/*
-Refuse a management API that would answer at random.
+Refuse an in-process counter store on more than one replica.
 
-Without redis.addresses the counters, the idempotency records, the sweep lease,
-and the confirmation tokens all live in one replica's memory. At more than one
-replica a preview lands on one pod and its confirmation on another, which has
-never heard of the token: the operator gets 404 or 409 depending on which pod
-the Service picked. The reads would look fine the whole time.
+Without redis.addresses every replica counts in its own memory, so a limit of
+N admits N per replica: the rendered limit is not the enforced one, and nothing
+in the status says so. The management API makes it worse - its idempotency
+records, sweep lease, and confirmation tokens live in that same memory, so a
+preview lands on one pod and its confirmation on another that has never heard
+of the token. Both are the same mistake, and this is where it is refused.
 */}}
-{{- define "ratelimit.validateManagement" -}}
-{{- if .Values.management.enabled -}}
-{{- if and (not .Values.redis.addresses) (gt (int .Values.REPLICAS) 1) -}}
-{{- fail (printf "management.enabled needs a shared counter store above one replica: REPLICAS is %v and redis.addresses is empty, so the idempotency records and confirmation tokens would live in each replica's memory. Set redis.addresses, or REPLICAS to 1." .Values.REPLICAS) -}}
-{{- end -}}
+{{- define "ratelimit.validateStore" -}}
+{{- if and (not .Values.redis.addresses) (ne (int .Values.REPLICAS) 1) -}}
+{{- fail (printf "in-process store needs exactly one replica; set redis.addresses (REPLICAS is %v and redis.addresses is empty)" .Values.REPLICAS) -}}
 {{- end -}}
 {{- end -}}
