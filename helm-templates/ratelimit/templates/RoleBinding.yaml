@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "ratelimit.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ratelimit.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ratelimit.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

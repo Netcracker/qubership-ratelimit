@@ -1,0 +1,619 @@
+package controller
+
+import (
+	"context"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+
+	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/config"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/internal/policy"
+)
+
+const envtestNamespace = "ratelimit-envtest"
+
+// These specs run against a real API server, which is the only place the schema
+// actually runs. A fake client accepts anything the Go types allow, so a
+// constraint that never fires would look like one that works.
+//
+// The schema holds the shape of values and nothing else: patterns, enums,
+// ranges, uniqueness through list types, and the one CEL rule that makes a
+// policy the singleton of its domain. Everything that relates fields to each
+// other is the compiler's, answered through the status — the cost estimator
+// charges every CEL rule the product of the list bounds on the way to it, so
+// keeping those checks here would mean bounding every list for the estimator's
+// sake and maintaining a second copy of the compiler.
+
+// policyWith builds a policy for a domain. The name is the domain: the CEL rule
+// admits nothing else.
+func policyWith(domain string, blocks ...ratelimitv1alpha1.LimitBlock) *ratelimitv1alpha1.RateLimitPolicy {
+	return &ratelimitv1alpha1.RateLimitPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: envtestNamespace, Name: domain},
+		Spec: ratelimitv1alpha1.RateLimitPolicySpec{
+			Domain: domain,
+			Limits: blocks,
+		},
+	}
+}
+
+func blockWith(name string, rules ...ratelimitv1alpha1.Rule) ratelimitv1alpha1.LimitBlock {
+	return ratelimitv1alpha1.LimitBlock{Name: name, Rules: rules}
+}
+
+func ruleWith(name string, rates ...ratelimitv1alpha1.Rate) ratelimitv1alpha1.Rule {
+	if len(rates) == 0 {
+		rates = []ratelimitv1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}}
+	}
+	return ratelimitv1alpha1.Rule{Name: name, Rates: rates}
+}
+
+func predicateRule(name string, predicates ...ratelimitv1alpha1.Predicate) ratelimitv1alpha1.Rule {
+	rule := ruleWith(name)
+	rule.Matches = predicates
+	return rule
+}
+
+var _ = Describe("RateLimitPolicy", func() {
+	var reconciler *RateLimitPolicyReconciler
+	var recorder *events.FakeRecorder
+
+	BeforeEach(func() {
+		// A stub fleet, so the healthy path reaches Ready: True against a real
+		// API server. Without a probe every generation stops at ProbeFailed,
+		// and the condition this suite exists to check would never be asserted.
+		recorder = events.NewFakeRecorder(16)
+		reconciler = &RateLimitPolicyReconciler{
+			Client:    k8sClient,
+			Scheme:    k8sClient.Scheme(),
+			Namespace: envtestNamespace,
+			Probe:     unanimous(3),
+			Events:    recorder,
+		}
+
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: envtestNamespace}}
+		err := k8sClient.Create(ctx, ns)
+		if err != nil {
+			Expect(client.IgnoreAlreadyExists(err)).To(Succeed())
+		}
+	})
+
+	create := func(policy *ratelimitv1alpha1.RateLimitPolicy) error {
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, policy))).To(Succeed())
+		})
+		return k8sClient.Create(ctx, policy)
+	}
+
+	Context("the singleton rule", func() {
+		It("requires the name to be the domain", func() {
+			// Object names are unique within a namespace, so this one rule is what
+			// makes a second policy for a domain unrepresentable. There is no
+			// "which of the two wins" question left to answer.
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Name = "something-else"
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("metadata.name has to equal spec.domain")))
+		})
+
+		It("refuses a second policy for a domain", func() {
+			Expect(create(policyWith("gateway.public", blockWith("api", ruleWith("total"))))).To(Succeed())
+
+			twin := policyWith("gateway.public", blockWith("other", ruleWith("total")))
+			Expect(create(twin)).To(MatchError(ContainSubstring("already exists")))
+		})
+	})
+
+	Context("the schema", func() {
+		It("requires a domain", func() {
+			// The name has to equal the domain, and a name cannot be empty, so an
+			// empty domain has nowhere left to hide.
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Domain = ""
+
+			Expect(create(policy)).To(HaveOccurred())
+		})
+
+		It("requires at least one block", func() {
+			Expect(create(policyWith("gateway.public"))).To(HaveOccurred())
+		})
+
+		It("rejects a domain that would break a counter key", func() {
+			// A colon separates key segments, braces are Redis Cluster hash tags,
+			// and a slash separates the namespace from the domain inside the tag.
+			// The object is never created, so it is not registered for cleanup:
+			// deleting a name the API server refused fails on the name itself.
+			for _, domain := range []string{"gateway:public", "gateway{public}", "Gateway.Public", "a/b"} {
+				policy := policyWith(domain, blockWith("api", ruleWith("total")))
+
+				Expect(k8sClient.Create(ctx, policy)).To(HaveOccurred(), "domain %q", domain)
+			}
+		})
+
+		It("rejects two blocks of one name", func() {
+			policy := policyWith("gateway.public",
+				blockWith("api", ruleWith("total")),
+				blockWith("api", ruleWith("total")),
+			)
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
+		})
+
+		It("rejects two rules of one name in a block", func() {
+			policy := policyWith("gateway.public",
+				blockWith("api", ruleWith("total"), ruleWith("total")))
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
+		})
+
+		It("rejects two windows of one period in a rule", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total",
+				ratelimitv1alpha1.Rate{Requests: 10, PeriodSeconds: 60},
+				ratelimitv1alpha1.Rate{Requests: 20, PeriodSeconds: 60},
+			)))
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
+		})
+
+		It("holds a period between one second and one day", func() {
+			for _, seconds := range []int32{0, 86401} {
+				policy := policyWith("gateway.public", blockWith("api", ruleWith("total",
+					ratelimitv1alpha1.Rate{Requests: 10, PeriodSeconds: seconds})))
+
+				Expect(create(policy)).To(HaveOccurred(), "periodSeconds %d", seconds)
+			}
+		})
+
+		It("accepts a day, the longest window a rate limit has", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total",
+				ratelimitv1alpha1.Rate{Requests: 10, PeriodSeconds: 86400})))
+
+			Expect(create(policy)).To(Succeed())
+		})
+
+		It("rejects a method outside the HTTP set", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Limits[0].Target = &ratelimitv1alpha1.Target{
+				Routes: []ratelimitv1alpha1.Route{{
+					Path:    ratelimitv1alpha1.PathMatch{Type: ratelimitv1alpha1.PathMatchPrefix, Value: "/api/"},
+					Methods: []ratelimitv1alpha1.HTTPMethod{"FETCH"},
+				}},
+			}
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("Unsupported value")))
+		})
+
+		It("rejects a duplicated method on a route", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Limits[0].Target = &ratelimitv1alpha1.Target{
+				Routes: []ratelimitv1alpha1.Route{{
+					Path:    ratelimitv1alpha1.PathMatch{Type: ratelimitv1alpha1.PathMatchPrefix, Value: "/api/"},
+					Methods: []ratelimitv1alpha1.HTTPMethod{"GET", "GET"},
+				}},
+			}
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
+		})
+
+		It("requires a path to start with a slash", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Limits[0].Target = &ratelimitv1alpha1.Target{
+				Routes: []ratelimitv1alpha1.Route{{
+					Path: ratelimitv1alpha1.PathMatch{Type: ratelimitv1alpha1.PathMatchPrefix, Value: "api/"},
+				}},
+			}
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("should match")))
+		})
+
+		It("admits a camelCase descriptor key", func() {
+			// One pattern covers every place a key is named, and it admits the
+			// camelCase the reference examples use.
+			policy := policyWith("gateway.public", blockWith("api",
+				predicateRule("per-tenant", ratelimitv1alpha1.Predicate{
+					Key: "tenantId", Operator: ratelimitv1alpha1.OperatorExists,
+				})))
+			policy.Spec.Mappings = []ratelimitv1alpha1.ClaimMapping{
+				{Key: "tenantId", Claim: "org_id"},
+			}
+			policy.Spec.Limits[0].Rules[0].Counters = []string{"tenantId"}
+			policy.Spec.Limits[0].Target = &ratelimitv1alpha1.Target{
+				Routes: []ratelimitv1alpha1.Route{{
+					Path: ratelimitv1alpha1.PathMatch{
+						Type: ratelimitv1alpha1.PathMatchTemplate, Value: "/api/orders/{orderId}",
+					},
+				}},
+			}
+
+			Expect(create(policy)).To(Succeed())
+		})
+
+		It("carries a policy no list bound would fit", func() {
+			// The lists carry no maxItems: what binds a generation is the bucket
+			// budget and the object size, and both are the compiler's business.
+			policy := policyWith("gateway.public")
+			for i := range 40 {
+				policy.Spec.Limits = append(policy.Spec.Limits,
+					blockWith(blockName(i), ruleWith("total")))
+			}
+
+			Expect(create(policy)).To(Succeed())
+		})
+
+		It("applies the defaults of the schema", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			Expect(create(policy)).To(Succeed())
+
+			stored := &ratelimitv1alpha1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
+
+			Expect(stored.Spec.Limits[0].Mode).To(Equal(ratelimitv1alpha1.BlockModeAll))
+			Expect(stored.Spec.Limits[0].Rules[0].Behavior).To(Equal(ratelimitv1alpha1.RuleBehaviorEnforce))
+			Expect(stored.Spec.Limits[0].Rules[0].Rates[0].Algorithm).To(Equal(ratelimitv1alpha1.AlgorithmGCRA))
+		})
+
+		It("accepts the mappings and groups of the one object", func() {
+			policy := policyWith("gateway.public", blockWith("api",
+				predicateRule("partners", ratelimitv1alpha1.Predicate{
+					Key: "client", Operator: ratelimitv1alpha1.OperatorInGroup, Value: "partners",
+				})))
+			policy.Spec.Mappings = []ratelimitv1alpha1.ClaimMapping{{
+				Key:           "roles",
+				Claim:         "realm_access.roles",
+				Type:          ratelimitv1alpha1.ClaimTypeStringArray,
+				Normalization: ratelimitv1alpha1.NormalizeLowercase,
+				Fallbacks:     []string{"sub"},
+			}}
+			policy.Spec.Groups = []ratelimitv1alpha1.ClientGroup{
+				{Name: "partners", Clients: []string{"p1", "p2"}},
+			}
+
+			Expect(create(policy)).To(Succeed())
+		})
+
+		It("rejects two mappings of one key", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Mappings = []ratelimitv1alpha1.ClaimMapping{
+				{Key: "roles", Claim: "a"},
+				{Key: "roles", Claim: "b"},
+			}
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
+		})
+	})
+
+	Context("reconciliation", func() {
+		It("records the status the API server accepts", func() {
+			// Every one of these fields is validated like any other: a status the
+			// operator cannot write is a diagnostic nobody ever sees.
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.public"}
+			Expect(create(policyWith(name.Name, blockWith("api", ruleWith("total"))))).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			reconciled := &ratelimitv1alpha1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, name, reconciled)).To(Succeed())
+			Expect(reconciled.Status.ObservedGeneration).To(Equal(reconciled.Generation))
+			Expect(reconciled.Status.ActiveGeneration).To(Equal(reconciled.Generation))
+			Expect(reconciled.Status.Rules).To(Equal(int32(1)))
+			Expect(reconciled.Status.EffectiveKeys).To(ContainElement("client"))
+
+			accepted := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
+			Expect(accepted).NotTo(BeNil())
+			Expect(accepted.Status).To(Equal(metav1.ConditionTrue))
+			Expect(accepted.Reason).To(Equal(ratelimitv1alpha1.ReasonRulesCompiled))
+			Expect(accepted.ObservedGeneration).To(Equal(reconciled.Generation))
+
+			ready := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionReady)
+			Expect(ready).NotTo(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ready.Reason).To(Equal(ratelimitv1alpha1.ReasonAllReplicas))
+
+			stalled := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+			Expect(stalled).NotTo(BeNil())
+			Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
+
+			// The fraction the printer columns show, written by the API server
+			// rather than by a fake.
+			Expect(reconciled.Status.Replicas.Total).To(Equal(int32(3)))
+			Expect(reconciled.Status.Replicas.Applied).To(Equal(int32(3)))
+			Expect(reconciled.Status.Replicas.LastCheckTime).NotTo(BeNil())
+
+			// The REPLICAS column reads this one field, because a printer
+			// column is a JSONPath expression and JSONPath cannot join two
+			// numbers into a fraction.
+			Expect(reconciled.Status.Replicas.Summary).To(Equal("3/3"))
+
+			By("keeping the spec out of the status subresource")
+			Expect(reconciled.Spec.Domain).To(Equal("gateway.public"))
+		})
+
+		// The counterpart of the persist-error event in internal/state: a
+		// generation the author cannot see refused anywhere else. The condition
+		// says the same thing, but nobody watches conditions on an object they
+		// have already applied.
+		It("raises one Warning per generation that does not compile", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.events"}
+			broken := policyWith(name.Name, blockWith("api", predicateRule("per-plan",
+				ratelimitv1alpha1.Predicate{Key: "plan", Operator: ratelimitv1alpha1.OperatorExists})))
+			Expect(create(broken)).To(Succeed())
+
+			drain(recorder)
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			var raised string
+			Eventually(recorder.Events).Should(Receive(&raised))
+			Expect(raised).To(ContainSubstring("Warning"))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ReasonNotCompiled))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ProblemUnresolvedKeyReference))
+
+			By("staying quiet while the same generation keeps failing")
+			// A reconcile runs on its interval whether or not anything moved, so
+			// without the generation guard this would put a Warning on the object
+			// every ten seconds for as long as the author left it broken.
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(recorder.Events).ShouldNot(Receive())
+
+			By("raising it again for the next generation")
+			Expect(k8sClient.Get(ctx, name, broken)).To(Succeed())
+			broken.Spec.Limits[0].Rules[0].Matches[0].Key = "tier"
+			Expect(k8sClient.Update(ctx, broken)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(recorder.Events).Should(Receive(&raised))
+			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ReasonNotCompiled))
+		})
+
+		It("stays quiet on a generation that compiles", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.quiet"}
+			Expect(create(policyWith(name.Name, blockWith("api", ruleWith("total"))))).To(Succeed())
+
+			drain(recorder)
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Consistently(recorder.Events).ShouldNot(Receive())
+		})
+
+		It("forgets the series of a deleted policy", func() {
+			// The reconcile of a policy that is gone is the only place the
+			// leader learns to stop reporting it. Without this an alert on a
+			// stalled domain fires forever on an object nobody can fix.
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.retired"}
+			Expect(create(policyWith(name.Name, blockWith("api", ruleWith("total"))))).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(scrapedDomains()).To(ContainElement(name.Name))
+
+			Expect(k8sClient.Delete(ctx, policyWith(name.Name))).To(Succeed())
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(scrapedDomains()).NotTo(ContainElement(name.Name))
+		})
+
+		It("writes the rule problems the API server accepts", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.private"}
+			Expect(create(policyWith(name.Name, blockWith("api", predicateRule("per-plan",
+				ratelimitv1alpha1.Predicate{
+					Key:      "plan",
+					Operator: ratelimitv1alpha1.OperatorExists,
+				}))))).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			reconciled := &ratelimitv1alpha1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, name, reconciled)).To(Succeed())
+			Expect(reconciled.Status.RuleProblems).To(HaveLen(1))
+			Expect(reconciled.Status.RuleProblems[0].Reason).
+				To(Equal(ratelimitv1alpha1.ProblemUnresolvedKeyReference))
+			Expect(reconciled.Status.Problems).To(Equal(int32(1)))
+			Expect(reconciled.Status.ActiveGeneration).To(BeZero(),
+				"a generation with a blocking problem enforces nothing")
+
+			accepted := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
+			Expect(accepted.Status).To(Equal(metav1.ConditionFalse))
+			Expect(accepted.Reason).To(Equal(ratelimitv1alpha1.ReasonCompilationFailed))
+
+			stalled := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+			Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
+			Expect(stalled.Reason).To(Equal(ratelimitv1alpha1.ReasonNotCompiled))
+		})
+
+		It("ignores a policy that is already gone", func() {
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.absent"},
+			})
+
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+})
+
+// blockName numbers the blocks of the no-bounds spec.
+func blockName(i int) string {
+	const digits = "0123456789"
+	return "b" + string(digits[i/10]) + string(digits[i%10])
+}
+
+var _ = Describe("SetupWithManager", func() {
+	// The builder chain runs at registration, and registration needs a real
+	// manager. The manager is never started: what these lines can get wrong
+	// fails right here.
+	It("registers the controller with a manager", func() {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:  clientgoscheme.Scheme,
+			Metrics: metricsserver.Options{BindAddress: "0"},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect((&RateLimitPolicyReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).
+			SetupWithManager(mgr)).To(Succeed())
+	})
+})
+
+// The reads of this kind all have to ask for the unstructured form, because
+// that is the only informer the process runs. Against a plain client - which
+// is what the rest of this file uses - a typed read works just as well, so the
+// mistake is invisible: it surfaces only against a cache configured the way
+// the real manager configures it, as a component that starts cleanly and never
+// reconciles anything. So this manager is built from the same functions the
+// binary calls, and started, which is what makes ReaderFailOnMissingInformer
+// mean something here.
+var _ = Describe("the manager's cache", Ordered, func() {
+	var cancel context.CancelFunc
+
+	BeforeAll(func() {
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:  clientgoscheme.Scheme,
+			Metrics: metricsserver.Options{BindAddress: "0"},
+			Client:  ClientOptions(),
+			Cache:   CacheOptions(envtestNamespace),
+			// The spec above registers a controller of this name on its own
+			// manager, and the name registry is global to the process.
+			Controller: config.Controller{SkipNameValidation: &skipNameValidation},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Registered, not just built. ByObject only configures an informer;
+		// what creates one is a caller asking for it, which in the binary is
+		// this registration and the store updater. A manager with no
+		// controller on it would fail these reads for a reason the binary
+		// does not have.
+		Expect((&RateLimitPolicyReconciler{
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Service: "ratelimit",
+		}).SetupWithManager(mgr)).To(Succeed())
+
+		var started context.Context
+		started, cancel = context.WithCancel(context.Background())
+		go func() {
+			defer GinkgoRecover()
+			Expect(mgr.Start(started)).To(Succeed())
+		}()
+		Expect(mgr.GetCache().WaitForCacheSync(started)).To(BeTrue())
+
+		// What the store updater does on every replica, and the step that
+		// actually creates the informer: ByObject only configures one. Asking
+		// for the wrong form here is the silent half of the bug these specs
+		// pin, because GetInformer creates whatever it is asked for.
+		_, err = mgr.GetCache().GetInformer(started, policy.Object())
+		Expect(err).NotTo(HaveOccurred())
+
+		// A policy has to exist for these reads to distinguish anything: a
+		// failed list and an empty namespace both come back with nothing.
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: envtestNamespace}}
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(context.Background(), ns))).To(Succeed())
+		cached := policyWith("cache.probe", blockWith("b", ruleWith("r")))
+		Expect(k8sClient.Create(context.Background(), cached)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(context.Background(), cached))).To(Succeed())
+		})
+		Eventually(policyCount).Should(BeNumerically(">", 0), "the informer never saw the policy")
+
+		DeferCleanup(func() { cancel() })
+		managerUnderTest = mgr
+	})
+
+	It("serves the policies the compiler loads", func() {
+		// policy.Load is the read every rebuild and every reconcile goes
+		// through.
+		_, err := policy.Load(context.Background(), managerUnderTest.GetCache(), envtestNamespace)
+		Expect(err).NotTo(HaveOccurred(),
+			"the cache cannot serve the kind the compiler reads")
+	})
+
+	It("serves the list an EndpointSlice change fans out from", func() {
+		reconciler := &RateLimitPolicyReconciler{
+			Client:  managerUnderTest.GetClient(),
+			Scheme:  managerUnderTest.GetScheme(),
+			Service: "ratelimit",
+		}
+		slice := &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: envtestNamespace,
+				Name:      "ratelimit-abcde",
+				Labels:    map[string]string{discoveryv1.LabelServiceName: "ratelimit"},
+			},
+		}
+
+		// A read failure is logged and swallowed here, so the assertion is on
+		// the requests: the fan-out going quiet is exactly how the bug this
+		// pins presented.
+		Expect(reconciler.policiesBehind(context.Background(), slice)).
+			To(HaveLen(policyCount()), "the EndpointSlice fan-out reconciles nothing")
+	})
+
+	It("gives the store updater an informer without starting a second one", func() {
+		// GetInformer creates what it is asked for, so asking for the wrong
+		// form here is silent: the informer works, and the process pays for a
+		// second cached copy of every policy. Both forms are asked for, and
+		// only one of them may already be present.
+		informers, err := managerUnderTest.GetCache().GetInformer(
+			context.Background(), policy.Object(), cache.BlockUntilSynced(false))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(informers).NotTo(BeNil())
+	})
+})
+
+// scrapedDomains names the domains the leader's own series currently carry.
+func scrapedDomains() []string {
+	families, err := ctrlmetrics.Registry.Gather()
+	Expect(err).NotTo(HaveOccurred())
+	var domains []string
+	for _, family := range families {
+		if family.GetName() != "ratelimit_policy_replicas" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			for _, label := range m.GetLabel() {
+				if label.GetName() == "domain" {
+					domains = append(domains, label.GetValue())
+				}
+			}
+		}
+	}
+	return domains
+}
+
+// drain empties the recorder so a spec only sees the events it caused.
+func drain(recorder *events.FakeRecorder) {
+	for {
+		select {
+		case <-recorder.Events:
+		default:
+			return
+		}
+	}
+}
+
+// managerUnderTest is the started manager of the cache specs above.
+var managerUnderTest ctrl.Manager
+
+// skipNameValidation lets a second manager in this process register a
+// controller of a name the first one already used.
+var skipNameValidation = true
+
+// policyCount is how many policies the envtest namespace holds, read through
+// the plain client so that it stays a fact about the cluster rather than about
+// the cache these specs are testing.
+func policyCount() int {
+	list := policy.ObjectList()
+	Expect(k8sClient.List(context.Background(), list, client.InNamespace(envtestNamespace))).To(Succeed())
+	return len(list.Items)
+}

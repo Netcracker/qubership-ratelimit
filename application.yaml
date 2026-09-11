@@ -1,0 +1,6 @@
+microservice:
+  name: ratelimit
+
+logging:
+  level:
+    root: info

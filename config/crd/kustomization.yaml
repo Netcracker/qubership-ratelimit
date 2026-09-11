@@ -1,0 +1,5 @@
+# This kustomization.yaml is in the "crd" directory and is used by
+# config/default. The Helm chart ships its own copy of the CRD, generated from
+# the same bases by "make helm-crd".
+resources:
+  - bases/ratelimit.netcracker.com_ratelimitpolicies.yaml
