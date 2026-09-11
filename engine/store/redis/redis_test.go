@@ -164,7 +164,7 @@ func TestContract(t *testing.T) {
 func TestDifferentialAgainstMemory(t *testing.T) {
 	r := redisstore.New(client(t))
 	m := memory.New()
-	waitOutHourBoundary()
+	waitOutBoundary(time.Hour, 10*time.Second)
 
 	uniq := fmt.Sprintf("diff:{%d}", time.Now().UnixNano())
 	buckets := []store.Bucket{
@@ -267,6 +267,10 @@ func TestHighFrequencyStateExact(t *testing.T) {
 	fixed := store.Bucket{Key: uniq + ":f", Algorithm: algo.FixedWindowID,
 		Window: algo.Window{Requests: 100_000, Period: time.Second}}
 
+	// The fixed-window state expires at the second boundary, and the GET
+	// below has to find it: the decision starts clear of the boundary.
+	waitOutBoundary(time.Second, 200*time.Millisecond)
+
 	// Charged in-script at one instant: the verdict is exact, no clock races.
 	v, err := r.Decide(t.Context(), []store.Bucket{gcra, fixed}, 9000)
 	if err != nil {
@@ -340,12 +344,15 @@ func TestStateExpires(t *testing.T) {
 	}
 }
 
-// waitOutHourBoundary keeps the fixed-window steps of the differential run
-// from straddling a calendar boundary, best effort on the local clock.
-func waitOutHourBoundary() {
+// waitOutBoundary keeps a test clear of the next boundary of a fixed window
+// of the given period, best effort on the local clock: a window's state
+// expires at its boundary, so a decision taken within a round trip of it
+// leaves nothing to read back, and a run that straddles one counts in two
+// windows. margin is how close to the boundary the test may start.
+func waitOutBoundary(period, margin time.Duration) {
 	now := time.Now()
-	boundary := now.Truncate(time.Hour).Add(time.Hour)
-	if wait := boundary.Sub(now); wait < 10*time.Second {
-		time.Sleep(wait + time.Second)
+	boundary := now.Truncate(period).Add(period)
+	if wait := boundary.Sub(now); wait < margin {
+		time.Sleep(wait + margin/10)
 	}
 }
