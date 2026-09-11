@@ -162,10 +162,15 @@ jobs:
       # {domain} hash tag that lets one Lua script decide a whole domain
       # atomically. A real six-node cluster closes that - a lost hash tag
       # fails here with CROSSSLOT instead of in production.
+      # The cluster run has code of its own, the per-master walk of Scan and
+      # the cursor that names a master, so its coverage ships to Sonar beside
+      # the standalone run's: the Sonar job collects every *.coverage.out of
+      # the coverage-* artifacts and merges them.
       - name: Test the store against a Redis Cluster
         working-directory: engine
         run: |
-          REDIS_ADDR="$(../hack/redis-cluster.sh up)"             go test -race ./store/redis/ -count=1
+          REDIS_ADDR="$(../hack/redis-cluster.sh up)" \
+            go test -race ./store/redis/ -count=1 -coverpkg=./... -coverprofile engine.cluster.coverage.out
 
       # The command store keeps its records, sweep lease, and confirmation
       # tokens beside the counters they act on, and its scripts touch both in
@@ -182,7 +187,9 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: coverage-engine
-          path: engine/engine.coverage.out
+          path: |
+            engine/engine.coverage.out
+            engine/engine.cluster.coverage.out
           if-no-files-found: error
 
   # The chart's CRD templates are generated artifacts — copies of
