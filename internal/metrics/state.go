@@ -25,7 +25,7 @@ type DomainView struct {
 	// be watched, not to be enforced.
 	Blocks int
 
-	// DecisionBuckets is the worst case one request can collect across the
+	// DecisionBuckets is the worst case one decision can collect across the
 	// domain — the headroom before an edit stops compiling.
 	DecisionBuckets int
 
@@ -100,7 +100,7 @@ var (
 		"Compiled blocks of the domain. Observed rather than bounded: watch the target scan, do not cap it.",
 		[]string{"domain"}, nil)
 	descDomainBuckets = prometheus.NewDesc("ratelimit_domain_decision_buckets",
-		"Worst-case buckets one request can collect across the domain, against the budget of 128.",
+		"Worst-case buckets one decision can collect across the domain, against the budget of 128.",
 		[]string{"domain"}, nil)
 )
 

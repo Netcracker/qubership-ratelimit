@@ -3,6 +3,7 @@ package rls
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -404,4 +405,53 @@ func TestShouldRateLimit_countsTokensSeen(t *testing.T) {
 			request(domain, map[string]string{"path": "/api"}))
 		require.NoError(t, err)
 	}), "a tokenless decision is not evidence about any claim path")
+}
+
+// The budget binds one decision, and a call is one decision per descriptor:
+// two descriptors that each fill the budget are two atomic store scripts of
+// 128 buckets, not one of 256, and the call is answered OK. The descriptor
+// cap bounds the call.
+func TestShouldRateLimit_theBudgetBindsOneDecisionNotTheCall(t *testing.T) {
+	const domain = "gateway.public"
+	periods := []time.Duration{time.Minute, time.Hour, 30 * time.Second, 10 * time.Second}
+	rules := make([]model.Rule, 0, 32)
+	for ri := range 32 {
+		rates := make([]model.Rate, 0, len(periods))
+		for _, pd := range periods {
+			rates = append(rates, model.Rate{Requests: 100, Period: pd})
+		}
+		// Counted by client, so the two descriptors below address disjoint
+		// buckets: a per-call check that merged equal keys would not see them
+		// as one set.
+		rules = append(rules, model.Rule{
+			Name: fmt.Sprintf("r%d", ri), Counters: []string{model.KeyClient}, Rates: rates,
+		})
+	}
+	atTheBudget := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
+	snap, problems := compile.Compile(testNamespace, domain, &atTheBudget)
+	require.Empty(t, problems)
+	require.Equal(t, engine.MaxDecisionBuckets, snap.DecisionBuckets,
+		"the fixture fills the budget of one decision exactly")
+
+	ruleStore := store.New()
+	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
+		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
+	}))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	overBudget := func() float64 {
+		return testutil.ToFloat64(metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyBuckets))
+	}
+	var resp *envoyratelimit.RateLimitResponse
+	refused := delta(overBudget, func() {
+		var err error
+		resp, err = server.ShouldRateLimit(context.Background(), requestWith(
+			map[string]string{"path": "/any", model.KeyClient: "alice"},
+			map[string]string{"path": "/any", model.KeyClient: "bob"}))
+		require.NoError(t, err)
+	})
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
+		"two decisions of 128 buckets each are within the budget")
+	assert.Equal(t, 0.0, refused, "the budget is not the sum over the call")
 }
