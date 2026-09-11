@@ -10,6 +10,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
+
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
@@ -130,41 +132,48 @@ func scrapeAllReplicas() map[string]*dto.MetricFamily {
 	pods := operatorPods()
 	Expect(pods).NotTo(BeEmpty(), "no running replica to scrape")
 	merged := map[string]*dto.MetricFamily{}
-	httpClient := &http.Client{Timeout: 10 * time.Second}
 	for _, pod := range pods {
-		port := 0
-		for _, c := range pod.Spec.Containers {
-			for _, p := range c.Ports {
-				if p.Name == "metrics" {
-					port = int(p.ContainerPort)
-				}
-			}
-		}
-		Expect(port).NotTo(BeZero(), "pod %s exposes no metrics port", pod.Name)
+		mergeScrape(merged, pod)
+	}
+	return merged
+}
 
-		addr, stop := forwardToPod(pod.Name, port)
-		resp, err := httpClient.Get("http://" + addr + "/metrics")
-		if err != nil {
-			stop()
-			Fail(fmt.Sprintf("pod %s did not answer on /metrics: %v", pod.Name, err))
-		}
-		// The zero-value TextParser carries no name validation scheme and
-		// panics on the first name it checks.
-		parser := expfmt.NewTextParser(model.LegacyValidation)
-		found, err := parser.TextToMetricFamilies(resp.Body)
-		_ = resp.Body.Close()
-		stop()
-		Expect(err).NotTo(HaveOccurred(), "the scrape of %s does not parse", pod.Name)
-
-		for name, family := range found {
-			if have, ok := merged[name]; ok {
-				have.Metric = append(have.Metric, family.Metric...)
-			} else {
-				merged[name] = family
+// mergeScrape fetches /metrics from one pod over a port-forward and merges
+// the parse into families. The port-forward goes through the kubelet rather
+// than the pod network, so a scrape reads a pod that a mesh policy has
+// silenced to its peers.
+func mergeScrape(families map[string]*dto.MetricFamily, pod corev1.Pod) {
+	port := 0
+	for _, c := range pod.Spec.Containers {
+		for _, p := range c.Ports {
+			if p.Name == "metrics" {
+				port = int(p.ContainerPort)
 			}
 		}
 	}
-	return merged
+	Expect(port).NotTo(BeZero(), "pod %s exposes no metrics port", pod.Name)
+
+	addr, stop := forwardToPod(pod.Name, port)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get("http://" + addr + "/metrics")
+	if err != nil {
+		stop()
+		Fail(fmt.Sprintf("pod %s did not answer on /metrics: %v", pod.Name, err))
+	}
+	// The zero-value TextParser carries no name validation scheme and
+	// panics on the first name it checks.
+	parser := expfmt.NewTextParser(model.LegacyValidation)
+	found, err := parser.TextToMetricFamilies(resp.Body)
+	_ = resp.Body.Close()
+	stop()
+	Expect(err).NotTo(HaveOccurred(), "the scrape of %s does not parse", pod.Name)
+
+	for name, family := range found {
+		if have, ok := families[name]; ok {
+			have.Metric = append(have.Metric, family.Metric...)
+		} else {
+			families[name] = family
+		}
+	}
 }
 
 // hasSeries reports whether the family holds a series carrying every given

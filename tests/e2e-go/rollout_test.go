@@ -25,9 +25,21 @@ import (
 // and Terminating at the same time.
 var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 	const domain = "gateway.rollout"
-	var applied bool
+	var (
+		applied bool
+		fleet   *fleetScale
+	)
 
 	BeforeAll(func() {
+		// At one replica this spec cannot see what it exists to catch. The
+		// rollout then replaces the pod holding the lease, and between the
+		// old leader's exit and the new one's first reconcile nobody writes
+		// the status: the samples read a frozen True, and the new leader's
+		// first write is already whole. With two, a surviving leader writes
+		// the status through the replacement of the other, and the assertion
+		// on lastCheckTime below is the proof that one did.
+		fleet = scaleFleet(2)
+
 		Expect(apply(newPolicy(domain, totalLimits(10, 60)))).To(Succeed())
 		applied = true
 
@@ -42,9 +54,17 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 		if applied {
 			deletePolicies(domain)
 		}
+		if fleet != nil {
+			fleet.restore()
+		}
 	})
 
 	It("keeps Ready true while every pod is replaced", func() {
+		before, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+		checkedBefore := before.Status.Replicas.LastCheckTime
+		Expect(checkedBefore).NotTo(BeNil(), "no leader has probed the fleet yet")
+
 		// Sampled rather than checked at the ends, because the failure this
 		// pins is transient by nature: the fraction is wrong only while a pod
 		// drains, and both ends of the rollout look correct.
@@ -90,6 +110,16 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 		defer mu.Unlock()
 		Expect(seen).To(BeEmpty(),
 			"Ready left True during a rollout that changed no rule: %v", seen)
+
+		// The samples above are evidence only if somebody was writing the
+		// status while they were taken. A moving lastCheckTime is that
+		// somebody: a leader that probed the fleet during the rollout.
+		after, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after.Status.Replicas.LastCheckTime).NotTo(BeNil())
+		Expect(after.Status.Replicas.LastCheckTime.Time).To(BeTemporally(">", checkedBefore.Time),
+			"lastCheckTime did not move: no leader wrote the status while the samples were taken, "+
+				"so a frozen True would have passed")
 	})
 
 	It("counts the whole fleet once the rollout settles", func() {

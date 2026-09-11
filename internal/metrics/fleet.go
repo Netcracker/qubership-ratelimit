@@ -25,8 +25,13 @@ type FleetSample struct {
 
 	// Stalled reports whether the domain is stuck rather than progressing,
 	// and Reason names which of the two ways it is stuck. Reason is set even
-	// when Stalled is false, where it is the reason of the negative condition,
-	// so the series never changes its label set as a domain recovers.
+	// when Stalled is false, where it is the reason of the negative condition.
+	//
+	// The series keeps one label set per domain: the value of reason follows
+	// the condition, so a recovered domain reports Progressing at 0 and its
+	// ReplicaStale series stops being emitted and goes stale. A query on
+	// max(ratelimit_policy_stalled) is unaffected; one on a specific reason
+	// sees that series disappear rather than drop to zero.
 	Stalled bool
 	Reason  string
 }
