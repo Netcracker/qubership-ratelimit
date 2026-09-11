@@ -849,14 +849,19 @@ paths:
         window x identity x state - plus pagination.
 
         Work is bounded per call: the server examines at most its scan
-        budget of keys for one page, so a narrow filter over a huge domain
-        may return fewer than `pageSize` items mid-collection. `scanned` in
-        the envelope says how much was examined; a present `nextCursor` is
+        budget of keys for one page, reading the store in steps of a few
+        hundred keys and at most a fixed number of steps per page. A narrow
+        filter over a huge domain may therefore return fewer than `pageSize`
+        items mid-collection, and a page over a stretch of the store that
+        holds none of the domain's keys may return no item at all. `scanned`
+        in the envelope says how much was examined; a present `nextCursor` is
         the only signal of completion, never the page fill.
 
         A cursor is bound to its selection: it embeds a fingerprint of the canonical selector (the form defined on ResetSelector, applied to the query selection likewise) and a TTL, and presenting it with different selectors - or after expiry - is RLS-0400, never a silently different listing. Pages are not a consistent snapshot: the store
         is scanned live, so counters created, expired, or changed between
         pages may be missed, duplicated, or reported with newer numbers.
+        Items arrive in the order the store walks its keys, which need not be
+        the key order: neither a page nor the listing as a whole is sorted.
 
         Counters of rules no longer in the enforced set - a rollout removed the rule while its keys live out their TTL - are skipped: they cannot be rendered against the serving snapshot. They still count in scanned, remain sweepable by the counter-resets action through its key-parsing selectors (ruleIds, algorithm, period, domain-wide - axes and limited need the rule and cannot see them), and expire on their own.
       parameters:
@@ -897,13 +902,15 @@ paths:
           maximum: 500
           default: 100
         description: Upper bound on items in one page. A page may carry fewer even
-          mid-collection when the scan budget fills first, so the end of the listing
-          is an absent nextCursor, never a short page.
+          mid-collection when the scan budget or the step cap fills first, so the
+          end of the listing is an absent nextCursor, never a short page.
       - name: cursor
         in: query
         required: false
         description: Opaque continuation from the previous page's nextCursor; valid
-          for the same selection.
+          for the same selection on the same store. One the store cannot resume,
+          such as a cursor minted before a Redis Cluster slot moved, is RLS-0400
+          like an expired one.
         schema:
           type: string
       - $ref: '#/components/parameters/xRequestId'

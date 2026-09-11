@@ -1,7 +1,6 @@
 package records_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -131,10 +130,7 @@ func runConformance(t *testing.T, build factory) {
 		require.Equal(t, 4, record.Progress.Reset)
 		require.Equal(t, map[string]int{"a/b/c": 4}, record.Progress.Rules)
 
-		found, err := counters.(interface {
-			Keys(context.Context, string) ([]string, error)
-		}).Keys(t.Context(), live)
-		require.NoError(t, err)
+		found := keysUnder(t, counters, live)
 		require.Empty(t, found, "the batch deleted what it counted")
 	})
 
@@ -154,10 +150,7 @@ func runConformance(t *testing.T, build factory) {
 		require.NoError(t, err)
 		require.Zero(t, record.Progress.Scanned)
 
-		found, err := counters.(interface {
-			Keys(context.Context, string) ([]string, error)
-		}).Keys(t.Context(), live)
-		require.NoError(t, err)
+		found := keysUnder(t, counters, live)
 		require.Len(t, found, 1, "and it deleted nothing either")
 	})
 
@@ -262,10 +255,7 @@ func runConformance(t *testing.T, build factory) {
 		require.False(t, outcome.Replayed)
 		require.Equal(t, 1, outcome.Count)
 
-		found, err := counters.(interface {
-			Keys(context.Context, string) ([]string, error)
-		}).Keys(t.Context(), live)
-		require.NoError(t, err)
+		found := keysUnder(t, counters, live)
 		require.Empty(t, found)
 	})
 
@@ -288,10 +278,7 @@ func runConformance(t *testing.T, build factory) {
 		require.True(t, second.Replayed)
 		require.Equal(t, 1, second.Count)
 
-		found, err := counters.(interface {
-			Keys(context.Context, string) ([]string, error)
-		}).Keys(t.Context(), live)
-		require.NoError(t, err)
+		found := keysUnder(t, counters, live)
 		require.Len(t, found, 1, "the retry deleted nothing")
 	})
 
@@ -306,10 +293,7 @@ func runConformance(t *testing.T, build factory) {
 		require.NoError(t, err)
 		require.Equal(t, 1, outcome.Count)
 
-		found, err := counters.(interface {
-			Keys(context.Context, string) ([]string, error)
-		}).Keys(t.Context(), live)
-		require.NoError(t, err)
+		found := keysUnder(t, counters, live)
 		require.Len(t, found, 1)
 	})
 
@@ -397,6 +381,23 @@ func waitForLease(t *testing.T, commands records.Store, k records.Keys) {
 		record, err := commands.Lookup(t.Context(), k)
 		return err == nil && !record.Alive()
 	}, 2*time.Second, 20*time.Millisecond, "the lease never expired")
+}
+
+// keysUnder walks the keys of one prefix to the end, which is how a test
+// checks whether a counter still exists on any store.
+func keysUnder(t *testing.T, counters store.Store, prefix string) []string {
+	t.Helper()
+	var found []string
+	cursor := ""
+	for {
+		keys, next, err := counters.(store.Inspector).Scan(t.Context(), prefix, cursor, 100)
+		require.NoError(t, err, "Scan(%q, %q)", prefix, cursor)
+		found = append(found, keys...)
+		if next == "" {
+			return found
+		}
+		cursor = next
+	}
 }
 
 // spend puts one counter key in the store, the way traffic would.

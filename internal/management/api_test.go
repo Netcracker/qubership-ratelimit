@@ -434,8 +434,13 @@ func TestCounters_pagesWithACursorBoundToItsSelection(t *testing.T) {
 	require.Len(t, second.Items, 2)
 	require.Empty(t, second.NextCursor)
 
-	// The two pages are disjoint and in key order.
-	require.Less(t, first.Items[1].Key, second.Items[0].Key)
+	// The two pages together are the four counters, each once, in whatever
+	// order the store walks them.
+	clients := make([]string, 0, 4)
+	for _, item := range append(first.Items, second.Items...) {
+		clients = append(clients, item.Axes["client"])
+	}
+	require.ElementsMatch(t, []string{"alice", "bob", "carol", "dave"}, clients)
 
 	// The same cursor under a different selection is refused rather than
 	// silently answered with another listing.

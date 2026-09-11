@@ -247,15 +247,27 @@ const cursorTTL = 10 * time.Minute
 // so that presenting it with different filters is refused rather than silently
 // answered with a different listing.
 type cursor struct {
-	After       string `json:"k"`
+	Step        string `json:"c,omitempty"`
+	After       string `json:"k,omitempty"`
 	Fingerprint string `json:"f"`
 	ExpiresAt   int64  `json:"e"`
 }
 
-// encodeCursor mints the continuation after the given key.
-func encodeCursor(after string, s selector, now time.Time) string {
+// scanPos is where a page walk resumes: the store cursor of the step to read,
+// and the last key of that step an earlier page consumed, empty when none.
+// Resuming rereads the step and skips its keys up to and including after, so
+// a page may end inside a step and the next page still reads the rest of that
+// step; the store sorts a step, so the skip is a string comparison.
+type scanPos struct {
+	step  string
+	after string
+}
+
+// encodeCursor mints the continuation that resumes at pos.
+func encodeCursor(pos scanPos, s selector, now time.Time) string {
 	buf, err := json.Marshal(cursor{
-		After:       after,
+		Step:        pos.step,
+		After:       pos.after,
 		Fingerprint: s.fingerprint(),
 		ExpiresAt:   now.Add(cursorTTL).Unix(),
 	})
@@ -267,22 +279,22 @@ func encodeCursor(after string, s selector, now time.Time) string {
 
 // decodeCursor reads a continuation and checks it against the selection it is
 // being presented with.
-func decodeCursor(raw string, s selector, now time.Time) (string, *apiError) {
+func decodeCursor(raw string, s selector, now time.Time) (scanPos, *apiError) {
 	buf, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return "", invalid("the cursor is not a continuation this API minted", "cursor")
+		return scanPos{}, invalid("the cursor is not a continuation this API minted", "cursor")
 	}
 	var parsed cursor
 	if err := json.Unmarshal(buf, &parsed); err != nil {
-		return "", invalid("the cursor is not a continuation this API minted", "cursor")
+		return scanPos{}, invalid("the cursor is not a continuation this API minted", "cursor")
 	}
 	if parsed.Fingerprint != s.fingerprint() {
-		return "", invalid("the cursor was minted for a different selection; restart the listing", "cursor")
+		return scanPos{}, invalid("the cursor was minted for a different selection; restart the listing", "cursor")
 	}
 	if now.Unix() > parsed.ExpiresAt {
-		return "", invalid("the cursor has expired; restart the listing", "cursor")
+		return scanPos{}, invalid("the cursor has expired; restart the listing", "cursor")
 	}
-	return parsed.After, nil
+	return scanPos{step: parsed.Step, after: parsed.After}, nil
 }
 
 func sortedUnique(values []string) []string {

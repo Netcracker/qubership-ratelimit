@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"maps"
-	"sort"
 	"time"
 
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -90,34 +89,46 @@ func (s *sweeper) run(ctx context.Context, deadline time.Time) error {
 	if !s.domainWide {
 		prefix = scanPrefix(s.api.Namespace, s.snapshot.Domain, s.sel)
 	}
-	keys, err := inspector.Keys(ctx, prefix)
-	if err != nil {
-		return err
-	}
-	sort.Strings(keys)
-
 	batch := make([]counterCandidate, 0, sweepBatch)
-	for _, k := range keys {
+	cursor := ""
+	for {
+		// The deadline is checked before every step as well as before every
+		// key: on a keyspace shared with other data a step can return no key
+		// of the prefix, and a long stretch of such steps would otherwise run
+		// past the deadline with no key to check it on.
 		if s.api.now().After(deadline) {
 			return errDeadline
 		}
-
-		s.progress.Scanned++
-		candidate, ok := s.consider(ctx, k)
-		if !ok {
-			continue
-		}
-
-		batch = append(batch, candidate)
-		if len(batch) < sweepBatch {
-			continue
-		}
-		if err := s.commitBatch(ctx, batch); err != nil {
+		keys, next, err := inspector.Scan(ctx, prefix, cursor, scanStep)
+		if err != nil {
 			return err
 		}
-		batch = batch[:0]
+
+		for _, k := range keys {
+			if s.api.now().After(deadline) {
+				return errDeadline
+			}
+
+			s.progress.Scanned++
+			candidate, ok := s.consider(ctx, k)
+			if !ok {
+				continue
+			}
+
+			batch = append(batch, candidate)
+			if len(batch) < sweepBatch {
+				continue
+			}
+			if err := s.commitBatch(ctx, batch); err != nil {
+				return err
+			}
+			batch = batch[:0]
+		}
+		if next == "" {
+			return s.commitBatch(ctx, batch)
+		}
+		cursor = next
 	}
-	return s.commitBatch(ctx, batch)
 }
 
 // consider applies the filters that need nothing but the key and the snapshot.

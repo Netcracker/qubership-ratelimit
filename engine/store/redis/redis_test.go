@@ -1,11 +1,13 @@
 package redis_test
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -347,5 +349,63 @@ func waitOutHourBoundary() {
 	boundary := now.Truncate(time.Hour).Add(time.Hour)
 	if wait := boundary.Sub(now); wait < 10*time.Second {
 		time.Sleep(wait + time.Second)
+	}
+}
+
+// A cursor is opaque to the caller and checked by the store: text that is not
+// a cursor, and a cursor naming a node this store does not have, are both
+// refused with store.ErrBadCursor rather than resumed anywhere.
+func TestScan_rejectsACursorItDidNotMint(t *testing.T) {
+	r := redisstore.New(client(t))
+	prefix := fmt.Sprintf("cursor:{%d}:", time.Now().UnixNano())
+
+	for _, cursor := range []string{"not-a-cursor", "10.0.0.1:1@5"} {
+		_, _, err := r.Scan(t.Context(), prefix, cursor, 10)
+		if !errors.Is(err, store.ErrBadCursor) {
+			t.Errorf("Scan(%q, %q, 10) = %v, want store.ErrBadCursor", prefix, cursor, err)
+		}
+	}
+}
+
+// Keys without a hash tag spread over the slots, and on a Cluster over the
+// masters; a walk of such a prefix has to reach every master, or a key on
+// the second one is reported as absent. On a standalone store the same walk
+// reads its one node.
+func TestScan_anUntaggedPrefixReachesEveryMaster(t *testing.T) {
+	r := redisstore.New(client(t))
+	prefix := fmt.Sprintf("untagged:%d:", time.Now().UnixNano())
+
+	want := make([]string, 0, 12)
+	for i := range 12 {
+		b := store.Bucket{Key: fmt.Sprintf("%s%02d", prefix, i), Algorithm: algo.GCRAID,
+			Window: algo.Window{Requests: 10, Period: time.Hour, Burst: 10}}
+		// One bucket per decision: the keys are on different slots on purpose,
+		// and a decision spanning two slots is refused with CROSSSLOT.
+		if _, err := r.Decide(t.Context(), []store.Bucket{b}, 1); err != nil {
+			t.Fatalf("Decide(%q): %v", b.Key, err)
+		}
+		want = append(want, b.Key)
+	}
+
+	var seen []string
+	cursor := ""
+	for step := 0; ; step++ {
+		keys, next, err := r.Scan(t.Context(), prefix, cursor, 4)
+		if err != nil {
+			t.Fatalf("Scan(%q, %q, 4): %v", prefix, cursor, err)
+		}
+		seen = append(seen, keys...)
+		if next == "" {
+			break
+		}
+		if step > 100000 {
+			t.Fatalf("Scan(%q) walk did not end; the last cursor is %q", prefix, next)
+		}
+		cursor = next
+	}
+	for _, k := range want {
+		if !slices.Contains(seen, k) {
+			t.Errorf("Scan(%q) walk = %v, missing %q", prefix, seen, k)
+		}
 	}
 }

@@ -72,3 +72,69 @@ func BenchmarkRedisDecideBuckets(b *testing.B) {
 		})
 	}
 }
+
+// scanDomainKeys is the size of the domain the scan benchmarks walk, the
+// "few hundred thousand keys" the management API describes as a busy domain.
+const scanDomainKeys = 300_000
+
+// seedScanKeys writes n keys under prefix through pipelines, with a TTL so a
+// shared server forgets them on its own. The values are irrelevant to a walk.
+func seedScanKeys(b *testing.B, prefix string, n int) {
+	b.Helper()
+	c := client(b)
+	const chunk = 5000
+	for start := 0; start < n; start += chunk {
+		pipe := c.Pipeline()
+		for i := start; i < start+chunk && i < n; i++ {
+			pipe.Set(b.Context(), fmt.Sprintf("%sorders/per-client:gcra:3600:client-%06d:", prefix, i), "1", 10*time.Minute)
+		}
+		if _, err := pipe.Exec(b.Context()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkRedisScanStep measures one step of 512 keys over a domain of
+// scanDomainKeys keys, the unit of work a listing page repeats at most
+// sixty-four times.
+func BenchmarkRedisScanStep(b *testing.B) {
+	s := redisstore.New(client(b))
+	prefix := fmt.Sprintf("bench:{scan-%d}:", time.Now().UnixNano())
+	seedScanKeys(b, prefix, scanDomainKeys)
+
+	cursor := ""
+	for b.Loop() {
+		_, next, err := s.Scan(b.Context(), prefix, cursor, 512)
+		if err != nil {
+			b.Fatal(err)
+		}
+		cursor = next
+	}
+}
+
+// BenchmarkRedisScanWalk measures a whole walk of the same domain, which is
+// what a bulk sweep of it costs in store reads.
+func BenchmarkRedisScanWalk(b *testing.B) {
+	s := redisstore.New(client(b))
+	prefix := fmt.Sprintf("bench:{walk-%d}:", time.Now().UnixNano())
+	seedScanKeys(b, prefix, scanDomainKeys)
+
+	for b.Loop() {
+		cursor := ""
+		steps, keys := 0, 0
+		for {
+			found, next, err := s.Scan(b.Context(), prefix, cursor, 512)
+			if err != nil {
+				b.Fatal(err)
+			}
+			steps++
+			keys += len(found)
+			if next == "" {
+				break
+			}
+			cursor = next
+		}
+		b.ReportMetric(float64(steps), "steps/op")
+		b.ReportMetric(float64(keys), "keys/op")
+	}
+}
