@@ -159,3 +159,52 @@ func TestSeedExtractions_makesZeroObservableWithoutResettingLiveSeries(t *testin
 	assert.Equal(t, 1.0, testutil.ToFloat64(Extractions.WithLabelValues("seeded_live")),
 		"reseeding an existing series is a no-op, not a reset")
 }
+
+// The leader's series. They are absent from every replica that does not hold
+// the lease, which is why ratelimit_leader exists: it says which scrape is the
+// one carrying them.
+func TestFleetCollector_reportsWhatTheLeaderSaw(t *testing.T) {
+	t.Cleanup(func() {
+		DropFleet("gateway.public")
+		DropFleet("gateway.private")
+		SetLeader(false)
+	})
+
+	SetLeader(true)
+	PublishFleet("gateway.public", FleetSample{Applied: 3, Total: 3, Reason: "Progressing"})
+	PublishFleet("gateway.private", FleetSample{
+		Applied: 1, Total: 3, Stalled: true, Reason: "ReplicaStale"})
+
+	expected := `
+# HELP ratelimit_leader Whether this replica holds the leader lease. The status series are only written by the replica reporting 1.
+# TYPE ratelimit_leader gauge
+ratelimit_leader 1
+# HELP ratelimit_policy_replicas Replicas of the domain by state: total is the ready fleet, applied is how many of it enforce the active generation.
+# TYPE ratelimit_policy_replicas gauge
+ratelimit_policy_replicas{domain="gateway.private",state="applied"} 1
+ratelimit_policy_replicas{domain="gateway.private",state="total"} 3
+ratelimit_policy_replicas{domain="gateway.public",state="applied"} 3
+ratelimit_policy_replicas{domain="gateway.public",state="total"} 3
+# HELP ratelimit_policy_stalled Whether the domain is stuck rather than progressing; reason names which way.
+# TYPE ratelimit_policy_stalled gauge
+ratelimit_policy_stalled{domain="gateway.private",reason="ReplicaStale"} 1
+ratelimit_policy_stalled{domain="gateway.public",reason="Progressing"} 0
+`
+	require.NoError(t, testutil.CollectAndCompare(fleetCollector{}, strings.NewReader(expected)))
+}
+
+// A deleted policy has to take its series with it: an alert on a stalled
+// domain would otherwise fire forever on an object nobody can fix.
+func TestFleetCollector_forgetsADeletedDomain(t *testing.T) {
+	t.Cleanup(func() { SetLeader(false) })
+
+	PublishFleet("gateway.retired", FleetSample{Applied: 1, Total: 1, Reason: "Progressing"})
+	DropFleet("gateway.retired")
+
+	expected := `
+# HELP ratelimit_leader Whether this replica holds the leader lease. The status series are only written by the replica reporting 1.
+# TYPE ratelimit_leader gauge
+ratelimit_leader 0
+`
+	require.NoError(t, testutil.CollectAndCompare(fleetCollector{}, strings.NewReader(expected)))
+}

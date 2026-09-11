@@ -349,6 +349,14 @@ type ReplicaStatus struct {
 	// +optional
 	Applied int32 `json:"applied"`
 
+	// Summary is Applied and Total as "2/3", and exists because the REPLICAS
+	// printer column has to read one field: a column is a JSONPath expression,
+	// and JSONPath cannot join two numbers. It is written by the leader
+	// alongside the two numbers and carries nothing they do not.
+	// +optional
+	// +kubebuilder:validation:MaxLength=32
+	Summary string `json:"summary,omitempty"`
+
 	// LastCheckTime is the freshness of the probe. When no pod exists at all
 	// there is nobody to write the status, and the age of this stamp is what
 	// shows it.
@@ -411,9 +419,7 @@ type RateLimitPolicyStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:categories=ratelimit,shortName=rlp
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
-// JSONPath cannot join two fields into "2/3", so the fraction is two columns.
-// +kubebuilder:printcolumn:name="Applied",type=integer,JSONPath=`.status.replicas.applied`
-// +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas.total`
+// +kubebuilder:printcolumn:name="Replicas",type=string,JSONPath=`.status.replicas.summary`
 // +kubebuilder:printcolumn:name="Rules",type=integer,JSONPath=`.status.rules`
 // +kubebuilder:printcolumn:name="Problems",type=integer,JSONPath=`.status.problems`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

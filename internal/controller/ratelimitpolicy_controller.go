@@ -9,10 +9,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -23,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
@@ -91,7 +94,14 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// reconciler writes is where that has to be reported.
 	stored := policy.Object()
 	if err := r.Get(ctx, req.NamespacedName, stored); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if apierrors.IsNotFound(err) {
+			// The name of a policy is its domain. Dropping the series here is
+			// what keeps an alert on a stalled domain from firing forever on
+			// an object nobody can fix, because it no longer exists.
+			metrics.DropFleet(req.Name)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 	decoded, _, err := policy.Decode(stored)
 	if err != nil {
@@ -135,6 +145,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		object.Status.Replicas = v1alpha1.ReplicaStatus{
 			Total:   view.Total,
 			Applied: view.Applied,
+			Summary: fmt.Sprintf("%d/%d", view.Applied, view.Total),
 			// Carried over first, so that comparing the status against its
 			// previous value below does not count this field as a change.
 			LastCheckTime: before.Replicas.LastCheckTime,
@@ -143,6 +154,16 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			object.Status.Replicas.LastCheckTime = &metav1.Time{Time: now}
 		}
 	}
+
+	// Published before the write, and whether or not it changes anything: these
+	// series report what the leader last saw, and a scrape between two
+	// unchanged reconciles has to keep seeing it.
+	metrics.PublishFleet(object.Spec.Domain, metrics.FleetSample{
+		Applied: object.Status.Replicas.Applied,
+		Total:   object.Status.Replicas.Total,
+		Stalled: judged.stalled == metav1.ConditionTrue,
+		Reason:  judged.stalledReason,
+	})
 
 	written, err := writeStatus(ctx, r.Client, &object, before, &object.Status)
 	if err != nil {

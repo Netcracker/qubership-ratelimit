@@ -278,3 +278,34 @@ func helmScale(release string, replicas int32) {
 	out, err := cmd.CombinedOutput()
 	Expect(err).NotTo(HaveOccurred(), "helm upgrade failed: %s", out)
 }
+
+// fleetScale is a release scaled for one container, remembering what to put
+// back. The suites that need more than one replica - a rollout with a
+// surviving leader, a follower the leader cannot reach - go through it so
+// that the scale-up and the restore are one pair, and a container that
+// fails halfway leaves the release the size it found it.
+type fleetScale struct {
+	release  string
+	original int32
+}
+
+// scaleFleet sets the replica count of the release and returns what restores
+// it. The release and its current count are read from the Deployment rather
+// than assumed, the way the leader suite reads them.
+func scaleFleet(replicas int32) *fleetScale {
+	var dep appsv1.Deployment
+	Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: operatorDeployment()}, &dep)).
+		To(Succeed())
+	release := dep.Annotations["meta.helm.sh/release-name"]
+	Expect(release).NotTo(BeEmpty(), "cannot determine the Helm release owning %s", dep.Name)
+	scale := &fleetScale{release: release, original: 1}
+	if dep.Spec.Replicas != nil {
+		scale.original = *dep.Spec.Replicas
+	}
+	helmScale(release, replicas)
+	return scale
+}
+
+func (f *fleetScale) restore() {
+	helmScale(f.release, f.original)
+}

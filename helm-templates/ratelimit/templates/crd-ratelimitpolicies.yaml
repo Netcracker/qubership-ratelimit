@@ -25,12 +25,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
-    - jsonPath: .status.replicas.applied
-      name: Applied
-      type: integer
-    - jsonPath: .status.replicas.total
+    - jsonPath: .status.replicas.summary
       name: Replicas
-      type: integer
+      type: string
     - jsonPath: .status.rules
       name: Rules
       type: integer
@@ -565,6 +562,14 @@ spec:
                       there is nobody to write the status, and the age of this stamp is what
                       shows it.
                     format: date-time
+                    type: string
+                  summary:
+                    description: |-
+                      Summary is Applied and Total as "2/3", and exists because the REPLICAS
+                      printer column has to read one field: a column is a JSONPath expression,
+                      and JSONPath cannot join two numbers. It is written by the leader
+                      alongside the two numbers and carries nothing they do not.
+                    maxLength: 32
                     type: string
                   total:
                     description: Total is the number of ready replicas at the time

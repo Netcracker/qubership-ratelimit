@@ -175,6 +175,7 @@ func init() {
 		StoreRoundtrip, StoreErrors,
 		SnapshotRebuilds, SnapshotTimestamp, StatePersistErrors,
 		stateCollector{},
+		fleetCollector{},
 	)
 }
 
