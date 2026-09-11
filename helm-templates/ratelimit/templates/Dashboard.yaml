@@ -1,3 +1,4 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if .Values.MONITORING_ENABLED }}
 {{- $namespaceHash := sha256sum .Release.Namespace | trunc 6 }}
 {{- $dashboardNamespace := .Release.Namespace | trunc 18 | trimSuffix "-" }}
@@ -24,4 +25,5 @@ metadata:
 spec:
   name: {{ printf "%s-dashboard" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}.json
   json: {{ .Files.Get "dashboards/ratelimit-dashboard.json" | toJson | replace "dashboard-uid-placeholder" $dashboardUID | replace "namespace-default-placeholder" .Release.Namespace }}
+{{- end }}
 {{- end }}

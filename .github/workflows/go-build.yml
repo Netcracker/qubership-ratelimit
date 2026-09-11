@@ -206,8 +206,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Lint the chart against every resource profile
+      - name: Lint the chart against every resource profile, in every mode
         run: make helm-lint
+
+      # A satellite namespace runs no component. What it gets is the gateway
+      # filters, and they have to point at the baseline's Service by its fixed
+      # name - a satellite has no other way to know how the baseline was
+      # installed. Both halves are checked: nothing but filters, and the
+      # address they carry.
+      - name: Check what a satellite renders
+        run: |
+          set -o pipefail
+          rendered=$(helm template t helm-templates/ratelimit -n satellite \
+            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            --set MONITORING_ENABLED=true --set management.enabled=true \
+            --set BASELINE_ORIGIN=baseline)
+          kinds=$(echo "$rendered" | grep '^kind:' | sort -u)
+          [ "$kinds" = "kind: EnvoyFilter" ] || {
+            echo "::error::a satellite rendered more than its gateway filters:"; echo "$kinds"; exit 1; }
+          echo "$rendered" | grep -q 'ratelimit\.baseline\.svc\.cluster\.local' || {
+            echo "::error::the satellite filters do not point at the baseline's ratelimit Service"; exit 1; }
+          # A blue-green baseline runs its shared components in the controller
+          # namespace, and that is where the filters must point.
+          helm template t helm-templates/ratelimit -n satellite \
+            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            --set BASELINE_ORIGIN=baseline --set BASELINE_CONTROLLER=baseline-ctl \
+            | grep -q 'ratelimit\.baseline-ctl\.svc\.cluster\.local' || {
+            echo "::error::the satellite filters ignore BASELINE_CONTROLLER"; exit 1; }
 
       # The management port is safe only behind its AuthorizationPolicy, and the
       # policy is only worth anything if it names the identity the gateway
@@ -240,17 +265,25 @@ jobs:
           echo "$manifests" | grep -q 'kind: AuthorizationPolicy' || {
             echo "::error::the management port rendered without its AuthorizationPolicy"; exit 1; }
 
-      # In-process counting keeps the idempotency records and confirmation
-      # tokens in one replica's memory, so a preview and its confirmation can
-      # land on different pods.
-      - name: Check that management refuses the in-process store above one replica
+      # An in-process store above one replica is a limit that admits N per
+      # replica, and the management API's records live in that same memory.
+      # The chart refuses to render it, with the message the runbook names.
+      - name: Check that the in-process store is refused above one replica
         run: |
-          if helm template t helm-templates/ratelimit \
-            -f helm-templates/ratelimit/resource-profiles/prod.yaml \
-            --set management.enabled=true >/dev/null 2>&1; then
-            echo "::error::two replicas without redis.addresses rendered a management API"
-            exit 1
+          set +e
+          out=$(helm template t helm-templates/ratelimit \
+            -f helm-templates/ratelimit/resource-profiles/prod.yaml 2>&1)
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::two replicas without redis.addresses rendered"; exit 1
           fi
+          echo "$out" | grep -q 'in-process store needs exactly one replica; set redis.addresses' || {
+            echo "::error::the render failed for a reason other than validateStore:"; echo "$out"; exit 1; }
+          # And the same profile renders once the store is shared.
+          helm template t helm-templates/ratelimit \
+            -f helm-templates/ratelimit/resource-profiles/prod.yaml \
+            --set redis.addresses=redis:6379 >/dev/null
       - name: Regenerate the manifests and the chart CRDs
         run: make sync-helm-crds
       - name: Fail on drift between the generated files and the commit

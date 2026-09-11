@@ -28,6 +28,10 @@ env:
   MESH_CONFIG_REPO: https://github.com/Netcracker/qubership-core-mesh-config.git
   MESH_CONFIG_REF: main
   E2E_NAMESPACE: ratelimit-e2e
+  # A second namespace with gateways of its own, where the chart is installed
+  # as a satellite of the first. The satellite suite reads it and skips when
+  # it is unset, so a stand without one still runs the rest.
+  E2E_SATELLITE_NAMESPACE: ratelimit-e2e-sat
   IMAGE: ratelimit:e2e
 
 jobs:
@@ -138,7 +142,12 @@ jobs:
         run: |
           # A profile is mandatory: values.yaml carries no resource keys, so the
           # chart is always installed the way it is in production.
-          helm upgrade --install ratelimit helm-templates/ratelimit \
+          #
+          # The release is not named after the chart. The Service has a fixed
+          # name that satellites compute their RLS address from, and with the
+          # release named ratelimit the two coincide and nothing in the suite
+          # can tell a fixed name from a derived one.
+          helm upgrade --install ratelimit-baseline helm-templates/ratelimit \
             --namespace "${E2E_NAMESPACE}" \
             -f helm-templates/ratelimit/resource-profiles/dev.yaml \
             --set logLevel=debug \
@@ -147,6 +156,7 @@ jobs:
             --set redis.addresses=e2e-redis:6379 \
             --set management.enabled=true \
             --wait --timeout 5m
+          kubectl get service ratelimit -n "${E2E_NAMESPACE}" >/dev/null
 
       - name: Deploy the probe backend
         run: |
@@ -155,6 +165,40 @@ jobs:
           # backend, a refusal answers 429, and 503 means the gateway itself.
           kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/echo.yaml
           kubectl rollout status deployment/e2e-echo -n "${E2E_NAMESPACE}" --timeout=120s
+
+      - name: Set up the satellite namespace
+        run: |
+          # The same gateways again, in a namespace of their own, the way a
+          # satellite of a composite has them.
+          kubectl create namespace "${E2E_SATELLITE_NAMESPACE}"
+          kubectl label namespace "${E2E_SATELLITE_NAMESPACE}" istio.io/dataplane-mode=ambient --overwrite
+          kubectl label namespace "${E2E_SATELLITE_NAMESPACE}" istio.io/use-waypoint=waypoint --overwrite
+
+          helm upgrade --install core-istio-mesh /tmp/mesh-config \
+            --namespace "${E2E_SATELLITE_NAMESPACE}" \
+            -f /tmp/mesh-config/resource-profiles/dev.yaml \
+            --set SERVICE_MESH_TYPE=Istio \
+            --set MONITORING_ENABLED=false \
+            --set CPU_REQUEST=10m \
+            --set WAYPOINT_CPU_REQUEST=100m \
+            --wait --timeout 10m
+          for gw in public-gateway private-gateway; do
+            kubectl wait "gateways.gateway.networking.k8s.io/${gw}" -n "${E2E_SATELLITE_NAMESPACE}" \
+              --for=condition=Programmed --timeout=300s
+            kubectl rollout status "deployment/${gw}-istio" -n "${E2E_SATELLITE_NAMESPACE}" --timeout=300s
+          done
+
+          # The chart as a satellite: BASELINE_ORIGIN names the baseline, and
+          # that alone turns the render into the gateway filters. No store,
+          # no image - there is no Deployment for either to matter to.
+          helm upgrade --install ratelimit-satellite helm-templates/ratelimit \
+            --namespace "${E2E_SATELLITE_NAMESPACE}" \
+            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            --set BASELINE_ORIGIN="${E2E_NAMESPACE}" \
+            --wait --timeout 2m
+
+          kubectl apply -n "${E2E_SATELLITE_NAMESPACE}" -f tests/e2e/manifests/echo.yaml
+          kubectl rollout status deployment/e2e-echo -n "${E2E_SATELLITE_NAMESPACE}" --timeout=120s
 
       # The JUnit report is the surefire analog, and the HTML page next to it
       # is the same run for human eyes - both uploaded below whatever the
@@ -219,5 +263,7 @@ jobs:
             -n "${E2E_NAMESPACE}" -o wide || true
           kubectl describe pods -n "${E2E_NAMESPACE}" || true
           kubectl logs -n "${E2E_NAMESPACE}" -l app.kubernetes.io/name=ratelimit --tail=200 || true
+          kubectl get all,envoyfilters,gateways.gateway.networking.k8s.io,httproutes \
+            -n "${E2E_SATELLITE_NAMESPACE}" -o wide || true
           kubectl get pods -n istio-system -o wide || true
           kubectl logs -n istio-system -l app=istiod --tail=100 || true

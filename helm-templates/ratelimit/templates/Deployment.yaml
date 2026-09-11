@@ -1,4 +1,5 @@
-{{- include "ratelimit.validateManagement" . -}}
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+{{- include "ratelimit.validateStore" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -50,7 +51,7 @@ spec:
             # The Service whose ready endpoints are this component's replicas.
             # The leader reads the enforced generation from each of them, which
             # is what the Ready condition of a policy reports.
-            - --service-name={{ include "ratelimit.fullname" . }}
+            - --service-name={{ include "ratelimit.serviceName" . }}
           env:
             # The name this replica signs the leader election lease with, and
             # the name the status conditions use for the replicas that lag.
@@ -161,3 +162,4 @@ spec:
       # Long enough for the gRPC drain (--rls-drain-timeout, 10s by default) to
       # finish before the kubelet sends SIGKILL.
       terminationGracePeriodSeconds: 30
+{{- end }}

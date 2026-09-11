@@ -1,6 +1,6 @@
 # ============== IMAGE ============================
 image:
-  repository: ghcr.io/netcracker/ratelimit
+  repository: ghcr.io/netcracker/qubership-ratelimit
   # Empty takes the chart's appVersion, which is a fixed release. A floating tag
   # such as "latest" moves under a running workload, so two pods of one rollout
   # can end up on different builds.
@@ -139,6 +139,17 @@ MONITORING_ENABLED: false
 
 ISTIO_PUBLIC_GATEWAY_NAME: public-gateway
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
+
+# ============== COMPOSITE ============================
+# The deployer's composite variables, the same ones core-operator renders by.
+# Both empty is a standalone installation or the baseline of a composite:
+# the whole component renders. BASELINE_ORIGIN set is a satellite: only the
+# gateway filters render, and they send checks to the baseline's Service at
+# ratelimit.<baseline namespace>:9000 - which is why that Service has a fixed
+# name. BASELINE_CONTROLLER names the controller namespace of a blue-green
+# baseline, where its shared components run; it takes precedence when set.
+BASELINE_ORIGIN: ""
+BASELINE_CONTROLLER: ""
 
 # What this chart owns per gateway: whether to rate limit it, and under which
 # domain. The domain is the binding key — it must equal spec.domain of the
