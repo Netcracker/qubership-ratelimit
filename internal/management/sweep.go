@@ -52,6 +52,9 @@ type sweeper struct {
 
 	progress records.Progress
 	rules    map[string]int
+
+	// batch holds the candidates judged since the last commit.
+	batch []counterCandidate
 }
 
 // newSweeper prepares a walk over the selection.
@@ -71,6 +74,7 @@ func (a *API) newSweeper(
 		domainWide: command.DomainWide,
 		execute:    !command.DryRun,
 		rules:      map[string]int{},
+		batch:      make([]counterCandidate, 0, sweepBatch),
 	}
 }
 
@@ -89,7 +93,6 @@ func (s *sweeper) run(ctx context.Context, deadline time.Time) error {
 	if !s.domainWide {
 		prefix = scanPrefix(s.api.Namespace, s.snapshot.Domain, s.sel)
 	}
-	batch := make([]counterCandidate, 0, sweepBatch)
 	cursor := ""
 	for {
 		// The deadline is checked before every step as well as before every
@@ -103,32 +106,41 @@ func (s *sweeper) run(ctx context.Context, deadline time.Time) error {
 		if err != nil {
 			return err
 		}
-
-		for _, k := range keys {
-			if s.api.now().After(deadline) {
-				return errDeadline
-			}
-
-			s.progress.Scanned++
-			candidate, ok := s.consider(ctx, k)
-			if !ok {
-				continue
-			}
-
-			batch = append(batch, candidate)
-			if len(batch) < sweepBatch {
-				continue
-			}
-			if err := s.commitBatch(ctx, batch); err != nil {
-				return err
-			}
-			batch = batch[:0]
+		if err := s.walk(ctx, keys, deadline); err != nil {
+			return err
 		}
 		if next == "" {
-			return s.commitBatch(ctx, batch)
+			return s.commitBatch(ctx, s.batch)
 		}
 		cursor = next
 	}
+}
+
+// walk judges the keys of one step, batching the candidates and committing
+// the batch whenever it fills; it stops with errDeadline when the clock runs
+// out between two keys.
+func (s *sweeper) walk(ctx context.Context, keys []string, deadline time.Time) error {
+	for _, k := range keys {
+		if s.api.now().After(deadline) {
+			return errDeadline
+		}
+
+		s.progress.Scanned++
+		candidate, ok := s.consider(ctx, k)
+		if !ok {
+			continue
+		}
+
+		s.batch = append(s.batch, candidate)
+		if len(s.batch) < sweepBatch {
+			continue
+		}
+		if err := s.commitBatch(ctx, s.batch); err != nil {
+			return err
+		}
+		s.batch = s.batch[:0]
+	}
+	return nil
 }
 
 // consider applies the filters that need nothing but the key and the snapshot.

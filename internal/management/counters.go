@@ -195,6 +195,45 @@ type page struct {
 	resume     scanPos
 }
 
+// pageWalk is one page being assembled: the selection it applies, where it
+// stands in the store, and what it has kept so far.
+type pageWalk struct {
+	api      *API
+	snapshot *compile.Snapshot
+	index    rateIndex
+	sel      selector
+	pageSize int
+	pos      scanPos
+	out      page
+}
+
+// take consumes the keys of one step after pos.after, keeping what the
+// selection admits, and reports whether the page filled before a key it did
+// not take. pos then names that key's step and the last key taken before it,
+// which is where the next page resumes.
+func (w *pageWalk) take(ctx context.Context, keys []string) (full bool) {
+	for _, k := range keys {
+		if w.pos.after != "" && k <= w.pos.after {
+			continue
+		}
+		if len(w.out.candidates) >= w.pageSize || w.out.scanned >= scanBudget {
+			return true
+		}
+		w.out.scanned++
+		w.pos.after = k
+		if candidate, ok := w.api.admit(ctx, w.snapshot, w.index, w.sel, k); ok {
+			w.out.candidates = append(w.out.candidates, candidate)
+		}
+	}
+	return false
+}
+
+// stopped returns the page cut short at pos, where the next page resumes.
+func (w *pageWalk) stopped() page {
+	w.out.more, w.out.resume = true, w.pos
+	return w.out
+}
+
 // selectCandidates walks the store from start one step at a time, keeping the
 // keys the selection admits, and stops at the page size, the scan budget, or
 // the step cap.
@@ -213,38 +252,24 @@ func (a *API) selectCandidates(
 	pageSize int,
 	start scanPos,
 ) (page, error) {
-	index := newRateIndex(snapshot)
+	w := &pageWalk{api: a, snapshot: snapshot, index: newRateIndex(snapshot), sel: sel, pageSize: pageSize, pos: start}
 	prefix := scanPrefix(a.Namespace, snapshot.Domain, sel)
-	out := page{}
-	pos := start
 
 	for steps := 0; ; steps++ {
 		if steps >= maxScanSteps {
-			out.more, out.resume = true, pos
-			return out, nil
+			return w.stopped(), nil
 		}
-		keys, next, err := inspector.Scan(ctx, prefix, pos.step, scanStep)
+		keys, next, err := inspector.Scan(ctx, prefix, w.pos.step, scanStep)
 		if err != nil {
 			return page{}, err
 		}
-		for _, k := range keys {
-			if pos.after != "" && k <= pos.after {
-				continue
-			}
-			if len(out.candidates) >= pageSize || out.scanned >= scanBudget {
-				out.more, out.resume = true, pos
-				return out, nil
-			}
-			out.scanned++
-			pos.after = k
-			if candidate, ok := a.admit(ctx, snapshot, index, sel, k); ok {
-				out.candidates = append(out.candidates, candidate)
-			}
+		if w.take(ctx, keys) {
+			return w.stopped(), nil
 		}
 		if next == "" {
-			return out, nil
+			return w.out, nil
 		}
-		pos = scanPos{step: next}
+		w.pos = scanPos{step: next}
 	}
 }
 
