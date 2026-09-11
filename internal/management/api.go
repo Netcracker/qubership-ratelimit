@@ -244,7 +244,7 @@ func (a *API) handleCounters(c *fiber.Ctx) error {
 	}
 
 	now := a.now()
-	start := scanPos{}
+	start := ""
 	if raw := query.Get("cursor"); raw != "" {
 		start, apiErr = decodeCursor(raw, sel, now)
 		if apiErr != nil {

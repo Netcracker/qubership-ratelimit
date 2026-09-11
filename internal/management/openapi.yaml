@@ -848,14 +848,21 @@ paths:
         evaluated at cost=1. Takes the full selection grammar - rules x
         window x identity x state - plus pagination.
 
-        Work is bounded per call: the server examines at most its scan
-        budget of keys for one page, reading the store in steps of a few
-        hundred keys and at most a fixed number of steps per page. A narrow
-        filter over a huge domain may therefore return fewer than `pageSize`
-        items mid-collection, and a page over a stretch of the store that
-        holds none of the domain's keys may return no item at all. `scanned`
-        in the envelope says how much was examined; a present `nextCursor` is
-        the only signal of completion, never the page fill.
+        Work is bounded per call: the server reads the store in whole steps,
+        each of at most the room left on the page, and at most 128 steps per
+        page, so a page examines at most 128 times `pageSize` keys and at
+        most its scan budget of 12000 keys; the budget binds for a `pageSize`
+        of 94 and above, and a narrow filter over a large domain wants a
+        large `pageSize`. A narrow filter over a huge domain may therefore
+        return fewer than `pageSize` items mid-collection, and a page over a
+        stretch of the store that holds none of the domain's keys may return
+        no item at all. A page ends on a step boundary and its cursor is the
+        store's own, so the walk stays on the chain of cursors the store
+        returns and stays complete; on a Redis store, whose step size is a
+        hint, a page may carry a few items more than `pageSize` and examine
+        a few keys more than the budget. `scanned` in the envelope says how
+        much was examined; a present `nextCursor` is the only signal of
+        completion, never the page fill.
 
         A cursor is bound to its selection: it embeds a fingerprint of the canonical selector (the form defined on ResetSelector, applied to the query selection likewise) and a TTL, and presenting it with different selectors - or after expiry - is RLS-0400, never a silently different listing. Pages are not a consistent snapshot: the store
         is scanned live, so counters created, expired, or changed between
@@ -901,9 +908,11 @@ paths:
           minimum: 1
           maximum: 500
           default: 100
-        description: Upper bound on items in one page. A page may carry fewer even
-          mid-collection when the scan budget or the step cap fills first, so the
-          end of the listing is an absent nextCursor, never a short page.
+        description: The size a page asks for. A page holds whole store steps, so on
+          a Redis store, whose step size is a hint, it may carry a few items more;
+          it may carry fewer even mid-collection when the scan budget or the step
+          cap fills first, so the end of the listing is an absent nextCursor, never
+          the page fill.
       - name: cursor
         in: query
         required: false

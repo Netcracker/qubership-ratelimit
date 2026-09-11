@@ -94,21 +94,25 @@ func seedScanKeys(b *testing.B, prefix string, n int) {
 	}
 }
 
-// BenchmarkRedisScanStep measures one step of 512 keys over a domain of
-// scanDomainKeys keys, the unit of work a listing page repeats at most
-// sixty-four times.
+// BenchmarkRedisScanStep measures one step over a domain of scanDomainKeys
+// keys at the ask of the default listing page (100) and of the sweep (512):
+// a listing page repeats the first at most 128 times.
 func BenchmarkRedisScanStep(b *testing.B) {
 	s := redisstore.New(client(b))
 	prefix := fmt.Sprintf("bench:{scan-%d}:", time.Now().UnixNano())
 	seedScanKeys(b, prefix, scanDomainKeys)
 
-	cursor := ""
-	for b.Loop() {
-		_, next, err := s.Scan(b.Context(), prefix, cursor, 512)
-		if err != nil {
-			b.Fatal(err)
-		}
-		cursor = next
+	for _, limit := range []int{100, 512} {
+		b.Run(fmt.Sprintf("limit=%d", limit), func(b *testing.B) {
+			cursor := ""
+			for b.Loop() {
+				_, next, err := s.Scan(b.Context(), prefix, cursor, limit)
+				if err != nil {
+					b.Fatal(err)
+				}
+				cursor = next
+			}
+		})
 	}
 }
 

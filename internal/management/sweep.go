@@ -26,6 +26,10 @@ import (
 // progress closer to the truth when a walk is cut short.
 const sweepBatch = 256
 
+// sweepScanStep is how many keys one store step of the walk asks for: the
+// keys a walk holds of the store at once, whatever the domain's size.
+const sweepScanStep = 512
+
 // errDeadline reports a walk that ran out of its deadline. It is separate from
 // a defect because its recovery is: narrow the selection.
 var errDeadline = errors.New("management: the sweep reached its deadline")
@@ -102,7 +106,7 @@ func (s *sweeper) run(ctx context.Context, deadline time.Time) error {
 		if s.api.now().After(deadline) {
 			return errDeadline
 		}
-		keys, next, err := inspector.Scan(ctx, prefix, cursor, scanStep)
+		keys, next, err := inspector.Scan(ctx, prefix, cursor, sweepScanStep)
 		if err != nil {
 			return err
 		}

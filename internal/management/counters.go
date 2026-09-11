@@ -14,7 +14,8 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/ruleview"
 )
 
-// scanBudget bounds the keys one call examines.
+// scanBudget bounds the keys one call examines, exactly on a store whose step
+// is exact and within the step's margin on one whose step is a hint.
 //
 // The size of a selection cannot be known in advance, because a scan does not
 // count matches cheaply. Work is bounded instead of predicted: a page stops at
@@ -22,20 +23,16 @@ import (
 // busy domain into a short page rather than a request that never returns.
 const scanBudget = 12_000
 
-// scanStep is how many keys one store step asks for, in the listing and in
-// the sweep alike: the keys either holds of the store at once, whatever the
-// domain's size.
-const scanStep = 512
-
 // maxScanSteps bounds the store round trips of one page. The budget counts
 // keys the store returned, and on a keyspace shared with other data a step
 // can return no key of the prefix at all; a long stretch of such steps would
 // never fill the budget. A page stops at this many steps whatever it found,
-// and says where to resume.
-const maxScanSteps = 64
+// and says where to resume. A step asks for the room left on the page, so
+// this many steps of the default page cover the scan budget.
+const maxScanSteps = 128
 
-// defaultPageSize and maxPageSize bound one page of counters. Each page costs
-// one Peek across its keys.
+// defaultPageSize and maxPageSize bound the size a page asks for. Each page
+// costs one Peek across its keys.
 const (
 	defaultPageSize = 100
 	maxPageSize     = 500
@@ -46,8 +43,9 @@ type CounterList struct {
 	Items []CounterView `json:"items"`
 
 	// NextCursor is the only signal that more follows. A page can be short
-	// mid-collection when the scan budget or the step cap fills first, so
-	// page fill says nothing.
+	// mid-collection when the scan budget or the step cap fills first, and
+	// on a store whose step is a hint it can run a little over the page
+	// size, so page fill says nothing.
 	NextCursor string `json:"nextCursor,omitempty"`
 
 	Truncated bool `json:"truncated,omitempty"`
@@ -149,7 +147,7 @@ func (a *API) listCounters(
 	snapshot *compile.Snapshot,
 	sel selector,
 	pageSize int,
-	start scanPos,
+	start string,
 	now time.Time,
 ) (CounterList, *apiError) {
 	inspector, ok := a.Counters.(counters.Inspector)
@@ -186,90 +184,97 @@ func (a *API) listCounters(
 }
 
 // page is what one walk produced: the counters it kept, how many keys it
-// looked at, whether it stopped with keys unread, and where the next page
-// resumes.
+// looked at, whether it stopped with steps unread, and the store cursor the
+// next page resumes with.
 type page struct {
 	candidates []counterCandidate
 	scanned    int
 	more       bool
-	resume     scanPos
+	resume     string
 }
 
-// pageWalk is one page being assembled: the selection it applies, where it
-// stands in the store, and what it has kept so far.
+// pageWalk is one page being assembled: the selection it applies, the store
+// cursor of the next step, and what it has kept so far.
 type pageWalk struct {
 	api      *API
 	snapshot *compile.Snapshot
 	index    rateIndex
 	sel      selector
 	pageSize int
-	pos      scanPos
+	next     string
 	out      page
 }
 
-// take consumes the keys of one step after pos.after, keeping what the
-// selection admits, and reports whether the page filled before a key it did
-// not take. pos then names that key's step and the last key taken before it,
-// which is where the next page resumes.
-func (w *pageWalk) take(ctx context.Context, keys []string) (full bool) {
+// take consumes the keys of one whole step, keeping what the selection
+// admits.
+func (w *pageWalk) take(ctx context.Context, keys []string) {
 	for _, k := range keys {
-		if w.pos.after != "" && k <= w.pos.after {
-			continue
-		}
-		if len(w.out.candidates) >= w.pageSize || w.out.scanned >= scanBudget {
-			return true
-		}
 		w.out.scanned++
-		w.pos.after = k
 		if candidate, ok := w.api.admit(ctx, w.snapshot, w.index, w.sel, k); ok {
 			w.out.candidates = append(w.out.candidates, candidate)
 		}
 	}
-	return false
 }
 
-// stopped returns the page cut short at pos, where the next page resumes.
+// full reports whether the page has no room for another step: the page size
+// or the scan budget is reached, or the step cap.
+func (w *pageWalk) full(steps int) bool {
+	return len(w.out.candidates) >= w.pageSize || w.out.scanned >= scanBudget || steps >= maxScanSteps
+}
+
+// room is how many keys the next step asks for: what the page size and the
+// scan budget leave, so that a store whose step is exact fills the page and
+// the budget exactly, and one whose step is a hint exceeds them by that
+// hint's margin at most.
+func (w *pageWalk) room() int {
+	return min(w.pageSize-len(w.out.candidates), scanBudget-w.out.scanned)
+}
+
+// stopped returns the page cut short with steps unread, resuming at next.
 func (w *pageWalk) stopped() page {
-	w.out.more, w.out.resume = true, w.pos
+	w.out.more, w.out.resume = true, w.next
 	return w.out
 }
 
-// selectCandidates walks the store from start one step at a time, keeping the
-// keys the selection admits, and stops at the page size, the scan budget, or
-// the step cap.
+// selectCandidates walks the store from the cursor start one whole step at a
+// time, keeping the keys the selection admits, and stops between steps once
+// the page size, the scan budget, or the step cap is reached.
 //
-// The cursor is minted from where the walk stopped, not from the last key it
-// kept. A page that filled its budget without a match would otherwise end the
-// listing, since a missing nextCursor is what the contract defines as the end,
-// and a narrow filter over a busy domain would report that a counter which
-// exists does not. Resuming from the last candidate would also rescan the keys
-// between it and the point the walk stopped.
+// A page never stops inside a step, and its cursor is the store's own cursor
+// of the step after it: the store returns every key only to a walk along the
+// chain of cursors it returns, so a page that reread a step with an earlier
+// cursor could miss or repeat a key after the store rearranged its keyspace.
+// Each step asks for the room left on the page, which keeps the page at the
+// page size on a store whose step is exact and a little past it on one whose
+// step is a hint. The cursor is minted from where the walk stopped, not from
+// the last key it kept: a page that filled its budget without a match would
+// otherwise end the listing, since a missing nextCursor is what the contract
+// defines as the end, and a narrow filter over a busy domain would report
+// that a counter which exists does not.
 func (a *API) selectCandidates(
 	ctx context.Context,
 	snapshot *compile.Snapshot,
 	inspector counters.Inspector,
 	sel selector,
 	pageSize int,
-	start scanPos,
+	start string,
 ) (page, error) {
-	w := &pageWalk{api: a, snapshot: snapshot, index: newRateIndex(snapshot), sel: sel, pageSize: pageSize, pos: start}
+	w := &pageWalk{api: a, snapshot: snapshot, index: newRateIndex(snapshot), sel: sel, pageSize: pageSize, next: start}
 	prefix := scanPrefix(a.Namespace, snapshot.Domain, sel)
 
 	for steps := 0; ; steps++ {
-		if steps >= maxScanSteps {
+		if w.full(steps) {
 			return w.stopped(), nil
 		}
-		keys, next, err := inspector.Scan(ctx, prefix, w.pos.step, scanStep)
+		keys, next, err := inspector.Scan(ctx, prefix, w.next, w.room())
 		if err != nil {
 			return page{}, err
 		}
-		if w.take(ctx, keys) {
-			return w.stopped(), nil
-		}
+		w.take(ctx, keys)
 		if next == "" {
 			return w.out, nil
 		}
-		w.pos = scanPos{step: next}
+		w.next = next
 	}
 }
 

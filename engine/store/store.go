@@ -133,8 +133,10 @@ type Inspector interface {
 	//
 	// The walk is live rather than a snapshot: a key that exists for the
 	// whole walk is returned at least once, and a key created, expired, or
-	// deleted during it may be missed or returned twice. Expensive by
-	// design: callers are management endpoints, never the decision path.
+	// deleted during it may be missed or returned twice. That holds for a
+	// walk along the chain of cursors the steps return; a step resumed with
+	// an earlier cursor has no such promise. Expensive by design: callers
+	// are management endpoints, never the decision path.
 	Scan(ctx context.Context, prefix, cursor string, limit int) (keys []string, next string, err error)
 }
 
