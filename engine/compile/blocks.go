@@ -48,14 +48,14 @@ func compileBlocks(namespace, domain string, p model.Policy, env *environment) (
 	return blocks, c.problems
 }
 
-// decisionBuckets is the worst case one request can collect from these blocks:
+// decisionBuckets is the worst case one decision can collect from these blocks:
 // every block targeted at once, All summing every counting rule, FirstMatch
 // settling on its widest counting rule after every shadow rule — shadows count
 // without ending the cascade. Bypass rules carry no rates, and replacedRules
 // suppression cannot be assumed statically.
 //
 // It sums blocks with disjoint targets too, so it is deliberately pessimistic:
-// no request can exceed a bound this formula respects.
+// no decision can exceed a bound this formula respects.
 func decisionBuckets(blocks []Block) int {
 	total := 0
 	for _, b := range blocks {

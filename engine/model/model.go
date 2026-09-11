@@ -19,7 +19,7 @@ const (
 	KeyToken = "token"
 )
 
-// MaxDomainDecisionBuckets is the worst-case bucket count one request may
+// MaxDomainDecisionBuckets is the worst-case bucket count one decision may
 // collect across the domain: All sums every counting rule of a block,
 // FirstMatch settles on its widest counting rule after every shadow rule, and
 // the blocks add up. Every bucket is one read and possibly one write inside a

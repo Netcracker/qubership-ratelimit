@@ -37,7 +37,7 @@ func TestStateCollector_rendersThePublishedView(t *testing.T) {
 # HELP ratelimit_domain_blocks Compiled blocks of the domain. Observed rather than bounded: watch the target scan, do not cap it.
 # TYPE ratelimit_domain_blocks gauge
 ratelimit_domain_blocks{domain="gateway.public"} 3
-# HELP ratelimit_domain_decision_buckets Worst-case buckets one request can collect across the domain, against the budget of 128.
+# HELP ratelimit_domain_decision_buckets Worst-case buckets one decision can collect across the domain, against the budget of 128.
 # TYPE ratelimit_domain_decision_buckets gauge
 ratelimit_domain_decision_buckets{domain="gateway.public"} 65
 # HELP ratelimit_policy_applied_generation The generation of the domain this replica enforces.

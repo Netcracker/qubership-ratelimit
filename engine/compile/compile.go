@@ -74,7 +74,7 @@ type Snapshot struct {
 	// then mapped keys in authored order.
 	Extraction []KeyExtraction
 
-	// DecisionBuckets is the worst case one request can collect across the
+	// DecisionBuckets is the worst case one decision can collect across the
 	// domain — the number compared against model.MaxDomainDecisionBuckets. It
 	// is a fact for an embedder's capacity metrics; the formula stays here.
 	DecisionBuckets int
@@ -191,7 +191,7 @@ func Compile(namespace, domain string, p *model.Policy) (*Snapshot, []Problem) {
 		problems = append(problems, Problem{
 			Reason: ReasonDomainBudgetExceeded,
 			Message: fmt.Sprintf(
-				"one request can collect up to %d buckets across the domain; the budget is %d",
+				"one decision can collect up to %d buckets across the domain; the budget is %d",
 				n, model.MaxDomainDecisionBuckets),
 			Blocking: true,
 		})
