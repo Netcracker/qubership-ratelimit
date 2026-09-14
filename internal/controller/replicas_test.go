@@ -464,3 +464,63 @@ func TestObserve_aViewCarriesTheTimeOfItsRound(t *testing.T) {
 	assert.Equal(t, taken, first.At)
 	assert.Equal(t, taken, second.At, "a reused round keeps the time it was taken")
 }
+
+// fakeClock is a clock the test and the fleet's handlers advance from their
+// own goroutines.
+type fakeClock struct {
+	base   time.Time
+	offset atomic.Int64
+}
+
+func (c *fakeClock) now() time.Time { return c.base.Add(time.Duration(c.offset.Load())) }
+
+func (c *fakeClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
+
+// The freshness counts from the end of a round, not from its start: a round
+// whose replicas took twelve seconds of the clock to answer is still reused
+// by the next domain under a freshness of ten, where a round aged from its
+// start would have expired before it completed and the cycle would fall
+// back to one round per domain.
+func TestObserve_aSlowRoundIsStillReusedAfterItCompletes(t *testing.T) {
+	var calls atomic.Int32
+	clock := &fakeClock{base: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
+	slow := func(w http.ResponseWriter, r *http.Request) {
+		clock.advance(6 * time.Second)
+		answers(t, appliedBy(7))(w, r)
+	}
+	probe := fleet(t, counting(&calls, slow), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe.Freshness = 10 * time.Second
+	probe.Now = clock.now
+
+	a, err := probe.Observe(context.Background(), "gateway.a", want(7), false)
+	require.NoError(t, err)
+	require.Equal(t, clock.base, a.At, "the view carries the start of the round")
+
+	_, err = probe.Observe(context.Background(), "gateway.b", want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "requests for two domains over two replicas, the second from the round")
+}
+
+// The replicas are asked together, so a round lasts one probe timeout at most
+// rather than one per replica. The handler answers only once every replica's
+// request is in flight, which a round that asked them one at a time could
+// never reach: its first request would time out alone.
+func TestObserve_asksTheReplicasTogether(t *testing.T) {
+	const replicas = 3
+	var arrived atomic.Int32
+	together := func(w http.ResponseWriter, r *http.Request) {
+		arrived.Add(1)
+		deadline := time.Now().Add(3 * time.Second)
+		for arrived.Load() < replicas && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		answers(t, appliedBy(7))(w, r)
+	}
+	probe := fleet(t, together, ready("ratelimit-a"), ready("ratelimit-b"), ready("ratelimit-c"))
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(replicas), view.Applied, "every replica answered within one timeout")
+	assert.Empty(t, view.Silent)
+}

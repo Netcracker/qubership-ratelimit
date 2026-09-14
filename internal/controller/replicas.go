@@ -101,7 +101,13 @@ type ReplicaProbe struct {
 // each of them enforced, or the error that failed the whole round. A round is
 // not modified once taken, so a view reads it without the lock.
 type fleetRound struct {
+	// taken is when the fleet was asked and completed when the last answer
+	// was in. The freshness counts from completed: a round that took long,
+	// because replicas were slow to answer, would otherwise expire before
+	// the next domain could reuse it, and the cycle would fall back to one
+	// round per domain.
 	taken     time.Time
+	completed time.Time
 	endpoints []endpoint
 
 	// answers holds what each endpoint enforces; an endpoint that did not
@@ -130,8 +136,8 @@ func (p *ReplicaProbe) Observe(
 }
 
 // currentRound returns the round an observation is answered from: the one
-// taken earlier while it is younger than the freshness, was taken from the
-// ready endpoints of now, and no fresh one was asked for; a new one
+// taken earlier while it completed less than the freshness ago, was taken
+// from the ready endpoints of now, and no fresh one was asked for; a new one
 // otherwise. The endpoints are read on every observation, from the cache
 // and at no cost to the fleet, because a round is only as good as the fleet
 // it was taken from: a pod that joined or left since changes the
@@ -144,10 +150,10 @@ func (p *ReplicaProbe) currentRound(ctx context.Context, fresh bool) *fleetRound
 	now := p.now()
 	endpoints, err := p.endpoints(ctx)
 	if err != nil {
-		p.round = &fleetRound{taken: now, err: err}
+		p.round = &fleetRound{taken: now, completed: now, err: err}
 		return p.round
 	}
-	if !fresh && p.round != nil && now.Sub(p.round.taken) < p.Freshness &&
+	if !fresh && p.round != nil && now.Sub(p.round.completed) < p.Freshness &&
 		slices.Equal(endpoints, p.round.endpoints) {
 		return p.round
 	}
@@ -162,19 +168,34 @@ func (p *ReplicaProbe) now() time.Time {
 	return time.Now()
 }
 
-// takeRound asks every one of the ready endpoints what it enforces.
+// takeRound asks every one of the ready endpoints what it enforces. The
+// endpoints are asked concurrently, so a round lasts one probe timeout at
+// most rather than one per replica.
 func (p *ReplicaProbe) takeRound(ctx context.Context, now time.Time, endpoints []endpoint) *fleetRound {
 	round := &fleetRound{taken: now, endpoints: endpoints, answers: map[endpoint]map[string]store.Applied{}}
 
+	type answer struct {
+		applied map[string]store.Applied
+		err     error
+	}
+	answers := make([]answer, len(endpoints))
+	var asking sync.WaitGroup
+	for i, endpoint := range endpoints {
+		asking.Go(func() {
+			answers[i].applied, answers[i].err = p.ask(ctx, endpoint.address)
+		})
+	}
+	asking.Wait()
+	round.completed = p.now()
+
 	var lastErr error
-	for _, endpoint := range endpoints {
-		applied, err := p.ask(ctx, endpoint.address)
-		if err != nil {
-			lastErr = err
+	for i, endpoint := range endpoints {
+		if answers[i].err != nil {
+			lastErr = answers[i].err
 			round.silent = append(round.silent, endpoint.name)
 			continue
 		}
-		round.answers[endpoint] = applied
+		round.answers[endpoint] = answers[i].applied
 	}
 
 	// Nobody answered, so this is a statement about the leader's reach rather

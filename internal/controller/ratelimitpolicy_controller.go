@@ -72,6 +72,16 @@ type RateLimitPolicyReconciler struct {
 	// Events records the Warning a generation that does not compile raises.
 	// It may be nil, which leaves the condition and the log as the only trace.
 	Events events.EventRecorder
+
+	// Now is the clock, injectable for tests; nil means time.Now.
+	Now func() time.Time
+}
+
+func (r *RateLimitPolicyReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // FleetProbe reports which replicas enforce which generation of a domain.
@@ -122,7 +132,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// policy's does, so the outcome already carries it.
 	outcome := result.Policies[req.NamespacedName]
 
-	now := time.Now()
+	now := r.now()
 	// A reconcile of a generation the status has not observed asks the fleet
 	// afresh: a round taken before the edit would report the replicas behind
 	// a change they may have applied since.
@@ -131,6 +141,10 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if view.At.IsZero() {
 		view.At = now
 	}
+	// Read after the probe, which may have waited for a round: the requeue
+	// counts from the return of this reconcile, so the wait until the round
+	// turns one interval old is measured from here.
+	probed := r.now()
 
 	before := object.Status.DeepCopy()
 	object.Status.ObservedGeneration = object.Generation
@@ -209,15 +223,15 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// last-good, and nothing about the object moves. Requeueing only while the
 	// verdict is false would leave such a replica unnoticed until the next edit
 	// or cache resync, which is exactly what Stalled exists to catch.
-	return ctrl.Result{RequeueAfter: nextProbe(view, probeErr, now)}, nil
+	return ctrl.Result{RequeueAfter: nextProbe(view, probeErr, probed)}, nil
 }
 
-// nextProbe is how long the reconcile waits before its next look at the
-// fleet: until the round it used turns ProbeInterval old, so the domains of
-// one cycle keep sharing a round and no status rests on answers older than
-// the interval. A failed probe waits the whole interval; a round on the
-// verge of that age waits one second, so a requeue never asks for a round
-// the probe would still reuse.
+// nextProbe is how long the reconcile waits, from now, before its next look
+// at the fleet: until the round it used turns ProbeInterval old, so the
+// domains of one cycle keep sharing a round and no status rests on answers
+// older than the interval. A failed probe waits the whole interval; a round
+// on the verge of that age waits one second, so a requeue never asks for a
+// round the probe would still reuse.
 func nextProbe(view FleetView, probeErr error, now time.Time) time.Duration {
 	if probeErr != nil {
 		return ProbeInterval
