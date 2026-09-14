@@ -94,6 +94,10 @@ test-engine: ## Run the engine module tests. Its own go.mod hides it from ./... 
 test-unit: fmt vet test-engine ## Run unit tests only — no envtest, no cluster, no network.
 	go test $(filter-out %/internal/controller,$(TEST_PKGS)) -coverprofile cover-unit.out
 
+.PHONY: test-unit-race
+test-unit-race: ## Run the unit tests of test-unit under the race detector, the same packages and nothing else.
+	go test -race $(filter-out %/internal/controller,$(TEST_PKGS)) -count=1
+
 .PHONY: test
 test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, including the envtest controller suite. Needs internet on the first run to fetch the envtest binaries.
 	@echo "Running tests with KUBEBUILDER_ASSETS=$$("$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)"
