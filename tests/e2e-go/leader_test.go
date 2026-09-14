@@ -52,10 +52,12 @@ var _ = Describe("leader election", Ordered, Label("leader"), func() {
 		Expect(apply(newPolicy(domain, totalLimits(1000, 60)))).To(Succeed())
 	})
 	AfterAll(func() {
-		deletePolicies(domain)
+		// The fleet is restored first: the cleanup wait can fail, and nothing
+		// after a failed step in this closure runs.
 		if release != "" {
 			helmScale(release, originalReplicas)
 		}
+		deletePolicies(domain)
 	})
 
 	It("elects one leader among two replicas", func() {

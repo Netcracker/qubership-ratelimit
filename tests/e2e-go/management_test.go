@@ -88,10 +88,12 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 	})
 	AfterAll(func() {
 		if applied {
-			deletePolicies(domain)
+			// The route and the probe pod go first: the cleanup wait can fail,
+			// and nothing after a failed step in this closure runs.
 			_ = k8s.Delete(ctx, managementRoute(route, basePath, port))
 			_ = k8s.Delete(ctx, &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: outsider}})
+			deletePolicies(domain)
 		}
 	})
 

@@ -5,12 +5,14 @@ package e2e
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -168,9 +170,24 @@ func prefixLimits(prefix, rule string, counters []string, requests, periodSecond
 	}}
 }
 
+// deletePolicies removes the policies of the given domains from the baseline
+// namespace and returns once every running replica has logged the rebuild
+// each removal causes, so that a container's cleanup cannot satisfy the next
+// container's waitStoreRebuilt. A domain without a policy is skipped; any
+// other failure to delete fails the cleanup, because a policy left behind
+// claims the domain in the next container.
 func deletePolicies(domains ...string) {
 	for _, domain := range domains {
-		_ = k8s.Delete(ctx, newPolicy(domain, nil))
+		before := storeRebuildsPerPod()
+		err := k8s.Delete(ctx, newPolicy(domain, nil))
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		Expect(err).NotTo(HaveOccurred(), "could not delete the policy of %s", domain)
+		Eventually(func() []string {
+			return podsNotRebuiltSince(before)
+		}).WithPolling(500*time.Millisecond).Should(BeEmpty(),
+			"replicas that did not rebuild the store after the policy of %s was removed", domain)
 	}
 }
 
@@ -190,10 +207,35 @@ func nextWindow() {
 // within one stable set of pods.
 func storeRebuilds() int {
 	total := 0
-	for _, pod := range operatorPods() {
-		total += strings.Count(podLogs(pod.Name, nil), "rate limit store rebuilt")
+	for _, n := range storeRebuildsPerPod() {
+		total += n
 	}
 	return total
+}
+
+// storeRebuildsPerPod counts the rebuild lines per running replica, keyed by
+// pod name.
+func storeRebuildsPerPod() map[string]int {
+	counts := map[string]int{}
+	for _, pod := range operatorPods() {
+		counts[pod.Name] = strings.Count(podLogs(pod.Name, nil), "rate limit store rebuilt")
+	}
+	return counts
+}
+
+// podsNotRebuiltSince names the replicas of before that are still running and
+// have logged no rebuild since before was taken, sorted by name. A replica
+// that has gone away is not named: nobody counts its log any more.
+func podsNotRebuiltSince(before map[string]int) []string {
+	now := storeRebuildsPerPod()
+	var lagging []string
+	for pod, n := range before {
+		if got, ok := now[pod]; ok && got <= n {
+			lagging = append(lagging, pod)
+		}
+	}
+	slices.Sort(lagging)
+	return lagging
 }
 
 // waitStoreRebuilt is the bash wait_for_domain: the store updater logs one
@@ -202,7 +244,9 @@ func storeRebuilds() int {
 // the count to grow. Waiting for "a line after time T" instead would race:
 // the log API filters timestamps at whole-second granularity, so a
 // neighbouring suite's rebuild from the same wall second satisfies it and
-// traffic then runs against a store that has not seen the change.
+// traffic then runs against a store that has not seen the change. The count
+// is a signal only while no earlier rebuild is still in flight; deletePolicies
+// therefore waits, per replica, for the rebuild its own removal causes.
 func waitStoreRebuilt(before int) {
 	Eventually(storeRebuilds).Should(BeNumerically(">", before),
 		"the store never rebuilt after the change")

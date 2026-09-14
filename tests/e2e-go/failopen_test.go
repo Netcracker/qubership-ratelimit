@@ -67,13 +67,15 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 		}
 	})
 	AfterAll(func() {
-		if applied {
-			deletePolicies(domain)
-		}
 		// The store comes back whatever happened above; a suite that leaves
-		// Redis at zero would fail everything after it.
+		// Redis at zero would fail everything after it. It comes back first:
+		// the cleanup wait below can fail, and nothing after a failed step in
+		// this closure runs.
 		if redisDeployment != "" {
 			scaleRedis(1)
+		}
+		if applied {
+			deletePolicies(domain)
 		}
 	})
 
