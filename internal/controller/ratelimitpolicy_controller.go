@@ -35,9 +35,10 @@ import (
 // long after the status went green, and that transition produces no event on
 // the policy itself. Events shorten the wait rather than replace it — a new
 // generation or an EndpointSlice change reconciles on its own. The production
-// probe reuses a round of answers for this long, so the domains of one cycle
-// share one round, and a reconcile requeues for when the round it used turns
-// this old, so no status rests on answers older than this.
+// probe reuses a round of answers for this long after the round completed, so
+// the domains of one cycle share one round, and a reconcile requeues for the
+// moment its round stops being reused, so the next look takes a new round and
+// no status rests on answers older than this plus the length of a round.
 const ProbeInterval = 10 * time.Second
 
 // lastCheckMaxAge bounds how stale status.replicas.lastCheckTime may look while
@@ -141,9 +142,12 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if view.At.IsZero() {
 		view.At = now
 	}
+	if view.RefreshAt.IsZero() {
+		view.RefreshAt = view.At.Add(ProbeInterval)
+	}
 	// Read after the probe, which may have waited for a round: the requeue
 	// counts from the return of this reconcile, so the wait until the round
-	// turns one interval old is measured from here.
+	// stops being reused is measured from here.
 	probed := r.now()
 
 	before := object.Status.DeepCopy()
@@ -227,16 +231,16 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 // nextProbe is how long the reconcile waits, from now, before its next look
-// at the fleet: until the round it used turns ProbeInterval old, so the
-// domains of one cycle keep sharing a round and no status rests on answers
-// older than the interval. A failed probe waits the whole interval; a round
-// on the verge of that age waits one second, so a requeue never asks for a
-// round the probe would still reuse.
+// at the fleet: until the probe stops answering from the round this one
+// used, so the next look takes a new round, the domains of one cycle keep
+// sharing a round, and a look that would only be answered from the same
+// round again is never scheduled. A failed probe waits the whole interval; a
+// round about to expire waits one second.
 func nextProbe(view FleetView, probeErr error, now time.Time) time.Duration {
 	if probeErr != nil {
 		return ProbeInterval
 	}
-	return max(ProbeInterval-now.Sub(view.At), time.Second)
+	return max(view.RefreshAt.Sub(now), time.Second)
 }
 
 // staleCheckTime reports whether lastCheckTime has stood still long enough that

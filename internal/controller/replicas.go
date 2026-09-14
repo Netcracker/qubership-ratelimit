@@ -43,9 +43,16 @@ const probeTimeout = 2 * time.Second
 type FleetView struct {
 	// At is when the fleet was asked. A view answered from a round taken
 	// earlier carries that round's time, so a reader knows how fresh the
-	// answers are; the reconciler stamps it into the status and times its
-	// next look at the fleet by it. Zero means the moment of the observation.
+	// answers are; the reconciler stamps it into the status. Zero means the
+	// moment of the observation.
 	At time.Time
+
+	// RefreshAt is when the probe stops answering from this round: its
+	// completion plus the freshness, or one ProbeInterval after At for a
+	// probe that reuses nothing. The reconciler times its next look at the
+	// fleet by it, so the look takes a new round rather than the same one
+	// again. Zero means one ProbeInterval after At.
+	RefreshAt time.Time
 
 	// Total is the number of ready endpoints at the time of the probe.
 	Total int32
@@ -132,7 +139,7 @@ func (p *ReplicaProbe) Observe(
 	if round.err != nil {
 		return FleetView{}, round.err
 	}
-	return round.view(domain, want), nil
+	return round.view(domain, want, p.Freshness), nil
 }
 
 // currentRound returns the round an observation is answered from: the one
@@ -213,8 +220,12 @@ func (p *ReplicaProbe) takeRound(ctx context.Context, now time.Time, endpoints [
 // view counts one domain's replicas from the round's answers: an endpoint
 // that reported the generation and object asked about is applied, one that
 // reported anything else is behind, and one that did not answer is silent.
-func (r *fleetRound) view(domain string, want store.Applied) FleetView {
-	view := FleetView{At: r.taken, Total: int32(len(r.endpoints)), Silent: r.silent}
+func (r *fleetRound) view(domain string, want store.Applied, freshness time.Duration) FleetView {
+	refreshAt := r.taken.Add(ProbeInterval)
+	if freshness > 0 {
+		refreshAt = r.completed.Add(freshness)
+	}
+	view := FleetView{At: r.taken, RefreshAt: refreshAt, Total: int32(len(r.endpoints)), Silent: r.silent}
 	for _, endpoint := range r.endpoints {
 		applied, answered := r.answers[endpoint]
 		if !answered {

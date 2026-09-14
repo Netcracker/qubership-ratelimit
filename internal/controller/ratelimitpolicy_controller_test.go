@@ -688,31 +688,38 @@ func TestReconcile_asksForAFreshRoundOnANewGenerationOnly(t *testing.T) {
 	}
 }
 
-// A reconcile requeues for the moment the round it used turns one interval
-// old, not one interval from now: the domains of a cycle keep sharing a round,
-// and no status rests on answers older than the interval. A round on the
-// verge of that age waits one second rather than nothing.
-func TestReconcile_requeuesForWhenTheRoundTurnsOneIntervalOld(t *testing.T) {
+// A reconcile requeues for the moment the probe stops answering from the
+// round it used, not for one interval after the round was taken: a round
+// that completed late is reused past that mark, and a look scheduled by the
+// round's age alone would be answered from the same round again, once a
+// second, until it expired. A view that names no expiry is treated as
+// expiring one interval after the fleet was asked; a round about to expire
+// waits one second rather than nothing.
+func TestReconcile_requeuesForWhenTheRoundStopsBeingReused(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name string
-		age  time.Duration
+		view FleetView
 		wait time.Duration
 	}{
-		{"a round four seconds old", 4 * time.Second, ProbeInterval - 4*time.Second},
-		{"a round taken now", 0, ProbeInterval},
-		{"a round on the verge of the interval", ProbeInterval - 200*time.Millisecond, time.Second},
+		{"a round reused for four more seconds", FleetView{At: now, RefreshAt: now.Add(4 * time.Second)}, 4 * time.Second},
+		{"a round taken ten seconds ago and reused for two more",
+			FleetView{At: now.Add(-10 * time.Second), RefreshAt: now.Add(2 * time.Second)}, 2 * time.Second},
+		{"a view without an expiry, taken now", FleetView{At: now}, ProbeInterval},
+		{"a view without an expiry, taken four seconds ago", FleetView{At: now.Add(-4 * time.Second)}, ProbeInterval - 4*time.Second},
+		{"a round about to expire", FleetView{At: now, RefreshAt: now.Add(200 * time.Millisecond)}, time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			probe := unanimous(2)
-			probe.view.At = time.Now().Add(-tc.age)
+			probe.view.At, probe.view.RefreshAt = tc.view.At, tc.view.RefreshAt
 			reconciler, _ := newReconciler(t, probe, testPolicy(7))
+			reconciler.Now = (&fakeClock{base: now}).now
 
 			result, err := reconciler.Reconcile(context.Background(), testRequest())
 			require.NoError(t, err)
 
-			assert.InDelta(t, tc.wait, result.RequeueAfter, float64(500*time.Millisecond),
-				"RequeueAfter for a round %s old", tc.age)
+			assert.Equal(t, tc.wait, result.RequeueAfter, "RequeueAfter for %s", tc.name)
 		})
 	}
 }

@@ -524,3 +524,31 @@ func TestObserve_asksTheReplicasTogether(t *testing.T) {
 	assert.Equal(t, int32(replicas), view.Applied, "every replica answered within one timeout")
 	assert.Empty(t, view.Silent)
 }
+
+// A view says when the probe stops answering from its round: the round's
+// completion plus the freshness, so a reconciler that requeues for that
+// moment takes a new round rather than the same one again. A probe that
+// reuses nothing says one interval after the fleet was asked.
+func TestObserve_aViewSaysWhenItsRoundExpires(t *testing.T) {
+	clock := &fakeClock{base: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
+	slow := func(w http.ResponseWriter, r *http.Request) {
+		clock.advance(6 * time.Second)
+		answers(t, appliedBy(7))(w, r)
+	}
+
+	reusing := fleet(t, slow, ready("ratelimit-a"), ready("ratelimit-b"))
+	reusing.Freshness = 10 * time.Second
+	reusing.Now = clock.now
+	view, err := reusing.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, clock.base.Add(22*time.Second), view.RefreshAt,
+		"a round taken at the base and completed twelve seconds later, reused for ten more")
+
+	clock.offset.Store(0)
+	single := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
+	single.Now = clock.now
+	view, err = single.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, clock.base.Add(ProbeInterval), view.RefreshAt,
+		"a probe that reuses nothing wants the next look one interval after the ask")
+}
