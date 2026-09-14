@@ -1,0 +1,107 @@
+# Captures the stdout of every pod the e2e run touches, including pods that
+# die mid-suite - the killed leader, the restarted operator - whose logs
+# kubectl cannot show after the fact. A DaemonSet tails the node's CRI log
+# files and appends every record, tagged with its source file name, to one
+# file on the node; CI copies that file off the node and splits it per pod.
+#
+# No RBAC and no kubernetes metadata filter: the CRI file name already
+# encodes <pod>_<namespace>_<container>, which is all the splitting needs.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: logging
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: logging
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        5
+        Daemon       Off
+        Log_Level    info
+        Parsers_File parsers.conf
+
+    [INPUT]
+        Name              tail
+        Tag               kube.*
+        Path              /var/log/containers/*_ratelimit-e2e_*.log,/var/log/containers/*_istio-system_*.log
+        Path_Key          file
+        Parser            cri
+        Read_From_Head    On
+        Mem_Buf_Limit     20MB
+        Skip_Long_Lines   On
+        Refresh_Interval  5
+        Rotate_Wait       30
+        DB                /var/log/fluent-bit/flb_kube.db
+
+    [OUTPUT]
+        Name   file
+        Match  kube.*
+        Path   /var/log/fluent-bit
+        File   e2e-pods.log
+        Format plain
+        Mkdir  true
+
+  parsers.conf: |
+    [PARSER]
+        Name   cri
+        Format regex
+        Regex  ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
+        Time_Key time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: logging
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: fluent-bit
+          image: cr.fluentbit.io/fluent/fluent-bit:2.2.2
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            # The CRI symlinks under containers/ point into pods/, so the
+            # tail needs both; neither is written to.
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+            - name: fluentbit-state
+              mountPath: /var/log/fluent-bit
+            - name: config
+              mountPath: /fluent-bit/etc/
+          resources:
+            limits:
+              memory: 200Mi
+            requests:
+              cpu: 50m
+              memory: 100Mi
+      volumes:
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+        - name: fluentbit-state
+          hostPath:
+            path: /var/log/fluent-bit
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: fluent-bit-config

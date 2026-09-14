@@ -1,0 +1,21 @@
+# More info: https://docs.docker.com/engine/reference/builder/#dockerignore-file
+# Ignore everything by default and re-include only needed files
+**
+
+# Re-include Go source files (but not *_test.go)
+!**/*.go
+**/*_test.go
+
+# Re-include Go module files, the nested engine module included
+!**/go.mod
+!**/go.sum
+
+# The Redis store embeds its counting script.
+!engine/store/redis/*.lua
+
+# The management API embeds the OpenAPI document it serves, so the file has to
+# reach the build context
+!internal/management/openapi.yaml
+
+# configloader's YAML property source reads this next to the binary.
+!application.yaml
