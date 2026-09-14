@@ -278,6 +278,37 @@ jobs:
           echo "$manifests" | grep -q 'kind: AuthorizationPolicy' || {
             echo "::error::the management port rendered without its AuthorizationPolicy"; exit 1; }
 
+      # The management values in every mode. Single and baseline render the
+      # port, the policy, and the identity configuration; a satellite runs no
+      # component, so it renders none of them however the values are set. The
+      # identity values are checked by their rendered names, which are what
+      # the configloader maps onto the properties the service reads.
+      - name: Check the management values in every mode
+        run: |
+          set -o pipefail
+          identity=(--set management.enabled=true
+            --set management.claims.roles=realm_access.roles
+            --set 'management.roles.viewer={rl-view}' --set 'management.roles.operator={rl-admin}')
+          render() {
+            helm template t helm-templates/ratelimit \
+              -f helm-templates/ratelimit/resource-profiles/dev.yaml "${identity[@]}" "$@"
+          }
+          for mode in single baseline; do
+            extra=(); [ "$mode" = baseline ] && extra=(--set ORIGIN_NAMESPACE=baseline)
+            manifests=$(render "${extra[@]}")
+            for want in 'management-bind-address' 'kind: AuthorizationPolicy' \
+              'MANAGEMENT_CLAIMS_ROLES' "value: 'realm_access.roles'" "value: 'rl-view'" "value: 'rl-admin'"; do
+              echo "$manifests" | grep -qF -- "$want" || {
+                echo "::error::mode $mode did not render: $want"; exit 1; }
+            done
+          done
+          satellite=$(render -n satellite --set BASELINE_ORIGIN=baseline)
+          for forbidden in 'management-bind-address' 'kind: AuthorizationPolicy' 'MANAGEMENT_'; do
+            if echo "$satellite" | grep -qF -- "$forbidden"; then
+              echo "::error::a satellite rendered $forbidden"; exit 1
+            fi
+          done
+
       # An in-process store above one replica is a limit that admits N per
       # replica, and the management API's records live in that same memory.
       # The chart refuses to render it, with the message the runbook names.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -184,23 +185,39 @@ func gatewayGetIn(ns, gateway, path string, headers map[string]string) int {
 // The bursts above discard bodies, which is all a rate-limit code needs; an
 // API answer has to be read.
 func gatewayGetBody(gateway, path string, headers map[string]string) (string, int) {
+	return gatewayRequest(gateway, http.MethodGet, path, "", headers)
+}
+
+// gatewayRequest is gatewayGetBody with a method and a body: the management
+// suite drives mutations through the gateway with it. A JSON body is sent as
+// such; an empty body sends none.
+func gatewayRequest(gateway, method, path, body string, headers map[string]string) (string, int) {
 	pod, port := gatewayEndpoint(gateway)
 	addr, stop := forwardToPod(pod, port)
 	defer stop()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+path, nil)
+	var payload io.Reader
+	if body != "" {
+		payload = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://"+addr+path, payload)
 	Expect(err).NotTo(HaveOccurred())
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	// Mutations wait longer than a probe: a bulk sweep runs to its recorded
+	// outcome inside the call.
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		return err.Error(), 0
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	answer, err := io.ReadAll(resp.Body)
 	Expect(err).NotTo(HaveOccurred())
-	return string(body), resp.StatusCode
+	return string(answer), resp.StatusCode
 }
 
 // gatewayBurst mirrors curl_gw_burst: one port-forward, sequential requests,

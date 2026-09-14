@@ -435,6 +435,50 @@
             }
           },
           "additionalProperties": false
+        },
+        "claims": {
+          "type": "object",
+          "title": "Identity claims",
+          "description": "The claims the subject and the roles are read from. Both accept a dotted path for a nested claim, such as realm_access.roles.",
+          "properties": {
+            "subject": {
+              "type": "string",
+              "minLength": 1,
+              "default": "sub"
+            },
+            "roles": {
+              "type": "string",
+              "minLength": 1,
+              "default": "roles"
+            }
+          }
+        },
+        "roles": {
+          "type": "object",
+          "title": "Role mapping",
+          "description": "The role names the IdP issues, mapped onto viewer and operator. A role on neither list grants nothing.",
+          "properties": {
+            "viewer": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "default": [
+                "viewer"
+              ]
+            },
+            "operator": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "default": [
+                "operator"
+              ]
+            }
+          }
         }
       },
       "additionalProperties": false

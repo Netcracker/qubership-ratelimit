@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,19 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 	var (
 		applied bool
 		port    int32
+
+		// The reset flows need counters to reset, and gateway.management has
+		// no gateway sending it. gateway.private does, so a second policy
+		// limits one path there, and the private gateway spends its budget
+		// before each flow lifts it. Two requests, GCRA, so the third is
+		// refused for half an hour with no calendar boundary in the way.
+		limitedApplied bool
+	)
+	const (
+		limitedDomain = "gateway.private"
+		limitedPrefix = "/e2e-management-reset"
+		limitedRule   = "probe/per-path"
+		limit         = 2
 	)
 
 	BeforeAll(func() {
@@ -87,6 +101,9 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			"the private gateway never served a listing with %s through %s", domain, basePath)
 	})
 	AfterAll(func() {
+		if limitedApplied {
+			deletePolicies(limitedDomain)
+		}
 		if applied {
 			deletePolicies(domain)
 			_ = k8s.Delete(ctx, managementRoute(route, basePath, port))
@@ -136,7 +153,150 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 				"the API answered a pod outside the allowed list")
 		}
 	})
+
+	// The reset flows. Each spends a path's budget through the private
+	// gateway until it is refused, lifts it through the management API, and
+	// proves the lift by the gateway admitting the path again. That last step
+	// is the point: an API answer alone says what the API believes it did,
+	// the gateway says what the counters now are.
+	It("runs the bulk flow: preview, execute, retry", func() {
+		probePath := spendBudget(limitedDomain, limitedPrefix, limitedRule, limit, &limitedApplied)
+
+		operator := map[string]string{
+			"Authorization": "Bearer " + managementToken("e2e@example.com", "operator")}
+		resets := basePath + "/domains/" + limitedDomain + "/counter-resets"
+		selector := `{"selector":{"ruleIds":["` + limitedRule + `"]}`
+
+		// Step one, the preview: a match as of now, and the confirmation
+		// token the execution needs. Its own Idempotency-Key, because a
+		// preview and its execution are different commands.
+		previewKey := idempotencyKey("preview")
+		body, code := gatewayRequest("private-gateway", http.MethodPost, resets,
+			selector+`,"dryRun":true}`, with(operator, "Idempotency-Key", previewKey))
+		Expect(code).To(Equal(http.StatusOK), "the preview did not answer 200; body: %s", body)
+		preview := decodeBulk(body)
+		Expect(preview.DryRun).To(BeTrue())
+		Expect(preview.ConfirmationToken).NotTo(BeEmpty(), "the preview minted no confirmation token")
+		Expect(preview.MatchedCount).NotTo(BeNil())
+		Expect(*preview.MatchedCount).To(BeNumerically(">=", 1),
+			"the preview matched no counter, so there was nothing to reset: %s", body)
+
+		// Step two, the execution, with the previewed token and a key of its
+		// own.
+		executeKey := idempotencyKey("execute")
+		execute := selector + `,"confirmationToken":"` + preview.ConfirmationToken + `"}`
+		body, code = gatewayRequest("private-gateway", http.MethodPost, resets, execute,
+			with(operator, "Idempotency-Key", executeKey))
+		Expect(code).To(Equal(http.StatusOK), "the execution did not answer 200; body: %s", body)
+		executed := decodeBulk(body)
+		Expect(executed.DryRun).To(BeFalse())
+		Expect(executed.ResetCount).NotTo(BeNil())
+		Expect(*executed.ResetCount).To(BeNumerically(">=", 1), "the execution reset nothing: %s", body)
+
+		// The retry: the same key and the same command answer the recorded
+		// outcome, not a second sweep. The token was consumed by the
+		// execution, so a second sweep would have been a 410; a replay is a
+		// 200 with the body already recorded.
+		retryBody, code := gatewayRequest("private-gateway", http.MethodPost, resets, execute,
+			with(operator, "Idempotency-Key", executeKey))
+		Expect(code).To(Equal(http.StatusOK), "the retry did not replay; body: %s", retryBody)
+		Expect(decodeBulk(retryBody).ResetCount).To(Equal(executed.ResetCount),
+			"the retry answered a different outcome than the one recorded")
+
+		// And the gateway agrees: the budget is whole again.
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(BeNumerically("<", 300),
+			"the private gateway still refuses the path after the bulk reset")
+	})
+
+	It("runs the addressed DELETE", func() {
+		probePath := spendBudget(limitedDomain, limitedPrefix, limitedRule, limit, &limitedApplied)
+
+		operator := map[string]string{
+			"Authorization": "Bearer " + managementToken("e2e@example.com", "operator")}
+
+		// One rule, one value for each of its axes: the keys are computed
+		// from the snapshot, never scanned, and a partial axis set is refused.
+		address := basePath + "/domains/" + limitedDomain + "/counters?ruleId=" +
+			url.QueryEscape(limitedRule) + "&axis.path=" + url.QueryEscape(probePath)
+		body, code := gatewayRequest("private-gateway", http.MethodDelete, address, "",
+			with(operator, "Idempotency-Key", idempotencyKey("delete")))
+		Expect(code).To(Equal(http.StatusOK), "the addressed DELETE did not answer 200; body: %s", body)
+
+		var reset struct {
+			RuleID     string   `json:"ruleId"`
+			Keys       []string `json:"keys"`
+			ResetCount *int     `json:"resetCount"`
+		}
+		Expect(json.Unmarshal([]byte(body), &reset)).To(Succeed(), "body: %s", body)
+		Expect(reset.RuleID).To(Equal(limitedRule))
+		Expect(reset.Keys).NotTo(BeEmpty(), "the DELETE addressed no key")
+		Expect(reset.ResetCount).NotTo(BeNil())
+		Expect(*reset.ResetCount).To(BeNumerically(">=", 1), "the DELETE reset nothing: %s", body)
+
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(BeNumerically("<", 300),
+			"the private gateway still refuses the path after the addressed reset")
+	})
 })
+
+// spendBudget limits one fresh path under prefix in the domain, applies the
+// policy on first use, and spends the path's budget through the private
+// gateway until the gateway refuses it. It returns the path, whose counter
+// is now the one the caller resets. A fresh path per call: the counter is
+// keyed by path, and a reset is what the caller is about to test, so a path
+// another call already spent would prove nothing.
+func spendBudget(domain, prefix, rule string, limit int32, applied *bool) string {
+	if !*applied {
+		blocks := prefixLimits(prefix, "per-path", []string{"path"}, limit, 3600)
+		blocks[0].Rules[0].Rates[0].Algorithm = v1alpha1.AlgorithmGCRA
+		before := storeRebuilds()
+		Expect(apply(newPolicy(domain, blocks))).To(Succeed())
+		*applied = true
+		waitStoreRebuilt(before)
+		Expect(rule).To(Equal(blocks[0].Name+"/"+blocks[0].Rules[0].Name),
+			"the rule id the flows address is not the one the policy declares")
+	}
+	path := prefix + "/" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	waitGatewayServes("private-gateway", path)
+
+	codes := gatewayBurst("private-gateway", path, int(limit)+1, nil)
+	Expect(codes[len(codes)-1]).To(Equal(429),
+		"the budget was never spent, so there is no counter to reset: %v", codes)
+	return path
+}
+
+// decodeBulk reads the fields of a bulk answer the flows assert on.
+func decodeBulk(body string) struct {
+	DryRun            bool   `json:"dryRun"`
+	ConfirmationToken string `json:"confirmationToken"`
+	MatchedCount      *int   `json:"matchedCount"`
+	ResetCount        *int   `json:"resetCount"`
+} {
+	var result struct {
+		DryRun            bool   `json:"dryRun"`
+		ConfirmationToken string `json:"confirmationToken"`
+		MatchedCount      *int   `json:"matchedCount"`
+		ResetCount        *int   `json:"resetCount"`
+	}
+	Expect(json.Unmarshal([]byte(body), &result)).To(Succeed(), "body: %s", body)
+	return result
+}
+
+// idempotencyKey mints a key unique to this run, in the pattern the API
+// accepts. Unique, because the record outlives the run by a day: a key a
+// previous run bound would replay that run's outcome.
+func idempotencyKey(step string) string {
+	return "e2e-" + step + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+}
+
+// with returns headers plus one more, leaving the original untouched.
+func with(headers map[string]string, name, value string) map[string]string {
+	out := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		out[k] = v
+	}
+	out[name] = value
+	return out
+}
 
 // managementPort reports the container port the release exposes for the
 // management API, 0 when the chart rendered without it.

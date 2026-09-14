@@ -85,6 +85,19 @@ spec:
             - name: REDIS_MASTERNAME
               value: '{{ . }}'
             {{- end }}
+            {{- if .Values.management.enabled }}
+            # The identity configuration of the management API. Read through
+            # the configloader, which maps MANAGEMENT_CLAIMS_SUBJECT onto
+            # management.claims.subject; the lists are comma-separated.
+            - name: MANAGEMENT_CLAIMS_SUBJECT
+              value: '{{ .Values.management.claims.subject }}'
+            - name: MANAGEMENT_CLAIMS_ROLES
+              value: '{{ .Values.management.claims.roles }}'
+            - name: MANAGEMENT_ROLES_VIEWER
+              value: '{{ join "," .Values.management.roles.viewer }}'
+            - name: MANAGEMENT_ROLES_OPERATOR
+              value: '{{ join "," .Values.management.roles.operator }}'
+            {{- end }}
             {{- if .Values.redis.existingSecret }}
             - name: REDIS_PASSWORD
               valueFrom:
