@@ -119,7 +119,7 @@ test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, inc
 .PHONY: test-e2e-go
 test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
 	@mkdir -p "$(E2E_ARTIFACTS)"
-	@rc=0; NAMESPACE="$(E2E_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
+	@rc=0; NAMESPACE="$(E2E_NAMESPACE)" E2E_SATELLITE_NAMESPACE="$(E2E_SATELLITE_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
 	  --flake-attempts=2 --poll-progress-after=120s \
 	  --junit-report=e2e-go.xml --output-dir="$(E2E_ARTIFACTS)" \
 	  ./tests/e2e-go || rc=$$?; \
@@ -130,6 +130,9 @@ test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release
 
 E2E_ARTIFACTS ?= artifacts
 E2E_NAMESPACE ?= core
+# A namespace installed as a satellite of E2E_NAMESPACE, for the satellite
+# suite; empty skips it. CI sets it in the job environment.
+E2E_SATELLITE_NAMESPACE ?=
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter, the engine module included.

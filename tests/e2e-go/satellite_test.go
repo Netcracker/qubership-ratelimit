@@ -3,7 +3,7 @@
 package e2e
 
 import (
-	"os"
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -12,39 +12,66 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
-// A composite is one baseline namespace plus satellites, each with its own
-// gateway, and the component runs in the baseline alone. The chart's satellite
-// mode renders the gateway filters and nothing else, pointing them at the
-// baseline's Service by its fixed name. A render check proves the address is
-// written; only a gateway in another namespace proves that the address works:
-// that a satellite's Envoy reaches the baseline's RLS across the namespace
-// boundary, and that one policy in the baseline governs both gateways.
+// The composite model, end to end. A composite is one baseline namespace plus
+// satellites, each with its own gateway; the component runs in the baseline
+// alone, a satellite gets the gateway filters pointed at it, and rules are
+// written per composite. What that has to mean in traffic is one budget: a
+// request through the baseline's gateway and one through a satellite's are
+// charged against the same bucket.
 //
-// The satellite namespace, its gateways, and the satellite release are set up
-// by the workflow, which is where the other infrastructure of the suite
-// already lives. The suite finds them through E2E_SATELLITE_NAMESPACE and
-// skips without it, so a local run against a plain stand still passes.
-var _ = Describe("a satellite namespace of a composite", Ordered, Label("satellite"), func() {
+// A render check proves the satellite's filters carry the baseline's address.
+// Only a gateway in another namespace proves the address works, and only two
+// gateways spending one budget prove the model. The satellite namespace, its
+// gateways, and the satellite release are set up by the workflow, where the
+// rest of the suite's infrastructure lives; the suite finds them through
+// E2E_SATELLITE_NAMESPACE and skips without it.
+var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("satellite"), func() {
 	const (
-		// The domain the public gateways of both namespaces send. It is the
-		// same domain on purpose: rules are written per composite, and the
-		// counter the satellite's traffic lands in is the baseline's.
-		domain    = "gateway.public"
-		probePath = "/e2e-satellite"
-		limit     = 2
+		// The domain both public gateways send. Rules are per composite, so
+		// this is the same domain on purpose, not a coincidence to avoid.
+		domain = "gateway.public"
+
+		// The prefix the policy targets and the route serves.
+		probePrefix = "/e2e-satellite"
+
+		// Two requests an hour. GCRA rather than a fixed window: a 3600 s fixed
+		// window resets at the top of the hour, so a run whose third request
+		// crossed hh:00 would have it admitted. GCRA with the default burst
+		// admits two at once and then refuses for half an hour, with no
+		// calendar boundary for the run to cross.
+		limit = 2
 	)
 	var (
-		satellite string
-		applied   bool
+		applied bool
+
+		// probePath is one path under probePrefix per attempt, set in the
+		// spec that spends it. The counter is keyed by path and the window
+		// is long, and deleting the policy does not clear a counter in Redis:
+		// a second run inside the window on the same store, or a
+		// --flake-attempts retry of the spec, would be refused on its first
+		// request. A fresh path is a fresh bucket. The route serves it because
+		// PathPrefix matches the segment, and the rule counts it because
+		// Prefix matches the string.
+		probePath string
 	)
 
+	// hourlyGCRA is prefixLimits with GCRA in place of the fixed window, for
+	// the reason on limit above.
+	hourlyGCRA := func(prefix, rule string, requests int32) []v1alpha1.LimitBlock {
+		blocks := prefixLimits(prefix, rule, []string{"path"}, requests, 3600)
+		blocks[0].Rules[0].Rates[0].Algorithm = v1alpha1.AlgorithmGCRA
+		return blocks
+	}
+
 	BeforeAll(func() {
-		satellite = os.Getenv("E2E_SATELLITE_NAMESPACE")
 		if satellite == "" {
 			Skip("E2E_SATELLITE_NAMESPACE is unset; the stand has no satellite namespace")
 		}
@@ -55,7 +82,7 @@ var _ = Describe("a satellite namespace of a composite", Ordered, Label("satelli
 		}
 	})
 
-	It("renders the gateway filters and nothing else", func() {
+	It("renders the gateway filters in the satellite and nothing else", func() {
 		filters := &unstructured.UnstructuredList{}
 		filters.SetGroupVersionKind(schema.GroupVersionKind{
 			Group: "networking.istio.io", Version: "v1alpha3", Kind: "EnvoyFilterList"})
@@ -63,65 +90,108 @@ var _ = Describe("a satellite namespace of a composite", Ordered, Label("satelli
 			client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"})).To(Succeed())
 		Expect(filters.Items).To(HaveLen(2), "one filter per enabled gateway")
 
-		// The filters have to carry the baseline's Service, by its fixed name
-		// and the baseline's namespace: a satellite has nothing else to go on.
-		authority := "ratelimit." + namespace + ".svc.cluster.local"
-		for _, filter := range filters.Items {
-			Expect(filter.Object).To(WithTransform(func(o map[string]any) string {
-				u := unstructured.Unstructured{Object: o}
-				raw, _ := u.MarshalJSON()
-				return string(raw)
-			}, ContainSubstring(authority)),
-				"filter %s does not point at the baseline's Service", filter.GetName())
-		}
-
-		// And no component: a satellite that rendered a Deployment would run
-		// a second limiter counting in its own store, with the baseline's
-		// gateways none the wiser.
-		ratelimitOwned := client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"}
+		// No component: a satellite that rendered a Deployment would run a
+		// second limiter counting in its own store, and the baseline's
+		// gateways would be none the wiser.
+		owned := client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"}
 		var deployments appsv1.DeploymentList
-		Expect(k8s.List(ctx, &deployments, client.InNamespace(satellite), ratelimitOwned)).To(Succeed())
+		Expect(k8s.List(ctx, &deployments, client.InNamespace(satellite), owned)).To(Succeed())
 		Expect(deployments.Items).To(BeEmpty(), "a satellite rendered a Deployment")
 		var services corev1.ServiceList
-		Expect(k8s.List(ctx, &services, client.InNamespace(satellite), ratelimitOwned)).To(Succeed())
+		Expect(k8s.List(ctx, &services, client.InNamespace(satellite), owned)).To(Succeed())
 		Expect(services.Items).To(BeEmpty(), "a satellite rendered a Service")
 		var accounts corev1.ServiceAccountList
-		Expect(k8s.List(ctx, &accounts, client.InNamespace(satellite), ratelimitOwned)).To(Succeed())
+		Expect(k8s.List(ctx, &accounts, client.InNamespace(satellite), owned)).To(Succeed())
 		Expect(accounts.Items).To(BeEmpty(), "a satellite rendered a ServiceAccount")
 		var roles rbacv1.RoleList
-		Expect(k8s.List(ctx, &roles, client.InNamespace(satellite), ratelimitOwned)).To(Succeed())
+		Expect(k8s.List(ctx, &roles, client.InNamespace(satellite), owned)).To(Succeed())
 		Expect(roles.Items).To(BeEmpty(), "a satellite rendered a Role")
 	})
 
-	It("has its traffic limited by a policy of the baseline", func() {
+	It("configures the satellite gateway to call the baseline's RLS", func() {
+		// Read from Envoy's own config dump rather than from the EnvoyFilter
+		// object: the object is what the chart wrote, the dump is what the
+		// gateway is actually going to call, and a filter Istio rejected
+		// leaves the first in place and the second empty.
+		expected := "outbound|9000||ratelimit." + namespace + ".svc.cluster.local"
+		Eventually(func() string {
+			return rateLimitClusterOfIn(satellite, gatewayPodIn(satellite, "public-gateway").Name)
+		}).WithTimeout(time.Minute).WithPolling(5*time.Second).Should(Equal(expected),
+			"the satellite gateway is not configured with the baseline's Service")
+	})
+
+	It("charges both gateways against one budget", func() {
+		// Set here rather than when the tree is built, so that a retry of this
+		// spec gets a bucket of its own.
+		probePath = probePrefix + "/" + strconv.FormatInt(time.Now().UnixNano(), 10)
+
 		// Warmed before the policy exists, so the warm-up probes do not spend
-		// the budget the burst below is about to measure.
+		// the budget the requests below are about to measure.
+		waitGatewayServes("public-gateway", probePath)
 		waitGatewayServesIn(satellite, "public-gateway", probePath)
 
 		before := storeRebuilds()
-		Expect(apply(newPolicy(domain,
-			prefixLimits(probePath, "per-path", []string{"path"}, limit, 3600)))).To(Succeed())
+		Expect(apply(newPolicy(domain, hourlyGCRA(probePrefix, "per-path", limit)))).To(Succeed())
 		applied = true
 		waitStoreRebuilt(before)
 
-		// The policy lives in the baseline; the requests go through the
-		// satellite's own gateway. A 429 here can only have come from the
-		// baseline's RLS, reached over the address the satellite's filter
-		// carries.
-		codes := gatewayBurstIn(satellite, "public-gateway", probePath, limit+2, nil)
-		Expect(codes).To(ContainElement(429),
-			"the satellite gateway was never refused; its checks are not reaching the baseline: %v", codes)
-		Expect(codes[:limit]).NotTo(ContainElement(429),
-			"the budget was spent before the burst: %v", codes)
+		// One request through each gateway spends the two the window allows.
+		// The order is the point: the satellite's request has to land in the
+		// bucket the baseline's request opened.
+		Expect(gatewayGet("public-gateway", probePath, nil)).To(BeNumerically("<", 300),
+			"the first request of the window did not pass through the baseline gateway")
+		Expect(gatewayGetIn(satellite, "public-gateway", probePath, nil)).To(BeNumerically("<", 300),
+			"the second request of the window did not pass through the satellite gateway")
+
+		// The third is refused whichever gateway it enters by. Through the
+		// satellite first: a 429 here can only have come from the baseline's
+		// RLS, over the address the satellite's filter carries, out of a
+		// bucket the baseline's own request helped fill.
+		Expect(gatewayGetIn(satellite, "public-gateway", probePath, nil)).To(Equal(429),
+			"the satellite gateway admitted a third request; the two gateways are not sharing a budget")
+		Expect(gatewayGet("public-gateway", probePath, nil)).To(Equal(429),
+			"the baseline gateway admitted a third request; the two gateways are not sharing a budget")
 	})
 
-	It("counts the satellite's traffic in the baseline's counter", func() {
-		// The same path through the baseline's own gateway is refused at once:
-		// the satellite already spent the budget. One domain, one counter, two
-		// gateways in two namespaces - which is what a composite means.
-		Eventually(func() int {
-			return gatewayGet("public-gateway", probePath, nil)
-		}).WithTimeout(30*time.Second).WithPolling(2*time.Second).Should(Equal(429),
-			"the baseline's gateway admitted a path the satellite had exhausted")
+	It("ignores a policy placed in the satellite", func() {
+		// The negative control. A satellite runs no controller and its
+		// namespace is outside the baseline's cache, so an object created
+		// there is never compiled: nothing writes its status, and no gateway
+		// enforces it. A tighter limit on a path of its own is the way to see
+		// that - if anything read the object, the third request would be
+		// refused.
+		//
+		// The path shares no prefix with probePath. The engine's Prefix is a
+		// string prefix, not the segment prefix of a Gateway API route, so a
+		// path under the positive spec's rule would be counted by that rule
+		// and refused for the wrong reason.
+		const strayPath = "/e2e-stray"
+		stray := newPolicy(domain, hourlyGCRA(strayPath, "stray", 1))
+		stray.Namespace = satellite
+		Expect(apply(stray)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8s.Delete(ctx, stray))).To(Succeed())
+		})
+
+		waitGatewayServesIn(satellite, "public-gateway", strayPath)
+		// The claim is that the traffic passed, so that is what is asserted:
+		// not-429 would hold for three 503s or three transport errors too.
+		codes := gatewayBurstIn(satellite, "public-gateway", strayPath, 3, nil)
+		Expect(codes).To(HaveEach(BeNumerically("<", 300)),
+			"a policy in the satellite affected traffic, or the path did not pass; something compiled it: %v", codes)
+
+		// And nothing has claimed it. A status would mean a controller saw the
+		// object; a 30 s window covers several probe intervals of the
+		// baseline's leader, which is the only controller there is.
+		// The error is returned, not swallowed: BeEmpty accepts nil, so a
+		// Get that failed would otherwise read as "no status".
+		Consistently(func() ([]metav1.Condition, error) {
+			var got v1alpha1.RateLimitPolicy
+			if err := k8s.Get(ctx, client.ObjectKeyFromObject(stray), &got); err != nil {
+				return nil, err
+			}
+			return got.Status.Conditions, nil
+		}).WithTimeout(30*time.Second).WithPolling(5*time.Second).Should(BeEmpty(),
+			"a policy in the satellite received a status; a controller is watching that namespace")
 	})
 })

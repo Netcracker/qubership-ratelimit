@@ -260,6 +260,17 @@ stdout of every pod the run touched — captured by `tests/e2e/manifests/fluent-
 make test-e2e-go E2E_NAMESPACE=core
 ```
 
+The `satellite` suite needs a second namespace, installed as a satellite of the first: its own gateways from a second
+`mesh-config` release, the chart with `BASELINE_ORIGIN` set to the baseline's namespace, and the probe backend. Name it
+in `E2E_SATELLITE_NAMESPACE` and the suite proves the composite model against it: a policy of two requests an hour in
+the baseline, one request through each gateway, a third refused through either, and a policy placed in the satellite
+that gets neither a status nor an effect. Without the variable the suite skips. The recipe for the namespace is the
+workflow's "Set up the satellite namespace" step; the command below runs the suite against it:
+
+```bash
+make test-e2e-go E2E_NAMESPACE=core E2E_SATELLITE_NAMESPACE=core-sat
+```
+
 The `redis` suite is the exception to "run everything": it asserts what only a
 shared counter store can do — that the operator selected Redis rather than
 falling back, that the counters carry the documented key, and that a spent budget

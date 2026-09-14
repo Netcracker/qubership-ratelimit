@@ -132,7 +132,13 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 // rateLimitClusterOf digs the ratelimit filter's cluster name out of the
 // Envoy config dump - the jq of the bash suite, spelled in Go.
 func rateLimitClusterOf(pod string) string {
-	dump, err := configDump(pod)
+	return rateLimitClusterOfIn(namespace, pod)
+}
+
+// rateLimitClusterOfIn is rateLimitClusterOf for a gateway in another
+// namespace; the composite suite reads a satellite's gateway with it.
+func rateLimitClusterOfIn(ns, pod string) string {
+	dump, err := configDumpIn(ns, pod)
 	if err != nil {
 		return ""
 	}
@@ -193,7 +199,11 @@ func descriptorKeysOf(pod string) []string {
 }
 
 func configDump(pod string) ([]map[string]any, error) {
-	out, err := execPod(pod, "istio-proxy", "pilot-agent", "request", "GET", "config_dump")
+	return configDumpIn(namespace, pod)
+}
+
+func configDumpIn(ns, pod string) ([]map[string]any, error) {
+	out, err := execPodIn(ns, pod, "istio-proxy", "pilot-agent", "request", "GET", "config_dump")
 	if err != nil {
 		return nil, err
 	}
