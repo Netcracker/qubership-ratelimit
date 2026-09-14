@@ -72,11 +72,13 @@ var _ = Describe("a replica the leader cannot reach", Ordered, Label("lagging"),
 	})
 	AfterAll(func() {
 		_ = k8s.Delete(ctx, denyPolicy(policy, silenced))
-		if applied {
-			deletePolicies(domain)
-		}
+		// The fleet is restored first: the cleanup wait can fail, and nothing
+		// after a failed step in this closure runs.
 		if fleet != nil {
 			fleet.restore()
+		}
+		if applied {
+			deletePolicies(domain)
 		}
 	})
 

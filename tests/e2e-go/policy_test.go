@@ -199,10 +199,12 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 			"a generation that does not compile is stuck, not in progress")
 	})
 
-	It("rebuilds the store in the running pod when a policy is deleted", func() {
-		since := time.Now().Add(-time.Second)
+	It("rebuilds the store in every running pod when a policy is deleted", func() {
+		before := storeRebuildsPerPod()
 		Expect(k8s.Delete(ctx, newPolicy(domain, nil))).To(Succeed())
-		Eventually(operatorLogsSince(since)).Should(ContainSubstring("rate limit store rebuilt"),
-			"no store rebuild logged after the policy was deleted")
+		Eventually(func() []string {
+			return podsNotRebuiltSince(before)
+		}).WithPolling(500*time.Millisecond).Should(BeEmpty(),
+			"replicas that logged no store rebuild after the policy was deleted")
 	})
 })
