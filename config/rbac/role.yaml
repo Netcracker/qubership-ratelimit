@@ -38,6 +38,5 @@ rules:
   resources:
   - ratelimitpolicies/status
   verbs:
-  - get
   - patch
   - update

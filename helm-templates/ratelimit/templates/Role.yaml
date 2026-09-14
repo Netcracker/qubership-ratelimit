@@ -1,3 +1,4 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -7,10 +8,12 @@ metadata:
     {{- include "ratelimit.labels" . | nindent 4 }}
 rules:
   # Leader election. The lease is always in the service's own namespace, and it
-  # gates status writes only.
+  # gates status writes only. Three verbs are what taking and renewing a lease
+  # costs: get to read the holder, create when there is none, update to renew
+  # or take it over. Nothing lists, watches, or deletes a lease.
   - apiGroups: [coordination.k8s.io]
     resources: [leases]
-    verbs: [get, list, watch, create, update, patch, delete]
+    verbs: [get, create, update]
   # Leader election records who took the lease as an Event in this namespace,
   # and the state store records what it wrote. Without these the service still
   # works, but every handover logs an API rejection that looks like a real
@@ -36,7 +39,7 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [ratelimit.netcracker.com]
     resources: [ratelimitpolicies/status]
-    verbs: [get, update, patch]
+    verbs: [update, patch]
   # The last-good spec of every object of a domain, so that a restart does not
   # forget which generation is being enforced. Names are ratelimit-state-<domain>
   # and the domains are only known at run time, so the rule cannot be narrowed to
@@ -45,3 +48,4 @@ rules:
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, list, watch, create, update, patch, delete]
+{{- end }}

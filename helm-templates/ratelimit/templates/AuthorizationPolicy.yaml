@@ -1,3 +1,4 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if and .Values.management.enabled .Values.management.authorizationPolicy.enabled }}
 {{- $allowed := .Values.management.authorizationPolicy.allowedServiceAccounts }}
 {{- if not $allowed }}
@@ -47,4 +48,5 @@ spec:
               {{- range $allowed }}
               - cluster.local/ns/{{ $.Release.Namespace }}/sa/{{ . }}
               {{- end }}
+{{- end }}
 {{- end }}

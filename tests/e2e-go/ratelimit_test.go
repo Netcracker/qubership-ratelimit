@@ -43,7 +43,13 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 	It("is what the gateway is configured to call", func() {
 		// A wrong cluster name fails exactly like an unreachable operator, so
 		// assert the configuration rather than inferring it from behaviour.
-		expected := fmt.Sprintf("outbound|9000||%s.%s.svc.cluster.local", operatorDeployment(), namespace)
+		// The address is the Service's, and the Service has a fixed name:
+		// a satellite in another namespace computes this same address with
+		// nothing but the baseline's namespace to go on, so it cannot depend
+		// on what the release or the Deployment is called.
+		Expect(serviceHost()).To(HavePrefix("ratelimit."),
+			"the Service is not named ratelimit; satellites compute the RLS address from that name")
+		expected := "outbound|9000||" + serviceHost()
 		Eventually(func() string {
 			return rateLimitClusterOf(gatewayPod("public-gateway").Name)
 		}).WithTimeout(time.Minute).WithPolling(5 * time.Second).Should(Equal(expected))

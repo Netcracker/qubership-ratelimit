@@ -1,3 +1,4 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if .Values.MONITORING_ENABLED }}
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
@@ -19,4 +20,5 @@ spec:
   selector:
     matchLabels:
       {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+{{- end }}
 {{- end }}
