@@ -448,7 +448,7 @@
     "BASELINE_CONTROLLER": {
       "type": "string",
       "title": "Baseline controller namespace",
-      "description": "The controller namespace of a blue-green baseline, where its shared components run. Takes precedence over BASELINE_ORIGIN as the namespace of the ratelimit Service a satellite sends checks to.",
+      "description": "Read for parity with control-plane, which resolves the baseline the same way; takes precedence over BASELINE_ORIGIN as the namespace of the ratelimit Service a satellite sends checks to. On this platform the baseline is never blue-green'd, so the deployer leaves it empty.",
       "default": ""
     }
   },

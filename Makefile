@@ -148,10 +148,12 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes, the engin
 # The address is not a value of any profile - it is environment configuration -
 # so lint supplies a placeholder. The refusal itself is checked in CI.
 #
-# Every profile is linted in each of the composite's modes. Standalone and
-# baseline render the same objects and differ only in the deployer's own
-# blue-green variables, so the baseline pass sets those; the satellite pass
-# sets BASELINE_ORIGIN, which is what turns the render into filters alone.
+# Every profile is linted in each of the composite's modes. The ticket names
+# three; the chart renders two. Standalone and baseline are the same render:
+# the chart reads nothing that tells them apart, and the baseline pass sets a
+# variable the chart does not read, so that the three passes the ticket asks
+# for exist by name. The satellite pass sets BASELINE_ORIGIN, which is the one
+# variable that changes the render, down to the filters alone.
 .PHONY: helm-lint
 helm-lint: ## Lint the Helm chart against every resource profile, in every mode.
 	@for profile in $(CHART_DIR)/resource-profiles/*.yaml; do \

@@ -35,9 +35,13 @@ the value is the baseline's namespace. A namespace without it is the baseline,
 or a standalone installation - and those two render the same objects, which
 is why there is no third value here.
 
-For a blue-green baseline the shared components run in its controller
-namespace, so BASELINE_CONTROLLER takes precedence when set. That is the
-resolution control-plane uses for the same question.
+BASELINE_CONTROLLER is a hedge, not a supported topology. On this platform
+the baseline is never blue-green'd, so the deployer never sets it for this
+chart and the coalesce below always resolves to BASELINE_ORIGIN. It is read
+anyway because control-plane reads it the same way - its deployment.yaml
+resolves BASELINE_PROJ as coalesce(BASELINE_CONTROLLER, BASELINE_ORIGIN,
+BASELINE_PROJ) - and two charts that would disagree about where the baseline
+is, should the variable ever appear, is a worse outcome than one line here.
 */}}
 {{- define "ratelimit.mode" -}}
 {{- if .Values.BASELINE_ORIGIN -}}satellite{{- else -}}baseline{{- end -}}

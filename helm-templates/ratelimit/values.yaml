@@ -146,8 +146,9 @@ ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
 # the whole component renders. BASELINE_ORIGIN set is a satellite: only the
 # gateway filters render, and they send checks to the baseline's Service at
 # ratelimit.<baseline namespace>:9000 - which is why that Service has a fixed
-# name. BASELINE_CONTROLLER names the controller namespace of a blue-green
-# baseline, where its shared components run; it takes precedence when set.
+# name. BASELINE_CONTROLLER is read for parity with control-plane, which
+# resolves the baseline the same way; on this platform the baseline is never
+# blue-green'd, so the deployer leaves it empty.
 BASELINE_ORIGIN: ""
 BASELINE_CONTROLLER: ""
 
