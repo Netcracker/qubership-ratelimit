@@ -54,16 +54,25 @@ func fakeClientWith(t *testing.T, objects ...client.Object) (client.Client, *run
 	return fakeClient, scheme
 }
 
-// stubProbe answers for the fleet without a network.
+// stubProbe answers for the fleet without a network, and records what each
+// observation asked for and whether it asked for a fresh round. observing,
+// when set, runs inside each observation, the way a real probe spends time
+// there.
 type stubProbe struct {
 	view FleetView
 	err  error
 
-	asked []store.Applied
+	asked     []store.Applied
+	fresh     []bool
+	observing func()
 }
 
-func (s *stubProbe) Observe(_ context.Context, _ string, want store.Applied) (FleetView, error) {
+func (s *stubProbe) Observe(_ context.Context, _ string, want store.Applied, fresh bool) (FleetView, error) {
 	s.asked = append(s.asked, want)
+	s.fresh = append(s.fresh, fresh)
+	if s.observing != nil {
+		s.observing()
+	}
 	if s.err != nil {
 		return FleetView{}, s.err
 	}
@@ -299,10 +308,13 @@ func TestReconcile_withoutAProbeTheFleetIsUnobserved(t *testing.T) {
 func TestReconcile_requeuesWhileTheGenerationSpreads(t *testing.T) {
 	probe := &stubProbe{view: FleetView{Total: 3, Applied: 2, Behind: []string{"ratelimit-7c9d-x2k1"}}}
 	reconciler, fakeClient := newReconciler(t, probe, testPolicy(7))
+	// A stopped clock: the requeue is the whole interval only when no time
+	// passed between the round and the return.
+	reconciler.Now = (&fakeClock{base: time.Now()}).now
 
 	result, err := reconciler.Reconcile(context.Background(), testRequest())
 	require.NoError(t, err)
-	assert.Equal(t, probeInterval, result.RequeueAfter,
+	assert.Equal(t, ProbeInterval, result.RequeueAfter,
 		"a fleet still taking up a generation converges without an event")
 
 	stored := fetch(t, fakeClient)
@@ -322,10 +334,11 @@ func TestReconcile_requeuesWhileTheGenerationSpreads(t *testing.T) {
 // policy, so no event announces it. Only the interval catches it.
 func TestReconcile_re_checksTheFleetWhileTheGenerationIsHealthy(t *testing.T) {
 	reconciler, fakeClient := newReconciler(t, unanimous(1), testPolicy(1))
+	reconciler.Now = (&fakeClock{base: time.Now()}).now
 
 	result, err := reconciler.Reconcile(context.Background(), testRequest())
 	require.NoError(t, err)
-	assert.Equal(t, probeInterval, result.RequeueAfter,
+	assert.Equal(t, ProbeInterval, result.RequeueAfter,
 		"a replica that falls behind after the status went green produces no event")
 
 	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
@@ -625,7 +638,7 @@ func TestPoliciesBehind_mapsTheFleetsOwnSliceToEveryPolicy(t *testing.T) {
 // reports ReplicaStale with Stalled true.
 //
 // The status write of the first probe is itself an event on the policy, so the
-// second probe arrives at once rather than in probeInterval. That is what makes
+// second probe arrives at once rather than in ProbeInterval. That is what makes
 // this reachable rather than theoretical.
 func TestReconcile_aSecondProbeStaysPropagatingAfterAnOutage(t *testing.T) {
 	object := testPolicy(7)
@@ -643,6 +656,106 @@ func TestReconcile_aSecondProbeStaysPropagatingAfterAnOutage(t *testing.T) {
 		"the first probe after an outage is the start of a rollout, not an hour into one")
 	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
 		"the second probe read a stamp from before this rollout began")
+}
+
+// The reconciler asks the fleet afresh only when it reacts to a generation it
+// has not observed: a round taken before the edit would report the replicas
+// behind a change they may have applied since, and a round reused between
+// edits keeps the fleet's cost at one round per cycle.
+func TestReconcile_asksForAFreshRoundOnANewGenerationOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		observed int64
+		fresh    bool
+	}{
+		{"a generation not yet observed", 6, true},
+		{"the generation already observed", 7, false},
+		{"a policy never reconciled", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			object := testPolicy(7)
+			object.Status.ObservedGeneration = tc.observed
+			probe := unanimous(2)
+			reconciler, _ := newReconciler(t, probe, object)
+
+			_, err := reconciler.Reconcile(context.Background(), testRequest())
+			require.NoError(t, err)
+
+			require.Len(t, probe.fresh, 1)
+			assert.Equal(t, tc.fresh, probe.fresh[0], "fresh for generation 7 with %d observed", tc.observed)
+		})
+	}
+}
+
+// A reconcile requeues for the moment the probe stops answering from the
+// round it used, not for one interval after the round was taken: a round
+// that completed late is reused past that mark, and a look scheduled by the
+// round's age alone would be answered from the same round again, once a
+// second, until it expired. A view that names no expiry is treated as
+// expiring one interval after the fleet was asked; a round about to expire
+// waits one second rather than nothing.
+func TestReconcile_requeuesForWhenTheRoundStopsBeingReused(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		view FleetView
+		wait time.Duration
+	}{
+		{"a round reused for four more seconds", FleetView{At: now, RefreshAt: now.Add(4 * time.Second)}, 4 * time.Second},
+		{"a round taken ten seconds ago and reused for two more",
+			FleetView{At: now.Add(-10 * time.Second), RefreshAt: now.Add(2 * time.Second)}, 2 * time.Second},
+		{"a view without an expiry, taken now", FleetView{At: now}, ProbeInterval},
+		{"a view without an expiry, taken four seconds ago", FleetView{At: now.Add(-4 * time.Second)}, ProbeInterval - 4*time.Second},
+		{"a round about to expire", FleetView{At: now, RefreshAt: now.Add(200 * time.Millisecond)}, time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := unanimous(2)
+			probe.view.At, probe.view.RefreshAt = tc.view.At, tc.view.RefreshAt
+			reconciler, _ := newReconciler(t, probe, testPolicy(7))
+			reconciler.Now = (&fakeClock{base: now}).now
+
+			result, err := reconciler.Reconcile(context.Background(), testRequest())
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.wait, result.RequeueAfter, "RequeueAfter for %s", tc.name)
+		})
+	}
+}
+
+// The requeue counts from the return of the reconcile, so the wait until the
+// round turns one interval old is measured after the probe, not before it: a
+// probe that spent four seconds waiting for a round leaves six, not ten.
+func TestReconcile_countsTheRequeueFromAfterTheProbe(t *testing.T) {
+	clock := &fakeClock{base: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
+	probe := unanimous(2)
+	probe.observing = func() { clock.advance(4 * time.Second) }
+	reconciler, _ := newReconciler(t, probe, testPolicy(7))
+	reconciler.Now = clock.now
+
+	result, err := reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+
+	assert.Equal(t, ProbeInterval-4*time.Second, result.RequeueAfter,
+		"RequeueAfter after a probe that took four seconds of a round taken at its start")
+}
+
+// lastCheckTime is the time the fleet was asked, which for a status built
+// from a reused round is earlier than the write: the field is the freshness
+// of the answers.
+func TestReconcile_stampsTheTimeTheFleetWasAsked(t *testing.T) {
+	probe := unanimous(2)
+	asked := time.Now().Add(-4 * time.Second)
+	probe.view.At = asked
+	reconciler, fakeClient := newReconciler(t, probe, testPolicy(7))
+
+	_, err := reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+
+	stamped := fetch(t, fakeClient).Status.Replicas.LastCheckTime
+	require.NotNil(t, stamped)
+	assert.WithinDuration(t, asked, stamped.Time, time.Second, "lastCheckTime against the time the fleet was asked")
 }
 
 // The everyday path: a broken policy is fixed, and one replica lags by a

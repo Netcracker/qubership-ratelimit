@@ -9,8 +9,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -39,6 +41,19 @@ const probeTimeout = 2 * time.Second
 
 // FleetView is what the leader saw when it asked the replicas.
 type FleetView struct {
+	// At is when the fleet was asked. A view answered from a round taken
+	// earlier carries that round's time, so a reader knows how fresh the
+	// answers are; the reconciler stamps it into the status. Zero means the
+	// moment of the observation.
+	At time.Time
+
+	// RefreshAt is when the probe stops answering from this round: its
+	// completion plus the freshness, or one ProbeInterval after At for a
+	// probe that reuses nothing. The reconciler times its next look at the
+	// fleet by it, so the look takes a new round rather than the same one
+	// again. Zero means one ProbeInterval after At.
+	RefreshAt time.Time
+
 	// Total is the number of ready endpoints at the time of the probe.
 	Total int32
 
@@ -57,7 +72,8 @@ type FleetView struct {
 }
 
 // ReplicaProbe reads the enforced generation from every ready endpoint of the
-// component's own Service. It is the production FleetProbe.
+// component's own Service. It is the production FleetProbe. It is safe for
+// concurrent use, and concurrent observations share one round of answers.
 type ReplicaProbe struct {
 	// Reader lists the EndpointSlices of the Service.
 	Reader client.Reader
@@ -73,25 +89,146 @@ type ReplicaProbe struct {
 	// HTTP is the client used for the probe; nil means a default with the
 	// probe timeout.
 	HTTP *http.Client
+
+	// Freshness is the age below which a later Observe reuses a round of
+	// answers instead of asking the fleet again. The reconciles of a
+	// namespace share one probe, so a freshness equal to their interval costs
+	// the fleet one request per replica per cycle rather than one per domain.
+	// Zero reuses nothing.
+	Freshness time.Duration
+
+	// Now is the clock the freshness is measured by; nil means time.Now.
+	Now func() time.Time
+
+	mu    sync.Mutex
+	round *fleetRound
 }
 
-// Observe asks every ready endpoint which generation of the domain it
-// enforces. An error means the fleet could not be observed at all, which is the
-// one case where Ready is Unknown rather than false: the leader does not know,
-// and reporting a guess would be worse than saying so.
-func (p *ReplicaProbe) Observe(ctx context.Context, domain string, want store.Applied) (FleetView, error) {
+// fleetRound is one round of answers: the ready endpoints at the time, what
+// each of them enforced, or the error that failed the whole round. A round is
+// not modified once taken, so a view reads it without the lock.
+type fleetRound struct {
+	// taken is when the fleet was asked and completed when the last answer
+	// was in. The freshness counts from completed: a round that took long,
+	// because replicas were slow to answer, would otherwise expire before
+	// the next domain could reuse it, and the cycle would fall back to one
+	// round per domain.
+	taken     time.Time
+	completed time.Time
+	endpoints []endpoint
+
+	// answers holds what each endpoint enforces; an endpoint that did not
+	// answer is named in silent instead.
+	answers map[endpoint]map[string]store.Applied
+	silent  []string
+	err     error
+}
+
+// Observe reports which ready endpoints enforce the generation of the domain
+// asked about, from a round of answers younger than the freshness and taken
+// from the same ready endpoints, or from a new round when fresh is set or no
+// such round exists. An error means the fleet could not be observed at all,
+// which is the one case where Ready is Unknown rather than false: the leader
+// does not know, and reporting a guess would be worse than saying so. A
+// round that failed is kept like any other, so a fleet that cannot be
+// observed costs one round per freshness, not one per domain.
+func (p *ReplicaProbe) Observe(
+	ctx context.Context, domain string, want store.Applied, fresh bool,
+) (FleetView, error) {
+	round := p.currentRound(ctx, fresh)
+	if round.err != nil {
+		return FleetView{}, round.err
+	}
+	return round.view(domain, want, p.Freshness), nil
+}
+
+// currentRound returns the round an observation is answered from: the one
+// taken earlier while it completed less than the freshness ago, was taken
+// from the ready endpoints of now, and no fresh one was asked for; a new one
+// otherwise. The endpoints are read on every observation, from the cache
+// and at no cost to the fleet, because a round is only as good as the fleet
+// it was taken from: a pod that joined or left since changes the
+// denominator, and the reconciles that change fans out have to see it. The
+// lock covers the asking, so concurrent reconciles share one round instead
+// of each taking their own.
+func (p *ReplicaProbe) currentRound(ctx context.Context, fresh bool) *fleetRound {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
 	endpoints, err := p.endpoints(ctx)
 	if err != nil {
-		return FleetView{}, err
+		p.round = &fleetRound{taken: now, completed: now, err: err}
+		return p.round
+	}
+	if !fresh && p.round != nil && now.Sub(p.round.completed) < p.Freshness &&
+		slices.Equal(endpoints, p.round.endpoints) {
+		return p.round
+	}
+	p.round = p.takeRound(ctx, now, endpoints)
+	return p.round
+}
+
+func (p *ReplicaProbe) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
+}
+
+// takeRound asks every one of the ready endpoints what it enforces. The
+// endpoints are asked concurrently, so a round lasts one probe timeout at
+// most rather than one per replica.
+func (p *ReplicaProbe) takeRound(ctx context.Context, now time.Time, endpoints []endpoint) *fleetRound {
+	round := &fleetRound{taken: now, endpoints: endpoints, answers: map[endpoint]map[string]store.Applied{}}
+
+	type answer struct {
+		applied map[string]store.Applied
+		err     error
+	}
+	answers := make([]answer, len(endpoints))
+	var asking sync.WaitGroup
+	for i, endpoint := range endpoints {
+		asking.Go(func() {
+			answers[i].applied, answers[i].err = p.ask(ctx, endpoint.address)
+		})
+	}
+	asking.Wait()
+	round.completed = p.now()
+
+	var lastErr error
+	for i, endpoint := range endpoints {
+		if answers[i].err != nil {
+			lastErr = answers[i].err
+			round.silent = append(round.silent, endpoint.name)
+			continue
+		}
+		round.answers[endpoint] = answers[i].applied
 	}
 
-	view := FleetView{Total: int32(len(endpoints))}
-	var lastErr error
-	for _, endpoint := range endpoints {
-		applied, err := p.ask(ctx, endpoint.address)
-		if err != nil {
-			lastErr = err
-			view.Silent = append(view.Silent, endpoint.name)
+	// Nobody answered, so this is a statement about the leader's reach rather
+	// than about the fleet. A network policy that admits only Prometheus to the
+	// metrics port silences every probe, and calling that a stale replica would
+	// report a working domain as Degraded. ProbeFailed says what is true: the
+	// leader cannot see.
+	if len(endpoints) > 0 && len(round.silent) == len(endpoints) {
+		round.err = fmt.Errorf("no replica answered %s: %w", store.AppliedPath, lastErr)
+	}
+	sort.Strings(round.silent)
+	return round
+}
+
+// view counts one domain's replicas from the round's answers: an endpoint
+// that reported the generation and object asked about is applied, one that
+// reported anything else is behind, and one that did not answer is silent.
+func (r *fleetRound) view(domain string, want store.Applied, freshness time.Duration) FleetView {
+	refreshAt := r.taken.Add(ProbeInterval)
+	if freshness > 0 {
+		refreshAt = r.completed.Add(freshness)
+	}
+	view := FleetView{At: r.taken, RefreshAt: refreshAt, Total: int32(len(r.endpoints)), Silent: r.silent}
+	for _, endpoint := range r.endpoints {
+		applied, answered := r.answers[endpoint]
+		if !answered {
 			continue
 		}
 		if reported, ok := applied[domain]; ok &&
@@ -101,19 +238,8 @@ func (p *ReplicaProbe) Observe(ctx context.Context, domain string, want store.Ap
 		}
 		view.Behind = append(view.Behind, endpoint.name)
 	}
-
-	// Nobody answered, so this is a statement about the leader's reach rather
-	// than about the fleet. A network policy that admits only Prometheus to the
-	// metrics port silences every probe, and calling that a stale replica would
-	// report a working domain as Degraded. ProbeFailed says what is true: the
-	// leader cannot see.
-	if len(endpoints) > 0 && len(view.Silent) == len(endpoints) {
-		return FleetView{}, fmt.Errorf("no replica answered %s: %w", store.AppliedPath, lastErr)
-	}
-
 	sort.Strings(view.Behind)
-	sort.Strings(view.Silent)
-	return view, nil
+	return view
 }
 
 // endpoint is one ready pod behind the Service.
@@ -125,8 +251,8 @@ type endpoint struct {
 // endpoints lists the ready addresses of the Service. An endpoint with no
 // target reference is named by its address, which is all the message needs.
 func (p *ReplicaProbe) endpoints(ctx context.Context) ([]endpoint, error) {
-	var slices discoveryv1.EndpointSliceList
-	if err := p.Reader.List(ctx, &slices,
+	var list discoveryv1.EndpointSliceList
+	if err := p.Reader.List(ctx, &list,
 		client.InNamespace(p.Namespace),
 		client.MatchingLabels{discoveryv1.LabelServiceName: p.Service},
 	); err != nil {
@@ -134,8 +260,8 @@ func (p *ReplicaProbe) endpoints(ctx context.Context) ([]endpoint, error) {
 	}
 
 	var out []endpoint
-	for i := range slices.Items {
-		for _, e := range slices.Items[i].Endpoints {
+	for i := range list.Items {
+		for _, e := range list.Items[i].Endpoints {
 			if e.Conditions.Ready != nil && !*e.Conditions.Ready {
 				continue
 			}

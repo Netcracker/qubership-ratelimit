@@ -437,6 +437,7 @@ func replicaProbe(mgr ctrl.Manager, options runOptions, namespace string) *contr
 		Namespace: namespace,
 		Service:   serviceName(options),
 		Port:      port,
+		Freshness: controller.ProbeInterval,
 	}
 }
 

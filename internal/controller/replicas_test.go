@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -100,7 +102,7 @@ func appliedBy(generation int64) map[string]store.Applied {
 func TestObserve_countsTheReplicasOnTheGenerationAsked(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"), ready("ratelimit-b"))
 
-	view, err := probe.Observe(context.Background(), testDomain, want(7))
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), view.Total)
@@ -116,7 +118,7 @@ func TestObserve_aMatchingGenerationOfAnotherObjectIsNotApplied(t *testing.T) {
 		testDomain: {Generation: 7, UID: "some-older-object"},
 	}), ready("ratelimit-a"))
 
-	view, err := probe.Observe(context.Background(), testDomain, want(7))
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
 	assert.Zero(t, view.Applied)
@@ -126,7 +128,7 @@ func TestObserve_aMatchingGenerationOfAnotherObjectIsNotApplied(t *testing.T) {
 func TestObserve_aReplicaOnAnotherGenerationIsBehind(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(6)), ready("ratelimit-a"))
 
-	view, err := probe.Observe(context.Background(), testDomain, want(7))
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), view.Total)
@@ -139,7 +141,7 @@ func TestObserve_aReplicaOnAnotherGenerationIsBehind(t *testing.T) {
 func TestObserve_aReplicaThatDoesNotKnowTheDomainIsBehind(t *testing.T) {
 	probe := fleet(t, answers(t, map[string]store.Applied{"gateway.private": want(7)}), ready("ratelimit-a"))
 
-	view, err := probe.Observe(context.Background(), testDomain, want(7))
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
 	assert.Zero(t, view.Applied)
@@ -160,7 +162,7 @@ func TestObserve_oneSilentReplicaIsNamedButDoesNotBlindTheLeader(t *testing.T) {
 		require.NoError(t, json.NewEncoder(w).Encode(appliedBy(7)))
 	}, ready("ratelimit-a"), ready("ratelimit-b"))
 
-	view, err := probe.Observe(context.Background(), testDomain, want(7))
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), view.Total)
@@ -178,7 +180,7 @@ func TestObserve_aFleetThatAnswersNothingIsAnError(t *testing.T) {
 		w.WriteHeader(http.StatusForbidden)
 	}, ready("ratelimit-a"), ready("ratelimit-b"))
 
-	_, err := probe.Observe(context.Background(), testDomain, want(7))
+	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.Error(t, err, "no answer at all is ProbeFailed, not a fleet of stale replicas")
 	assert.Contains(t, err.Error(), store.AppliedPath)
@@ -189,7 +191,7 @@ func TestObserve_aBodyThatDoesNotDecodeIsSilence(t *testing.T) {
 		_, _ = w.Write([]byte("not json"))
 	}, ready("ratelimit-a"), ready("ratelimit-b"))
 
-	_, err := probe.Observe(context.Background(), testDomain, want(7))
+	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decode")
@@ -200,7 +202,7 @@ func TestObserve_aBodyThatDoesNotDecodeIsSilence(t *testing.T) {
 func TestObserve_anEmptyFleetIsObservedAsEmpty(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(7)))
 
-	view, err := probe.Observe(context.Background(), testDomain, want(7))
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
 	assert.Zero(t, view.Total)
@@ -263,7 +265,7 @@ func TestEndpoints_reportsAListThatFailed(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
 	probe.Reader = failingReader{}
 
-	_, err := probe.Observe(context.Background(), testDomain, want(7))
+	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.Error(t, err, "a fleet that cannot be listed is unobservable, not empty")
 	assert.Contains(t, err.Error(), "EndpointSlice")
@@ -284,7 +286,7 @@ func TestObserve_aTerminatingReplicaLeavesTheFraction(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(7)),
 		ready("ratelimit-new"), draining("ratelimit-old"))
 
-	view, err := probe.Observe(context.Background(), testDomain, want(7))
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), view.Total, "a terminating pod is not part of the fleet")
@@ -297,9 +299,256 @@ func TestObserve_aTerminatingReplicaLeavesTheFraction(t *testing.T) {
 func TestObserve_aTerminatingReplicaOnAnOldGenerationIsNotBehind(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(6)), draining("ratelimit-old"))
 
-	view, err := probe.Observe(context.Background(), testDomain, want(7))
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
 	assert.Zero(t, view.Total)
 	assert.Empty(t, view.Behind, "a pod on its way out is not a propagation problem")
+}
+
+// counting wraps a handler and counts the requests it served, which is the
+// cost of a probe as the fleet sees it: one request per replica per round.
+func counting(calls *atomic.Int32, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		next(w, r)
+	}
+}
+
+// The observations of one cycle share one round: three domains asked within
+// the freshness cost the fleet one request per replica, and each domain is
+// still judged on its own out of the same answers.
+func TestObserve_theDomainsOfACycleShareOneRound(t *testing.T) {
+	var calls atomic.Int32
+	applied := map[string]store.Applied{
+		"gateway.a": want(7),
+		"gateway.b": want(3),
+		"gateway.c": {Generation: 2, UID: "another-object"},
+	}
+	probe := fleet(t, counting(&calls, answers(t, applied)), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe.Freshness = time.Minute
+
+	a, err := probe.Observe(context.Background(), "gateway.a", want(7), false)
+	require.NoError(t, err)
+	b, err := probe.Observe(context.Background(), "gateway.b", want(3), false)
+	require.NoError(t, err)
+	c, err := probe.Observe(context.Background(), "gateway.c", want(2), false)
+	require.NoError(t, err)
+
+	assert.Equal(t, int32(2), a.Applied, "gateway.a applied of %d", a.Total)
+	assert.Equal(t, int32(2), b.Applied, "gateway.b applied of %d", b.Total)
+	assert.Zero(t, c.Applied, "gateway.c: the generation matches but the object does not")
+	assert.Equal(t, []string{"ratelimit-a", "ratelimit-b"}, c.Behind, "gateway.c behind")
+	assert.Equal(t, int32(2), calls.Load(), "requests for three domains over two replicas")
+}
+
+// A fresh observation retakes the round whatever its age: the reconciler asks
+// for one when it reacts to a new generation, so the status never rests on
+// answers from before the change.
+func TestObserve_aFreshObservationRetakesTheRound(t *testing.T) {
+	var calls atomic.Int32
+	probe := fleet(t, counting(&calls, answers(t, appliedBy(7))), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe.Freshness = time.Minute
+
+	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "an observation within the freshness reused the round")
+
+	_, err = probe.Observe(context.Background(), testDomain, want(7), true)
+	require.NoError(t, err)
+	assert.Equal(t, int32(4), calls.Load(), "the fresh observation took a round of its own")
+}
+
+// A round is reused while it is younger than the freshness and retaken from
+// the moment it is that old: one request per replica just under the
+// freshness, another round at it.
+func TestObserve_aRoundIsRetakenAtItsFreshness(t *testing.T) {
+	var calls atomic.Int32
+	probe := fleet(t, counting(&calls, answers(t, appliedBy(7))), ready("ratelimit-a"))
+	probe.Freshness = time.Minute
+	now := time.Now()
+	probe.Now = func() time.Time { return now }
+
+	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+
+	now = now.Add(time.Minute - time.Millisecond)
+	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), calls.Load(), "just under the freshness the round is reused")
+
+	now = now.Add(time.Millisecond)
+	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "at the freshness a round is taken")
+}
+
+// A round is reused only for the fleet it was taken from. The reconciles an
+// EndpointSlice change fans out exist to update the denominator, so a pod
+// that joined since the round was taken retakes it, and a fleet that did not
+// change keeps it.
+func TestObserve_aRoundIsRetakenWhenTheFleetChanges(t *testing.T) {
+	var calls atomic.Int32
+	probe := fleet(t, counting(&calls, answers(t, appliedBy(7))), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe.Freshness = time.Minute
+
+	first, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), first.Total)
+
+	var slice discoveryv1.EndpointSlice
+	writer := probe.Reader.(client.Client)
+	require.NoError(t, writer.Get(context.Background(),
+		client.ObjectKey{Namespace: testNamespace, Name: probeService + "-abc"}, &slice))
+	slice.Endpoints = append(slice.Endpoints, ready("ratelimit-c"))
+	require.NoError(t, writer.Update(context.Background(), &slice))
+
+	second, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), second.Total, "the joined pod is in the denominator at once")
+	assert.Equal(t, int32(5), calls.Load(), "two requests for the first fleet, three for the changed one")
+
+	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(5), calls.Load(), "an unchanged fleet keeps the round")
+}
+
+// A fleet that answers nothing is an error for every domain of the cycle, and
+// it costs one round: the leader does not ask a silent fleet again for each
+// domain.
+func TestObserve_aSilentFleetIsOneRoundOfErrors(t *testing.T) {
+	var calls atomic.Int32
+	probe := fleet(t, counting(&calls, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe.Freshness = time.Minute
+
+	_, err := probe.Observe(context.Background(), "gateway.a", want(7), false)
+	require.Error(t, err)
+	_, err = probe.Observe(context.Background(), "gateway.b", want(7), false)
+	require.Error(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "requests for two domains over two replicas")
+}
+
+// Without a freshness every observation is a round of its own; the older
+// tests of this file leave the freshness at zero and count on it.
+func TestObserve_withoutAFreshnessEveryObservationIsARound(t *testing.T) {
+	var calls atomic.Int32
+	probe := fleet(t, counting(&calls, answers(t, appliedBy(7))), ready("ratelimit-a"))
+
+	for range 2 {
+		_, err := probe.Observe(context.Background(), testDomain, want(7), false)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, int32(2), calls.Load(), "requests for two observations over one replica")
+}
+
+// A view carries the time its round was taken, so a reader of the status
+// knows how fresh the answers are: an observation answered from a reused
+// round reports the round's time, not its own.
+func TestObserve_aViewCarriesTheTimeOfItsRound(t *testing.T) {
+	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
+	probe.Freshness = time.Minute
+	taken := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	now := taken
+	probe.Now = func() time.Time { return now }
+
+	first, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	now = taken.Add(4 * time.Second)
+	second, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+
+	assert.Equal(t, taken, first.At)
+	assert.Equal(t, taken, second.At, "a reused round keeps the time it was taken")
+}
+
+// fakeClock is a clock the test and the fleet's handlers advance from their
+// own goroutines.
+type fakeClock struct {
+	base   time.Time
+	offset atomic.Int64
+}
+
+func (c *fakeClock) now() time.Time { return c.base.Add(time.Duration(c.offset.Load())) }
+
+func (c *fakeClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
+
+// The freshness counts from the end of a round, not from its start: a round
+// whose replicas took twelve seconds of the clock to answer is still reused
+// by the next domain under a freshness of ten, where a round aged from its
+// start would have expired before it completed and the cycle would fall
+// back to one round per domain.
+func TestObserve_aSlowRoundIsStillReusedAfterItCompletes(t *testing.T) {
+	var calls atomic.Int32
+	clock := &fakeClock{base: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
+	slow := func(w http.ResponseWriter, r *http.Request) {
+		clock.advance(6 * time.Second)
+		answers(t, appliedBy(7))(w, r)
+	}
+	probe := fleet(t, counting(&calls, slow), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe.Freshness = 10 * time.Second
+	probe.Now = clock.now
+
+	a, err := probe.Observe(context.Background(), "gateway.a", want(7), false)
+	require.NoError(t, err)
+	require.Equal(t, clock.base, a.At, "the view carries the start of the round")
+
+	_, err = probe.Observe(context.Background(), "gateway.b", want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "requests for two domains over two replicas, the second from the round")
+}
+
+// The replicas are asked together, so a round lasts one probe timeout at most
+// rather than one per replica. The handler answers only once every replica's
+// request is in flight, which a round that asked them one at a time could
+// never reach: its first request would time out alone.
+func TestObserve_asksTheReplicasTogether(t *testing.T) {
+	const replicas = 3
+	var arrived atomic.Int32
+	together := func(w http.ResponseWriter, r *http.Request) {
+		arrived.Add(1)
+		deadline := time.Now().Add(3 * time.Second)
+		for arrived.Load() < replicas && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		answers(t, appliedBy(7))(w, r)
+	}
+	probe := fleet(t, together, ready("ratelimit-a"), ready("ratelimit-b"), ready("ratelimit-c"))
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(replicas), view.Applied, "every replica answered within one timeout")
+	assert.Empty(t, view.Silent)
+}
+
+// A view says when the probe stops answering from its round: the round's
+// completion plus the freshness, so a reconciler that requeues for that
+// moment takes a new round rather than the same one again. A probe that
+// reuses nothing says one interval after the fleet was asked.
+func TestObserve_aViewSaysWhenItsRoundExpires(t *testing.T) {
+	clock := &fakeClock{base: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
+	slow := func(w http.ResponseWriter, r *http.Request) {
+		clock.advance(6 * time.Second)
+		answers(t, appliedBy(7))(w, r)
+	}
+
+	reusing := fleet(t, slow, ready("ratelimit-a"), ready("ratelimit-b"))
+	reusing.Freshness = 10 * time.Second
+	reusing.Now = clock.now
+	view, err := reusing.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, clock.base.Add(22*time.Second), view.RefreshAt,
+		"a round taken at the base and completed twelve seconds later, reused for ten more")
+
+	clock.offset.Store(0)
+	single := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
+	single.Now = clock.now
+	view, err = single.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, clock.base.Add(ProbeInterval), view.RefreshAt,
+		"a probe that reuses nothing wants the next look one interval after the ask")
 }
