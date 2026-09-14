@@ -68,8 +68,10 @@ jobs:
   # The engine is a separate Go module the root job's ./... does not see.
   # This job tests it with the race detector and ships its coverage as a
   # coverage-* artifact — the naming convention the generic workflow's Sonar
-  # job downloads by glob. No setup-go: GOTOOLCHAIN=auto fetches the version
-  # engine/go.mod declares.
+  # job downloads by glob. It also runs the root module's unit tests under
+  # the race detector, which the generic workflow does not: its test step
+  # runs without -race. No setup-go: GOTOOLCHAIN=auto fetches the version
+  # each module's go.mod declares.
   golangci:
     name: golangci-lint (both modules)
     runs-on: ubuntu-latest
@@ -156,6 +158,17 @@ jobs:
         run: |
           go vet ./...
           go test -race ./... -coverpkg=./... -coverprofile engine.coverage.out
+
+      # The generic workflow runs the root module's tests without -race; this
+      # step runs them with the detector on, with the Redis service for
+      # internal/records. The controller suite is left out the way make
+      # test-unit leaves it out: it needs the envtest control plane the
+      # generic workflow installs for its own run.
+      - name: Test the root module under the race detector
+        env:
+          REDIS_ADDR: 127.0.0.1:6379
+        run: |
+          go test -race $(go list ./... | grep -v '/internal/controller$') -count=1
 
       # The standalone service above cannot refuse a cross-slot script, so it
       # never exercises the slot mechanics the key contract exists for: the

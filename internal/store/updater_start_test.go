@@ -108,22 +108,37 @@ type stubSource struct {
 	informer *stubInformer
 	getError error
 
+	mu sync.Mutex // guards asked
+
 	// asked records the object the updater subscribed with. GetInformer
 	// creates whatever it is handed, so asking for the typed kind would start
 	// a second informer beside the unstructured one every read of this kind
 	// uses - which costs a second cached copy of every policy and shows up
-	// nowhere else.
+	// nowhere else. The updater writes it from its own goroutine and the test
+	// reads it from another, so mu guards it; the store under the lock also
+	// orders the object's own writes, made before the subscription, ahead of
+	// the test's reads through askedObject.
 	asked client.Object
 }
 
 func (s *stubSource) GetInformer(
 	_ context.Context, object client.Object, _ ...cache.InformerGetOption,
 ) (cache.Informer, error) {
+	s.mu.Lock()
 	s.asked = object
+	s.mu.Unlock()
 	if s.getError != nil {
 		return nil, s.getError
 	}
 	return s.informer, nil
+}
+
+// askedObject returns the object the updater subscribed with, nil until the
+// updater has subscribed.
+func (s *stubSource) askedObject() client.Object {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.asked
 }
 
 func newStubSource(t *testing.T, objects ...client.Object) *stubSource {
@@ -259,7 +274,6 @@ type stubState struct {
 	failing       bool
 	listFailing   bool
 	deleteFailing bool
-	saveFailures  int
 	attempts      int
 }
 
@@ -286,12 +300,16 @@ func (s *stubState) Save(_ context.Context, domain string, bundle policy.Bundle)
 	if s.failing {
 		return errors.New("cannot write the state")
 	}
-	if s.saveFailures > 0 {
-		s.saveFailures--
-		return errors.New("the write did not land")
-	}
 	s.saved[domain] = bundle
 	return nil
+}
+
+// setFailing makes every later write fail, or succeed again, from the test's
+// goroutine while the updater's may be writing.
+func (s *stubState) setFailing(failing bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failing = failing
 }
 
 func (s *stubState) ListDomains(_ context.Context) ([]string, error) {
@@ -468,11 +486,14 @@ func TestUpdaterStart_persistsOnceLeadershipIsAcquired(t *testing.T) {
 func TestUpdaterStart_retriesAWriteThatFailed(t *testing.T) {
 	// The bundle the store holds is not the bundle that was computed. Treating a
 	// failed write as done would leave the state unwritten until something else
-	// happened to change it.
+	// happened to change it. Writes fail until the test lifts the failure, so
+	// whichever rebuild first sees the domain, the one at startup or the one
+	// the event schedules, it cannot have saved it; a single failing write
+	// would let the next rebuild save before the check below runs.
 	added := policyObject("gateway.private")
 	source := newStubSource(t)
 	state := newStubState()
-	state.saveFailures = 1
+	state.failing = true
 	startUpdaterWithState(t, source, New(), state, closedChannel())
 	require.Eventually(t, source.informer.handlerRegistered, 2*time.Second, 5*time.Millisecond)
 
@@ -480,9 +501,10 @@ func TestUpdaterStart_retriesAWriteThatFailed(t *testing.T) {
 	source.informer.deliverAdd(t, added)
 	require.Eventually(t, func() bool { return state.attempted() > 0 },
 		2*time.Second, 5*time.Millisecond)
-	require.Empty(t, state.savedDomains(), "the first write failed")
+	require.Empty(t, state.savedDomains(), "every write failed so far")
 
 	// Any later rebuild has to try again, even though nothing changed meanwhile.
+	state.setFailing(false)
 	source.informer.deliverAdd(t, added)
 
 	assert.Eventually(t, func() bool { return len(state.savedDomains()) == 1 },
@@ -500,9 +522,10 @@ func TestUpdaterStart_subscribesToTheUnstructuredInformer(t *testing.T) {
 	source := newStubSource(t, policyObject("gateway.public"))
 	startUpdater(t, source, New())
 
-	require.Eventually(t, func() bool { return source.asked != nil },
+	require.Eventually(t, func() bool { return source.askedObject() != nil },
 		2*time.Second, 5*time.Millisecond)
-	assert.IsType(t, &unstructured.Unstructured{}, source.asked,
+	asked := source.askedObject()
+	assert.IsType(t, &unstructured.Unstructured{}, asked,
 		"the updater must share the one informer the rest of the process reads")
-	assert.Equal(t, "RateLimitPolicy", source.asked.GetObjectKind().GroupVersionKind().Kind)
+	assert.Equal(t, "RateLimitPolicy", asked.GetObjectKind().GroupVersionKind().Kind)
 }
