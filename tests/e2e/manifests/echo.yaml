@@ -88,6 +88,9 @@ spec:
             value: /e2e-satellite
         - path:
             type: PathPrefix
+            value: /e2e-stray
+        - path:
+            type: PathPrefix
             value: /e2e
       backendRefs:
         - name: e2e-echo

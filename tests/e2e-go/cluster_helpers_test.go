@@ -55,12 +55,16 @@ func operatorPods() []corev1.Pod {
 // execPod runs one command in a container and returns its stdout - the
 // kubectl exec of the suite.
 func execPod(pod, container string, command ...string) (string, error) {
+	return execPodIn(namespace, pod, container, command...)
+}
+
+func execPodIn(ns, pod, container string, command ...string) (string, error) {
 	cfg, err := ctrlconfig.GetConfig()
 	if err != nil {
 		return "", err
 	}
 	req := clientset.CoreV1().RESTClient().Post().
-		Resource("pods").Namespace(namespace).Name(pod).SubResource("exec").
+		Resource("pods").Namespace(ns).Name(pod).SubResource("exec").
 		Param("stdout", "true").Param("stderr", "true")
 	if container != "" {
 		req.Param("container", container)

@@ -8,6 +8,9 @@
 // Environment:
 //
 //	NAMESPACE - business namespace holding the release (default: core)
+//	E2E_SATELLITE_NAMESPACE - a satellite of that namespace: its own gateways
+//	    and the chart in satellite mode. Optional; the composite suite skips
+//	    without it, and every other suite runs against NAMESPACE alone.
 package e2e
 
 import (
@@ -35,6 +38,10 @@ var (
 	k8s       client.Client
 	clientset *kubernetes.Clientset
 	namespace string
+
+	// satellite is the namespace installed as a satellite of namespace, or
+	// empty when the stand has none.
+	satellite string
 )
 
 func TestE2E(t *testing.T) {
@@ -51,6 +58,7 @@ var _ = BeforeSuite(func() {
 	if namespace == "" {
 		namespace = "core"
 	}
+	satellite = os.Getenv("E2E_SATELLITE_NAMESPACE")
 
 	cfg, err := config.GetConfig()
 	Expect(err).NotTo(HaveOccurred(), "no kubeconfig; the suite needs a cluster with the chart installed")
