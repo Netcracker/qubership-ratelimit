@@ -161,14 +161,14 @@ jobs:
 
       # The generic workflow runs the root module's tests without -race; this
       # step runs them with the detector on, with the Redis service for
-      # internal/records. The controller suite is left out the way make
-      # test-unit leaves it out: it needs the envtest control plane the
-      # generic workflow installs for its own run.
+      # internal/records. The target takes the package list of make test-unit,
+      # so the controller suite is left out the way test-unit leaves it out:
+      # it needs the envtest control plane the generic workflow installs for
+      # its own run.
       - name: Test the root module under the race detector
         env:
           REDIS_ADDR: 127.0.0.1:6379
-        run: |
-          go test -race $(go list ./... | grep -v '/internal/controller$') -count=1
+        run: make test-unit-race
 
       # The standalone service above cannot refuse a cross-slot script, so it
       # never exercises the slot mechanics the key contract exists for: the
