@@ -175,6 +175,10 @@ func gatewayGet(gateway, path string, headers map[string]string) int {
 	return gatewayBurst(gateway, path, 1, headers)[0]
 }
 
+func gatewayGetIn(ns, gateway, path string, headers map[string]string) int {
+	return gatewayBurstIn(ns, gateway, path, 1, headers)[0]
+}
+
 // gatewayGetBody sends one request through a gateway and returns the body
 // with the status code; 0 stands for a transport error, as gatewayGet does.
 // The bursts above discard bodies, which is all a rate-limit code needs; an
@@ -238,7 +242,7 @@ func waitGatewayServes(gateway, path string) {
 
 func waitGatewayServesIn(ns, gateway, path string) {
 	Eventually(func() bool {
-		code := gatewayBurstIn(ns, gateway, path, 1, nil)[0]
+		code := gatewayGetIn(ns, gateway, path, nil)
 		return (code >= 200 && code < 300) || code == 404
 	}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(BeTrue(),
 		"the gateway %s in %s never served %s", gateway, ns, path)

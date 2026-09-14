@@ -42,22 +42,34 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		// The prefix the policy targets and the route serves.
 		probePrefix = "/e2e-satellite"
 
-		// Two requests an hour, so the third request of the hour is refused
-		// whichever gateway it enters by, and the window never reopens during
-		// the run.
+		// Two requests an hour. GCRA rather than a fixed window: a 3600 s fixed
+		// window resets at the top of the hour, so a run whose third request
+		// crossed hh:00 would have it admitted. GCRA with the default burst
+		// admits two at once and then refuses for half an hour, with no
+		// calendar boundary for the run to cross.
 		limit = 2
 	)
 	var (
 		applied bool
 
-		// probePath is one path under probePrefix per run. The counter is keyed
-		// by path and the window is an hour, and deleting the policy does not
-		// clear a counter in Redis: a second run inside the hour on the same
-		// store would be refused on its first request. A fresh path is a fresh
-		// bucket. The route serves it because PathPrefix matches the segment,
-		// and the rule counts it because Prefix matches the string.
-		probePath = probePrefix + "/" + strconv.FormatInt(time.Now().Unix(), 10)
+		// probePath is one path under probePrefix per attempt, set in the
+		// spec that spends it. The counter is keyed by path and the window
+		// is long, and deleting the policy does not clear a counter in Redis:
+		// a second run inside the window on the same store, or a
+		// --flake-attempts retry of the spec, would be refused on its first
+		// request. A fresh path is a fresh bucket. The route serves it because
+		// PathPrefix matches the segment, and the rule counts it because
+		// Prefix matches the string.
+		probePath string
 	)
+
+	// hourlyGCRA is prefixLimits with GCRA in place of the fixed window, for
+	// the reason on limit above.
+	hourlyGCRA := func(prefix, rule string, requests int32) []v1alpha1.LimitBlock {
+		blocks := prefixLimits(prefix, rule, []string{"path"}, requests, 3600)
+		blocks[0].Rules[0].Rates[0].Algorithm = v1alpha1.AlgorithmGCRA
+		return blocks
+	}
 
 	BeforeAll(func() {
 		if satellite == "" {
@@ -109,30 +121,33 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 	})
 
 	It("charges both gateways against one budget", func() {
+		// Set here rather than when the tree is built, so that a retry of this
+		// spec gets a bucket of its own.
+		probePath = probePrefix + "/" + strconv.FormatInt(time.Now().UnixNano(), 10)
+
 		// Warmed before the policy exists, so the warm-up probes do not spend
 		// the budget the requests below are about to measure.
 		waitGatewayServes("public-gateway", probePath)
 		waitGatewayServesIn(satellite, "public-gateway", probePath)
 
 		before := storeRebuilds()
-		Expect(apply(newPolicy(domain,
-			prefixLimits(probePrefix, "per-path", []string{"path"}, limit, 3600)))).To(Succeed())
+		Expect(apply(newPolicy(domain, hourlyGCRA(probePrefix, "per-path", limit)))).To(Succeed())
 		applied = true
 		waitStoreRebuilt(before)
 
-		// One request through each gateway spends the two the hour allows.
+		// One request through each gateway spends the two the window allows.
 		// The order is the point: the satellite's request has to land in the
 		// bucket the baseline's request opened.
 		Expect(gatewayGet("public-gateway", probePath, nil)).To(BeNumerically("<", 300),
-			"the baseline gateway refused the first request of the hour")
-		Expect(gatewayBurstIn(satellite, "public-gateway", probePath, 1, nil)[0]).To(BeNumerically("<", 300),
-			"the satellite gateway refused the second request of the hour")
+			"the first request of the window did not pass through the baseline gateway")
+		Expect(gatewayGetIn(satellite, "public-gateway", probePath, nil)).To(BeNumerically("<", 300),
+			"the second request of the window did not pass through the satellite gateway")
 
 		// The third is refused whichever gateway it enters by. Through the
 		// satellite first: a 429 here can only have come from the baseline's
 		// RLS, over the address the satellite's filter carries, out of a
 		// bucket the baseline's own request helped fill.
-		Expect(gatewayBurstIn(satellite, "public-gateway", probePath, 1, nil)[0]).To(Equal(429),
+		Expect(gatewayGetIn(satellite, "public-gateway", probePath, nil)).To(Equal(429),
 			"the satellite gateway admitted a third request; the two gateways are not sharing a budget")
 		Expect(gatewayGet("public-gateway", probePath, nil)).To(Equal(429),
 			"the baseline gateway admitted a third request; the two gateways are not sharing a budget")
@@ -151,7 +166,7 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		// path under the positive spec's rule would be counted by that rule
 		// and refused for the wrong reason.
 		const strayPath = "/e2e-stray"
-		stray := newPolicy(domain, prefixLimits(strayPath, "stray", []string{"path"}, 1, 3600))
+		stray := newPolicy(domain, hourlyGCRA(strayPath, "stray", 1))
 		stray.Namespace = satellite
 		Expect(apply(stray)).To(Succeed())
 		DeferCleanup(func() {
@@ -159,19 +174,23 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		})
 
 		waitGatewayServesIn(satellite, "public-gateway", strayPath)
+		// The claim is that the traffic passed, so that is what is asserted:
+		// not-429 would hold for three 503s or three transport errors too.
 		codes := gatewayBurstIn(satellite, "public-gateway", strayPath, 3, nil)
-		Expect(codes).NotTo(ContainElement(429),
-			"a policy in the satellite affected traffic; something compiled it: %v", codes)
+		Expect(codes).To(HaveEach(BeNumerically("<", 300)),
+			"a policy in the satellite affected traffic, or the path did not pass; something compiled it: %v", codes)
 
 		// And nothing has claimed it. A status would mean a controller saw the
 		// object; a 30 s window covers several probe intervals of the
 		// baseline's leader, which is the only controller there is.
-		Consistently(func() []metav1.Condition {
+		// The error is returned, not swallowed: BeEmpty accepts nil, so a
+		// Get that failed would otherwise read as "no status".
+		Consistently(func() ([]metav1.Condition, error) {
 			var got v1alpha1.RateLimitPolicy
 			if err := k8s.Get(ctx, client.ObjectKeyFromObject(stray), &got); err != nil {
-				return nil
+				return nil, err
 			}
-			return got.Status.Conditions
+			return got.Status.Conditions, nil
 		}).WithTimeout(30*time.Second).WithPolling(5*time.Second).Should(BeEmpty(),
 			"a policy in the satellite received a status; a controller is watching that namespace")
 	})
