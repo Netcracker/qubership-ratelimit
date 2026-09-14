@@ -30,17 +30,20 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
-// probeInterval is how often the leader re-reads the fleet. It runs on every
+// ProbeInterval is how often the leader re-reads the fleet. It runs on every
 // reconcile, not only while a generation spreads: a replica can fall behind
 // long after the status went green, and that transition produces no event on
 // the policy itself. Events shorten the wait rather than replace it — a new
-// generation or an EndpointSlice change reconciles on its own.
-const probeInterval = 10 * time.Second
+// generation or an EndpointSlice change reconciles on its own. The production
+// probe reuses a round of answers for this long, so the domains of one cycle
+// share one round, and a reconcile requeues for when the round it used turns
+// this old, so no status rests on answers older than this.
+const ProbeInterval = 10 * time.Second
 
 // lastCheckMaxAge bounds how stale status.replicas.lastCheckTime may look while
 // nothing else about the status moves. The field documents the freshness of the
 // probe, so a leader that keeps probing has to keep stamping it, but stamping
-// every probe would write the object every probeInterval and reconcile it again
+// every probe would write the object every ProbeInterval and reconcile it again
 // on the way back. One write per domain per this interval is the compromise.
 const lastCheckMaxAge = 5 * time.Minute
 
@@ -72,8 +75,10 @@ type RateLimitPolicyReconciler struct {
 }
 
 // FleetProbe reports which replicas enforce which generation of a domain.
+// With fresh set, Observe answers from a round taken during the call, whatever
+// the probe kept from an earlier one.
 type FleetProbe interface {
-	Observe(ctx context.Context, domain string, want store.Applied) (FleetView, error)
+	Observe(ctx context.Context, domain string, want store.Applied, fresh bool) (FleetView, error)
 }
 
 // +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies,verbs=get;list;watch
@@ -118,7 +123,14 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	outcome := result.Policies[req.NamespacedName]
 
 	now := time.Now()
-	view, probeErr := r.observe(ctx, &object, outcome)
+	// A reconcile of a generation the status has not observed asks the fleet
+	// afresh: a round taken before the edit would report the replicas behind
+	// a change they may have applied since.
+	fresh := object.Generation != object.Status.ObservedGeneration
+	view, probeErr := r.observe(ctx, &object, outcome, fresh)
+	if view.At.IsZero() {
+		view.At = now
+	}
 
 	before := object.Status.DeepCopy()
 	object.Status.ObservedGeneration = object.Generation
@@ -151,7 +163,10 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			LastCheckTime: before.Replicas.LastCheckTime,
 		}
 		if !equalStatus(before, &object.Status) || staleCheckTime(before.Replicas.LastCheckTime, now) {
-			object.Status.Replicas.LastCheckTime = &metav1.Time{Time: now}
+			// The time the fleet was asked, which for a reused round is
+			// earlier than this reconcile: the field is the freshness of the
+			// answers, not of the write.
+			object.Status.Replicas.LastCheckTime = &metav1.Time{Time: view.At}
 		}
 	}
 
@@ -194,7 +209,20 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// last-good, and nothing about the object moves. Requeueing only while the
 	// verdict is false would leave such a replica unnoticed until the next edit
 	// or cache resync, which is exactly what Stalled exists to catch.
-	return ctrl.Result{RequeueAfter: probeInterval}, nil
+	return ctrl.Result{RequeueAfter: nextProbe(view, probeErr, now)}, nil
+}
+
+// nextProbe is how long the reconcile waits before its next look at the
+// fleet: until the round it used turns ProbeInterval old, so the domains of
+// one cycle keep sharing a round and no status rests on answers older than
+// the interval. A failed probe waits the whole interval; a round on the
+// verge of that age waits one second, so a requeue never asks for a round
+// the probe would still reuse.
+func nextProbe(view FleetView, probeErr error, now time.Time) time.Duration {
+	if probeErr != nil {
+		return ProbeInterval
+	}
+	return max(ProbeInterval-now.Sub(view.At), time.Second)
 }
 
 // staleCheckTime reports whether lastCheckTime has stood still long enough that
@@ -208,6 +236,7 @@ func (r *RateLimitPolicyReconciler) observe(
 	ctx context.Context,
 	object *v1alpha1.RateLimitPolicy,
 	outcome policy.Outcome,
+	fresh bool,
 ) (FleetView, error) {
 	if r.Probe == nil {
 		return FleetView{}, errNoProbe
@@ -215,7 +244,7 @@ func (r *RateLimitPolicyReconciler) observe(
 	return r.Probe.Observe(ctx, object.Spec.Domain, store.Applied{
 		Generation: outcome.ActiveGeneration,
 		UID:        outcome.UID,
-	})
+	}, fresh)
 }
 
 // SetupWithManager registers the reconciler with the manager.
