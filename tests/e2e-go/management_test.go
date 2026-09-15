@@ -101,14 +101,17 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			"the private gateway never served a listing with %s through %s", domain, basePath)
 	})
 	AfterAll(func() {
-		if limitedApplied {
-			deletePolicies(limitedDomain)
-		}
 		if applied {
 			deletePolicies(domain)
 			_ = k8s.Delete(ctx, managementRoute(route, basePath, port))
 			_ = k8s.Delete(ctx, &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: outsider}})
+		}
+		// Last, because the cleanup wait inside can fail and end this closure:
+		// nothing below it would run, and the route and the pod above would
+		// leak.
+		if limitedApplied {
+			deletePolicies(limitedDomain)
 		}
 	})
 
@@ -364,19 +367,93 @@ func managementRoute(name, prefix string, port int32) *unstructured.Unstructured
 	return route
 }
 
+// managementIdentity is how the release told the service to read a token:
+// the claim the subject is in, the claim the roles are in (a dotted path for
+// a nested claim), and the IdP's names for the two canonical roles. Read from
+// the running pod's environment, which is what the chart rendered, so the
+// tokens this suite mints are shaped the way the service was configured to
+// read them - and the suite proves the values reached the service, not only
+// the Deployment. Absent variables mean the service's defaults.
+type managementIdentity struct {
+	subjectClaim string
+	rolesClaim   string
+	viewer       string
+	operator     string
+}
+
+func readManagementIdentity() managementIdentity {
+	pods := operatorPods()
+	Expect(pods).NotTo(BeEmpty(), "no running replica to read the identity of")
+	identity := managementIdentity{
+		subjectClaim: "sub", rolesClaim: "roles", viewer: "viewer", operator: "operator"}
+	for _, c := range pods[0].Spec.Containers {
+		for _, env := range c.Env {
+			first := func(csv string) string { return strings.SplitN(csv, ",", 2)[0] }
+			switch env.Name {
+			case "MANAGEMENT_CLAIMS_SUBJECT":
+				identity.subjectClaim = env.Value
+			case "MANAGEMENT_CLAIMS_ROLES":
+				identity.rolesClaim = env.Value
+			case "MANAGEMENT_ROLES_VIEWER":
+				identity.viewer = first(env.Value)
+			case "MANAGEMENT_ROLES_OPERATOR":
+				identity.operator = first(env.Value)
+			}
+		}
+	}
+	return identity
+}
+
 // managementToken builds the alg-none token the management API reads. The
 // service never verifies the signature - the gateway's JWT filter does - so
 // the suite needs no signing key, and the AuthorizationPolicy is what keeps
 // that from being a way in.
+//
+// roles are the canonical names, viewer and operator. They are translated to
+// the names the release configured and placed under the claim the release
+// configured, so a service that ignored its identity configuration would
+// refuse every token this suite sends when CI installs non-default values.
 func managementToken(subject string, roles ...string) string {
+	identity := readManagementIdentity()
+	issued := make([]string, 0, len(roles))
+	for _, role := range roles {
+		switch role {
+		case "viewer":
+			issued = append(issued, identity.viewer)
+		case "operator":
+			issued = append(issued, identity.operator)
+		default:
+			issued = append(issued, role)
+		}
+	}
+
+	payload := map[string]any{}
+	setClaim(payload, identity.subjectClaim, subject)
+	setClaim(payload, identity.rolesClaim, issued)
+
 	seg := func(v any) string {
 		raw, err := json.Marshal(v)
 		Expect(err).NotTo(HaveOccurred())
 		return base64.RawURLEncoding.EncodeToString(raw)
 	}
 	header := seg(map[string]string{"alg": "none", "typ": "JWT"})
-	payload := seg(map[string]any{"sub": subject, "roles": roles})
-	return header + "." + payload + "."
+	return header + "." + seg(payload) + "."
+}
+
+// setClaim writes a value at a dotted path, creating the objects along it:
+// realm_access.roles becomes {"realm_access":{"roles":...}}.
+func setClaim(claims map[string]any, path string, value any) {
+	parts := strings.Split(path, ".")
+	node := claims
+	for _, part := range parts[:len(parts)-1] {
+		child, ok := node[part].(map[string]any)
+		if !ok {
+			child = map[string]any{}
+			node[part] = child
+		}
+		node = child
+	}
+	node[parts[len(parts)-1]] = value
 }
 
 // errorCodePrefix opens every code the API puts in a TMF error, which is how

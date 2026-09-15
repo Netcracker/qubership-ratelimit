@@ -179,7 +179,7 @@ this chart, and the filters follow in the same upgrade: the old `Service` goes, 
 switch to it as their xDS catches up. The CI install exercises exactly that shape by naming its release
 `ratelimit-baseline`.
 
-The management port, when `management.enabled` is set, rides on that same `Service` rather than on one of its own.
+The management port, when `management.enabled` is set, is exposed on the same `Service` rather than on one of its own.
 The `AuthorizationPolicy` that keeps the port reachable from the private gateway alone is enforced at the pod, so a
 dedicated `Service` would add a name without adding a boundary; the gateway's `HTTPRoute` names the port on the one
 `Service`. The identity the API reads is configured under `management.claims` (the claim names, dotted for a nested
