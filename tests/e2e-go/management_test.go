@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,19 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 	var (
 		applied bool
 		port    int32
+
+		// The reset flows need counters to reset, and gateway.management has
+		// no gateway sending it. gateway.private does, so a second policy
+		// limits one path there, and the private gateway spends its budget
+		// before each flow lifts it. Two requests, GCRA, so the third is
+		// refused for half an hour with no calendar boundary in the way.
+		limitedApplied bool
+	)
+	const (
+		limitedDomain = "gateway.private"
+		limitedPrefix = "/e2e-management-reset"
+		limitedRule   = "probe/per-path"
+		limit         = 2
 	)
 
 	BeforeAll(func() {
@@ -95,6 +109,12 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: outsider}})
 			deletePolicies(domain)
 		}
+		// Last, because the cleanup wait inside can fail and end this closure:
+		// nothing below it would run, and the route and the pod above would
+		// leak.
+		if limitedApplied {
+			deletePolicies(limitedDomain)
+		}
 	})
 
 	It("answers a viewer through the gateway and lists the domain", func() {
@@ -138,7 +158,150 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 				"the API answered a pod outside the allowed list")
 		}
 	})
+
+	// The reset flows. Each spends a path's budget through the private
+	// gateway until it is refused, lifts it through the management API, and
+	// proves the lift by the gateway admitting the path again. That last step
+	// is the point: an API answer alone says what the API believes it did,
+	// the gateway says what the counters now are.
+	It("runs the bulk flow: preview, execute, retry", func() {
+		probePath := spendBudget(limitedDomain, limitedPrefix, limitedRule, limit, &limitedApplied)
+
+		operator := map[string]string{
+			"Authorization": "Bearer " + managementToken("e2e@example.com", "operator")}
+		resets := basePath + "/domains/" + limitedDomain + "/counter-resets"
+		selector := `{"selector":{"ruleIds":["` + limitedRule + `"]}`
+
+		// Step one, the preview: a match as of now, and the confirmation
+		// token the execution needs. Its own Idempotency-Key, because a
+		// preview and its execution are different commands.
+		previewKey := idempotencyKey("preview")
+		body, code := gatewayRequest("private-gateway", http.MethodPost, resets,
+			selector+`,"dryRun":true}`, with(operator, "Idempotency-Key", previewKey))
+		Expect(code).To(Equal(http.StatusOK), "the preview did not answer 200; body: %s", body)
+		preview := decodeBulk(body)
+		Expect(preview.DryRun).To(BeTrue())
+		Expect(preview.ConfirmationToken).NotTo(BeEmpty(), "the preview minted no confirmation token")
+		Expect(preview.MatchedCount).NotTo(BeNil())
+		Expect(*preview.MatchedCount).To(BeNumerically(">=", 1),
+			"the preview matched no counter, so there was nothing to reset: %s", body)
+
+		// Step two, the execution, with the previewed token and a key of its
+		// own.
+		executeKey := idempotencyKey("execute")
+		execute := selector + `,"confirmationToken":"` + preview.ConfirmationToken + `"}`
+		body, code = gatewayRequest("private-gateway", http.MethodPost, resets, execute,
+			with(operator, "Idempotency-Key", executeKey))
+		Expect(code).To(Equal(http.StatusOK), "the execution did not answer 200; body: %s", body)
+		executed := decodeBulk(body)
+		Expect(executed.DryRun).To(BeFalse())
+		Expect(executed.ResetCount).NotTo(BeNil())
+		Expect(*executed.ResetCount).To(BeNumerically(">=", 1), "the execution reset nothing: %s", body)
+
+		// The retry: the same key and the same command answer the recorded
+		// outcome, not a second sweep. The token was consumed by the
+		// execution, so a second sweep would have been a 410; a replay is a
+		// 200 with the body already recorded.
+		retryBody, code := gatewayRequest("private-gateway", http.MethodPost, resets, execute,
+			with(operator, "Idempotency-Key", executeKey))
+		Expect(code).To(Equal(http.StatusOK), "the retry did not replay; body: %s", retryBody)
+		Expect(decodeBulk(retryBody).ResetCount).To(Equal(executed.ResetCount),
+			"the retry answered a different outcome than the one recorded")
+
+		// And the gateway agrees: the budget is whole again.
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(BeNumerically("<", 300),
+			"the private gateway still refuses the path after the bulk reset")
+	})
+
+	It("runs the addressed DELETE", func() {
+		probePath := spendBudget(limitedDomain, limitedPrefix, limitedRule, limit, &limitedApplied)
+
+		operator := map[string]string{
+			"Authorization": "Bearer " + managementToken("e2e@example.com", "operator")}
+
+		// One rule, one value for each of its axes: the keys are computed
+		// from the snapshot, never scanned, and a partial axis set is refused.
+		address := basePath + "/domains/" + limitedDomain + "/counters?ruleId=" +
+			url.QueryEscape(limitedRule) + "&axis.path=" + url.QueryEscape(probePath)
+		body, code := gatewayRequest("private-gateway", http.MethodDelete, address, "",
+			with(operator, "Idempotency-Key", idempotencyKey("delete")))
+		Expect(code).To(Equal(http.StatusOK), "the addressed DELETE did not answer 200; body: %s", body)
+
+		var reset struct {
+			RuleID     string   `json:"ruleId"`
+			Keys       []string `json:"keys"`
+			ResetCount *int     `json:"resetCount"`
+		}
+		Expect(json.Unmarshal([]byte(body), &reset)).To(Succeed(), "body: %s", body)
+		Expect(reset.RuleID).To(Equal(limitedRule))
+		Expect(reset.Keys).NotTo(BeEmpty(), "the DELETE addressed no key")
+		Expect(reset.ResetCount).NotTo(BeNil())
+		Expect(*reset.ResetCount).To(BeNumerically(">=", 1), "the DELETE reset nothing: %s", body)
+
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(BeNumerically("<", 300),
+			"the private gateway still refuses the path after the addressed reset")
+	})
 })
+
+// spendBudget limits one fresh path under prefix in the domain, applies the
+// policy on first use, and spends the path's budget through the private
+// gateway until the gateway refuses it. It returns the path, whose counter
+// is now the one the caller resets. A fresh path per call: the counter is
+// keyed by path, and a reset is what the caller is about to test, so a path
+// another call already spent would prove nothing.
+func spendBudget(domain, prefix, rule string, limit int32, applied *bool) string {
+	if !*applied {
+		blocks := prefixLimits(prefix, "per-path", []string{"path"}, limit, 3600)
+		blocks[0].Rules[0].Rates[0].Algorithm = v1alpha1.AlgorithmGCRA
+		before := storeRebuilds()
+		Expect(apply(newPolicy(domain, blocks))).To(Succeed())
+		*applied = true
+		waitStoreRebuilt(before)
+		Expect(rule).To(Equal(blocks[0].Name+"/"+blocks[0].Rules[0].Name),
+			"the rule id the flows address is not the one the policy declares")
+	}
+	path := prefix + "/" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	waitGatewayServes("private-gateway", path)
+
+	codes := gatewayBurst("private-gateway", path, int(limit)+1, nil)
+	Expect(codes[len(codes)-1]).To(Equal(429),
+		"the budget was never spent, so there is no counter to reset: %v", codes)
+	return path
+}
+
+// decodeBulk reads the fields of a bulk answer the flows assert on.
+func decodeBulk(body string) struct {
+	DryRun            bool   `json:"dryRun"`
+	ConfirmationToken string `json:"confirmationToken"`
+	MatchedCount      *int   `json:"matchedCount"`
+	ResetCount        *int   `json:"resetCount"`
+} {
+	var result struct {
+		DryRun            bool   `json:"dryRun"`
+		ConfirmationToken string `json:"confirmationToken"`
+		MatchedCount      *int   `json:"matchedCount"`
+		ResetCount        *int   `json:"resetCount"`
+	}
+	Expect(json.Unmarshal([]byte(body), &result)).To(Succeed(), "body: %s", body)
+	return result
+}
+
+// idempotencyKey mints a key unique to this run, in the pattern the API
+// accepts. Unique, because the record outlives the run by a day: a key a
+// previous run bound would replay that run's outcome.
+func idempotencyKey(step string) string {
+	return "e2e-" + step + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+}
+
+// with returns headers plus one more, leaving the original untouched.
+func with(headers map[string]string, name, value string) map[string]string {
+	out := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		out[k] = v
+	}
+	out[name] = value
+	return out
+}
 
 // managementPort reports the container port the release exposes for the
 // management API, 0 when the chart rendered without it.
@@ -206,19 +369,93 @@ func managementRoute(name, prefix string, port int32) *unstructured.Unstructured
 	return route
 }
 
+// managementIdentity is how the release told the service to read a token:
+// the claim the subject is in, the claim the roles are in (a dotted path for
+// a nested claim), and the IdP's names for the two canonical roles. Read from
+// the running pod's environment, which is what the chart rendered, so the
+// tokens this suite mints are shaped the way the service was configured to
+// read them - and the suite proves the values reached the service, not only
+// the Deployment. Absent variables mean the service's defaults.
+type managementIdentity struct {
+	subjectClaim string
+	rolesClaim   string
+	viewer       string
+	operator     string
+}
+
+func readManagementIdentity() managementIdentity {
+	pods := operatorPods()
+	Expect(pods).NotTo(BeEmpty(), "no running replica to read the identity of")
+	identity := managementIdentity{
+		subjectClaim: "sub", rolesClaim: "roles", viewer: "viewer", operator: "operator"}
+	for _, c := range pods[0].Spec.Containers {
+		for _, env := range c.Env {
+			first := func(csv string) string { return strings.SplitN(csv, ",", 2)[0] }
+			switch env.Name {
+			case "MANAGEMENT_CLAIMS_SUBJECT":
+				identity.subjectClaim = env.Value
+			case "MANAGEMENT_CLAIMS_ROLES":
+				identity.rolesClaim = env.Value
+			case "MANAGEMENT_ROLES_VIEWER":
+				identity.viewer = first(env.Value)
+			case "MANAGEMENT_ROLES_OPERATOR":
+				identity.operator = first(env.Value)
+			}
+		}
+	}
+	return identity
+}
+
 // managementToken builds the alg-none token the management API reads. The
 // service never verifies the signature - the gateway's JWT filter does - so
 // the suite needs no signing key, and the AuthorizationPolicy is what keeps
 // that from being a way in.
+//
+// roles are the canonical names, viewer and operator. They are translated to
+// the names the release configured and placed under the claim the release
+// configured, so a service that ignored its identity configuration would
+// refuse every token this suite sends when CI installs non-default values.
 func managementToken(subject string, roles ...string) string {
+	identity := readManagementIdentity()
+	issued := make([]string, 0, len(roles))
+	for _, role := range roles {
+		switch role {
+		case "viewer":
+			issued = append(issued, identity.viewer)
+		case "operator":
+			issued = append(issued, identity.operator)
+		default:
+			issued = append(issued, role)
+		}
+	}
+
+	payload := map[string]any{}
+	setClaim(payload, identity.subjectClaim, subject)
+	setClaim(payload, identity.rolesClaim, issued)
+
 	seg := func(v any) string {
 		raw, err := json.Marshal(v)
 		Expect(err).NotTo(HaveOccurred())
 		return base64.RawURLEncoding.EncodeToString(raw)
 	}
 	header := seg(map[string]string{"alg": "none", "typ": "JWT"})
-	payload := seg(map[string]any{"sub": subject, "roles": roles})
-	return header + "." + payload + "."
+	return header + "." + seg(payload) + "."
+}
+
+// setClaim writes a value at a dotted path, creating the objects along it:
+// realm_access.roles becomes {"realm_access":{"roles":...}}.
+func setClaim(claims map[string]any, path string, value any) {
+	parts := strings.Split(path, ".")
+	node := claims
+	for _, part := range parts[:len(parts)-1] {
+		child, ok := node[part].(map[string]any)
+		if !ok {
+			child = map[string]any{}
+			node[part] = child
+		}
+		node = child
+	}
+	node[parts[len(parts)-1]] = value
 }
 
 // errorCodePrefix opens every code the API puts in a TMF error, which is how

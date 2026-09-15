@@ -106,9 +106,35 @@ metrics:
 # can reach this port, which is what authorizationPolicy is for. Enabling the
 # port without the policy leaves the endpoints open to every workload in the
 # mesh, so keep them together.
+#
+# The port is exposed on the component's own Service, ratelimit, not on a
+# Service of its own. What keeps the port safe is the AuthorizationPolicy,
+# and that is enforced by ztunnel at the pod: a second Service would change
+# nothing about who can reach the port, and would add a second name for the
+# deployer's HTTPRoute to get right. The gateway's route names the port on
+# the one Service, which is what backendRefs.port is for.
 management:
   enabled: false
   port: 8082
+
+  # Where the identity is read from in the bearer token. Both are claim
+  # names, and both accept a dotted path for a nested claim: Keycloak issues
+  # the roles under realm_access.roles.
+  claims:
+    subject: sub
+    roles: roles
+
+  # The role names the IdP issues, mapped onto the two this API authorizes
+  # against. Each is a list, and with at least one list set a role on neither
+  # grants nothing. Both lists empty is not "nobody has a role": it switches
+  # the mapping off and the token's roles are read as they are, which is the
+  # canonical names - the schema refuses that combination so it cannot happen
+  # by accident. A read-only deployment sets viewer and leaves operator
+  # empty. The defaults are the canonical names, so a deployment whose IdP
+  # already issues viewer and operator configures nothing here.
+  roles:
+    viewer: [viewer]
+    operator: [operator]
 
   # Restrict the port to the gateways that front it. The policy denies every
   # other source, and it is the half of this feature that makes the other half

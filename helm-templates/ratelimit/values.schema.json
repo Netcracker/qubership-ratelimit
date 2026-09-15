@@ -435,6 +435,74 @@
             }
           },
           "additionalProperties": false
+        },
+        "claims": {
+          "type": "object",
+          "title": "Identity claims",
+          "description": "The claims the subject and the roles are read from. Both accept a dotted path for a nested claim, such as realm_access.roles.",
+          "properties": {
+            "subject": {
+              "type": "string",
+              "minLength": 1,
+              "default": "sub"
+            },
+            "roles": {
+              "type": "string",
+              "minLength": 1,
+              "default": "roles"
+            }
+          },
+          "additionalProperties": false
+        },
+        "roles": {
+          "type": "object",
+          "title": "Role mapping",
+          "description": "The role names the IdP issues, mapped onto viewer and operator. With at least one list set, a role on neither list grants nothing. Both lists empty is a different thing: the mapping is off and the token's roles are read as they are, which is the canonical names. The schema refuses that combination so it cannot happen by accident; a read-only deployment sets viewer and leaves operator empty.",
+          "properties": {
+            "viewer": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "default": [
+                "viewer"
+              ]
+            },
+            "operator": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "default": [
+                "operator"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "properties": {
+                "viewer": {
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "viewer"
+              ]
+            },
+            {
+              "properties": {
+                "operator": {
+                  "minItems": 1
+                }
+              },
+              "required": [
+                "operator"
+              ]
+            }
+          ]
         }
       },
       "additionalProperties": false

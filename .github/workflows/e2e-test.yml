@@ -143,6 +143,13 @@ jobs:
           # A profile is mandatory: values.yaml carries no resource keys, so the
           # chart is always installed the way it is in production.
           #
+          # The management identity is not the default either: the roles
+          # under a nested claim and IdP role names of their own. The suite
+          # reads what the release configured off the pod and mints its
+          # tokens to match, so a service that ignored these values would
+          # refuse every token the suite sends. With the defaults the same
+          # run passes whether the values are read or not.
+          #
           # The release is not named after the chart. The Service has a fixed
           # name that satellites compute their RLS address from, and with the
           # release named ratelimit the two coincide and nothing in the suite
@@ -155,6 +162,9 @@ jobs:
             --set image.tag=e2e \
             --set redis.addresses=e2e-redis:6379 \
             --set management.enabled=true \
+            --set management.claims.roles=realm_access.roles \
+            --set 'management.roles.viewer={rl-viewer}' \
+            --set 'management.roles.operator={rl-operator}' \
             --wait --timeout 5m
           kubectl get service ratelimit -n "${E2E_NAMESPACE}" >/dev/null
 
