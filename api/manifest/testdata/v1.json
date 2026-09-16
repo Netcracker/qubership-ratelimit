@@ -1,0 +1,16 @@
+{
+  "formatVersion": 1,
+  "operatorVersion": "0.0.0-golden",
+  "domains": {
+    "gateway.private": {
+      "generation": 3,
+      "uid": "9f0e1d2c-3b4a-4596-8778-695a4b3c2d1e",
+      "hash": "sha256:fcde2b2edba56bf408601fb721fe9b5c338d10ee429ea04fae5511b68fbf8fb9"
+    },
+    "gateway.public": {
+      "generation": 7,
+      "uid": "1d8c9c4e-0b2a-4c1f-9e2b-7a6f5d4c3b2a",
+      "hash": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+    }
+  }
+}

@@ -39,6 +39,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	"github.com/netcracker/qubership-ratelimit/api/contract"
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	enginestore "github.com/netcracker/qubership-ratelimit/engine/store"
@@ -86,7 +87,8 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
 		"The address the Prometheus metrics endpoint binds to. \"0\" disables it.")
-	flag.StringVar(&rlsAddr, "rls-bind-address", ":9000", "The address the rate limit gRPC endpoint binds to.")
+	flag.StringVar(&rlsAddr, "rls-bind-address", ":"+strconv.Itoa(contract.GRPCPort),
+		"The address the rate limit gRPC endpoint binds to.")
 	flag.StringVar(&managementAddr, "management-bind-address", "0",
 		"The address the management API binds to. \"0\" disables it. It must never be reachable "+
 			"from the data path: these endpoints lift limits.")
@@ -442,12 +444,13 @@ func replicaProbe(mgr ctrl.Manager, options runOptions, namespace string) *contr
 }
 
 // serviceName is the Service whose ready endpoints are the replicas: the flag
-// when set, otherwise the platform's own name for this microservice.
+// when set, otherwise the platform's own name for this microservice, and
+// failing that the contract's fixed name, which is what the chart renders.
 func serviceName(options runOptions) string {
 	if options.serviceName != "" {
 		return options.serviceName
 	}
-	return configloader.GetOrDefaultString("microservice.name", "ratelimit")
+	return configloader.GetOrDefaultString("microservice.name", contract.ServiceName)
 }
 
 // portOf reads the port out of a bind address. "0" and an empty address both
