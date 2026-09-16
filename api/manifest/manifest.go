@@ -33,9 +33,14 @@ import (
 )
 
 // FormatVersion is the version the operator writes. Increment it with any
-// change of what Encode or EncodePayload produce, and write the golden of the
-// new version (see manifest_test.go); the decoder then reads this version and
-// the previous one.
+// change of what Encode or EncodePayload produce, a field added to the spec
+// included, and write the goldens of the new version (see manifest_test.go);
+// the decoder then reads this version and the previous one.
+//
+// The reader's side of that promise: a field removed from the format stays in
+// the struct for one more version, tolerated and ignored, or the golden of
+// N-1 stops decoding and the service refuses the operator it was promised to
+// read.
 const FormatVersion = 1
 
 // SupportedVersions lists the format versions Decode accepts: the current one
@@ -97,14 +102,13 @@ func PayloadKey(domain string) string {
 	return domain + ".json.gz"
 }
 
-// Encode renders a manifest the way the operator writes it. The output is
-// deterministic - domains are emitted in sorted order and the layout is
-// fixed - which is what lets a golden pin the format.
+// Encode renders a manifest the way the operator writes it. It stamps
+// FormatVersion itself: this writer produces one version, and a caller that
+// could set the field could only set it wrong. The output is deterministic,
+// with the domains in sorted order and a fixed layout. That is what lets a
+// golden pin the format.
 func Encode(m Manifest) ([]byte, error) {
-	if m.FormatVersion != FormatVersion {
-		return nil, fmt.Errorf("manifest: encode version %d, this writer produces %d",
-			m.FormatVersion, FormatVersion)
-	}
+	m.FormatVersion = FormatVersion
 	// A nil map encodes as null, an empty one as {}; the manifest says "no
 	// domains" with the latter, and a reader should never meet the former.
 	if m.Domains == nil {
@@ -119,17 +123,34 @@ func Encode(m Manifest) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Decode reads a manifest strictly. A field this format does not define, or a
-// version outside SupportedVersions, is a refusal with a reason: the caller
+// Decode reads a manifest strictly. A version outside SupportedVersions, or a
+// field this format does not define, is a refusal with a reason: the caller
 // keeps whatever it applied last.
+//
+// The version is read first, on its own and leniently, and judged before
+// anything else is looked at. A newer format is exactly a manifest with a
+// field this reader does not define, so a strict decode that ran first would
+// report every version increment as corruption, and the operator would turn
+// that into the wrong status reason. ErrUnsupportedFormat is the signal the
+// skew policy rests on, and it has to win over ErrMalformed.
 func Decode(data []byte) (Manifest, error) {
+	var header struct {
+		FormatVersion *int `json:"formatVersion"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return Manifest{}, fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	if header.FormatVersion == nil {
+		return Manifest{}, fmt.Errorf("%w: formatVersion is absent", ErrMalformed)
+	}
+	if !supported(*header.FormatVersion) {
+		return Manifest{}, fmt.Errorf("%w: %d (this reader accepts %v)",
+			ErrUnsupportedFormat, *header.FormatVersion, SupportedVersions())
+	}
+
 	var m Manifest
 	if err := unmarshalStrict(data, &m); err != nil {
 		return Manifest{}, err
-	}
-	if !supported(m.FormatVersion) {
-		return Manifest{}, fmt.Errorf("%w: %d (this reader accepts %v)",
-			ErrUnsupportedFormat, m.FormatVersion, SupportedVersions())
 	}
 	if m.Domains == nil {
 		return Manifest{}, fmt.Errorf("%w: domains is absent", ErrMalformed)

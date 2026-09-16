@@ -18,6 +18,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
@@ -211,7 +212,7 @@ func (p *ReplicaProbe) takeRound(ctx context.Context, now time.Time, endpoints [
 	// report a working domain as Degraded. ProbeFailed says what is true: the
 	// leader cannot see.
 	if len(endpoints) > 0 && len(round.silent) == len(endpoints) {
-		round.err = fmt.Errorf("no replica answered %s: %w", store.AppliedPath, lastErr)
+		round.err = fmt.Errorf("no replica answered %s: %w", contract.AppliedPath, lastErr)
 	}
 	sort.Strings(round.silent)
 	return round
@@ -301,7 +302,7 @@ func (p *ReplicaProbe) ask(ctx context.Context, address string) (map[string]stor
 	target := url.URL{
 		Scheme: "http",
 		Host:   net.JoinHostPort(address, strconv.Itoa(p.Port)),
-		Path:   store.AppliedPath,
+		Path:   contract.AppliedPath,
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {

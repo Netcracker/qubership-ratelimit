@@ -8,12 +8,6 @@ import (
 	"time"
 )
 
-// AppliedPath is where a replica publishes what it enforces. It sits under the
-// /debug/ prefix of the metrics port: read-only diagnostics inside the cluster,
-// with no mutations, no authentication, and no compatibility promise. It is not
-// part of any management API.
-const AppliedPath = "/debug/applied"
-
 // Applied is one replica's answer for one domain: the generation it enforces,
 // and the object that generation came from.
 //

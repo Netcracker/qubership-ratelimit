@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -17,12 +18,14 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
-// update rewrites the golden of the current format version from the sample.
-// It is the one way a golden is written: when FormatVersion is incremented,
-// run "go test ./api/manifest -update" once and commit the new file beside
-// the old ones. Running it without an increment is how the bump check is
-// silenced, which is why the check names the flag only after it fails.
-var update = flag.Bool("update", false, "write testdata/v<FormatVersion>.json from the sample")
+// update rewrites the goldens of the current format version: the manifest
+// from the sample, and the field set of the spec. It is the one way a golden
+// is written: when FormatVersion is incremented, run
+// "go test ./api/manifest -update" once and commit the new files beside the
+// previous version's, and delete the version before that, which the reader
+// no longer promises. Running it without an increment is how the bump check
+// is silenced, which is why the check names the flag only after it fails.
+var update = flag.Bool("update", false, "write testdata/v<FormatVersion>.* from the sample and the spec")
 
 // sample is the manifest every golden is written from. It does not change
 // between versions: what a golden pins is the format, and a sample that moved
@@ -48,6 +51,12 @@ func sample() Manifest {
 
 func golden(version int) string {
 	return filepath.Join("testdata", fmt.Sprintf("v%d.json", version))
+}
+
+// fieldsGolden is the payload's golden: the JSON paths of every field the
+// spec carries under this format version, one per line.
+func fieldsGolden(version int) string {
+	return filepath.Join("testdata", fmt.Sprintf("v%d.fields.txt", version))
 }
 
 // TestDecode_readsEverySupportedVersion is the skew guarantee: the service
@@ -90,7 +99,79 @@ func TestEncode_matchesTheGoldenOfTheCurrentVersion(t *testing.T) {
 		FormatVersion)
 	require.Equal(t, string(want), string(got),
 		"the writer's output changed without a version increment: increment FormatVersion, "+
-			"then write the new golden with -update and keep the old one")
+			"then write the new golden with -update and keep the previous one")
+}
+
+// TestPayloadFields_matchTheGoldenOfTheCurrentVersion is the bump check for
+// the payload. The manifest golden cannot see a field added to the spec, and
+// a payload sample would not either when the field is optional and omitted;
+// the field set can. An older service meeting a field it does not define
+// refuses the payload as malformed under a version it believes it supports,
+// which is the corruption-for-skew confusion the version exists to prevent.
+// So a field added, removed, or renamed on RateLimitPolicySpec fails here
+// until FormatVersion moves.
+func TestPayloadFields_matchTheGoldenOfTheCurrentVersion(t *testing.T) {
+	got := strings.Join(FieldPaths(reflect.TypeFor[v1alpha1.RateLimitPolicySpec]()), "\n") + "\n"
+
+	path := fieldsGolden(FormatVersion)
+	if *update {
+		require.NoError(t, os.WriteFile(path, []byte(got), 0o644))
+		t.Logf("wrote %s", path)
+		return
+	}
+
+	want, err := os.ReadFile(path)
+	require.NoError(t, err,
+		"no field-set golden for FormatVersion %d: write it once with -update and commit it", FormatVersion)
+	require.Equal(t, string(want), got,
+		"the field set of RateLimitPolicySpec changed without a version increment: an older service would "+
+			"refuse the payload as malformed. Increment FormatVersion, then write the new goldens with -update")
+}
+
+// TestFieldPaths_walksTheShapesTheSpecUses pins the walker on a type built
+// to hold every shape the spec has: nested structs, slices of structs,
+// slices of scalars, pointers, maps, an inlined struct, and a recursive type.
+func TestFieldPaths_walksTheShapesTheSpecUses(t *testing.T) {
+	type leaf struct {
+		Name  string         `json:"name"`
+		Count *int32         `json:"count,omitempty"`
+		Skip  string         `json:"-"`
+		Bare  string         // no tag: the Go name
+		Tags  []string       `json:"tags,omitempty"`
+		Extra map[string]int `json:"extra,omitempty"`
+	}
+	type inlined struct {
+		Kind string `json:"kind"`
+	}
+	type node struct {
+		inlined
+		Leaf     leaf            `json:"leaf"`
+		Leaves   []leaf          `json:"leaves"`
+		ByName   map[string]leaf `json:"byName"`
+		Next     *node           `json:"next,omitempty"`
+		Anything any             `json:"anything"`
+	}
+
+	assert.Equal(t, []string{
+		"anything<any>",
+		"byName{}.Bare",
+		"byName{}.count",
+		"byName{}.extra{}",
+		"byName{}.name",
+		"byName{}.tags[]",
+		"kind",
+		"leaf.Bare",
+		"leaf.count",
+		"leaf.extra{}",
+		"leaf.name",
+		"leaf.tags[]",
+		"leaves[].Bare",
+		"leaves[].count",
+		"leaves[].extra{}",
+		"leaves[].name",
+		"leaves[].tags[]",
+		"next...",
+	}, FieldPaths(reflect.TypeFor[node]()))
 }
 
 // TestGoldens_areOnlyTheSupportedVersions keeps testdata honest in the other
@@ -104,12 +185,12 @@ func TestGoldens_areOnlyTheSupportedVersions(t *testing.T) {
 	for _, e := range entries {
 		present = append(present, e.Name())
 	}
-	expected := make([]string, 0, len(SupportedVersions()))
+	expected := make([]string, 0, 2*len(SupportedVersions()))
 	for _, v := range SupportedVersions() {
-		expected = append(expected, fmt.Sprintf("v%d.json", v))
+		expected = append(expected, fmt.Sprintf("v%d.json", v), fmt.Sprintf("v%d.fields.txt", v))
 	}
 	assert.ElementsMatch(t, expected, present,
-		"testdata holds one golden per supported version and nothing else")
+		"testdata holds the two goldens of every supported version and nothing else")
 }
 
 func TestDecode_refusesAnUnknownField(t *testing.T) {
@@ -147,6 +228,32 @@ func TestDecode_refusesAnUnknownVersion(t *testing.T) {
 	}
 }
 
+// TestDecode_reportsANewerFormatAsUnsupportedNotMalformed is what the skew
+// policy rests on. From the older side, every version increment looks like a
+// manifest with fields this reader does not define; if the strict decode ran
+// first it would report corruption, and the operator would turn that into the
+// wrong status reason. The version has to be judged before any field is.
+func TestDecode_reportsANewerFormatAsUnsupportedNotMalformed(t *testing.T) {
+	data, err := Encode(sample())
+	require.NoError(t, err)
+	newer := string(data)
+	newer = strings.Replace(newer, fmt.Sprintf(`"formatVersion": %d`, FormatVersion),
+		fmt.Sprintf(`"formatVersion": %d, "checksum": "abc"`, FormatVersion+1), 1)
+	newer = strings.Replace(newer, `"generation": 7`, `"generation": 7, "priority": 1`, 1)
+
+	_, err = Decode([]byte(newer))
+	require.ErrorIs(t, err, ErrUnsupportedFormat,
+		"a newer format with fields this reader does not define is unsupported, not malformed: %v", err)
+	assert.NotErrorIs(t, err, ErrMalformed)
+	assert.Contains(t, err.Error(), fmt.Sprint(FormatVersion+1))
+}
+
+func TestDecode_refusesAManifestWithoutAVersion(t *testing.T) {
+	_, err := Decode([]byte(`{"operatorVersion": "x", "domains": {}}`))
+	require.ErrorIs(t, err, ErrMalformed)
+	assert.Contains(t, err.Error(), "formatVersion")
+}
+
 func TestDecode_refusesAManifestWithoutDomains(t *testing.T) {
 	_, err := Decode([]byte(`{"formatVersion": 1, "operatorVersion": "x"}`))
 	require.ErrorIs(t, err, ErrMalformed)
@@ -165,11 +272,17 @@ func TestDecode_readsAnEmptyNamespace(t *testing.T) {
 	assert.Empty(t, m.Domains)
 }
 
-func TestEncode_refusesAnotherVersion(t *testing.T) {
+func TestEncode_stampsTheVersionItProduces(t *testing.T) {
+	// The writer produces one version; whatever the caller put in the field
+	// is overwritten, so there is no way to write a manifest that claims a
+	// version it is not.
 	m := sample()
-	m.FormatVersion = FormatVersion + 1
-	_, err := Encode(m)
-	require.Error(t, err, "the writer produces one version; a manifest claiming another is a bug")
+	m.FormatVersion = FormatVersion + 7
+	data, err := Encode(m)
+	require.NoError(t, err)
+	decoded, err := Decode(data)
+	require.NoError(t, err)
+	assert.Equal(t, FormatVersion, decoded.FormatVersion)
 }
 
 func TestEncode_isDeterministic(t *testing.T) {

@@ -342,7 +342,7 @@ func newManager(
 			// leader reads it to learn which generation each replica enforces.
 			// It is not the management API, carries no authentication, and is
 			// outside the compatibility promises.
-			ExtraHandlers: map[string]http.Handler{store.AppliedPath: applied},
+			ExtraHandlers: map[string]http.Handler{contract.AppliedPath: applied},
 		},
 		HealthProbeBindAddress: options.probeAddr,
 		Client:                 controller.ClientOptions(),

@@ -6,8 +6,9 @@
 // to be the same string on both sides or the pair fails silently: filters
 // aimed at a missing Service pass everything under fail-open, and a ConfigMap
 // nobody mounts leaves the service NotReady. So the strings live here, once,
-// and both binaries import them; a CI test renders both charts and compares
-// their names and ports with these values.
+// and both binaries import them. The charts carry the same names and ports,
+// and the CI test that renders both charts and compares them with these
+// values comes with the second chart (Netcracker/qubership-core-infra#412).
 package contract
 
 const (
@@ -29,6 +30,14 @@ const (
 	// EndpointSlice by this name and reads the applied generation of every
 	// ready replica on it.
 	MetricsPortName = "metrics"
+
+	// AppliedPath is where a service replica publishes what it enforces, on
+	// the metrics port: the applied generation per domain, the format
+	// versions it reads, and a refusal with its reason. The operator reads it
+	// from every ready replica to judge Ready. It sits under /debug/: read-only
+	// diagnostics inside the cluster, with no authentication and no
+	// compatibility promise beyond the two halves of this delivery.
+	AppliedPath = "/debug/applied"
 
 	// ConfigMapName is the one ConfigMap per namespace that the operator
 	// writes and the service mounts. The operator is its only writer; no
