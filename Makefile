@@ -91,17 +91,25 @@ vet: ## Run go vet against code, the engine module included.
 # anyway.
 TEST_PKGS = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./...)
 
+# ENVTEST_PKGS are the packages whose tests start a control plane: found by
+# the import rather than listed by name, so a new envtest suite is kept out of
+# the unit runs without anyone remembering to add it here. The operator's
+# writer suite was the one that taught this.
+ENVTEST_PKGS = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{range .TestImports}} {{.}}{{end}}{{end}}' ./... \
+	| grep 'sigs.k8s.io/controller-runtime/pkg/envtest' | cut -d' ' -f1)
+UNIT_PKGS = $(filter-out $(ENVTEST_PKGS),$(TEST_PKGS))
+
 .PHONY: test-engine
 test-engine: ## Run the engine module tests. Its own go.mod hides it from ./... of the root module.
 	cd engine && go vet ./... && go test -race ./...
 
 .PHONY: test-unit
 test-unit: fmt vet test-engine ## Run unit tests only — no envtest, no cluster, no network.
-	go test $(filter-out %/internal/controller,$(TEST_PKGS)) -coverprofile cover-unit.out
+	go test $(UNIT_PKGS) -coverprofile cover-unit.out
 
 .PHONY: test-unit-race
 test-unit-race: ## Run the unit tests of test-unit under the race detector, the same packages and nothing else.
-	go test -race $(filter-out %/internal/controller,$(TEST_PKGS)) -count=1
+	go test -race $(UNIT_PKGS) -count=1
 
 .PHONY: test
 test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, including the envtest controller suite. Needs internet on the first run to fetch the envtest binaries.
