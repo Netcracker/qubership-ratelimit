@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
@@ -150,6 +152,14 @@ func TestFieldPaths_walksTheShapesTheSpecUses(t *testing.T) {
 		ByName   map[string]leaf `json:"byName"`
 		Next     *node           `json:"next,omitempty"`
 		Anything any             `json:"anything"`
+
+		// Types with a JSON form of their own: a struct of unexported fields
+		// to a walk, one value in JSON. Each is one path, and one that goes
+		// missing is a field whose addition the golden would not see.
+		Timeout  metav1.Duration    `json:"timeout"`
+		Timeouts []metav1.Duration  `json:"timeouts"`
+		Size     *resource.Quantity `json:"size,omitempty"`
+		When     metav1.Time        `json:"when"`
 	}
 
 	assert.Equal(t, []string{
@@ -171,6 +181,10 @@ func TestFieldPaths_walksTheShapesTheSpecUses(t *testing.T) {
 		"leaves[].name",
 		"leaves[].tags[]",
 		"next...",
+		"size",
+		"timeout",
+		"timeouts[]",
+		"when",
 	}, FieldPaths(reflect.TypeFor[node]()))
 }
 

@@ -1,6 +1,8 @@
 package manifest
 
 import (
+	"encoding"
+	"encoding/json"
 	"reflect"
 	"sort"
 	"strings"
@@ -32,6 +34,10 @@ func walk(t reflect.Type, prefix string, seen map[reflect.Type]bool, paths *[]st
 			return
 		}
 		t = t.Elem()
+	}
+	if hasOwnJSON(t) {
+		*paths = append(*paths, prefix)
+		return
 	}
 	switch t.Kind() {
 	case reflect.Struct:
@@ -82,17 +88,37 @@ func walk(t reflect.Type, prefix string, seen map[reflect.Type]bool, paths *[]st
 	}
 }
 
+var (
+	jsonMarshaler = reflect.TypeFor[json.Marshaler]()
+	textMarshaler = reflect.TypeFor[encoding.TextMarshaler]()
+)
+
 // isLeaf reports a type that has no fields of its own to descend into: a
-// scalar, or a container of scalars is handled by the caller.
+// scalar, or a type with a JSON form of its own. A json.Marshaler or a
+// TextMarshaler (metav1.Duration, resource.Quantity) is a struct of
+// unexported fields to a walk, so it would contribute nothing and a field of
+// that type would be absent from the golden, its addition unseen. Its JSON is
+// whatever it writes, one value, so it is one path.
 func isLeaf(t reflect.Type) bool {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
+	}
+	if hasOwnJSON(t) {
+		return true
 	}
 	switch t.Kind() {
 	case reflect.Struct, reflect.Slice, reflect.Array, reflect.Map, reflect.Interface:
 		return false
 	}
 	return true
+}
+
+// hasOwnJSON reports a type that encoding/json hands its own encoding to,
+// through a value or a pointer receiver.
+func hasOwnJSON(t reflect.Type) bool {
+	p := reflect.PointerTo(t)
+	return t.Implements(jsonMarshaler) || p.Implements(jsonMarshaler) ||
+		t.Implements(textMarshaler) || p.Implements(textMarshaler)
 }
 
 // jsonName is the field's key in JSON and whether it is inlined: the tag's
