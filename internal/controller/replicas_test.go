@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
@@ -86,7 +87,7 @@ func draining(pod string) discoveryv1.Endpoint {
 func answers(t *testing.T, applied map[string]store.Applied) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, store.AppliedPath, r.URL.Path, "the probe reads the documented path")
+		assert.Equal(t, contract.AppliedPath, r.URL.Path, "the probe reads the documented path")
 		require.NoError(t, json.NewEncoder(w).Encode(applied))
 	}
 }
@@ -183,7 +184,7 @@ func TestObserve_aFleetThatAnswersNothingIsAnError(t *testing.T) {
 	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.Error(t, err, "no answer at all is ProbeFailed, not a fleet of stale replicas")
-	assert.Contains(t, err.Error(), store.AppliedPath)
+	assert.Contains(t, err.Error(), contract.AppliedPath)
 }
 
 func TestObserve_aBodyThatDoesNotDecodeIsSilence(t *testing.T) {

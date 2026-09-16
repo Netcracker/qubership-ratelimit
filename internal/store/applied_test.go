@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
@@ -60,7 +61,7 @@ func TestAppliedHandler_servesWhatTheReplicaEnforces(t *testing.T) {
 	})
 
 	recorder := httptest.NewRecorder()
-	AppliedHandler(u).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, AppliedPath, nil))
+	AppliedHandler(u).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, contract.AppliedPath, nil))
 
 	require.Equal(t, http.StatusOK, recorder.Code)
 	assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
@@ -76,7 +77,7 @@ func TestAppliedHandler_servesWhatTheReplicaEnforces(t *testing.T) {
 
 func TestAppliedHandler_answersAnEmptyObjectBeforeTheFirstRebuild(t *testing.T) {
 	recorder := httptest.NewRecorder()
-	AppliedHandler(&Updater{}).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, AppliedPath, nil))
+	AppliedHandler(&Updater{}).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, contract.AppliedPath, nil))
 
 	require.Equal(t, http.StatusOK, recorder.Code)
 	assert.JSONEq(t, "{}", recorder.Body.String(),
