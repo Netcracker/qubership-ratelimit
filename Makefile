@@ -181,6 +181,10 @@ helm-lint: ## Lint the Helm chart against every resource profile, in every mode.
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager ./cmd/
 
+.PHONY: build-operator
+build-operator: manifests generate fmt vet ## Build the operator binary.
+	go build -o bin/ratelimit-operator ./operator/cmd/
+
 .PHONY: run
 run: manifests generate fmt vet ## Run the service from your host.
 	go run ./cmd/

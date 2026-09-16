@@ -18,6 +18,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
@@ -70,6 +71,11 @@ type FleetView struct {
 	// generation is a propagation question, an unreachable one is a question
 	// about the metrics port or a network policy in front of it.
 	Silent []string
+
+	// Refusing names the replicas that answered with a refusal: the manifest
+	// they were last given is one they do not read, and they keep their
+	// snapshot. It is what turns into ReplicaFormatUnsupported.
+	Refusing []string
 }
 
 // ReplicaProbe reads the enforced generation from every ready endpoint of the
@@ -84,7 +90,11 @@ type ReplicaProbe struct {
 	Namespace string
 	Service   string
 
-	// Port is the metrics port, which is where /debug/applied lives.
+	// Port is the metrics port, which is where /debug/applied lives. Zero
+	// means "the port the Service publishes under contract.MetricsPortName",
+	// read from each EndpointSlice: that is the split's contract, where the
+	// operator knows nothing of the service's bind address. A fixed port is
+	// the one-binary packaging, whose Service publishes no such name.
 	Port int
 
 	// HTTP is the client used for the probe; nil means a default with the
@@ -120,7 +130,7 @@ type fleetRound struct {
 
 	// answers holds what each endpoint enforces; an endpoint that did not
 	// answer is named in silent instead.
-	answers map[endpoint]map[string]store.Applied
+	answers map[endpoint]applied.Report
 	silent  []string
 	err     error
 }
@@ -180,17 +190,17 @@ func (p *ReplicaProbe) now() time.Time {
 // endpoints are asked concurrently, so a round lasts one probe timeout at
 // most rather than one per replica.
 func (p *ReplicaProbe) takeRound(ctx context.Context, now time.Time, endpoints []endpoint) *fleetRound {
-	round := &fleetRound{taken: now, endpoints: endpoints, answers: map[endpoint]map[string]store.Applied{}}
+	round := &fleetRound{taken: now, endpoints: endpoints, answers: map[endpoint]applied.Report{}}
 
 	type answer struct {
-		applied map[string]store.Applied
-		err     error
+		report applied.Report
+		err    error
 	}
 	answers := make([]answer, len(endpoints))
 	var asking sync.WaitGroup
 	for i, endpoint := range endpoints {
 		asking.Go(func() {
-			answers[i].applied, answers[i].err = p.ask(ctx, endpoint.address)
+			answers[i].report, answers[i].err = p.ask(ctx, endpoint)
 		})
 	}
 	asking.Wait()
@@ -203,7 +213,7 @@ func (p *ReplicaProbe) takeRound(ctx context.Context, now time.Time, endpoints [
 			round.silent = append(round.silent, endpoint.name)
 			continue
 		}
-		round.answers[endpoint] = answers[i].applied
+		round.answers[endpoint] = answers[i].report
 	}
 
 	// Nobody answered, so this is a statement about the leader's reach rather
@@ -228,11 +238,17 @@ func (r *fleetRound) view(domain string, want store.Applied, freshness time.Dura
 	}
 	view := FleetView{At: r.taken, RefreshAt: refreshAt, Total: int32(len(r.endpoints)), Silent: r.silent}
 	for _, endpoint := range r.endpoints {
-		applied, answered := r.answers[endpoint]
+		report, answered := r.answers[endpoint]
 		if !answered {
 			continue
 		}
-		if reported, ok := applied[domain]; ok &&
+		// A refusing replica is behind on every domain by construction: it
+		// kept the snapshot from before the manifest it could not read. It is
+		// named separately because the reason is not lag.
+		if report.Refusal != nil {
+			view.Refusing = append(view.Refusing, endpoint.name)
+		}
+		if reported, ok := report.Domains[domain]; ok &&
 			reported.Generation == want.Generation && reported.UID == want.UID {
 			view.Applied++
 			continue
@@ -240,13 +256,15 @@ func (r *fleetRound) view(domain string, want store.Applied, freshness time.Dura
 		view.Behind = append(view.Behind, endpoint.name)
 	}
 	sort.Strings(view.Behind)
+	sort.Strings(view.Refusing)
 	return view
 }
 
-// endpoint is one ready pod behind the Service.
+// endpoint is one ready pod behind the Service, and the port to ask it on.
 type endpoint struct {
 	name    string
 	address string
+	port    int
 }
 
 // endpoints lists the ready addresses of the Service. An endpoint with no
@@ -262,6 +280,14 @@ func (p *ReplicaProbe) endpoints(ctx context.Context) ([]endpoint, error) {
 
 	var out []endpoint
 	for i := range list.Items {
+		port, ok := p.portOf(&list.Items[i])
+		if !ok {
+			// A slice without the port is one the probe cannot ask, whatever
+			// it lists: a Service that publishes no metrics port, or an older
+			// one. Its endpoints are skipped rather than counted silent, so
+			// that a misnamed port reads as no replica and not as a stale one.
+			continue
+		}
 		for _, e := range list.Items[i].Endpoints {
 			if e.Conditions.Ready != nil && !*e.Conditions.Ready {
 				continue
@@ -284,29 +310,47 @@ func (p *ReplicaProbe) endpoints(ctx context.Context) ([]endpoint, error) {
 			if e.TargetRef != nil && e.TargetRef.Name != "" {
 				name = e.TargetRef.Name
 			}
-			out = append(out, endpoint{name: name, address: e.Addresses[0]})
+			out = append(out, endpoint{name: name, address: e.Addresses[0], port: port})
 		}
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].name < out[b].name })
 	return out, nil
 }
 
-// ask reads one replica's enforced generations.
-func (p *ReplicaProbe) ask(ctx context.Context, address string) (map[string]store.Applied, error) {
+// portOf is the port to ask the endpoints of a slice on: the fixed one when
+// configured, otherwise the one the slice publishes under the metrics port
+// name. A slice can carry the port under another name or not at all, and
+// then it has no port this probe can use.
+func (p *ReplicaProbe) portOf(slice *discoveryv1.EndpointSlice) (int, bool) {
+	if p.Port != 0 {
+		return p.Port, true
+	}
+	for _, port := range slice.Ports {
+		if port.Name != nil && *port.Name == contract.MetricsPortName && port.Port != nil {
+			return int(*port.Port), true
+		}
+	}
+	return 0, false
+}
+
+// ask reads one replica's report: what it enforces per domain, and whether it
+// refused the last manifest.
+func (p *ReplicaProbe) ask(ctx context.Context, target endpoint) (applied.Report, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
 	// The metrics port speaks plain HTTP by the chart's contract, the way
 	// Prometheus scrapes it; whether the hop between two pods is encrypted is
 	// the mesh's decision, not this client's.
-	target := url.URL{
+	address := target.address
+	location := url.URL{
 		Scheme: "http",
-		Host:   net.JoinHostPort(address, strconv.Itoa(p.Port)),
+		Host:   net.JoinHostPort(address, strconv.Itoa(target.port)),
 		Path:   contract.AppliedPath,
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, location.String(), nil)
 	if err != nil {
-		return nil, err
+		return applied.Report{}, err
 	}
 
 	caller := p.HTTP
@@ -315,25 +359,25 @@ func (p *ReplicaProbe) ask(ctx context.Context, address string) (map[string]stor
 	}
 	response, err := caller.Do(request)
 	if err != nil {
-		return nil, err
+		return applied.Report{}, err
 	}
 	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("replica %s answered %s", address, response.Status)
+		return applied.Report{}, fmt.Errorf("replica %s answered %s", address, response.Status)
 	}
 	// A replica that answers with a body this large is not one this leader
 	// understands, and reading it whole would be the leader's problem.
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return applied.Report{}, err
 	}
 
-	var applied map[string]store.Applied
-	if err := json.Unmarshal(body, &applied); err != nil {
-		return nil, fmt.Errorf("decode the reply of replica %s: %w", address, err)
+	var report applied.Report
+	if err := json.Unmarshal(body, &report); err != nil {
+		return applied.Report{}, fmt.Errorf("decode the reply of replica %s: %w", address, err)
 	}
-	return applied, nil
+	return report, nil
 }
 
 // errNoProbe is what a reconciler reports when it has no way to observe the

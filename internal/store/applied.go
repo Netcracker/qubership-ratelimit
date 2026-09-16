@@ -5,21 +5,19 @@ import (
 	"maps"
 	"net/http"
 	"sync/atomic"
-	"time"
+
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 )
 
 // Applied is one replica's answer for one domain: the generation it enforces,
-// and the object that generation came from.
+// and the object that generation came from. It is the api's type, because the
+// operator reads it from another binary after the split.
 //
 // The UID travels with the generation because a generation number alone is
 // ambiguous across a delete and recreate: a fresh object starts at generation 1
 // too, and a leader comparing numbers would call a replica up to date when it
 // is enforcing rules from an object that no longer exists.
-type Applied struct {
-	Generation int64     `json:"generation"`
-	UID        string    `json:"uid"`
-	AppliedAt  time.Time `json:"appliedAt"`
-}
+type Applied = applied.Domain
 
 // applied is what this replica currently enforces, keyed by domain. It is
 // published by the updater after each rebuild and read by the leader's probe.
@@ -58,7 +56,10 @@ func AppliedHandler(u *Updater) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		if err := json.NewEncoder(w).Encode(u.Applied()); err != nil {
+		// The report shape of the split: the domains under a key, so that a
+		// replica that reads manifests can say which formats and whether it
+		// refused one. This replica reads none, so the other fields are absent.
+		if err := json.NewEncoder(w).Encode(applied.Report{Domains: u.Applied()}); err != nil {
 			// The status is already written by then, so there is nothing to
 			// report to the caller; the leader treats a truncated body as an
 			// unreachable replica.

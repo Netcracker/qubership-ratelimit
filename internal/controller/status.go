@@ -20,11 +20,21 @@ type StateReader interface {
 	Load(ctx context.Context, domains []string) (map[string]policy.Bundle, error)
 }
 
-// propagationDeadline separates a rollout from a breakage. Under it, replicas
-// still taking up a new generation are Propagating; over it they are
+// DefaultPropagationDeadline separates a rollout from a breakage. Under it,
+// replicas still taking up a new generation are Propagating; over it they are
 // ReplicaStale, which is the condition worth alerting on: a broken informer, or
 // image version skew that a rollout is not going to resolve on its own.
-const propagationDeadline = 30 * time.Second
+//
+// It is the one-binary packaging's value, where a replica learns of a
+// generation from its own informer within a second. The operator sets the
+// split's, above the kubelet's sync period: there a replica learns of it
+// from a volume the kubelet refreshes once a minute by default, and a 30 s
+// threshold would call every rollout stale.
+const DefaultPropagationDeadline = 30 * time.Second
+
+// SplitPropagationDeadline is the threshold of the split packaging, above
+// the kubelet's default sync period of one minute.
+const SplitPropagationDeadline = 90 * time.Second
 
 // compile recompiles the namespace against the last-good state of one domain.
 //
@@ -32,22 +42,33 @@ const propagationDeadline = 30 * time.Second
 // Compiling without it would report an object as contributing nothing while an
 // earlier generation of it is still in effect — a status that contradicts the
 // snapshot the replicas are serving from.
+//
+// With a size limit the state of every domain is loaded, not only this
+// one's: whether a generation fits is a question about the namespace's
+// total, and the fit has to see the same bundles the ConfigMap writer sees.
 func compile(
 	ctx context.Context,
 	reader client.Reader,
 	state StateReader,
 	namespace, domain string,
+	limit int,
 ) (*policy.Result, error) {
 	input, err := policy.Load(ctx, reader, namespace)
 	if err != nil {
 		return nil, err
 	}
 	if state != nil {
-		if input.State, err = state.Load(ctx, []string{domain}); err != nil {
+		domains := []string{domain}
+		if limit > 0 {
+			domains = policy.Domains(input)
+		}
+		if input.State, err = state.Load(ctx, domains); err != nil {
 			return nil, err
 		}
 	}
-	return policy.Compile(input), nil
+	result := policy.Compile(input)
+	policy.Fit(input, result, limit)
+	return result, nil
 }
 
 // setAccepted records whether the latest generation compiles.
@@ -103,8 +124,11 @@ type fleetStatus struct {
 // is the one compiled, it is the one enforced rather than a last-good spec, and
 // every ready replica reports it. Stalled separates "still in progress" from
 // "stuck", so that a rollout does not page anyone and a broken informer does.
-func judge(outcome policy.Outcome, view FleetView, probeErr error, since time.Duration) fleetStatus {
+func judge(outcome policy.Outcome, view FleetView, probeErr error, since, deadline time.Duration) fleetStatus {
 	progressing := fleetStatus{stalled: metav1.ConditionFalse, stalledReason: v1alpha1.ReasonProgressing}
+	if deadline <= 0 {
+		deadline = DefaultPropagationDeadline
+	}
 
 	switch {
 	// A generation that does not compile is stuck whatever the replicas say,
@@ -116,6 +140,18 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since time.Du
 			readyMessage:  notCompiledMessage(outcome),
 			stalled:       metav1.ConditionTrue,
 			stalledReason: v1alpha1.ReasonNotCompiled,
+		}
+
+	// A generation that compiles but does not fit the namespace's ConfigMap
+	// is stuck the same way, for a different reason and with a different fix:
+	// the spec is right, the namespace is full.
+	case outcome.TooLarge:
+		return fleetStatus{
+			ready:         metav1.ConditionFalse,
+			readyReason:   v1alpha1.ReasonConfigMapTooLarge,
+			readyMessage:  tooLargeMessage(outcome),
+			stalled:       metav1.ConditionTrue,
+			stalledReason: v1alpha1.ReasonConfigMapTooLarge,
 		}
 
 	case probeErr != nil:
@@ -138,7 +174,20 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since time.Du
 		progressing.readyMessage = fmt.Sprintf("all %d ready replicas enforce generation %d",
 			view.Total, outcome.ActiveGeneration)
 
-	case since > propagationDeadline:
+	// A replica that refused the manifest is not lagging: it will never
+	// take this generation up, whatever the threshold, until the service is
+	// upgraded. Judged before the deadline so the reason names the cause
+	// rather than the symptom.
+	case len(view.Refusing) > 0:
+		return fleetStatus{
+			ready:         metav1.ConditionFalse,
+			readyReason:   v1alpha1.ReasonReplicaFormatUnsupported,
+			readyMessage:  refusingMessage(outcome, view),
+			stalled:       metav1.ConditionTrue,
+			stalledReason: v1alpha1.ReasonReplicaFormatUnsupported,
+		}
+
+	case since > deadline:
 		return fleetStatus{
 			ready:         metav1.ConditionFalse,
 			readyReason:   v1alpha1.ReasonReplicaStale,
@@ -158,6 +207,24 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since time.Du
 		progressing.readyMessage = behindMessage(outcome, view)
 	}
 	return progressing
+}
+
+// tooLargeMessage says what is enforced instead of a generation that does not
+// fit, and by how much the namespace overflows.
+func tooLargeMessage(outcome policy.Outcome) string {
+	if outcome.ActiveGeneration == 0 {
+		return fmt.Sprintf("generation %d does not fit the namespace's ConfigMap and nothing is enforced: %s",
+			outcome.Generation, outcome.TooLargeReason)
+	}
+	return fmt.Sprintf("generation %d does not fit the namespace's ConfigMap; generation %d keeps serving: %s",
+		outcome.Generation, outcome.ActiveGeneration, outcome.TooLargeReason)
+}
+
+// refusingMessage names the replicas that refused the manifest.
+func refusingMessage(outcome policy.Outcome, view FleetView) string {
+	return fmt.Sprintf("%d of %d ready replicas enforce generation %d; %s refused the manifest's format "+
+		"and keep an earlier snapshot: upgrade the service before the operator",
+		view.Applied, view.Total, outcome.ActiveGeneration, someOf(view.Refusing))
 }
 
 // notCompiledMessage says what is enforced instead of the latest generation.

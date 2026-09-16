@@ -433,7 +433,7 @@ func TestJudge_walksTheReadyTable(t *testing.T) {
 		},
 		{
 			name:    "a replica lags past the deadline",
-			outcome: compiled, view: FleetView{Total: 3, Applied: 2}, since: propagationDeadline + time.Second,
+			outcome: compiled, view: FleetView{Total: 3, Applied: 2}, since: DefaultPropagationDeadline + time.Second,
 			ready: metav1.ConditionFalse, readyReason: ratelimitv1alpha1.ReasonReplicaStale,
 			stalled: metav1.ConditionTrue, stalledReason: ratelimitv1alpha1.ReasonReplicaStale,
 		},
@@ -459,7 +459,7 @@ func TestJudge_walksTheReadyTable(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := judge(tc.outcome, tc.view, tc.probeErr, tc.since)
+			got := judge(tc.outcome, tc.view, tc.probeErr, tc.since, 0)
 
 			assert.Equal(t, tc.ready, got.ready)
 			assert.Equal(t, tc.readyReason, got.readyReason)
@@ -475,7 +475,7 @@ func TestJudge_walksTheReadyTable(t *testing.T) {
 func TestJudge_notCompiledOutranksTheFleet(t *testing.T) {
 	outcome := policy.Outcome{Generation: 8, ActiveGeneration: 7, Err: errors.New("1 blocking problem")}
 
-	got := judge(outcome, FleetView{Total: 3, Applied: 3}, nil, 0)
+	got := judge(outcome, FleetView{Total: 3, Applied: 3}, nil, 0, 0)
 
 	assert.Equal(t, ratelimitv1alpha1.ReasonNotCompiled, got.readyReason)
 	assert.Equal(t, metav1.ConditionTrue, got.stalled)
@@ -787,7 +787,7 @@ func TestReconcile_aRolloutPastTheDeadlineIsStale(t *testing.T) {
 		Type:               ratelimitv1alpha1.ConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             ratelimitv1alpha1.ReasonPropagating,
-		LastTransitionTime: metav1.Time{Time: time.Now().Add(-propagationDeadline - time.Minute)},
+		LastTransitionTime: metav1.Time{Time: time.Now().Add(-DefaultPropagationDeadline - time.Minute)},
 		ObservedGeneration: 7,
 	}}
 	probe := &stubProbe{view: FleetView{Total: 2, Applied: 1, Behind: []string{"ratelimit-b"}}}
@@ -813,4 +813,56 @@ func requireProbeReports(
 
 	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
 	require.Equal(t, reason, ready.Reason, because)
+}
+
+// The two reasons of the split.
+func TestJudge_aRefusingReplicaIsFormatUnsupportedNotStale(t *testing.T) {
+	compiled := policy.Outcome{Generation: 7, ActiveGeneration: 7}
+	view := FleetView{Total: 3, Applied: 2, Behind: []string{"ratelimit-c"}, Refusing: []string{"ratelimit-c"}}
+
+	// Well past the deadline, which would otherwise be ReplicaStale: the
+	// refusal is the cause and gets named, the lag is the symptom.
+	got := judge(compiled, view, nil, time.Hour, 0)
+	assert.Equal(t, metav1.ConditionFalse, got.ready)
+	assert.Equal(t, ratelimitv1alpha1.ReasonReplicaFormatUnsupported, got.readyReason)
+	assert.Equal(t, metav1.ConditionTrue, got.stalled)
+	assert.Equal(t, ratelimitv1alpha1.ReasonReplicaFormatUnsupported, got.stalledReason)
+	assert.Contains(t, got.readyMessage, "ratelimit-c")
+	assert.Contains(t, got.readyMessage, "upgrade the service before the operator")
+}
+
+func TestJudge_aGenerationThatDoesNotFitIsTooLargeNotNotCompiled(t *testing.T) {
+	// It compiles: Err is nil. It does not fit: the last-good generation is
+	// the active one. The reason has to say the second, because the fix is
+	// not the spec.
+	outcome := policy.Outcome{Generation: 8, ActiveGeneration: 7, TooLarge: true,
+		TooLargeReason: "the namespace's configuration would be 1100000 bytes compressed, over the limit of 1048576"}
+
+	got := judge(outcome, FleetView{Total: 3, Applied: 3}, nil, 0, 0)
+	assert.Equal(t, metav1.ConditionFalse, got.ready)
+	assert.Equal(t, ratelimitv1alpha1.ReasonConfigMapTooLarge, got.readyReason)
+	assert.Equal(t, metav1.ConditionTrue, got.stalled)
+	assert.Equal(t, ratelimitv1alpha1.ReasonConfigMapTooLarge, got.stalledReason)
+	assert.Contains(t, got.readyMessage, "generation 7 keeps serving")
+
+	// And a generation that does not compile stays NotCompiled whatever its
+	// size: the spec is the fix there.
+	broken := outcome
+	broken.Err = errors.New("1 blocking problem (InvalidWindow)")
+	got = judge(broken, FleetView{Total: 3, Applied: 3}, nil, 0, 0)
+	assert.Equal(t, ratelimitv1alpha1.ReasonNotCompiled, got.readyReason)
+}
+
+func TestJudge_honorsTheConfiguredDeadline(t *testing.T) {
+	compiled := policy.Outcome{Generation: 7, ActiveGeneration: 7}
+	lagging := FleetView{Total: 3, Applied: 2, Behind: []string{"ratelimit-c"}}
+
+	// 45 s: stale under the one-binary deadline, propagating under the
+	// split's, where the kubelet takes up to a minute to project a change.
+	got := judge(compiled, lagging, nil, 45*time.Second, 0)
+	assert.Equal(t, ratelimitv1alpha1.ReasonReplicaStale, got.readyReason)
+	got = judge(compiled, lagging, nil, 45*time.Second, SplitPropagationDeadline)
+	assert.Equal(t, ratelimitv1alpha1.ReasonPropagating, got.readyReason)
+	got = judge(compiled, lagging, nil, SplitPropagationDeadline+time.Second, SplitPropagationDeadline)
+	assert.Equal(t, ratelimitv1alpha1.ReasonReplicaStale, got.readyReason)
 }

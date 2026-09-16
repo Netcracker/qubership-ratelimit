@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"sync/atomic"
 	"time"
 
@@ -581,15 +580,4 @@ func unchanged(before, after policy.Bundle) bool {
 	return bytes.Equal(first, second)
 }
 
-func domainsOf(input policy.Input) []string {
-	seen := make(map[string]struct{}, len(input.Policies))
-	for i := range input.Policies {
-		seen[input.Policies[i].Spec.Domain] = struct{}{}
-	}
-	domains := make([]string, 0, len(seen))
-	for domain := range seen {
-		domains = append(domains, domain)
-	}
-	sort.Strings(domains)
-	return domains
-}
+func domainsOf(input policy.Input) []string { return policy.Domains(input) }

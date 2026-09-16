@@ -1,0 +1,6 @@
+microservice:
+  name: ratelimit-operator
+
+logging:
+  level:
+    root: info
