@@ -7,7 +7,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,15 +20,11 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/xrequestid"
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/ctxmanager"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -108,16 +103,6 @@ func run(probeAddr, metricsAddr, deployment string) error {
 		return err
 	}
 
-	// The cache of the one-binary packaging, plus the one ConfigMap this
-	// process owns: watched by name, so that the informer holds one object
-	// and not every ConfigMap of the namespace.
-	cacheOptions := controller.CacheOptions(namespace)
-	cacheOptions.ByObject[&corev1.ConfigMap{}] = cache.ByObject{
-		Namespaces: map[string]cache.Config{namespace: {
-			FieldSelector: fields.OneTermEqualSelector("metadata.name", contract.ConfigMapName),
-		}},
-	}
-
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
@@ -128,7 +113,7 @@ func run(probeAddr, metricsAddr, deployment string) error {
 		LeaderElection:                      true,
 		LeaderElectionID:                    process.LeaseName,
 		LeaderElectionResourceLockInterface: lock,
-		Cache:                               cacheOptions,
+		Cache:                               config.CacheOptions(namespace),
 	})
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
@@ -143,7 +128,11 @@ func run(probeAddr, metricsAddr, deployment string) error {
 	store := config.New(direct, namespace, map[string]string{
 		"app.kubernetes.io/managed-by": managedBy,
 	}, version, process.NewLogrLogger(loggerName).WithName("config"))
-	setOwner(direct, store, namespace, deployment)
+	adopt, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := store.AdoptDeployment(adopt, direct, deployment); err != nil {
+		setupLog.Warnf("%v", err)
+	}
+	cancel()
 
 	writer := &config.Reconciler{Client: mgr.GetClient(), Namespace: namespace, Store: store}
 	if err := writer.SetupWithManager(mgr); err != nil {
@@ -186,24 +175,4 @@ func run(probeAddr, metricsAddr, deployment string) error {
 		return fmt.Errorf("run manager: %w", err)
 	}
 	return nil
-}
-
-// setOwner points the store at the operator's own Deployment, so the
-// ConfigMap it writes is garbage-collected with the operator and never with
-// a policy. A Deployment the operator cannot read leaves the object without
-// an owner rather than unwritten: a missing owner costs a manual cleanup, a
-// missing ConfigMap costs the service its configuration.
-func setOwner(reader client.Reader, store *config.Store, namespace, name string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var owner appsv1.Deployment
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &owner); err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			setupLog.Warnf("could not read Deployment %s within 10s; %s is written without an owner", name, contract.ConfigMapName)
-			return
-		}
-		setupLog.Warnf("could not read Deployment %s: %v; %s is written without an owner", name, err, contract.ConfigMapName)
-		return
-	}
-	store.SetOwner(&owner, "apps/v1", "Deployment")
 }

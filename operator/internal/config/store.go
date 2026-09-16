@@ -19,14 +19,18 @@ import (
 	"sort"
 
 	"github.com/go-logr/logr"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/internal/controller"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
 
@@ -215,4 +219,32 @@ func (s *Store) render(state map[string]policy.Bundle, limit int) (map[string]st
 
 func (s *Store) key() client.ObjectKey {
 	return client.ObjectKey{Namespace: s.namespace, Name: contract.ConfigMapName}
+}
+
+// CacheOptions is the operator's cache: the one-binary packaging's, plus the
+// one ConfigMap this process owns, watched by name so that the informer holds
+// one object and not every ConfigMap of the namespace.
+func CacheOptions(namespace string) cache.Options {
+	options := controller.CacheOptions(namespace)
+	options.ByObject[&corev1.ConfigMap{}] = cache.ByObject{
+		Namespaces: map[string]cache.Config{namespace: {
+			FieldSelector: fields.OneTermEqualSelector("metadata.name", contract.ConfigMapName),
+		}},
+	}
+	return options
+}
+
+// AdoptDeployment points the store at the operator's own Deployment, so the
+// ConfigMap it writes is garbage-collected with the operator and never with
+// a policy. A Deployment the operator cannot read leaves the object without
+// an owner rather than unwritten, and the error says so: a missing owner
+// costs a manual cleanup, a missing ConfigMap costs the service its
+// configuration.
+func (s *Store) AdoptDeployment(ctx context.Context, reader client.Reader, name string) error {
+	var owner appsv1.Deployment
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: name}, &owner); err != nil {
+		return fmt.Errorf("read Deployment %s: %w; %s is written without an owner", name, err, contract.ConfigMapName)
+	}
+	s.SetOwner(&owner, "apps/v1", "Deployment")
+	return nil
 }
