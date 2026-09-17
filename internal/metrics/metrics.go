@@ -1,6 +1,7 @@
-// Package metrics defines every Prometheus series the service exposes and
-// registers them with the controller-runtime registry, so they ride the
-// manager's metrics endpoint.
+// Package metrics defines every Prometheus series the binaries expose. The
+// collectors are package values; Register puts them on the registry a binary
+// serves, the manager's for the one binary and the operator, a plain one for
+// the service, which is why nothing here registers itself at init.
 //
 // Label cardinality is bounded by configuration on purpose: domains come from
 // the gateway filter config, policies and rules from the custom resources,
@@ -9,8 +10,9 @@
 package metrics
 
 import (
+	"errors"
+
 	"github.com/prometheus/client_golang/prometheus"
-	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 )
@@ -168,15 +170,24 @@ var (
 	}, []string{"reason"})
 )
 
-func init() {
-	ctrlmetrics.Registry.MustRegister(
+// Register puts every series of this package on the registry. It is called
+// once per process, at wiring time; a second call on the same registry is a
+// no-op rather than the panic prometheus raises for a duplicate, so that a
+// test which builds a process twice does not need to know.
+func Register(registry prometheus.Registerer) {
+	for _, collector := range []prometheus.Collector{
 		Checks, CheckDuration, Decisions, NearLimit, Refusals,
 		UnknownDomainChecks, UnmatchedChecks, ExtractionSkips, Extractions, TokensSeen,
 		StoreRoundtrip, StoreErrors,
 		SnapshotRebuilds, SnapshotTimestamp, StatePersistErrors,
 		stateCollector{},
 		fleetCollector{},
-	)
+	} {
+		var already prometheus.AlreadyRegisteredError
+		if err := registry.Register(collector); err != nil && !errors.As(err, &already) {
+			panic(err)
+		}
+	}
 }
 
 // SeedExtractions creates a zero-valued extraction series for every declared
@@ -208,6 +219,6 @@ func CacheStatsCollectors(stats *engine.CacheStats) []prometheus.Collector {
 
 // RegisterCacheStats registers the token-cache counters; call it once, at
 // wiring time.
-func RegisterCacheStats(stats *engine.CacheStats) {
-	ctrlmetrics.Registry.MustRegister(CacheStatsCollectors(stats)...)
+func RegisterCacheStats(registry prometheus.Registerer, stats *engine.CacheStats) {
+	registry.MustRegister(CacheStatsCollectors(stats)...)
 }

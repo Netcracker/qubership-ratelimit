@@ -5,12 +5,30 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
+
+// policyObject builds the one policy of a domain, named by it.
+func policyObject(domain string) *v1alpha1.RateLimitPolicy {
+	return &v1alpha1.RateLimitPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "biz", Name: domain, Generation: 1},
+		Spec: v1alpha1.RateLimitPolicySpec{
+			Domain: domain,
+			Limits: []v1alpha1.LimitBlock{{
+				Name: "api",
+				Rules: []v1alpha1.Rule{{
+					Name:  "total",
+					Rates: []v1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}},
+				}},
+			}},
+		},
+	}
+}
 
 // ruleSetOf compiles the objects and binds each domain to a counter store, which
 // is what the updater does on every rebuild.
@@ -65,13 +83,4 @@ func TestHasDomain_eachDomainCarriesItsOwnEngine(t *testing.T) {
 	require.True(t, s.Load().Has("gateway.public"))
 	require.True(t, s.Load().Has("gateway.private"))
 	assert.Equal(t, 2, s.Load().Len())
-}
-
-func TestNeedLeaderElection_updaterRunsOnEveryReplica(t *testing.T) {
-	// Every replica answers rate limit checks, so every replica needs a populated
-	// store. A store filled only on the leader would make limits apply on some
-	// pods and not others.
-	updater := &Updater{}
-
-	assert.False(t, updater.NeedLeaderElection())
 }

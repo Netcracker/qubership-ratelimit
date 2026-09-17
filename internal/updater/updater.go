@@ -1,4 +1,10 @@
-package store
+// Package updater keeps the rule store of the one-binary packaging in sync
+// with the RateLimitPolicy objects of the namespace, through the manager's
+// informer. It is the informer-fed half of what the service does from the
+// mounted ConfigMap; the store it writes and the metrics it feeds are the
+// same, and the packages under service/ import neither this package nor the
+// client it rides on.
+package updater
 
 import (
 	"bytes"
@@ -19,6 +25,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 	"github.com/netcracker/qubership-ratelimit/internal/ruleview"
+	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 // DefaultDebounce is how long the updater waits after the first event of a burst
@@ -55,7 +62,7 @@ type StateStore interface {
 // failure that shows up as limits that apply on some pods and not others.
 type Updater struct {
 	Cache    InformerSource
-	Store    *Store
+	Store    *store.Store
 	Debounce time.Duration
 	Log      logr.Logger
 
@@ -94,7 +101,7 @@ type Updater struct {
 	// domains whose bundle did not change. Engine and snapshot travel together
 	// because the engine was built from that snapshot, and the management API
 	// reports the snapshot as what is being enforced.
-	domains map[string]Domain
+	domains map[string]store.Domain
 
 	// reconciledStale is set once this leader has swept the persisted state for
 	// domains that retired before it took the lease.
@@ -232,8 +239,8 @@ func (u *Updater) rebuild(ctx context.Context) {
 	metrics.SnapshotRebuilds.WithLabelValues("ok").Inc()
 	metrics.SnapshotTimestamp.SetToCurrentTime()
 	metrics.PublishState(stateView(result))
-	metrics.PruneStale(activeSet(result))
-	metrics.SeedExtractions(extractionKeys(result))
+	metrics.PruneStale(metrics.ActiveSetOf(result.Snapshots))
+	metrics.SeedExtractions(metrics.ExtractionKeysOf(result.Snapshots))
 
 	u.Log.Info("rate limit store rebuilt", summarize(result).fields()...)
 }
@@ -301,8 +308,8 @@ func (s rebuildSummary) fields() []any {
 //
 // The pair is reused rather than just the engine, so the snapshot the management
 // API reports is always the one the engine beside it was built from.
-func (u *Updater) ruleSet(result *policy.Result, previous map[string]policy.Bundle) *RuleSet {
-	domains := make(map[string]Domain, len(result.Snapshots))
+func (u *Updater) ruleSet(result *policy.Result, previous map[string]policy.Bundle) *store.RuleSet {
+	domains := make(map[string]store.Domain, len(result.Snapshots))
 	for domain, snapshot := range result.Snapshots {
 		if prev, ok := u.domains[domain]; ok && unchanged(previous[domain], result.State[domain]) {
 			domains[domain] = prev
@@ -315,7 +322,7 @@ func (u *Updater) ruleSet(result *policy.Result, previous map[string]policy.Bund
 		// The store is wrapped per domain so the roundtrip series carries the
 		// domain label without parsing bucket keys on the hot path.
 		instrumented := metrics.InstrumentStore(domain, u.Counters)
-		domains[domain] = Domain{
+		domains[domain] = store.Domain{
 			Engine:   engine.New(snapshot, instrumented, opts...),
 			Snapshot: snapshot,
 			// The version is hashed here, once per rebuild, and read as a
@@ -326,7 +333,7 @@ func (u *Updater) ruleSet(result *policy.Result, previous map[string]policy.Bund
 		}
 	}
 	u.domains = domains
-	return NewRuleSet(domains)
+	return store.NewRuleSet(domains)
 }
 
 // appliedOf records the generation this replica now enforces for each domain,
@@ -344,51 +351,6 @@ func appliedOf(result *policy.Result) map[string]Applied {
 		}
 	}
 	return out
-}
-
-// activeSet lists the label values the new snapshot can produce, for the
-// series pruner: domains, rule triples, and identity keys. Whatever is not
-// here belongs to a renamed or deleted object and its series are leftovers.
-func activeSet(result *policy.Result) *metrics.ActiveSet {
-	active := &metrics.ActiveSet{
-		Domains: make(map[string]struct{}, len(result.Snapshots)),
-		Rules:   map[string]struct{}{},
-		Keys:    map[string]struct{}{},
-	}
-	for domain, snapshot := range result.Snapshots {
-		active.Domains[domain] = struct{}{}
-		for _, key := range snapshot.EffectiveKeys {
-			active.Keys[key] = struct{}{}
-		}
-		for i := range snapshot.Blocks {
-			block := &snapshot.Blocks[i]
-			for _, rule := range block.Rules {
-				active.Rules[metrics.RuleID(block.Name, rule.Name)] = struct{}{}
-			}
-		}
-	}
-	return active
-}
-
-// extractionKeys lists the keys the new snapshots extract from a token: the
-// built-in client plus the mapped keys of every domain. Their series are
-// seeded so that "declared but never extracted" is a visible zero rather than
-// a missing series. path and method are resolved from the request, not
-// extracted, and stay out.
-func extractionKeys(result *policy.Result) []string {
-	seen := map[string]struct{}{}
-	var keys []string
-	for _, snapshot := range result.Snapshots {
-		for i := range snapshot.Extraction {
-			key := snapshot.Extraction[i].Key
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			keys = append(keys, key)
-		}
-	}
-	return keys
 }
 
 // stateView distills a compilation into the scrape-time status series: who is

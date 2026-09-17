@@ -20,6 +20,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	enginecompile "github.com/netcracker/qubership-ratelimit/engine/compile"
+	"github.com/netcracker/qubership-ratelimit/internal/convert"
 )
 
 // Input is the set of objects one compilation reads, plus the last-good state of
@@ -199,7 +200,7 @@ func compileDomainFitting(
 		outcome.TooLarge = true
 		outcome.TooLargeReason = tooLarge
 		snapshot, _ = enginecompile.Compile(namespace, domain,
-			modelPolicy(&v1alpha1.RateLimitPolicySpec{Domain: domain}))
+			convert.Policy(&v1alpha1.RateLimitPolicySpec{Domain: domain}))
 	}
 
 	// The latest generation is invalid as a whole, or does not fit. Whatever
@@ -221,7 +222,7 @@ func compileDomainFitting(
 		return outcome, snapshot, Bundle{}
 	}
 
-	fallback, fallbackProblems := enginecompile.Compile(namespace, domain, modelPolicy(&good.GoodSpec))
+	fallback, fallbackProblems := enginecompile.Compile(namespace, domain, convert.Policy(&good.GoodSpec))
 	if blockingError(fallbackProblems) != nil {
 		// A persisted spec that no longer compiles means the component's own
 		// rules changed under it. There is nothing left to fall back to.
@@ -251,14 +252,14 @@ func latestGeneration(
 	}
 	if len(skew) > 0 {
 		empty, _ := enginecompile.Compile(namespace, object.Spec.Domain,
-			modelPolicy(&v1alpha1.RateLimitPolicySpec{Domain: object.Spec.Domain}))
+			convert.Policy(&v1alpha1.RateLimitPolicySpec{Domain: object.Spec.Domain}))
 		outcome.Problems = skew
 		outcome.Err = fmt.Errorf("%d %s this schema does not define (%s)",
 			len(skew), plural(len(skew), "field"), v1alpha1.ProblemInvalidSpec)
 		return empty, outcome
 	}
 
-	snapshot, problems := enginecompile.Compile(namespace, object.Spec.Domain, modelPolicy(&object.Spec))
+	snapshot, problems := enginecompile.Compile(namespace, object.Spec.Domain, convert.Policy(&object.Spec))
 	outcome.Problems = ruleProblems(problems)
 	outcome.Err = blockingError(problems)
 	return snapshot, outcome

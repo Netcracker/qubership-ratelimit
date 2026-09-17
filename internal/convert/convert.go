@@ -1,4 +1,9 @@
-package policy
+// Package convert turns the resource's spec into the engine's model. The
+// engine never learns that Kubernetes exists, and this package is the only
+// place that knows both vocabularies. It is its own package, rather than a
+// file of internal/policy, so that the service compiles the specs it reads
+// from the mounted ConfigMap without the policy package's Kubernetes client.
+package convert
 
 import (
 	"time"
@@ -7,16 +12,13 @@ import (
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 )
 
-// The engine never learns that Kubernetes exists — it takes plain model
-// structures — so this file is the only place that knows both vocabularies.
-//
 // The enums are string-typed on both sides and carry the same values, which makes
 // most of the conversion a rename rather than a translation. That is a deliberate
 // coupling and a fragile one, so a test asserts the two vocabularies still agree
 // rather than trusting them to.
 
-// modelPolicy converts one policy spec, which is the whole of a domain.
-func modelPolicy(spec *v1alpha1.RateLimitPolicySpec) *model.Policy {
+// Policy converts one policy spec, which is the whole of a domain.
+func Policy(spec *v1alpha1.RateLimitPolicySpec) *model.Policy {
 	if spec == nil {
 		return nil
 	}

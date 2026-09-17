@@ -7,7 +7,6 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/client-go/rest"
 )
 
 func TestNamespace_isTheCloudNamespaceAndNothingElse(t *testing.T) {
@@ -28,28 +27,6 @@ func TestNamespace_isTheCloudNamespaceAndNothingElse(t *testing.T) {
 	namespace, err := Namespace()
 	require.NoError(t, err)
 	assert.Equal(t, "biz", namespace)
-}
-
-func TestLeaderLock_signsTheLeaseWithThePodName(t *testing.T) {
-	t.Setenv("POD_NAME", "ratelimit-operator-abc12")
-	// A config that dials nothing: the lock is built lazily, and what is
-	// asserted is who it says it is.
-	lock, err := LeaderLock(&rest.Config{Host: "https://127.0.0.1:1"}, "biz")
-	require.NoError(t, err)
-	require.NotNil(t, lock)
-	assert.Equal(t, "ratelimit-operator-abc12", lock.Identity(),
-		"the holder identity is the pod name, which is what the status messages name replicas by")
-	assert.Equal(t, "biz/"+LeaseName, lock.Describe())
-}
-
-func TestLeaderLock_isNilOutsideAPod(t *testing.T) {
-	// No POD_NAME means no pod: a local run, an envtest. The choice of
-	// identity goes back to controller-runtime rather than refusing to start.
-	t.Setenv("POD_NAME", "")
-	lock, err := LeaderLock(&rest.Config{Host: "https://127.0.0.1:1"}, "biz")
-	require.NoError(t, err)
-	assert.Nil(t, lock)
-	assert.Empty(t, LeaderIdentity())
 }
 
 // The logr bridge. controller-runtime and client-go log through logr, and
@@ -87,4 +64,11 @@ func TestFormatMessage(t *testing.T) {
 	// An odd trailing key is a caller's mistake; it is dropped rather than
 	// paired with a missing value.
 	assert.Equal(t, "odd a=1", formatMessage("odd", []any{"a", 1, "dangling"}))
+}
+
+func TestPodName_isTheDownwardAPIValueOrEmpty(t *testing.T) {
+	t.Setenv("POD_NAME", "ratelimit-abc12")
+	assert.Equal(t, "ratelimit-abc12", PodName())
+	t.Setenv("POD_NAME", "")
+	assert.Empty(t, PodName(), "outside a pod there is no name to borrow")
 }

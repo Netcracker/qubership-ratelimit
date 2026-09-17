@@ -15,10 +15,13 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
+	"github.com/netcracker/qubership-ratelimit/internal/leader"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 	"github.com/netcracker/qubership-ratelimit/internal/process"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/config"
@@ -66,10 +69,10 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 	// The lease is signed with the pod name, so the leader a reader finds on
 	// the Lease is the pod they can look at. Outside a pod the hostname
 	// stands in, and that is worth a line in the log.
-	if process.LeaderIdentity() == "" {
+	if process.PodName() == "" {
 		warn("POD_NAME is not set, so the lease is signed with the hostname")
 	}
-	lock, err := process.LeaderLock(restConfig, namespace)
+	lock, err := leader.Lock(restConfig, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +83,7 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 		HealthProbeBindAddress:              options.ProbeAddr,
 		Client:                              controller.ClientOptions(),
 		LeaderElection:                      options.LeaderElection,
-		LeaderElectionID:                    process.LeaseName,
+		LeaderElectionID:                    leader.LeaseName,
 		LeaderElectionResourceLockInterface: lock,
 		// Read only when the lock is nil, which is a run outside a pod:
 		// controller-runtime then builds the lock itself and has no pod to
@@ -91,6 +94,9 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 	if err != nil {
 		return nil, fmt.Errorf("create manager: %w", err)
 	}
+	// The fleet series of the status reconciler ride the manager's metrics
+	// endpoint.
+	metrics.Register(ctrlmetrics.Registry)
 
 	// The configuration store reads and writes through an uncached client:
 	// the object is read once per reconcile and written once.

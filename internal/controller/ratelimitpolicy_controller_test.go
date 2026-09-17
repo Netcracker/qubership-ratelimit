@@ -20,9 +20,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
-	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 const (
@@ -62,12 +62,12 @@ type stubProbe struct {
 	view FleetView
 	err  error
 
-	asked     []store.Applied
+	asked     []applied.Domain
 	fresh     []bool
 	observing func()
 }
 
-func (s *stubProbe) Observe(_ context.Context, _ string, want store.Applied, fresh bool) (FleetView, error) {
+func (s *stubProbe) Observe(_ context.Context, _ string, want applied.Domain, fresh bool) (FleetView, error) {
 	s.asked = append(s.asked, want)
 	s.fresh = append(s.fresh, fresh)
 	if s.observing != nil {

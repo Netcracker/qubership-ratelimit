@@ -83,7 +83,7 @@ func main() {
 	}
 
 	setupLog.Infof("starting operator namespace=%v deployment=%v leaderIdentity=%v version=%v",
-		namespace, options.Deployment, process.LeaderIdentity(), options.Version)
+		namespace, options.Deployment, process.PodName(), options.Version)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Errorf("%v", fmt.Errorf("run manager: %w", err))
 		os.Exit(1)

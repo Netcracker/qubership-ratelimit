@@ -1,4 +1,4 @@
-package policy
+package convert
 
 import (
 	"testing"
@@ -11,6 +11,8 @@ import (
 	enginecompile "github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 )
+
+const testDomain = "gateway.public"
 
 // The conversion is a rename, not a translation: the enums are string-typed on
 // both sides and carry the same values. That is a deliberate coupling and a
@@ -98,7 +100,7 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 		}},
 	}
 
-	out := modelPolicy(spec)
+	out := Policy(spec)
 
 	require.NotNil(t, out)
 	assert.Equal(t, testDomain, out.Domain)
@@ -149,7 +151,7 @@ func TestModelRule_anUnsetBurstStaysZero(t *testing.T) {
 // engine: as a nil policy rather than an empty one, which is the built-ins-only
 // domain.
 func TestModelPolicy_noSpecIsTheEmptyDomain(t *testing.T) {
-	assert.Nil(t, modelPolicy(nil))
+	assert.Nil(t, Policy(nil))
 }
 
 // TestModelPeriod_isPlainSeconds pins the unit the API moved to: the field name
