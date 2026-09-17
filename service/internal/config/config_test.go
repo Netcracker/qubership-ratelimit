@@ -250,26 +250,60 @@ func TestApplier_reusesTheEngineOfAnUnchangedDomain(t *testing.T) {
 		"the generation moves with the manifest even when the payload did not")
 }
 
-func TestApplier_aSpecThatDoesNotCompileHereClaimsTheDomainAndEnforcesNothing(t *testing.T) {
-	// A spec the operator validated under rules this build does not share:
-	// two rules of one name, which the compiler refuses.
-	bad := v1alpha1.RateLimitPolicySpec{Domain: "gateway.public", Limits: []v1alpha1.LimitBlock{{
+// A spec the operator validated under rules this build does not share: two
+// rules of one name, which the compiler refuses.
+func badSpec(domain string) v1alpha1.RateLimitPolicySpec {
+	return v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: []v1alpha1.LimitBlock{{
 		Name: "api", Rules: []v1alpha1.Rule{
 			{Name: "total", Rates: []v1alpha1.Rate{{Requests: 1, PeriodSeconds: 60}}},
 			{Name: "total", Rates: []v1alpha1.Rate{{Requests: 2, PeriodSeconds: 60}}},
 		}}}}
+}
+
+func TestApplier_aSpecThatDoesNotCompileHereKeepsTheLastGoodEngine(t *testing.T) {
 	f := newFixture(t)
-	f.write(5, bad, spec("gateway.private", 20))
+	f.write(4, spec("gateway.public", 10), spec("gateway.private", 20))
 	cfg, err := Read(f.dir)
+	require.NoError(t, err)
+	a := newApplier()
+	a.Apply(cfg)
+	lastGood := a.Store.Engine("gateway.public")
+
+	f.write(5, badSpec("gateway.public"), spec("gateway.private", 21))
+	cfg, err = Read(f.dir)
 	require.NoError(t, err, "the payload decodes; it is the compiler that objects")
+	a.Apply(cfg)
+
+	assert.True(t, a.Ready())
+	assert.Same(t, lastGood, a.Store.Engine("gateway.public"),
+		"the rules enforced a moment ago stay enforced; the design's last-good, and this replica has it")
+	assert.Equal(t, int64(4), a.Report().Domains["gateway.public"].Generation,
+		"reported at the generation it enforces, so the operator sees this replica behind on the one domain")
+	assert.Equal(t, int64(5), a.Report().Domains["gateway.private"].Generation, "the other domain moves on")
+	assert.Nil(t, a.Report().Refusal, "not a refusal: the manifest was applied, one domain on last-good")
+
+	// The good payload back under a new generation: applied, reported.
+	f.write(6, spec("gateway.public", 10), spec("gateway.private", 21))
+	cfg, err = Read(f.dir)
+	require.NoError(t, err)
+	a.Apply(cfg)
+	assert.Same(t, lastGood, a.Store.Engine("gateway.public"), "same payload hash as generation 4")
+	assert.Equal(t, int64(6), a.Report().Domains["gateway.public"].Generation)
+}
+
+func TestApplier_aSpecThatDoesNotCompileHereAndWasNeverAppliedClaimsTheDomainEmpty(t *testing.T) {
+	f := newFixture(t)
+	f.write(5, badSpec("gateway.public"), spec("gateway.private", 20))
+	cfg, err := Read(f.dir)
+	require.NoError(t, err)
 
 	a := newApplier()
 	a.Apply(cfg)
 	assert.True(t, a.Ready())
-	assert.True(t, a.Store.HasDomain("gateway.public"), "claimed")
-	assert.Empty(t, a.Store.Load().Snapshot("gateway.public").Blocks, "and empty")
+	assert.True(t, a.Store.HasDomain("gateway.public"), "claimed, so the request is not an unknown domain")
+	assert.Empty(t, a.Store.Load().Snapshot("gateway.public").Blocks, "and nothing to keep, so empty")
 	assert.Equal(t, int64(0), a.Report().Domains["gateway.public"].Generation,
-		"reported at zero so the operator sees this replica behind, not enforcing")
+		"reported at zero: the operator sees this replica behind, not enforcing")
 	assert.Equal(t, int64(5), a.Report().Domains["gateway.private"].Generation, "the other domain is untouched")
 }
 

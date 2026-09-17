@@ -75,14 +75,18 @@ func (a *Applier) Report() applied.Report {
 //
 // A spec that does not compile here is a spec the operator validated under
 // rules this build does not share, a version skew inside the compiler rather
-// than the format. The domain is claimed and enforces nothing, its applied
-// generation is reported as zero so the operator sees the replica behind,
-// and the other domains of the namespace are untouched.
+// than the format. The rule for a generation that does not compile is that
+// last-good stays enforced, and last-good is the engine of the previous
+// apply: the domain keeps it and reports the generation it came from, so the
+// operator sees this replica behind on that one domain and the others of
+// the namespace move on. Only a domain this replica has never applied has
+// nothing to keep; it is claimed and enforces nothing, at generation zero.
 func (a *Applier) Apply(cfg Configuration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	now := time.Now().UTC()
+	previous := a.Report().Domains
 	domains := make(map[string]store.Domain, len(cfg.Specs))
 	hashes := make(map[string]string, len(cfg.Specs))
 	snapshots := make(map[string]*enginecompile.Snapshot, len(cfg.Specs))
@@ -97,23 +101,37 @@ func (a *Applier) Apply(cfg Configuration) {
 		spec := cfg.Specs[domain]
 		generation := entry.Generation
 
-		var built store.Domain
-		if previous, ok := a.domains[domain]; ok && a.hashes[domain] == entry.Hash {
-			built = previous
-		} else {
+		uid := entry.UID
+		built, kept := a.domains[domain]
+		switch {
+		case kept && a.hashes[domain] == entry.Hash:
+			// Same payload, same engine, warm cache kept.
+		default:
 			snapshot, problems := enginecompile.Compile(a.Namespace, domain, convert.Policy(&spec))
-			if blocking(problems) {
-				a.Log.Error(nil, "the validated spec of a domain does not compile in this build; the domain enforces nothing",
-					"domain", domain, "generation", generation, "problems", len(problems))
-				snapshot, _ = enginecompile.Compile(a.Namespace, domain, convert.Policy(&v1alpha1.RateLimitPolicySpec{Domain: domain}))
-				generation = 0
+			if !blocking(problems) {
+				built = a.build(domain, snapshot)
+				break
 			}
+			if kept {
+				last := previous[domain]
+				generation, uid = last.Generation, last.UID
+				a.Log.Error(nil, "the validated spec of a domain does not compile in this build; keeping the last-good engine",
+					"domain", domain, "generation", entry.Generation, "enforcing", generation, "problems", len(problems))
+				// The hash recorded is the previous one: the engine belongs
+				// to that payload, and the next manifest is compared to it.
+				entry.Hash = a.hashes[domain]
+				break
+			}
+			a.Log.Error(nil, "the validated spec of a domain does not compile in this build; the domain enforces nothing",
+				"domain", domain, "generation", entry.Generation, "problems", len(problems))
+			snapshot, _ = enginecompile.Compile(a.Namespace, domain, convert.Policy(&v1alpha1.RateLimitPolicySpec{Domain: domain}))
 			built = a.build(domain, snapshot)
+			generation = 0
 		}
 		domains[domain] = built
 		hashes[domain] = entry.Hash
 		snapshots[domain] = built.Snapshot
-		report.Domains[domain] = applied.Domain{Generation: generation, UID: entry.UID, AppliedAt: now}
+		report.Domains[domain] = applied.Domain{Generation: generation, UID: uid, AppliedAt: now}
 		views = append(views, metrics.DomainView{
 			Domain:            domain,
 			Blocks:            len(built.Snapshot.Blocks),
