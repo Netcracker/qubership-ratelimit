@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -144,6 +146,17 @@ func TestRead_refusals(t *testing.T) {
 				f.writeManifest(encoded)
 			},
 			version: 1, reason: "futureField",
+		},
+		"a payload that decompresses past the decoder's limit": {
+			damage: func(f *fixture) {
+				var buf bytes.Buffer
+				zw := gzip.NewWriter(&buf)
+				_, err := zw.Write(bytes.Repeat([]byte{'0'}, manifest.MaxPayloadSize+1))
+				require.NoError(t, err)
+				require.NoError(t, zw.Close())
+				require.NoError(t, os.WriteFile(filepath.Join(f.dir, manifest.PayloadKey("gateway.public")), buf.Bytes(), 0o600))
+			},
+			version: 1, reason: "decompresses past",
 		},
 		"a payload that belongs to another domain": {
 			damage: func(f *fixture) {

@@ -347,6 +347,37 @@ func TestPayload_refusesWhatIsNotGzip(t *testing.T) {
 	require.ErrorIs(t, err, ErrMalformed)
 }
 
+// gzipOf compresses n bytes of one value: the shape of a decompression
+// bomb, a few hundred kilobytes that expand to whatever n says.
+func gzipOf(t *testing.T, n int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write(bytes.Repeat([]byte{'0'}, n))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
+func TestPayload_refusesAStreamThatDecompressesPastTheLimit(t *testing.T) {
+	// One byte over: refused for the size, before the JSON decoder sees it.
+	// The compressed form is a few kilobytes, which is the point: the bound
+	// is on what comes out, not on what went in.
+	bomb := gzipOf(t, MaxPayloadSize+1)
+	require.Less(t, len(bomb), 64<<10)
+
+	var out payload
+	_, err := DecodePayload(bomb, &out)
+	require.ErrorIs(t, err, ErrMalformed)
+	assert.Contains(t, err.Error(), fmt.Sprintf("past %d bytes", MaxPayloadSize))
+
+	// At the limit exactly, the size is fine and the content is what is
+	// judged: a run of digits is a JSON number, not a spec.
+	_, err = DecodePayload(gzipOf(t, MaxPayloadSize), &out)
+	require.ErrorIs(t, err, ErrMalformed)
+	assert.NotContains(t, err.Error(), "past")
+}
+
 func TestPayloadKey(t *testing.T) {
 	assert.Equal(t, "gateway.public.json.gz", PayloadKey("gateway.public"))
 }

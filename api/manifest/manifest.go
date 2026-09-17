@@ -177,17 +177,31 @@ func EncodePayload(v any) (compressed []byte, hash string, err error) {
 	return buf.Bytes(), Hash(raw), nil
 }
 
+// MaxPayloadSize bounds what DecodePayload decompresses. A ConfigMap value
+// is at most 1 MiB and gzip expands up to about a thousandfold, so an
+// unbounded read of a corrupt or hand-edited payload would grow the heap by
+// hundreds of megabytes before the JSON decoder objected, and take the
+// replica down with an OOM instead of a refusal. The bound sits well above
+// any spec the API server admits: the etcd object cap is 1.5 MiB, and a
+// spec is a fraction of its object.
+const MaxPayloadSize = 8 << 20
+
 // DecodePayload reads a domain's payload into v, strictly: a field the value's
-// type does not define is a refusal. The hash of the decompressed bytes is
-// returned so the caller can check it against the manifest.
+// type does not define is a refusal, and so is a stream that decompresses
+// past MaxPayloadSize. The hash of the decompressed bytes is returned so the
+// caller can check it against the manifest.
 func DecodePayload(compressed []byte, v any) (hash string, err error) {
 	zr, err := gzip.NewReader(bytes.NewReader(compressed))
 	if err != nil {
 		return "", fmt.Errorf("%w: payload is not gzip: %v", ErrMalformed, err)
 	}
-	raw, err := io.ReadAll(zr)
+	// One byte past the limit tells "at the limit" from "over it".
+	raw, err := io.ReadAll(io.LimitReader(zr, MaxPayloadSize+1))
 	if err != nil {
 		return "", fmt.Errorf("%w: payload does not decompress: %v", ErrMalformed, err)
+	}
+	if len(raw) > MaxPayloadSize {
+		return "", fmt.Errorf("%w: payload decompresses past %d bytes", ErrMalformed, MaxPayloadSize)
 	}
 	if err := unmarshalStrict(raw, v); err != nil {
 		return "", err
