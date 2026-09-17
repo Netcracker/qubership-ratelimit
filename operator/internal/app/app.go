@@ -82,7 +82,11 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 		LeaderElection:                      options.LeaderElection,
 		LeaderElectionID:                    process.LeaseName,
 		LeaderElectionResourceLockInterface: lock,
-		Cache:                               config.CacheOptions(namespace),
+		// Read only when the lock is nil, which is a run outside a pod:
+		// controller-runtime then builds the lock itself and has no pod to
+		// take the namespace from.
+		LeaderElectionNamespace: namespace,
+		Cache:                   config.CacheOptions(namespace),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create manager: %w", err)

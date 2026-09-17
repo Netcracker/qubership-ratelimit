@@ -43,14 +43,20 @@ var _ = Describe("the operator, built", Ordered, func() {
 		probeAddr := listener.Addr().String()
 		Expect(listener.Close()).To(Succeed())
 
+		// No POD_NAME, and the election on: the run outside a pod that a
+		// local start is. The lock is controller-runtime's own then, and it
+		// needs the namespace it cannot read from a pod that is not there.
+		GinkgoT().Setenv("POD_NAME", "")
 		mgr, err := Build(cfg, scheme.Scheme, testNamespace, Options{
 			ProbeAddr: probeAddr, MetricsAddr: "0", Deployment: "ratelimit-operator", Version: "0.0.0-test",
-			Log:  logf.Log,
-			Warn: func(format string, args ...any) { warnings = append(warnings, format) },
+			LeaderElection: true,
+			Log:            logf.Log,
+			Warn:           func(format string, args ...any) { warnings = append(warnings, format) },
 		})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(mgr).NotTo(BeNil())
 		Expect(warnings).To(ContainElement("%v"), "the missing Deployment is a warning, not a refusal to build")
+		Expect(warnings).To(ContainElement(ContainSubstring("POD_NAME")))
 
 		runCtx, cancel := context.WithCancel(ctx)
 		DeferCleanup(cancel)

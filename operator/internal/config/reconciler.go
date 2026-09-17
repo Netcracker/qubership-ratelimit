@@ -105,7 +105,10 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			func(object client.Object) bool {
 				return object.GetNamespace() == r.Namespace && object.GetName() == contract.ConfigMapName
 			}))).
-		Watches(policy.Object(), toTheOne).
+		// Spec changes only: a status write of the probe cycle changes nothing
+		// the writer reads, and without the predicate each one would cost a
+		// recompile and a read of the object. Creates and deletes pass.
+		Watches(policy.Object(), toTheOne, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WatchesRawSource(source.Channel(kick, toTheOne)).
 		Complete(r)
 }

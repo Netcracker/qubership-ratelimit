@@ -132,6 +132,39 @@ func TestSave_replacesTheObjectWholeAndKeepsTheOwner(t *testing.T) {
 	assert.Equal(t, "op", object.OwnerReferences[0].Name)
 }
 
+func TestSave_sparesTheWriteWhenTheObjectAlreadyHoldsIt(t *testing.T) {
+	state := map[string]policy.Bundle{"gateway.same": {UID: "us", GoodGeneration: 1, GoodSpec: goodSpec("gateway.same")}}
+	updates := 0
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+			updates++
+			return c.Update(ctx, object, opts...)
+		}}).Build()
+	store := New(c, unitNamespace, map[string]string{"managed": "yes"}, "0.0.0-unit", logr.Discard())
+	owner := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "op", UID: "op-uid"}}
+	store.SetOwner(owner, "apps/v1", "Deployment")
+
+	// The first write creates; the second, of the same state, finds the
+	// object as it would write it and does not touch it. Every status write
+	// of the probe cycle reaches Save this way.
+	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
+	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
+	assert.Equal(t, 0, updates, "an identical write is spared, not sent to be a no-op at the API server")
+
+	// Anything Save owns that differs is written: a payload, a label, the owner.
+	state["gateway.more"] = policy.Bundle{UID: "um", GoodGeneration: 1, GoodSpec: goodSpec("gateway.more")}
+	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
+	assert.Equal(t, 1, updates)
+	store.labels = map[string]string{"managed": "still"}
+	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
+	assert.Equal(t, 2, updates)
+	store.SetOwner(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "op", UID: "op-reborn"}}, "apps/v1", "Deployment")
+	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
+	assert.Equal(t, 3, updates, "a Deployment recreated under a new UID takes the object over")
+	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
+	assert.Equal(t, 3, updates)
+}
+
 func TestSave_refusesAStateTheObjectCannotHold(t *testing.T) {
 	store := storeOver(t)
 	err := store.Save(context.Background(),

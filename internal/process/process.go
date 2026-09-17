@@ -41,9 +41,11 @@ func LeaderIdentity() string {
 // LeaderLock builds the lease this replica competes for, signed with the pod
 // name. It returns a nil lock when POD_NAME is unset, which hands the choice
 // of identity back to controller-runtime: outside a pod - a local run, an
-// envtest - the hostname is the only name there is, and refusing to start
-// would make the binary unrunnable off-cluster for no gain. The caller logs
-// that case; this function has no logger.
+// envtest - the hostname is the only name there is. The manager that takes
+// the nil lock has to set LeaderElectionNamespace as well, since off cluster
+// controller-runtime has no pod to read the namespace from and refuses to
+// start without it. The caller logs the hostname case; this function has no
+// logger.
 //
 // The renew deadline mirrors controller-runtime's own default, because it only
 // sizes the client timeout of the lock; the manager keeps timing the election

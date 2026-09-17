@@ -13,14 +13,17 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -161,6 +164,15 @@ func (s *Store) Save(ctx context.Context, state map[string]policy.Bundle, limit 
 		return fmt.Errorf("read %s: %w", contract.ConfigMapName, err)
 	}
 
+	// An identical write is a no-op at the API server, no new resourceVersion
+	// and no event, but it is still a request per trigger; the comparison
+	// here spares it. The render is deterministic, so the same state is the
+	// same bytes.
+	if s.written(&existing, data, binaryData) {
+		s.log.V(1).Info("configuration unchanged", "domains", len(binaryData))
+		return nil
+	}
+
 	// Replaced whole, not merged: a domain that retired has its payload
 	// dropped by this write, and a key nobody wrote is not one the service
 	// should find.
@@ -175,6 +187,17 @@ func (s *Store) Save(ctx context.Context, state map[string]policy.Bundle, limit 
 	}
 	s.log.V(1).Info("configuration written", "domains", len(binaryData))
 	return nil
+}
+
+// written reports whether the object already holds what Save would write:
+// the two halves, the labels, and the owner when there is one to set.
+func (s *Store) written(existing *corev1.ConfigMap, data map[string]string, binaryData map[string][]byte) bool {
+	if s.owner != nil && !equality.Semantic.DeepEqual(existing.OwnerReferences, []metav1.OwnerReference{*s.owner}) {
+		return false
+	}
+	return maps.Equal(existing.Labels, s.labels) &&
+		maps.Equal(existing.Data, data) &&
+		maps.EqualFunc(existing.BinaryData, binaryData, bytes.Equal)
 }
 
 // ErrTooLarge marks a state the ConfigMap cannot hold even after the fit:

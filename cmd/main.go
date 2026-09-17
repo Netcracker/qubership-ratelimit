@@ -345,7 +345,11 @@ func newManager(
 		LeaderElection:                      true,
 		LeaderElectionID:                    process.LeaseName,
 		LeaderElectionResourceLockInterface: lock,
-		Cache:                               controller.CacheOptions(namespace),
+		// Read only when the lock is nil, which is a run outside a pod:
+		// controller-runtime then builds the lock itself and has no pod to
+		// take the namespace from.
+		LeaderElectionNamespace: namespace,
+		Cache:                   controller.CacheOptions(namespace),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create manager: %w", err)

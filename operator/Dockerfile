@@ -8,6 +8,9 @@
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+# The build's own version stamp, and the fallback only: the pipeline passes
+# no build arguments, so the manifest's operatorVersion comes from
+# OPERATOR_VERSION in the container's environment, which the chart sets.
 ARG VERSION=dev
 # Allow Go toolchain auto-download when the image patch (e.g. 1.26.1) is
 # older than the minimum declared in go.mod (e.g. 1.26.5).

@@ -32,8 +32,11 @@ import (
 // loggerName prefixes every log line this process writes.
 const loggerName = "ratelimit-operator"
 
-// version is stamped into the manifest as operatorVersion. It is set by the
-// build through -ldflags; "dev" is a local build.
+// version is stamped into the manifest as operatorVersion. The chart sets it
+// through OPERATOR_VERSION, from the image tag it deploys; this value, set by
+// the build through -ldflags, is the fallback, and "dev" is a local build.
+// The pipeline passes no build arguments to the image, so without the
+// variable every image would say "dev".
 var version = "dev"
 
 var scheme = runtime.NewScheme()
@@ -44,7 +47,7 @@ func init() {
 }
 
 func main() {
-	options := app.Options{Version: version, LeaderElection: true}
+	options := app.Options{Version: operatorVersion(), LeaderElection: true}
 
 	flag.StringVar(&options.ProbeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&options.MetricsAddr, "metrics-bind-address", ":8080",
@@ -80,9 +83,17 @@ func main() {
 	}
 
 	setupLog.Infof("starting operator namespace=%v deployment=%v leaderIdentity=%v version=%v",
-		namespace, options.Deployment, process.LeaderIdentity(), version)
+		namespace, options.Deployment, process.LeaderIdentity(), options.Version)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Errorf("%v", fmt.Errorf("run manager: %w", err))
 		os.Exit(1)
 	}
+}
+
+// operatorVersion is OPERATOR_VERSION when set, else the build's own stamp.
+func operatorVersion() string {
+	if v := os.Getenv("OPERATOR_VERSION"); v != "" {
+		return v
+	}
+	return version
 }
