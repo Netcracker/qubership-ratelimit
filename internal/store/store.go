@@ -1,8 +1,11 @@
 // Package store holds the rule set the RLS server reads on every check.
 //
-// The store is written by the updater on every RateLimitPolicy event and read
-// by the gRPC server on every request, so it is a whole-value swap behind an
-// atomic pointer: readers never take a lock and never observe a half-built map.
+// The store is written on every rebuild, by the updater of the one binary or
+// by the service's configuration reader, and read by the gRPC server on every
+// request, so it is a whole-value swap behind an atomic pointer: readers never
+// take a lock and never observe a half-built map. It knows nothing of where
+// the rules come from, which is what lets the service import it without a
+// Kubernetes client.
 package store
 
 import (

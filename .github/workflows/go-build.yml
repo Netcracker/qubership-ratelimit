@@ -127,6 +127,32 @@ jobs:
           REDIS_ADDR: 127.0.0.1:6379
         run: go test ./internal/rls/ -run TestLoad -v -count=1
 
+  service-binary:
+    name: Service binary carries no Kubernetes client
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The depguard rule keeps client-go and controller-runtime out of the
+      # files under service/; what it cannot see is a root package the
+      # service imports pulling one in. The build information of the linked
+      # binary lists every module that contributed a package, so this is the
+      # check that holds whatever the import graph does.
+      - name: Build the service and read its build information
+        run: |
+          go build -o bin/ratelimit-service ./service/cmd/
+          go version -m bin/ratelimit-service | grep -E '^\s+dep\s+' | tee service-deps.txt
+          if grep -E '^\s+dep\s+(k8s.io/client-go|sigs.k8s.io/controller-runtime)\s' service-deps.txt; then
+            echo "::error::the service binary depends on a Kubernetes client; see service-deps.txt above"
+            exit 1
+          fi
+
   engine:
     name: Engine module tests (race)
     runs-on: ubuntu-latest

@@ -22,7 +22,6 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 // The probe is the only part of the operator that talks to another replica, and
@@ -85,7 +84,7 @@ func draining(pod string) discoveryv1.Endpoint {
 }
 
 // answers replies with one generation for every caller.
-func answers(t *testing.T, domains map[string]store.Applied) http.HandlerFunc {
+func answers(t *testing.T, domains map[string]applied.Domain) http.HandlerFunc {
 	t.Helper()
 	return reports(t, applied.Report{Domains: domains})
 }
@@ -100,12 +99,12 @@ func reports(t *testing.T, report applied.Report) http.HandlerFunc {
 	}
 }
 
-func want(generation int64) store.Applied {
-	return store.Applied{Generation: generation, UID: string(testUID)}
+func want(generation int64) applied.Domain {
+	return applied.Domain{Generation: generation, UID: string(testUID)}
 }
 
-func appliedBy(generation int64) map[string]store.Applied {
-	return map[string]store.Applied{testDomain: want(generation)}
+func appliedBy(generation int64) map[string]applied.Domain {
+	return map[string]applied.Domain{testDomain: want(generation)}
 }
 
 func TestObserve_countsTheReplicasOnTheGenerationAsked(t *testing.T) {
@@ -123,7 +122,7 @@ func TestObserve_countsTheReplicasOnTheGenerationAsked(t *testing.T) {
 // The UID travels with the generation because the number alone is ambiguous
 // across a delete and recreate: a fresh object starts at generation 1 too.
 func TestObserve_aMatchingGenerationOfAnotherObjectIsNotApplied(t *testing.T) {
-	probe := fleet(t, answers(t, map[string]store.Applied{
+	probe := fleet(t, answers(t, map[string]applied.Domain{
 		testDomain: {Generation: 7, UID: "some-older-object"},
 	}), ready("ratelimit-a"))
 
@@ -148,7 +147,7 @@ func TestObserve_aReplicaOnAnotherGenerationIsBehind(t *testing.T) {
 // A replica that has never compiled this domain answers without it, which is
 // the honest answer for a pod that is not ready either.
 func TestObserve_aReplicaThatDoesNotKnowTheDomainIsBehind(t *testing.T) {
-	probe := fleet(t, answers(t, map[string]store.Applied{"gateway.private": want(7)}), ready("ratelimit-a"))
+	probe := fleet(t, answers(t, map[string]applied.Domain{"gateway.private": want(7)}), ready("ratelimit-a"))
 
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
@@ -329,7 +328,7 @@ func counting(calls *atomic.Int32, next http.HandlerFunc) http.HandlerFunc {
 // still judged on its own out of the same answers.
 func TestObserve_theDomainsOfACycleShareOneRound(t *testing.T) {
 	var calls atomic.Int32
-	enforced := map[string]store.Applied{
+	enforced := map[string]applied.Domain{
 		"gateway.a": want(7),
 		"gateway.b": want(3),
 		"gateway.c": {Generation: 2, UID: "another-object"},
@@ -607,7 +606,7 @@ func requireSlicePorts(t *testing.T, probe *ReplicaProbe, ports ...discoveryv1.E
 // will never take the generation up, whatever the threshold.
 func TestObserve_namesAReplicaThatRefusedTheManifest(t *testing.T) {
 	probe := fleet(t, reports(t, applied.Report{
-		Domains:        map[string]store.Applied{testDomain: want(6)},
+		Domains:        map[string]applied.Domain{testDomain: want(6)},
 		FormatVersions: []int{1},
 		Refusal:        &applied.Refusal{FormatVersion: 2, Reason: "manifest: unsupported format version: 2"},
 	}), ready("ratelimit-a"))

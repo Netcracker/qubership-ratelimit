@@ -20,5 +20,6 @@
 # configloader's YAML property source reads this next to the binary.
 !application.yaml
 
-# The operator image copies its own application.yaml.
+# The operator and the service images copy their own application.yaml.
 !operator/application.yaml
+!service/application.yaml

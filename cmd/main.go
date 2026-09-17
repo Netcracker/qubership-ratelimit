@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -35,24 +34,24 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-
-	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	enginestore "github.com/netcracker/qubership-ratelimit/engine/store"
-	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
-	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
+	"github.com/netcracker/qubership-ratelimit/internal/leader"
 	"github.com/netcracker/qubership-ratelimit/internal/management"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/process"
 	"github.com/netcracker/qubership-ratelimit/internal/records"
 	"github.com/netcracker/qubership-ratelimit/internal/rls"
+	"github.com/netcracker/qubership-ratelimit/internal/settings"
 	"github.com/netcracker/qubership-ratelimit/internal/state"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
+	"github.com/netcracker/qubership-ratelimit/internal/updater"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -96,7 +95,7 @@ func main() {
 	flag.StringVar(&serviceName, "service-name", "",
 		"The Service whose ready endpoints are this component's replicas. The leader reads the enforced "+
 			"generation from each of them to decide whether a policy is Ready. Defaults to microservice.name.")
-	flag.DurationVar(&storeDebounce, "store-debounce", store.DefaultDebounce,
+	flag.DurationVar(&storeDebounce, "store-debounce", updater.DefaultDebounce,
 		"How long to collect resource events before rebuilding the rule store.")
 	flag.DurationVar(&drainTimeout, "rls-drain-timeout", rls.DefaultDrainTimeout,
 		"How long in-flight rate limit checks may delay shutdown.")
@@ -144,93 +143,6 @@ type runOptions struct {
 	drainTimeout  time.Duration
 }
 
-// newCounterStore picks where the counters live, and returns the client whose
-// lifecycle the caller owns — the store never closes it.
-//
-// Redis is what makes a limit a limit of the domain rather than of each replica:
-// with N replicas counting in their own memory, a limit of 100 admits 100*N. The
-// in-process store is correct at one replica and for tests, and is what an empty
-// address list selects.
-//
-// The topology is the caller's business, which is why the engine takes a
-// UniversalClient: one address is a standalone server, several are a cluster, and
-// a master name selects Sentinel. The domain hash tag in the counter keys keeps
-// each decision on one Cluster slot, so the script is valid on all three.
-func newCounterStore() counterBackend {
-	addresses := configloader.GetOrDefaultString("redis.addresses", "")
-	if addresses == "" {
-		// The records live where the counters do. Leaving them nil would start
-		// the management API with a nil store, and every mutation would panic
-		// into an RLS-0500 while the reads kept working. In-process counting is
-		// correct at one replica, and so are in-process records.
-		counters := memory.New()
-		return counterBackend{
-			store:       counters,
-			records:     records.NewMemory(counters),
-			description: "in-process, counted per replica",
-		}
-	}
-
-	shared := goredis.NewUniversalClient(&goredis.UniversalOptions{
-		Addrs:      strings.Split(addresses, ","),
-		Username:   configloader.GetOrDefaultString("redis.username", ""),
-		Password:   configloader.GetOrDefaultString("redis.password", ""),
-		DB:         redisDatabase(),
-		MasterName: configloader.GetOrDefaultString("redis.masterName", ""),
-	})
-	return counterBackend{
-		store:       redisstore.New(shared),
-		records:     records.NewRedis(shared),
-		closer:      shared,
-		description: "redis at " + addresses,
-		shared:      true,
-	}
-}
-
-// counterBackend is the chosen counter store and what the rest of the process
-// needs to know about it: the client whose lifecycle the caller owns, a
-// description for the startup line.
-type counterBackend struct {
-	store       enginestore.Store
-	records     records.Store
-	closer      io.Closer
-	description string
-
-	// shared marks a store every replica counts in. Without one a limit of N
-	// admits N per replica — and the management API's records are per replica
-	// too.
-	shared bool
-}
-
-// nearLimitRatio reads the near-limit margin for the metrics. The property
-// key spells every hump as its own segment because the configloader turns
-// each underscore of METRICS_NEAR_LIMIT_RATIO into a dot; a camelCase key
-// would never see the variable.
-func nearLimitRatio() float64 {
-	raw := configloader.GetOrDefaultString("metrics.near.limit.ratio", "")
-	if raw == "" {
-		return rls.DefaultNearLimitRatio
-	}
-	ratio, err := strconv.ParseFloat(raw, 64)
-	if err != nil || ratio <= 0 || ratio >= 1 {
-		setupLog.Errorf("METRICS_NEAR_LIMIT_RATIO=%q is not a ratio in (0, 1), using %v",
-			raw, rls.DefaultNearLimitRatio)
-		return rls.DefaultNearLimitRatio
-	}
-	return ratio
-}
-
-// redisDatabase reads the database index.
-func redisDatabase() int {
-	raw := configloader.GetOrDefaultString("redis.db", "0")
-	database, err := strconv.Atoi(raw)
-	if err != nil {
-		setupLog.Errorf("REDIS_DB=%q is not a number, using database 0", raw)
-		return 0
-	}
-	return database
-}
-
 // run wires the process together and hands it to the manager.
 //
 // Every replica runs both halves: the controller that writes status and the
@@ -252,6 +164,8 @@ func run(options runOptions) error {
 	if err != nil {
 		return err
 	}
+	// Every series rides the manager's metrics endpoint.
+	metrics.Register(ctrlmetrics.Registry)
 
 	// The last-good state lives in ConfigMaps read with an uncached client.
 	stateClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
@@ -297,7 +211,7 @@ func run(options runOptions) error {
 		metrics.SetLeader(true)
 	}()
 
-	setupLog.Infof("starting service namespace=%v leaderIdentity=%v", namespace, process.LeaderIdentity())
+	setupLog.Infof("starting service namespace=%v leaderIdentity=%v", namespace, process.PodName())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		return fmt.Errorf("run manager: %w", err)
 	}
@@ -343,7 +257,7 @@ func newManager(
 		// that is not elected is two replicas writing conditions over each
 		// other, so there is no deployment this is right to switch off.
 		LeaderElection:                      true,
-		LeaderElectionID:                    process.LeaseName,
+		LeaderElectionID:                    leader.LeaseName,
 		LeaderElectionResourceLockInterface: lock,
 		// Read only when the lock is nil, which is a run outside a pod:
 		// controller-runtime then builds the lock itself and has no pod to
@@ -357,13 +271,13 @@ func newManager(
 	return mgr, nil
 }
 
-// leaderLock is process.LeaderLock with the warning a hostname-signed lease
+// leaderLock is leader.Lock with the warning a hostname-signed lease
 // deserves, because this binary's status messages name replicas by pod name.
 func leaderLock(config *rest.Config, namespace string) (resourcelock.Interface, error) {
-	if process.LeaderIdentity() == "" {
+	if process.PodName() == "" {
 		setupLog.Warnf("POD_NAME is not set, so the lease is signed with the hostname")
 	}
-	return process.LeaderLock(config, namespace)
+	return leader.Lock(config, namespace)
 }
 
 // addControllers registers the reconcilers that write object status. They are
@@ -444,7 +358,7 @@ func portOf(addr string) (int, error) {
 // whose lifetime the caller owns.
 type rateLimitEndpoint struct {
 	runner  *rls.Runner
-	updater *store.Updater
+	updater *updater.Updater
 	closer  io.Closer
 
 	// rules is the enforced rule set and counters is where it counts. The
@@ -504,26 +418,26 @@ func addRateLimitEndpoint(
 	namespace string,
 	lastGood *state.Store,
 ) (rateLimitEndpoint, error) {
-	backend := newCounterStore()
-	endpoint := rateLimitEndpoint{closer: backend.closer}
-	setupLog.Infof("counter store selected backend=%v", backend.description)
+	backend := settings.CounterStore(setupLog.Errorf)
+	endpoint := rateLimitEndpoint{closer: backend.Closer}
+	setupLog.Infof("counter store selected backend=%v", backend.Description)
 
 	cacheStats := &engine.CacheStats{}
-	metrics.RegisterCacheStats(cacheStats)
+	metrics.RegisterCacheStats(ctrlmetrics.Registry, cacheStats)
 
 	ruleStore := store.New()
 	endpoint.rules = ruleStore
-	endpoint.counters = backend.store
-	endpoint.records = backend.records
-	endpoint.backend = backend.description
-	endpoint.shared = backend.shared
-	endpoint.updater = &store.Updater{
+	endpoint.counters = backend.Store
+	endpoint.records = backend.Records
+	endpoint.backend = backend.Description
+	endpoint.shared = backend.Shared
+	endpoint.updater = &updater.Updater{
 		Cache:      mgr.GetCache(),
 		Store:      ruleStore,
 		Namespace:  namespace,
 		Debounce:   options.storeDebounce,
 		Log:        process.NewLogrLogger(loggerName).WithName("store"),
-		Counters:   backend.store,
+		Counters:   backend.Store,
 		CacheStats: cacheStats,
 		State:      lastGood,
 		Elected:    mgr.Elected(),
@@ -531,12 +445,12 @@ func addRateLimitEndpoint(
 	if err := mgr.Add(endpoint.updater); err != nil {
 		return endpoint, fmt.Errorf("add store updater: %w", err)
 	}
-	endpoint.applied = store.AppliedHandler(endpoint.updater)
+	endpoint.applied = updater.AppliedHandler(endpoint.updater)
 
 	endpoint.runner = &rls.Runner{
 		Addr: options.rlsAddr,
 		Server: rls.NewServer(ruleStore, logging.GetLogger(loggerName+"/rls"),
-			rls.WithNearLimitRatio(nearLimitRatio())),
+			rls.WithNearLimitRatio(settings.NearLimitRatio(setupLog.Errorf))),
 		DrainTimeout: options.drainTimeout,
 		Log:          process.NewLogrLogger(loggerName).WithName("rls"),
 	}
@@ -544,41 +458,6 @@ func addRateLimitEndpoint(
 		return endpoint, fmt.Errorf("add rls server: %w", err)
 	}
 	return endpoint, nil
-}
-
-// managementClaims names the claims the subject and its roles are read from.
-// Both accept a dotted path, because an IdP often nests the roles: Keycloak
-// issues them under realm_access.roles.
-func managementClaims() management.ClaimNames {
-	return management.ClaimNames{
-		Subject: configloader.GetOrDefaultString("management.claims.subject",
-			management.DefaultClaimNames.Subject),
-		Roles: configloader.GetOrDefaultString("management.claims.roles",
-			management.DefaultClaimNames.Roles),
-	}
-}
-
-// managementRoles maps the role names the IdP issues onto the two this API
-// authorizes against. Both properties are comma-separated lists, and both
-// default to the canonical name, which is what a deployment issuing "viewer"
-// and "operator" already has.
-func managementRoles() management.RoleMapping {
-	return management.RoleMapping{
-		Viewer:   csv(configloader.GetOrDefaultString("management.roles.viewer", management.RoleViewer)),
-		Operator: csv(configloader.GetOrDefaultString("management.roles.operator", management.RoleOperator)),
-	}
-}
-
-// csv splits a comma-separated property, dropping the empty entries a trailing
-// comma or a blank value leaves behind.
-func csv(value string) []string {
-	var out []string
-	for item := range strings.SplitSeq(value, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
 }
 
 // addManagementAPI registers the control interface, on its own listener.
@@ -615,8 +494,8 @@ func addManagementAPI(
 		Counters:       limiter.counters,
 		Records:        limiter.records,
 		Namespace:      namespace,
-		Claims:         managementClaims(),
-		Roles:          managementRoles(),
+		Claims:         settings.ManagementClaims(),
+		Roles:          settings.ManagementRoles(),
 		CounterBackend: limiter.backend,
 		Log:            logging.GetLogger(loggerName + "/management"),
 	}

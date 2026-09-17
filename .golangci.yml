@@ -5,6 +5,7 @@ linters:
   default: none
   enable:
     - copyloopvar
+    - depguard
     - dupl
     - errcheck
     - goconst
@@ -23,6 +24,21 @@ linters:
     - unparam
     - unused
   settings:
+    # The service is the data plane and holds no Kubernetes client: its pod
+    # carries no Role and no token, so a package under service/ that imported
+    # one would be a design breach the compiler cannot see. The rule covers
+    # what the files under service/ import; the build-information check in CI
+    # covers what they import transitively.
+    depguard:
+      rules:
+        service:
+          files:
+            - "**/service/**"
+          deny:
+            - pkg: k8s.io/client-go
+              desc: the service holds no Kubernetes client (ADR 0007)
+            - pkg: sigs.k8s.io/controller-runtime
+              desc: the service holds no Kubernetes client (ADR 0007)
     revive:
       rules:
         - name: comment-spacings

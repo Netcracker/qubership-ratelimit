@@ -24,10 +24,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
-	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 // ProbeInterval is how often the leader re-reads the fleet. It runs on every
@@ -99,7 +99,7 @@ func (r *RateLimitPolicyReconciler) now() time.Time {
 // With fresh set, Observe answers from a round taken during the call, whatever
 // the probe kept from an earlier one.
 type FleetProbe interface {
-	Observe(ctx context.Context, domain string, want store.Applied, fresh bool) (FleetView, error)
+	Observe(ctx context.Context, domain string, want applied.Domain, fresh bool) (FleetView, error)
 }
 
 // +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies,verbs=get;list;watch
@@ -269,7 +269,7 @@ func (r *RateLimitPolicyReconciler) observe(
 	if r.Probe == nil {
 		return FleetView{}, errNoProbe
 	}
-	return r.Probe.Observe(ctx, object.Spec.Domain, store.Applied{
+	return r.Probe.Observe(ctx, object.Spec.Domain, applied.Domain{
 		Generation: outcome.ActiveGeneration,
 		UID:        outcome.UID,
 	}, fresh)

@@ -1,4 +1,4 @@
-package store
+package updater
 
 import (
 	"context"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 // stubInformer records the handler the updater registers so a test can deliver
@@ -149,7 +150,7 @@ func newStubSource(t *testing.T, objects ...client.Object) *stubSource {
 	}
 }
 
-func startUpdater(t *testing.T, source *stubSource, ruleStore *Store) context.CancelFunc {
+func startUpdater(t *testing.T, source *stubSource, ruleStore *store.Store) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	updater := &Updater{
@@ -179,7 +180,7 @@ func TestUpdaterStart_fillsTheStoreBeforeAnyEvent(t *testing.T) {
 	// rebuild must already see every existing policy — a replica that waited for
 	// an event would answer checks from an empty store until one arrived.
 	source := newStubSource(t, policyObject("gateway.public"))
-	ruleStore := New()
+	ruleStore := store.New()
 
 	startUpdater(t, source, ruleStore)
 
@@ -190,7 +191,7 @@ func TestUpdaterStart_fillsTheStoreBeforeAnyEvent(t *testing.T) {
 
 func TestUpdaterStart_rebuildsOnAnEvent(t *testing.T) {
 	source := newStubSource(t)
-	ruleStore := New()
+	ruleStore := store.New()
 	startUpdater(t, source, ruleStore)
 	require.Eventually(t, source.informer.handlerRegistered, 2*time.Second, 5*time.Millisecond)
 	require.False(t, ruleStore.Load().Has("gateway.private"))
@@ -206,7 +207,7 @@ func TestUpdaterStart_rebuildsOnAnEvent(t *testing.T) {
 func TestUpdaterStart_dropsADeletedPolicy(t *testing.T) {
 	removed := policyObject("gateway.private")
 	source := newStubSource(t, removed)
-	ruleStore := New()
+	ruleStore := store.New()
 	startUpdater(t, source, ruleStore)
 	require.Eventually(t, func() bool { return ruleStore.Load().Has("gateway.private") },
 		2*time.Second, 5*time.Millisecond)
@@ -220,7 +221,7 @@ func TestUpdaterStart_dropsADeletedPolicy(t *testing.T) {
 
 func TestUpdaterStart_removesItsHandlerOnShutdown(t *testing.T) {
 	source := newStubSource(t)
-	cancel := startUpdater(t, source, New())
+	cancel := startUpdater(t, source, store.New())
 	require.Eventually(t, source.informer.handlerRegistered, 2*time.Second, 5*time.Millisecond)
 
 	cancel()
@@ -231,7 +232,7 @@ func TestUpdaterStart_removesItsHandlerOnShutdown(t *testing.T) {
 func TestUpdaterStart_reportsAMissingInformer(t *testing.T) {
 	updater := &Updater{
 		Cache:    &stubSource{getError: errors.New("no informer")},
-		Store:    New(),
+		Store:    store.New(),
 		Log:      logr.Discard(),
 		Counters: memory.New(),
 	}
@@ -242,7 +243,7 @@ func TestUpdaterStart_reportsAMissingInformer(t *testing.T) {
 func TestUpdaterStart_reportsAFailedHandlerRegistration(t *testing.T) {
 	source := newStubSource(t)
 	source.informer.addError = errors.New("cannot add handler")
-	updater := &Updater{Cache: source, Store: New(), Log: logr.Discard(), Counters: memory.New()}
+	updater := &Updater{Cache: source, Store: store.New(), Log: logr.Discard(), Counters: memory.New()}
 
 	assert.Error(t, updater.Start(context.Background()))
 }
@@ -252,7 +253,7 @@ func TestUpdaterStart_rebuildsOnANewDomain(t *testing.T) {
 	// so one informer sees every change that can alter a snapshot — and the
 	// domain becomes known on the rebuild that first sees its policy.
 	source := newStubSource(t)
-	ruleStore := New()
+	ruleStore := store.New()
 	startUpdater(t, source, ruleStore)
 	require.Eventually(t, source.informer.handlerRegistered, 2*time.Second, 5*time.Millisecond)
 
@@ -370,7 +371,7 @@ func (s *stubState) deletedDomains() []string {
 func startUpdaterWithState(
 	t *testing.T,
 	source *stubSource,
-	ruleStore *Store,
+	ruleStore *store.Store,
 	state StateStore,
 	elected <-chan struct{},
 ) {
@@ -411,7 +412,7 @@ func TestUpdaterStart_theLeaderPersistsTheStateOfEachDomain(t *testing.T) {
 	source := newStubSource(t, policyObject("gateway.public"))
 	state := newStubState()
 
-	startUpdaterWithState(t, source, New(), state, closedChannel())
+	startUpdaterWithState(t, source, store.New(), state, closedChannel())
 
 	assert.Eventually(t, func() bool {
 		return len(state.savedDomains()) == 1 && state.savedDomains()[0] == "gateway.public"
@@ -425,7 +426,7 @@ func TestUpdaterStart_aNonLeaderReadsTheStateButNeverWritesIt(t *testing.T) {
 	state := newStubState()
 
 	// A channel that is never closed is a replica that never wins the lease.
-	startUpdaterWithState(t, source, New(), state, make(chan struct{}))
+	startUpdaterWithState(t, source, store.New(), state, make(chan struct{}))
 
 	require.Eventually(t, func() bool { return len(state.loadedDomains()) > 0 },
 		2*time.Second, 5*time.Millisecond)
@@ -436,7 +437,7 @@ func TestUpdaterStart_dropsTheStateOfARetiredDomain(t *testing.T) {
 	removed := policyObject("gateway.private")
 	source := newStubSource(t, removed)
 	state := newStubState()
-	startUpdaterWithState(t, source, New(), state, closedChannel())
+	startUpdaterWithState(t, source, store.New(), state, closedChannel())
 	require.Eventually(t, func() bool { return len(state.savedDomains()) == 1 },
 		2*time.Second, 5*time.Millisecond)
 
@@ -454,7 +455,7 @@ func TestUpdaterStart_servesRulesEvenWhenTheStateIsUnreadable(t *testing.T) {
 	source := newStubSource(t, policyObject("gateway.public"))
 	state := newStubState()
 	state.failing = true
-	ruleStore := New()
+	ruleStore := store.New()
 
 	startUpdaterWithState(t, source, ruleStore, state, closedChannel())
 
@@ -470,7 +471,7 @@ func TestUpdaterStart_persistsOnceLeadershipIsAcquired(t *testing.T) {
 	source := newStubSource(t, policyObject("gateway.public"))
 	state := newStubState()
 	elected := make(chan struct{})
-	ruleStore := New()
+	ruleStore := store.New()
 
 	startUpdaterWithState(t, source, ruleStore, state, elected)
 	require.Eventually(t, func() bool { return ruleStore.Load().Has("gateway.public") },
@@ -494,7 +495,7 @@ func TestUpdaterStart_retriesAWriteThatFailed(t *testing.T) {
 	source := newStubSource(t)
 	state := newStubState()
 	state.failing = true
-	startUpdaterWithState(t, source, New(), state, closedChannel())
+	startUpdaterWithState(t, source, store.New(), state, closedChannel())
 	require.Eventually(t, source.informer.handlerRegistered, 2*time.Second, 5*time.Millisecond)
 
 	require.NoError(t, source.Reader.(client.Client).Create(context.Background(), added))
@@ -520,7 +521,7 @@ func TestUpdaterStart_retriesAWriteThatFailed(t *testing.T) {
 // every policy for the life of the pod.
 func TestUpdaterStart_subscribesToTheUnstructuredInformer(t *testing.T) {
 	source := newStubSource(t, policyObject("gateway.public"))
-	startUpdater(t, source, New())
+	startUpdater(t, source, store.New())
 
 	require.Eventually(t, func() bool { return source.askedObject() != nil },
 		2*time.Second, 5*time.Millisecond)

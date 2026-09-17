@@ -20,7 +20,6 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 // The leader is the only replica that writes status, but Ready is a statement
@@ -144,7 +143,7 @@ type fleetRound struct {
 // round that failed is kept like any other, so a fleet that cannot be
 // observed costs one round per freshness, not one per domain.
 func (p *ReplicaProbe) Observe(
-	ctx context.Context, domain string, want store.Applied, fresh bool,
+	ctx context.Context, domain string, want applied.Domain, fresh bool,
 ) (FleetView, error) {
 	round := p.currentRound(ctx, fresh)
 	if round.err != nil {
@@ -231,7 +230,7 @@ func (p *ReplicaProbe) takeRound(ctx context.Context, now time.Time, endpoints [
 // view counts one domain's replicas from the round's answers: an endpoint
 // that reported the generation and object asked about is applied, one that
 // reported anything else is behind, and one that did not answer is silent.
-func (r *fleetRound) view(domain string, want store.Applied, freshness time.Duration) FleetView {
+func (r *fleetRound) view(domain string, want applied.Domain, freshness time.Duration) FleetView {
 	refreshAt := r.taken.Add(ProbeInterval)
 	if freshness > 0 {
 		refreshAt = r.completed.Add(freshness)

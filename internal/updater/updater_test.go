@@ -1,4 +1,4 @@
-package store
+package updater
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
 
 // fakeReader builds a reader over the given objects.
@@ -153,7 +154,7 @@ func TestRebuild_aBudgetBlockedGenerationKeepsTheLastGoodOne(t *testing.T) {
 	fakeClient := fakeReader(t, &oversized)
 	updater := &Updater{
 		Cache:     readerOnly{fakeClient},
-		Store:     New(),
+		Store:     store.New(),
 		Namespace: testNamespace,
 		Counters:  memory.New(),
 		Log:       sink,
@@ -221,7 +222,7 @@ func TestReady_isTrueOnceTheStoreHasBeenBuilt(t *testing.T) {
 	// One rebuild is enough: the store then reflects the namespace, whether or
 	// not any policy in it compiled.
 	source := newStubSource(t, policyObject("gateway.public"))
-	updater := &Updater{Cache: source, Store: New(), Log: logr.Discard(), Counters: memory.New()}
+	updater := &Updater{Cache: source, Store: store.New(), Log: logr.Discard(), Counters: memory.New()}
 	require.False(t, updater.Ready())
 
 	updater.rebuild(context.Background())
@@ -236,7 +237,7 @@ func TestReady_staysFalseWhenTheNamespaceCannotBeRead(t *testing.T) {
 	// no rules into the Service endpoints.
 	source := newStubSource(t)
 	source.Reader = failingReader{}
-	updater := &Updater{Cache: source, Store: New(), Log: logr.Discard(), Counters: memory.New()}
+	updater := &Updater{Cache: source, Store: store.New(), Log: logr.Discard(), Counters: memory.New()}
 
 	updater.rebuild(context.Background())
 
@@ -314,7 +315,7 @@ func TestRebuild_prunesTheSeriesOfARenamedRule(t *testing.T) {
 	fakeClient := fakeReader(t, policyObject("gateway.public"))
 	updater := &Updater{
 		Cache:     readerOnly{fakeClient},
-		Store:     New(),
+		Store:     store.New(),
 		Namespace: testNamespace,
 		Counters:  memory.New(),
 	}
@@ -330,6 +331,15 @@ func TestExtractionKeys_listsTokenExtractedKeysOnce(t *testing.T) {
 		Policies:  []v1alpha1.RateLimitPolicy{policyWith("gateway.public", 10)},
 	})
 
-	assert.ElementsMatch(t, []string{"client", "tenant"}, extractionKeys(result),
+	assert.ElementsMatch(t, []string{"client", "tenant"}, metrics.ExtractionKeysOf(result.Snapshots),
 		"the built-in client and the mapped tenant are extracted from the token; path and method are resolved from the request and stay out")
+}
+
+func TestNeedLeaderElection_updaterRunsOnEveryReplica(t *testing.T) {
+	// Every replica answers rate limit checks, so every replica needs a populated
+	// store. A store filled only on the leader would make limits apply on some
+	// pods and not others.
+	updater := &Updater{}
+
+	assert.False(t, updater.NeedLeaderElection())
 }

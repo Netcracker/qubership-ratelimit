@@ -193,6 +193,12 @@ build: manifests generate fmt vet ## Build manager binary.
 build-operator: manifests generate fmt vet ## Build the operator binary.
 	go build -o bin/ratelimit-operator ./operator/cmd/
 
+.PHONY: build-service
+build-service: generate fmt vet ## Build the service binary and check it carries no Kubernetes client.
+	go build -o bin/ratelimit-service ./service/cmd/
+	@go version -m bin/ratelimit-service | grep -E '^\s+dep\s+(k8s.io/client-go|sigs.k8s.io/controller-runtime)\s' \
+	  && { echo "the service binary depends on a Kubernetes client"; exit 1; } || echo "service binary: no Kubernetes client"
+
 .PHONY: run
 run: manifests generate fmt vet ## Run the service from your host.
 	go run ./cmd/

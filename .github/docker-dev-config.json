@@ -9,6 +9,11 @@
             "name": "qubership-ratelimit-operator",
             "file": "./operator/Dockerfile",
             "context": "."
+        },
+        {
+            "name": "qubership-ratelimit-service",
+            "file": "./service/Dockerfile",
+            "context": "."
         }
     ],
     "platforms": "linux/amd64,linux/arm64"

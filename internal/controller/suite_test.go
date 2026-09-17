@@ -16,8 +16,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -45,6 +47,9 @@ func TestControllers(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
+	// The fleet series a spec scrapes below ride the manager's registry, as
+	// they do in the binaries.
+	metrics.Register(ctrlmetrics.Registry)
 
 	ctx, cancel = context.WithCancel(context.TODO())
 
