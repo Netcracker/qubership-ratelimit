@@ -1,4 +1,4 @@
-package main
+package process
 
 import (
 	"fmt"
@@ -15,9 +15,10 @@ type logrAdapter struct {
 	kvs    []any
 }
 
-// newLogrLogger returns the root logr sink backed by the platform logger.
-func newLogrLogger() logr.Logger {
-	return logr.New(&logrAdapter{logger: logging.GetLogger(loggerName), name: loggerName})
+// NewLogrLogger returns the root logr sink backed by the platform logger,
+// under the given name.
+func NewLogrLogger(name string) logr.Logger {
+	return logr.New(&logrAdapter{logger: logging.GetLogger(name), name: name})
 }
 
 // Init receives the call-depth information logr offers a sink.

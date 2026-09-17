@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/policy"
 )
@@ -68,11 +69,12 @@ func TestAppliedHandler_servesWhatTheReplicaEnforces(t *testing.T) {
 	assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"),
 		"a cached answer would report a generation the replica has already left")
 
-	var decoded map[string]Applied
+	var decoded applied.Report
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &decoded))
 	assert.Equal(t, map[string]Applied{
 		"gateway.public": {Generation: 7, UID: "uid-1", AppliedAt: stamp},
-	}, decoded, "the leader decodes into this exact shape")
+	}, decoded.Domains, "the leader decodes into this exact shape")
+	assert.Nil(t, decoded.Refusal, "a replica that reads no manifest refuses none")
 }
 
 func TestAppliedHandler_answersAnEmptyObjectBeforeTheFirstRebuild(t *testing.T) {
@@ -80,8 +82,8 @@ func TestAppliedHandler_answersAnEmptyObjectBeforeTheFirstRebuild(t *testing.T) 
 	AppliedHandler(&Updater{}).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, contract.AppliedPath, nil))
 
 	require.Equal(t, http.StatusOK, recorder.Code)
-	assert.JSONEq(t, "{}", recorder.Body.String(),
-		"an empty object decodes; a null body would make every leader treat this replica as unreachable")
+	assert.JSONEq(t, `{"domains": {}}`, recorder.Body.String(),
+		"an empty object decodes; a null map would make every leader treat this replica as unreachable")
 }
 
 // appliedOf is what turns a compilation into the answer above, and the
@@ -93,11 +95,11 @@ func TestAppliedOf_publishesTheEnforcedGenerationPerDomain(t *testing.T) {
 		},
 	}}
 
-	applied := appliedOf(result)
+	enforced := appliedOf(result)
 
-	require.Contains(t, applied, "gateway.public")
-	assert.Equal(t, int64(7), applied["gateway.public"].Generation,
+	require.Contains(t, enforced, "gateway.public")
+	assert.Equal(t, int64(7), enforced["gateway.public"].Generation,
 		"the leader compares against what runs, not against what was written last")
-	assert.Equal(t, "uid-1", applied["gateway.public"].UID)
-	assert.WithinDuration(t, time.Now(), applied["gateway.public"].AppliedAt, time.Minute)
+	assert.Equal(t, "uid-1", enforced["gateway.public"].UID)
+	assert.WithinDuration(t, time.Now(), enforced["gateway.public"].AppliedAt, time.Minute)
 }

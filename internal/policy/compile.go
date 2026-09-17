@@ -67,6 +67,13 @@ type Outcome struct {
 	// when it compiles.
 	Err error
 
+	// TooLarge marks a latest generation that compiles but does not fit the
+	// namespace's ConfigMap, with TooLargeReason saying by how much. The
+	// last-good generation is the active one, as for a generation that does
+	// not compile; Compiled stays true, because the spec is right.
+	TooLarge       bool
+	TooLargeReason string
+
 	// EffectiveKeys is the key set of the active generation, not of the
 	// candidate: a rule author has to read what is in effect.
 	EffectiveKeys []string
@@ -158,11 +165,25 @@ func compileDomain(
 	previous Bundle,
 	skew []v1alpha1.RuleProblem,
 ) (Outcome, *enginecompile.Snapshot, Bundle) {
+	return compileDomainFitting(namespace, object, previous, skew, "")
+}
+
+// compileDomainFitting is compileDomain with one more way for the latest
+// generation to be kept out: tooLarge, set by the size fit when the
+// generation compiles but the namespace's ConfigMap cannot hold it. The
+// last-good machinery below serves either case; the outcome says which.
+func compileDomainFitting(
+	namespace string,
+	object *v1alpha1.RateLimitPolicy,
+	previous Bundle,
+	skew []v1alpha1.RuleProblem,
+	tooLarge string,
+) (Outcome, *enginecompile.Snapshot, Bundle) {
 	domain := object.Spec.Domain
 
 	snapshot, outcome := latestGeneration(namespace, object, skew)
 
-	if outcome.Compiled() {
+	if outcome.Compiled() && tooLarge == "" {
 		outcome.ActiveGeneration = object.Generation
 		bundle := Bundle{
 			UID:            string(object.UID),
@@ -171,10 +192,20 @@ func compileDomain(
 		}
 		return withContribution(outcome, snapshot), snapshot, bundle
 	}
+	if outcome.Compiled() {
+		// It compiles; it does not fit. The snapshot of the latest generation
+		// is not the one to serve, so the claimed-but-empty one stands in
+		// unless last-good has something better below.
+		outcome.TooLarge = true
+		outcome.TooLargeReason = tooLarge
+		snapshot, _ = enginecompile.Compile(namespace, domain,
+			modelPolicy(&v1alpha1.RateLimitPolicySpec{Domain: domain}))
+	}
 
-	// The latest generation is invalid as a whole. Whatever was good last keeps
-	// serving; the problems above still describe the latest one, because that
-	// is the spec whose author is waiting for an answer.
+	// The latest generation is invalid as a whole, or does not fit. Whatever
+	// was good last keeps serving; the problems above still describe the
+	// latest one, because that is the spec whose author is waiting for an
+	// answer.
 	good := previous.good(string(object.UID))
 	if good == nil {
 		return outcome, snapshot, Bundle{}
@@ -242,6 +273,20 @@ func withContribution(outcome Outcome, snapshot *enginecompile.Snapshot) Outcome
 		outcome.Rules += len(snapshot.Blocks[i].Rules)
 	}
 	return outcome
+}
+
+// Domains lists the domains the input's policies claim, sorted, each once.
+func Domains(in Input) []string {
+	seen := make(map[string]struct{}, len(in.Policies))
+	for i := range in.Policies {
+		seen[in.Policies[i].Spec.Domain] = struct{}{}
+	}
+	domains := make([]string, 0, len(seen))
+	for domain := range seen {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return domains
 }
 
 // sortedPolicies orders the objects so that a compilation is a function of the

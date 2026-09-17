@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
@@ -486,4 +487,134 @@ func TestCompile_anUnknownEnumValueIsRefusedByTheCompiler(t *testing.T) {
 	require.NotEmpty(t, outcome.Problems)
 	assert.Equal(t, v1alpha1.ProblemInvalidSpec, outcome.Problems[0].Reason)
 	assert.Contains(t, outcome.Problems[0].Message, "GlobMatch")
+}
+
+// The size fit. A namespace's configuration has to fit one ConfigMap, and the
+// generations that pushed it over are the ones set back.
+
+// wideBlocks is a payload large enough to measure against a small limit and
+// still compile: many blocks on disjoint path prefixes, one rule each, with
+// names that compress poorly. Disjoint targets keep the worst-case decision at
+// one block, so the size grows and the bucket budget does not.
+func wideBlocks(name string, blocks int) []v1alpha1.LimitBlock {
+	out := make([]v1alpha1.LimitBlock, 0, blocks)
+	for i := range blocks {
+		out = append(out, v1alpha1.LimitBlock{
+			Name: fmt.Sprintf("%s-%d-%x", name, i, i*2654435761),
+			Target: &v1alpha1.Target{Routes: []v1alpha1.Route{{
+				Path: v1alpha1.PathMatch{Type: v1alpha1.PathMatchPrefix, Value: fmt.Sprintf("/%s/%d/", name, i)},
+			}}},
+			Rules: []v1alpha1.Rule{{
+				Name:  fmt.Sprintf("r-%x", i*40503),
+				Rates: []v1alpha1.Rate{minuteRate(int32(100 + i))},
+			}},
+		})
+	}
+	return out
+}
+
+func TestFit_leavesANamespaceThatFitsAlone(t *testing.T) {
+	object := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
+	in := Input{Namespace: testNamespace, Policies: []v1alpha1.RateLimitPolicy{object}}
+	result := Compile(in)
+
+	Fit(in, result, ConfigMapLimit)
+
+	outcome := result.Policies[key()]
+	assert.False(t, outcome.TooLarge)
+	assert.Equal(t, int64(1), outcome.ActiveGeneration)
+}
+
+func TestFit_setsAGenerationThatDoesNotFitBackToLastGood(t *testing.T) {
+	good := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
+	grown := *good.DeepCopy()
+	grown.Generation = 2
+	grown.Spec.Limits = wideBlocks("wide", 100)
+
+	in := Input{
+		Namespace: testNamespace,
+		Policies:  []v1alpha1.RateLimitPolicy{grown},
+		State:     map[string]Bundle{testDomain: {UID: "uid-1", GoodGeneration: 1, GoodSpec: good.Spec}},
+	}
+	result := Compile(in)
+	require.Equal(t, int64(2), result.Policies[key()].ActiveGeneration, "it compiles; the fit is what keeps it out")
+
+	// A limit the small generation fits and the wide one does not: the
+	// small one is a few hundred bytes compressed, the wide one over two
+	// thousand.
+	Fit(in, result, 1024)
+
+	outcome := result.Policies[key()]
+	assert.True(t, outcome.Compiled(), "the spec is right; Compiled stays true")
+	assert.True(t, outcome.TooLarge)
+	assert.Contains(t, outcome.TooLargeReason, "over the limit of 1024")
+	assert.Equal(t, int64(1), outcome.ActiveGeneration, "the last-good generation keeps serving")
+	assert.Equal(t, int64(2), outcome.Generation)
+	assert.Equal(t, int64(1), result.State[testDomain].GoodGeneration, "the bundle to persist is the one that fits")
+	require.Len(t, result.Snapshots[testDomain].Blocks, 1, "the snapshot is the last-good one")
+}
+
+func TestFit_withoutLastGoodTheDomainIsClaimedAndEmpty(t *testing.T) {
+	object := policyObject(wideBlocks("wide", 100)...)
+	in := Input{Namespace: testNamespace, Policies: []v1alpha1.RateLimitPolicy{object}}
+	result := Compile(in)
+
+	Fit(in, result, 1024)
+
+	outcome := result.Policies[key()]
+	assert.True(t, outcome.TooLarge)
+	assert.Zero(t, outcome.ActiveGeneration)
+	assert.Equal(t, Bundle{}, result.State[testDomain], "nothing to persist for a domain nothing fits")
+	require.NotNil(t, result.Snapshots[testDomain])
+	assert.Empty(t, result.Snapshots[testDomain].Blocks)
+}
+
+func TestFit_keepsOutTheFewestGenerationsLargestFirst(t *testing.T) {
+	// Two domains moved; one is wide, one is small. The limit admits the
+	// small one beside the wide one's last-good, so only the wide one is kept
+	// out, and the small one lands.
+	wide := policyObject(wideBlocks("wide", 100)...)
+	wide.Name, wide.Spec.Domain, wide.UID = "gateway.wide", "gateway.wide", "uid-wide"
+	small := policyObject(v1alpha1.LimitBlock{Name: "a", Rules: []v1alpha1.Rule{simpleRule("total")}})
+	small.Name, small.Spec.Domain, small.UID = "gateway.small", "gateway.small", "uid-small"
+
+	in := Input{Namespace: testNamespace, Policies: []v1alpha1.RateLimitPolicy{wide, small}}
+	result := Compile(in)
+
+	Fit(in, result, 1024)
+
+	assert.True(t, result.Policies[client.ObjectKey{Namespace: testNamespace, Name: "gateway.wide"}].TooLarge)
+	assert.False(t, result.Policies[client.ObjectKey{Namespace: testNamespace, Name: "gateway.small"}].TooLarge,
+		"the small domain fits once the wide one is out; keeping it out too would be one generation too many")
+	assert.Equal(t, int64(1), result.Policies[client.ObjectKey{Namespace: testNamespace, Name: "gateway.small"}].ActiveGeneration)
+}
+
+func TestFit_isDeterministicAcrossRuns(t *testing.T) {
+	// The writer and the status reconciler run the fit separately and must
+	// agree; two runs over the same input have to keep the same generations.
+	build := func() (Input, *Result) {
+		names := []string{"gateway.a", "gateway.b", "gateway.c"}
+		policies := make([]v1alpha1.RateLimitPolicy, 0, len(names))
+		for _, name := range names {
+			p := policyObject(wideBlocks(name, 40)...)
+			p.Name, p.Spec.Domain, p.UID = name, name, types.UID("uid-"+name)
+			policies = append(policies, p)
+		}
+		in := Input{Namespace: testNamespace, Policies: policies}
+		return in, Compile(in)
+	}
+	verdict := func() map[string]bool {
+		in, result := build()
+		Fit(in, result, 1500)
+		out := map[string]bool{}
+		for key, outcome := range result.Policies {
+			out[key.Name] = outcome.TooLarge
+		}
+		return out
+	}
+	first := verdict()
+	for range 10 {
+		assert.Equal(t, first, verdict())
+	}
+	assert.Contains(t, first, "gateway.a")
 }

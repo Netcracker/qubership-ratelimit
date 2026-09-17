@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/store"
 )
@@ -84,11 +85,18 @@ func draining(pod string) discoveryv1.Endpoint {
 }
 
 // answers replies with one generation for every caller.
-func answers(t *testing.T, applied map[string]store.Applied) http.HandlerFunc {
+func answers(t *testing.T, domains map[string]store.Applied) http.HandlerFunc {
+	t.Helper()
+	return reports(t, applied.Report{Domains: domains})
+}
+
+// reports replies with a whole report: the domains, and whatever else the
+// replica says about itself.
+func reports(t *testing.T, report applied.Report) http.HandlerFunc {
 	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, contract.AppliedPath, r.URL.Path, "the probe reads the documented path")
-		require.NoError(t, json.NewEncoder(w).Encode(applied))
+		require.NoError(t, json.NewEncoder(w).Encode(report))
 	}
 }
 
@@ -160,7 +168,7 @@ func TestObserve_oneSilentReplicaIsNamedButDoesNotBlindTheLeader(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		require.NoError(t, json.NewEncoder(w).Encode(appliedBy(7)))
+		require.NoError(t, json.NewEncoder(w).Encode(applied.Report{Domains: appliedBy(7)}))
 	}, ready("ratelimit-a"), ready("ratelimit-b"))
 
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
@@ -321,12 +329,12 @@ func counting(calls *atomic.Int32, next http.HandlerFunc) http.HandlerFunc {
 // still judged on its own out of the same answers.
 func TestObserve_theDomainsOfACycleShareOneRound(t *testing.T) {
 	var calls atomic.Int32
-	applied := map[string]store.Applied{
+	enforced := map[string]store.Applied{
 		"gateway.a": want(7),
 		"gateway.b": want(3),
 		"gateway.c": {Generation: 2, UID: "another-object"},
 	}
-	probe := fleet(t, counting(&calls, answers(t, applied)), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe := fleet(t, counting(&calls, answers(t, enforced)), ready("ratelimit-a"), ready("ratelimit-b"))
 	probe.Freshness = time.Minute
 
 	a, err := probe.Observe(context.Background(), "gateway.a", want(7), false)
@@ -552,4 +560,61 @@ func TestObserve_aViewSaysWhenItsRoundExpires(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, clock.base.Add(ProbeInterval), view.RefreshAt,
 		"a probe that reuses nothing wants the next look one interval after the ask")
+}
+
+// The split's probe. The operator knows nothing of the service's bind
+// address; the Service publishes the metrics port under a name, and the
+// probe reads the number from the EndpointSlice.
+func TestObserve_takesThePortFromTheSliceByName(t *testing.T) {
+	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
+	// The fixed port goes away; the slice carries it under the contract name.
+	number := int32(probe.Port)
+	probe.Port = 0
+	requireSlicePorts(t, probe, discoveryv1.EndpointPort{Name: new(contract.MetricsPortName), Port: &number})
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), view.Applied, "the probe did not reach the replica on the named port")
+}
+
+func TestObserve_aSliceWithoutTheNamedPortHasNoReplicas(t *testing.T) {
+	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
+	number := int32(probe.Port)
+	probe.Port = 0
+	// The port is there, under another name: a Service of the one-binary
+	// packaging, or a misnamed one. Its endpoints cannot be asked, and they
+	// are not counted silent: a stale replica is a replica the probe could
+	// reach and found behind, and this one it could not address at all.
+	requireSlicePorts(t, probe, discoveryv1.EndpointPort{Name: new("http-metrics"), Port: &number})
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Zero(t, view.Total, "an endpoint without an addressable port is not in the fraction")
+	assert.Empty(t, view.Silent)
+}
+
+// requireSlicePorts rewrites the ports of the probe's one slice.
+func requireSlicePorts(t *testing.T, probe *ReplicaProbe, ports ...discoveryv1.EndpointPort) {
+	t.Helper()
+	var slice discoveryv1.EndpointSlice
+	require.NoError(t, probe.Reader.(client.Client).Get(context.Background(),
+		client.ObjectKey{Namespace: testNamespace, Name: probeService + "-abc"}, &slice))
+	slice.Ports = ports
+	require.NoError(t, probe.Reader.(client.Client).Update(context.Background(), &slice))
+}
+
+// A replica that refused the manifest is named apart from one that lags: it
+// will never take the generation up, whatever the threshold.
+func TestObserve_namesAReplicaThatRefusedTheManifest(t *testing.T) {
+	probe := fleet(t, reports(t, applied.Report{
+		Domains:        map[string]store.Applied{testDomain: want(6)},
+		FormatVersions: []int{1},
+		Refusal:        &applied.Refusal{FormatVersion: 2, Reason: "manifest: unsupported format version: 2"},
+	}), ready("ratelimit-a"))
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ratelimit-a"}, view.Refusing)
+	assert.Equal(t, []string{"ratelimit-a"}, view.Behind, "a refusing replica is behind as well; it kept its snapshot")
+	assert.Zero(t, view.Applied)
 }

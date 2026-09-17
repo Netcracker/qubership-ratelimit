@@ -76,6 +76,16 @@ type RateLimitPolicyReconciler struct {
 
 	// Now is the clock, injectable for tests; nil means time.Now.
 	Now func() time.Time
+
+	// PropagationDeadline is how long a replica may lag a generation before
+	// it is ReplicaStale rather than Propagating. Zero means
+	// DefaultPropagationDeadline; the operator sets SplitPropagationDeadline.
+	PropagationDeadline time.Duration
+
+	// ConfigMapLimit is the size the namespace's configuration must fit,
+	// in bytes; zero runs no size fit. The operator sets policy.ConfigMapLimit
+	// and the one-binary packaging, which writes no such object, sets nothing.
+	ConfigMapLimit int
 }
 
 func (r *RateLimitPolicyReconciler) now() time.Time {
@@ -125,7 +135,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	object := *decoded
 
-	result, err := compile(ctx, r.Client, r.State, r.Namespace, object.Spec.Domain)
+	result, err := compile(ctx, r.Client, r.State, r.Namespace, object.Spec.Domain, r.ConfigMapLimit)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -165,7 +175,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// The clock for "is this a rollout or a breakage" starts when this
 	// generation began spreading, so it is read before the condition is
 	// overwritten and rewound by the write below.
-	judged := judge(outcome, view, probeErr, readyAge(&object, now))
+	judged := judge(outcome, view, probeErr, readyAge(&object, now), r.PropagationDeadline)
 	setReadyCondition(&object.Status.Conditions,
 		judged.ready, judged.readyReason, judged.readyMessage, object.Generation, now)
 	setCondition(&object.Status.Conditions, v1alpha1.ConditionStalled,

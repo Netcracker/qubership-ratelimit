@@ -48,6 +48,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/controller"
 	"github.com/netcracker/qubership-ratelimit/internal/management"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
+	"github.com/netcracker/qubership-ratelimit/internal/process"
 	"github.com/netcracker/qubership-ratelimit/internal/records"
 	"github.com/netcracker/qubership-ratelimit/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/internal/state"
@@ -111,7 +112,7 @@ func main() {
 	setupLog = logging.GetLogger(loggerName)
 	// Route controller-runtime (logr) and client-go (klog) through the platform
 	// logger too.
-	logrLogger := newLogrLogger()
+	logrLogger := process.NewLogrLogger(loggerName)
 	ctrl.SetLogger(logrLogger)
 	klog.SetLogger(logrLogger)
 
@@ -230,15 +231,6 @@ func redisDatabase() int {
 	return database
 }
 
-// getCloudNamespace returns the namespace the manager watches.
-func getCloudNamespace() (string, error) {
-	namespace := configloader.GetOrDefaultString("cloud.namespace", "")
-	if namespace == "" {
-		return "", fmt.Errorf("CLOUD_NAMESPACE must be set")
-	}
-	return namespace, nil
-}
-
 // run wires the process together and hands it to the manager.
 //
 // Every replica runs both halves: the controller that writes status and the
@@ -246,7 +238,7 @@ func getCloudNamespace() (string, error) {
 // function, which keeps the shape of the process readable here - namespace,
 // manager, controllers, endpoint, probes.
 func run(options runOptions) error {
-	namespace, err := getCloudNamespace()
+	namespace, err := process.Namespace()
 	if err != nil {
 		return err
 	}
@@ -273,7 +265,7 @@ func run(options runOptions) error {
 	// adds is what a new leader sweeps retired domains by.
 	lastGood := state.New(stateClient, namespace, map[string]string{
 		"app.kubernetes.io/managed-by": managedBy,
-	}, newLogrLogger().WithName("state"), mgr.GetEventRecorder("ratelimit"))
+	}, process.NewLogrLogger(loggerName).WithName("state"), mgr.GetEventRecorder("ratelimit"))
 
 	if err := addControllers(mgr, options, namespace, lastGood); err != nil {
 		return err
@@ -305,7 +297,7 @@ func run(options runOptions) error {
 		metrics.SetLeader(true)
 	}()
 
-	setupLog.Infof("starting service namespace=%v leaderIdentity=%v", namespace, leaderIdentity())
+	setupLog.Infof("starting service namespace=%v leaderIdentity=%v", namespace, process.LeaderIdentity())
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		return fmt.Errorf("run manager: %w", err)
 	}
@@ -351,9 +343,13 @@ func newManager(
 		// that is not elected is two replicas writing conditions over each
 		// other, so there is no deployment this is right to switch off.
 		LeaderElection:                      true,
-		LeaderElectionID:                    "ratelimit.netcracker.com",
+		LeaderElectionID:                    process.LeaseName,
 		LeaderElectionResourceLockInterface: lock,
-		Cache:                               controller.CacheOptions(namespace),
+		// Read only when the lock is nil, which is a run outside a pod:
+		// controller-runtime then builds the lock itself and has no pod to
+		// take the namespace from.
+		LeaderElectionNamespace: namespace,
+		Cache:                   controller.CacheOptions(namespace),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create manager: %w", err)
@@ -361,40 +357,13 @@ func newManager(
 	return mgr, nil
 }
 
-// leaderIdentity is the name this replica signs the lease with: the pod's own
-// name, from the Downward API. It is empty outside a pod, where there is no
-// pod name to borrow.
-func leaderIdentity() string {
-	return os.Getenv("POD_NAME")
-}
-
-// leaderLock builds the lease this replica competes for, signed with the pod
-// name. It returns a nil lock when POD_NAME is unset, which hands the choice
-// of identity back to controller-runtime: outside a pod - a local run, an
-// envtest - the hostname is the only name there is, and refusing to start
-// would make the binary unrunnable off-cluster for no gain.
-//
-// The renew deadline mirrors controller-runtime's own default, because it only
-// sizes the client timeout of the lock; the manager keeps timing the election
-// itself.
+// leaderLock is process.LeaderLock with the warning a hostname-signed lease
+// deserves, because this binary's status messages name replicas by pod name.
 func leaderLock(config *rest.Config, namespace string) (resourcelock.Interface, error) {
-	identity := leaderIdentity()
-	if identity == "" {
+	if process.LeaderIdentity() == "" {
 		setupLog.Warnf("POD_NAME is not set, so the lease is signed with the hostname")
-		return nil, nil
 	}
-	lock, err := resourcelock.NewFromKubeconfig(
-		resourcelock.LeasesResourceLock,
-		namespace,
-		"ratelimit.netcracker.com",
-		resourcelock.ResourceLockConfig{Identity: identity},
-		config,
-		10*time.Second,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create the leader election lock: %w", err)
-	}
-	return lock, nil
+	return process.LeaderLock(config, namespace)
 }
 
 // addControllers registers the reconcilers that write object status. They are
@@ -553,7 +522,7 @@ func addRateLimitEndpoint(
 		Store:      ruleStore,
 		Namespace:  namespace,
 		Debounce:   options.storeDebounce,
-		Log:        newLogrLogger().WithName("store"),
+		Log:        process.NewLogrLogger(loggerName).WithName("store"),
 		Counters:   backend.store,
 		CacheStats: cacheStats,
 		State:      lastGood,
@@ -569,7 +538,7 @@ func addRateLimitEndpoint(
 		Server: rls.NewServer(ruleStore, logging.GetLogger(loggerName+"/rls"),
 			rls.WithNearLimitRatio(nearLimitRatio())),
 		DrainTimeout: options.drainTimeout,
-		Log:          newLogrLogger().WithName("rls"),
+		Log:          process.NewLogrLogger(loggerName).WithName("rls"),
 	}
 	if err := mgr.Add(endpoint.runner); err != nil {
 		return endpoint, fmt.Errorf("add rls server: %w", err)

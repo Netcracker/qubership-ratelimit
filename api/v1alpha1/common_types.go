@@ -60,10 +60,24 @@ const (
 	// ReasonProbeFailed marks a leader that could not observe the replicas at
 	// all, which is the one case where Ready is Unknown rather than false.
 	ReasonProbeFailed = "ProbeFailed"
+
+	// ReasonConfigMapTooLarge marks a latest generation that compiles but does
+	// not fit: with it, the compressed configuration of the namespace would
+	// exceed what one ConfigMap holds. The last-good generation stays
+	// enforced. It is distinct from NotCompiled because the fix is different:
+	// the spec is right, the namespace is full.
+	ReasonConfigMapTooLarge = "ConfigMapTooLarge"
+
+	// ReasonReplicaFormatUnsupported marks a replica that refused the
+	// manifest the operator wrote, because its format version is one the
+	// replica does not read. The replica keeps its snapshot. The fix is the
+	// upgrade order: the service before the operator.
+	ReasonReplicaFormatUnsupported = "ReplicaFormatUnsupported"
 )
 
 // Reason for the Stalled condition when it is false; the true cases reuse
-// ReasonReplicaStale and ReasonNotCompiled.
+// ReasonReplicaStale, ReasonNotCompiled, ReasonConfigMapTooLarge, and
+// ReasonReplicaFormatUnsupported.
 const ReasonProgressing = "Progressing"
 
 // Reasons recorded in RateLimitPolicyStatus.RuleProblems.
