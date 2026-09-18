@@ -265,13 +265,13 @@ jobs:
       # A satellite namespace runs no component. What it gets is the gateway
       # filters, and they have to point at the baseline's Service by its fixed
       # name - a satellite has no other way to know how the baseline was
-      # installed. Both halves are checked for the one-binary chart and the
-      # operator chart: nothing but filters, and the address they carry. The
-      # service chart renders nothing there at all.
+      # installed. Both halves are checked for the operator chart: nothing but
+      # filters, and the address they carry. The service chart renders nothing
+      # there at all.
       - name: Check what a satellite renders
         run: |
           set -o pipefail
-          for chart in ratelimit ratelimit-operator; do
+          for chart in ratelimit-operator; do
             rendered=$(helm template t helm-templates/$chart -n satellite \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set MONITORING_ENABLED=true --set management.enabled=true \
@@ -304,7 +304,7 @@ jobs:
       # gateway itself - and nothing in a lint or a unit test can see that.
       - name: Check what the management AuthorizationPolicy allows
         run: |
-          for chart in ratelimit ratelimit-service; do
+          for chart in ratelimit-service; do
             rendered=$(helm template t helm-templates/$chart \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set management.enabled=true \
@@ -322,7 +322,7 @@ jobs:
       - name: Check that the management port is never rendered alone
         run: |
           set -o pipefail
-          for chart in ratelimit ratelimit-service; do
+          for chart in ratelimit-service; do
             manifests=$(helm template t helm-templates/$chart \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set management.enabled=true)
@@ -343,7 +343,7 @@ jobs:
           identity=(--set management.enabled=true
             --set management.claims.roles=realm_access.roles
             --set 'management.roles.viewer={rl-view}' --set 'management.roles.operator={rl-admin}')
-          for chart in ratelimit ratelimit-service; do
+          for chart in ratelimit-service; do
             render() {
               helm template t helm-templates/$chart \
                 -f helm-templates/$chart/resource-profiles/dev.yaml "${identity[@]}" "$@"
@@ -370,7 +370,7 @@ jobs:
       # The chart refuses to render it, with the message the runbook names.
       - name: Check that the in-process store is refused above one replica
         run: |
-          for chart in ratelimit ratelimit-service; do
+          for chart in ratelimit-service; do
             set +e
             out=$(helm template t helm-templates/$chart \
               -f helm-templates/$chart/resource-profiles/prod.yaml 2>&1)
@@ -390,7 +390,7 @@ jobs:
         run: make sync-helm-crds
       - name: Fail on drift between the generated files and the commit
         run: |
-          if ! git diff --exit-code -- config/rbac config/crd/bases helm-templates/ratelimit/templates helm-templates/ratelimit-operator/templates; then
+          if ! git diff --exit-code -- config/rbac config/crd/bases helm-templates/ratelimit-operator/templates; then
             echo "::error::generated manifests drifted from the commit: run 'make sync-helm-crds' and commit the result"
             exit 1
           fi

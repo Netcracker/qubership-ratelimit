@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
@@ -83,29 +85,41 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 	})
 
 	It("renders the gateway filters in the satellite and nothing else", func() {
+		// The operator chart renders the filters, and only them; the service
+		// chart renders nothing. The objects are listed by each chart's
+		// label, since that is what each chart puts on what it renders.
 		filters := &unstructured.UnstructuredList{}
 		filters.SetGroupVersionKind(schema.GroupVersionKind{
 			Group: "networking.istio.io", Version: "v1alpha3", Kind: "EnvoyFilterList"})
 		Expect(k8s.List(ctx, filters, client.InNamespace(satellite),
-			client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"})).To(Succeed())
+			client.MatchingLabels{"app.kubernetes.io/name": operatorChart})).To(Succeed())
 		Expect(filters.Items).To(HaveLen(2), "one filter per enabled gateway")
 
 		// No component: a satellite that rendered a Deployment would run a
 		// second limiter counting in its own store, and the baseline's
-		// gateways would be none the wiser.
-		owned := client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"}
-		var deployments appsv1.DeploymentList
-		Expect(k8s.List(ctx, &deployments, client.InNamespace(satellite), owned)).To(Succeed())
-		Expect(deployments.Items).To(BeEmpty(), "a satellite rendered a Deployment")
-		var services corev1.ServiceList
-		Expect(k8s.List(ctx, &services, client.InNamespace(satellite), owned)).To(Succeed())
-		Expect(services.Items).To(BeEmpty(), "a satellite rendered a Service")
-		var accounts corev1.ServiceAccountList
-		Expect(k8s.List(ctx, &accounts, client.InNamespace(satellite), owned)).To(Succeed())
-		Expect(accounts.Items).To(BeEmpty(), "a satellite rendered a ServiceAccount")
-		var roles rbacv1.RoleList
-		Expect(k8s.List(ctx, &roles, client.InNamespace(satellite), owned)).To(Succeed())
-		Expect(roles.Items).To(BeEmpty(), "a satellite rendered a Role")
+		// gateways would be none the wiser; a satellite that rendered an
+		// operator would write a status nobody reads. Neither chart leaves
+		// an account or a Role behind either.
+		for _, chart := range []string{operatorChart, serviceChart} {
+			owned := client.MatchingLabels{"app.kubernetes.io/name": chart}
+			var deployments appsv1.DeploymentList
+			Expect(k8s.List(ctx, &deployments, client.InNamespace(satellite), owned)).To(Succeed())
+			Expect(deployments.Items).To(BeEmpty(), "a satellite rendered a Deployment of %s", chart)
+			var services corev1.ServiceList
+			Expect(k8s.List(ctx, &services, client.InNamespace(satellite), owned)).To(Succeed())
+			Expect(services.Items).To(BeEmpty(), "a satellite rendered a Service of %s", chart)
+			var accounts corev1.ServiceAccountList
+			Expect(k8s.List(ctx, &accounts, client.InNamespace(satellite), owned)).To(Succeed())
+			Expect(accounts.Items).To(BeEmpty(), "a satellite rendered a ServiceAccount of %s", chart)
+			var roles rbacv1.RoleList
+			Expect(k8s.List(ctx, &roles, client.InNamespace(satellite), owned)).To(Succeed())
+			Expect(roles.Items).To(BeEmpty(), "a satellite rendered a Role of %s", chart)
+		}
+		var maps corev1.ConfigMapList
+		Expect(k8s.List(ctx, &maps, client.InNamespace(satellite))).To(Succeed())
+		for _, cm := range maps.Items {
+			Expect(cm.Name).NotTo(Equal(contract.ConfigMapName), "a satellite holds a configuration ConfigMap")
+		}
 	})
 
 	It("configures the satellite gateway to call the baseline's RLS", func() {
@@ -113,7 +127,7 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		// object: the object is what the chart wrote, the dump is what the
 		// gateway is actually going to call, and a filter Istio rejected
 		// leaves the first in place and the second empty.
-		expected := "outbound|9000||ratelimit." + namespace + ".svc.cluster.local"
+		expected := fmt.Sprintf("outbound|%d||%s.%s.svc.cluster.local", contract.GRPCPort, contract.ServiceName, namespace)
 		Eventually(func() string {
 			return rateLimitClusterOfIn(satellite, gatewayPodIn(satellite, "public-gateway").Name)
 		}).WithTimeout(time.Minute).WithPolling(5*time.Second).Should(Equal(expected),
@@ -130,10 +144,9 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		waitGatewayServes("public-gateway", probePath)
 		waitGatewayServesIn(satellite, "public-gateway", probePath)
 
-		before := storeRebuilds()
 		Expect(apply(newPolicy(domain, hourlyGCRA(probePrefix, "per-path", limit)))).To(Succeed())
 		applied = true
-		waitStoreRebuilt(before)
+		waitApplied(domain)
 
 		// One request through each gateway spends the two the window allows.
 		// The order is the point: the satellite's request has to land in the
@@ -182,7 +195,7 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 
 		// And nothing has claimed it. A status would mean a controller saw the
 		// object; a 30 s window covers several probe intervals of the
-		// baseline's leader, which is the only controller there is.
+		// baseline's operator, which is the only controller there is.
 		// The error is returned, not swallowed: BeEmpty accepts nil, so a
 		// Get that failed would otherwise read as "no status".
 		Consistently(func() ([]metav1.Condition, error) {

@@ -124,6 +124,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// what keeps an alert on a stalled domain from firing forever on
 			// an object nobody can fix, because it no longer exists.
 			metrics.DropFleet(req.Name)
+			metrics.DropPolicy(req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -206,6 +207,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		Stalled: judged.stalled == metav1.ConditionTrue,
 		Reason:  judged.stalledReason,
 	})
+	metrics.PublishPolicy(policyView(&object, outcome, judged))
 
 	written, err := writeStatus(ctx, r.Client, &object, before, &object.Status)
 	if err != nil {
@@ -319,4 +321,37 @@ func (r *RateLimitPolicyReconciler) policiesBehind(
 		})
 	}
 	return requests
+}
+
+// policyView is the status of one policy as the scrape reports it: ready by
+// the fleet's judgement, with the reason of the negative condition, and the
+// facts of the compile. In the one binary the updater published the same
+// series from its own compile; in the split the operator is the only place
+// that judges a policy, so it publishes them from here.
+func policyView(object *v1alpha1.RateLimitPolicy, outcome policy.Outcome, judged fleetStatus) metrics.PolicyView {
+	lag := object.Generation
+	if outcome.ActiveGeneration > 0 {
+		lag = object.Generation - outcome.ActiveGeneration
+	}
+	var blocking, info int
+	for _, problem := range outcome.Problems {
+		if v1alpha1.BlockingProblem(problem.Reason) {
+			blocking++
+		} else {
+			info++
+		}
+	}
+	view := metrics.PolicyView{
+		Domain:           object.Spec.Domain,
+		Ready:            judged.ready == metav1.ConditionTrue,
+		Reason:           judged.readyReason,
+		Enforced:         outcome.ActiveGeneration != 0,
+		GenerationLag:    lag,
+		BlockingProblems: blocking,
+		InfoProblems:     info,
+	}
+	if view.Ready {
+		view.Reason = ""
+	}
+	return view
 }

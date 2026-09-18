@@ -17,7 +17,7 @@ import (
 // with failClosed=false, so a store outage must widen into admitted traffic,
 // not refusals - and the exposure must be visible: unavailable verdicts and
 // store errors, not a quiet pass. When the store returns, the limits bite
-// again without anyone touching the operator.
+// again without anyone touching the service.
 var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), func() {
 	const (
 		domain    = "gateway.public"
@@ -60,10 +60,9 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 			waitGatewayServes("public-gateway", probePath)
 			// Far above the burst: every probe is an admission, and every
 			// admission is a store roundtrip - which is all this suite needs.
-			before := storeRebuilds()
 			Expect(apply(newPolicy(domain,
 				prefixLimits(probePath, "total", nil, 1000, 60)))).To(Succeed())
-			waitStoreRebuilt(before)
+			waitApplied(domain)
 		}
 	})
 	AfterAll(func() {
@@ -83,7 +82,7 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 		before := scrapeAllReplicas()
 		scaleRedis(0)
 
-		// The gateway must keep admitting - fail-open - while the operator
+		// The gateway must keep admitting - fail-open - while the service
 		// reports what is happening: unavailable verdicts and store errors.
 		Eventually(func() bool {
 			codes := gatewayBurst("public-gateway", probePath, 2, nil)
@@ -118,6 +117,6 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 				counterSum(mid, "ratelimit_checks_total",
 					map[string]string{"domain": domain, "verdict": "ok"}) > 0
 		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(BeTrue(),
-			"no ok verdict after the store returned; the operator did not reconnect")
+			"no ok verdict after the store returned; the service did not reconnect")
 	})
 })

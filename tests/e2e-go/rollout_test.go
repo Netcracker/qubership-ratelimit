@@ -15,14 +15,16 @@ import (
 )
 
 // Ready is a statement about every replica, which makes a rollout the case it
-// is easiest to get wrong: the pods change while the rules do not. A leader
+// is easiest to get wrong: the pods change while the rules do not. An operator
 // counting a draining pod sees applied fall below total and reports the domain
-// as not ready, and an operator watching that condition, or Argo CD waiting on
+// as not ready, and a person watching that condition, or Argo CD waiting on
 // it, is told a change is in flight when nothing about the policy moved.
 //
 // Nothing else in the suite covers it. The unit tests pin the arithmetic on a
 // fabricated EndpointSlice; only a real rollout produces a pod that is Ready
-// and Terminating at the same time.
+// and Terminating at the same time. The second half is the opposite case: a
+// change to the policy, which does go through the kubelet's projection, and
+// has to read as one on its way to every replica.
 var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 	const domain = "gateway.rollout"
 	var (
@@ -31,13 +33,12 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 	)
 
 	BeforeAll(func() {
-		// At one replica this spec cannot see what it exists to catch. The
-		// rollout then replaces the pod holding the lease, and between the
-		// old leader's exit and the new one's first reconcile nobody writes
-		// the status: the samples read a frozen True, and the new leader's
-		// first write is already whole. With two, a surviving leader writes
-		// the status through the replacement of the other, and the assertion
-		// on lastCheckTime below is the proof that one did.
+		// At one replica the rollout is one pod leaving and one arriving, and
+		// the fraction reads 1/1 at both ends; with two, one replica serves
+		// through the replacement of the other, and the fraction has a
+		// draining pod to get wrong. The operator writes the status
+		// throughout, and the assertion on lastCheckTime below is the proof
+		// that it did.
 		fleet = scaleFleet(2)
 
 		Expect(apply(newPolicy(domain, totalLimits(10, 60)))).To(Succeed())
@@ -65,7 +66,7 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 		before, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
 		checkedBefore := before.Status.Replicas.LastCheckTime
-		Expect(checkedBefore).NotTo(BeNil(), "no leader has probed the fleet yet")
+		Expect(checkedBefore).NotTo(BeNil(), "the operator has not probed the fleet yet")
 
 		// Sampled rather than checked at the ends, because the failure this
 		// pins is transient by nature: the fraction is wrong only while a pod
@@ -103,7 +104,7 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 			}
 		}()
 
-		rolloutRestart(operatorDeployment())
+		rolloutRestart(serviceDeployment())
 
 		close(stop)
 		<-ended
@@ -115,13 +116,45 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 
 		// The samples above are evidence only if somebody was writing the
 		// status while they were taken. A moving lastCheckTime is that
-		// somebody: a leader that probed the fleet during the rollout.
+		// somebody: the operator probing the fleet during the rollout.
 		after, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(after.Status.Replicas.LastCheckTime).NotTo(BeNil())
 		Expect(after.Status.Replicas.LastCheckTime.Time).To(BeTemporally(">", checkedBefore.Time),
-			"lastCheckTime did not move: no leader wrote the status while the samples were taken, "+
+			"lastCheckTime did not move: the operator wrote no status while the samples were taken, "+
 				"so a frozen True would have passed")
+	})
+
+	It("reads a policy change as a rollout on its way to the replicas", func() {
+		// A new generation reaches the replicas through the ConfigMap and the
+		// kubelet's projection of it, one pod at a time. Ready leaves True
+		// while that happens and comes back once every replica applied it.
+		// What is asserted is the sequence, never its duration: the window
+		// is the kubelet's sync period, seconds here and a minute in
+		// production, and a spec that timed it would pin the cluster's
+		// configuration rather than the operator's behavior. The reasons on
+		// the way are Reconciling, no replica has it yet, and Propagating,
+		// some have; which of the two a sample catches depends on the
+		// kubelet's timing across the nodes.
+		Expect(policyCondition(domain, "Ready")()).To(Equal("True"), "the domain was not ready before the change")
+		p, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+		p.Spec.Limits[0].Rules[0].Rates[0].Requests++
+		Expect(k8s.Update(ctx, p)).To(Succeed())
+
+		var seen []string
+		Eventually(func() []string {
+			reason := readyReason(domain)()
+			if reason == v1alpha1.ReasonReconciling || reason == v1alpha1.ReasonPropagating {
+				seen = append(seen, reason)
+			}
+			return seen
+		}).WithTimeout(time.Minute).WithPolling(200*time.Millisecond).ShouldNot(BeEmpty(),
+			"the change reached every replica without Ready ever reading as in flight")
+		Eventually(readyReason(domain)).WithTimeout(2*time.Minute).WithPolling(time.Second).
+			Should(Equal(v1alpha1.ReasonAllReplicas), "Ready did not come back once the change propagated")
+		Expect(policyCondition(domain, "Stalled")()).To(Equal("False"),
+			"a rollout that completed was reported as stalled")
 	})
 
 	It("counts the whole fleet once the rollout settles", func() {

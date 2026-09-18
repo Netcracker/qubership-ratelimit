@@ -15,7 +15,7 @@ import (
 )
 
 // Everything here is a property the in-process store cannot have, which is
-// the only reason this suite exists: that the operator really selected Redis
+// the only reason this suite exists: that the service really selected Redis
 // rather than falling back to memory, that the counters live in Redis under
 // the documented key shape, and - the one that matters - that a budget
 // already spent survives the process that spent it.
@@ -52,10 +52,9 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 			// restart straddling a boundary cannot hand the budget back
 			// and blame Redis for it.
 			waitGatewayServes("public-gateway", probePath)
-			before := storeRebuilds()
 			Expect(apply(newPolicy(domain,
 				prefixLimits(probePath, "total", nil, limit, 3600)))).To(Succeed())
-			waitStoreRebuilt(before)
+			waitApplied(domain)
 		}
 	})
 	AfterAll(func() {
@@ -66,10 +65,10 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 
 	It("selected Redis rather than falling back", func() {
 		// A wrong address, an unreachable host or a typo in the values would
-		// leave the operator counting in memory, and every limit would still
+		// leave the service counting in memory, and every limit would still
 		// look enforced on one replica. The startup line tells the two apart.
 		var backend string
-		for _, pod := range operatorPods() {
+		for _, pod := range servicePods() {
 			for _, line := range strings.Split(podLogs(pod.Name, nil), "\n") {
 				if strings.Contains(line, "counter store selected backend=") {
 					backend = line
@@ -80,7 +79,7 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 			}
 		}
 		Expect(backend).To(ContainSubstring("redis"),
-			"the operator did not select the Redis store (startup said: %q)", backend)
+			"the service did not select the Redis store (startup said: %q)", backend)
 	})
 
 	It("enforces a declared limit through the shared store", func() {
@@ -127,27 +126,27 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 			"no counter at the documented key; the domain holds %v", keys)
 	})
 
-	It("keeps a spent budget across an operator restart", func() {
+	It("keeps a spent budget across a service restart", func() {
 		// This is the whole point of the shared store: an in-process counter
 		// is lost with its pod, so the budget would come back.
-		rolloutRestart(operatorDeployment())
+		rolloutRestart(serviceDeployment())
 
 		// Only the store has to be back, and it is waited for through the
 		// rebuild it logs. Probing the gateway here would be worse than
 		// useless: the budget is spent, so every probe answers 429 and a
 		// warm-up that insists on 2xx would never finish. The replacement
 		// pod starts a fresh log, so its first rebuild line is the signal.
-		waitStoreRebuilt(0)
+		waitApplied(domain)
 		Expect(gatewayGet("public-gateway", probePath, nil)).To(Equal(429),
 			"the budget came back after a restart; the counters did not outlive the process")
 	})
 })
 
-// redisAddresses reads what the release pointed the operator at; empty means
+// redisAddresses reads what the release pointed the service at; empty means
 // the install counts in process and this suite has nothing to prove.
 func redisAddresses() string {
 	var dep appsv1.Deployment
-	if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: operatorDeployment()}, &dep); err != nil {
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: serviceDeployment()}, &dep); err != nil {
 		return ""
 	}
 	for _, env := range dep.Spec.Template.Spec.Containers[0].Env {
@@ -158,8 +157,8 @@ func redisAddresses() string {
 	return ""
 }
 
-// redisCli runs one redis-cli command against the store the operator was
-// pointed at. The pod is resolved through the Service the operator dials, so
+// redisCli runs one redis-cli command against the store the service was
+// pointed at. The pod is resolved through the Service the service dials, so
 // the suite works against any Redis the release names rather than one it
 // hardcodes.
 func redisCli(addresses string, args ...string) (string, error) {

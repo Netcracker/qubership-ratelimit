@@ -1,9 +1,9 @@
 # End-to-end tests
 #
-# Stands up a kind cluster with the platform's own mesh — qubership-istio for
-# the distribution and qubership-core-mesh-config for the gateways — installs
-# the chart with an image built from the checked-out sources, and runs the
-# Ginkgo suites in tests/e2e-go.
+# Stands up a kind cluster with the platform's own mesh, qubership-istio for
+# the distribution and qubership-core-mesh-config for the gateways, installs
+# the two charts of the split with images built from the checked-out sources,
+# the operator first, and runs the Ginkgo suites in tests/e2e-go.
 
 name: E2E
 
@@ -32,7 +32,8 @@ env:
   # as a satellite of the first. The satellite suite reads it and skips when
   # it is unset, so a stand without one still runs the rest.
   E2E_SATELLITE_NAMESPACE: ratelimit-e2e-sat
-  IMAGE: ratelimit:e2e
+  OPERATOR_IMAGE: ratelimit-operator:e2e
+  SERVICE_IMAGE: ratelimit-service:e2e
 
 jobs:
   e2e:
@@ -65,25 +66,42 @@ jobs:
 
       # The layer cache carries the base images and the module-download
       # layer between runs; only the build of changed sources remains.
-      # load: true keeps the image in the local daemon for kind to side-load.
-      - name: Build operator image
+      # load: true keeps the images in the local daemon for kind to side-load.
+      - name: Build the operator image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          file: operator/Dockerfile
           load: true
-          tags: ${{ env.IMAGE }}
-          cache-from: type=gha,scope=e2e-image
-          cache-to: type=gha,scope=e2e-image,mode=max
+          tags: ${{ env.OPERATOR_IMAGE }}
+          cache-from: type=gha,scope=e2e-operator-image
+          cache-to: type=gha,scope=e2e-operator-image,mode=max
 
+      - name: Build the service image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: service/Dockerfile
+          load: true
+          tags: ${{ env.SERVICE_IMAGE }}
+          cache-from: type=gha,scope=e2e-service-image
+          cache-to: type=gha,scope=e2e-service-image,mode=max
+
+      # The cluster configuration lowers the kubelet's sync period, so that
+      # a ConfigMap update reaches the service's volume in seconds rather
+      # than in the minute production takes.
       - name: Create kind cluster
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: ratelimit-e2e
+          config: tests/e2e/kind-config.yaml
 
-      # kind nodes cannot reach the local docker daemon, so the image has to be
-      # side-loaded. The chart's IfNotPresent policy then uses it as-is.
-      - name: Load the image into kind
-        run: kind load docker-image "${IMAGE}" --name ratelimit-e2e
+      # kind nodes cannot reach the local docker daemon, so the images have to
+      # be side-loaded. The charts' IfNotPresent policy then uses them as-is.
+      - name: Load the images into kind
+        run: |
+          kind load docker-image "${OPERATOR_IMAGE}" --name ratelimit-e2e
+          kind load docker-image "${SERVICE_IMAGE}" --name ratelimit-e2e
 
       # Captures every pod's stdout from here on - including pods the suites
       # kill, whose logs kubectl cannot show afterwards. Collected and
@@ -138,27 +156,37 @@ jobs:
           kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/redis.yaml
           kubectl rollout status deployment/e2e-redis -n "${E2E_NAMESPACE}" --timeout=120s
 
-      - name: Install the chart
+      - name: Install the charts
         run: |
-          # A profile is mandatory: values.yaml carries no resource keys, so the
+          # A profile is mandatory: values.yaml carries no resource keys, so a
           # chart is always installed the way it is in production.
           #
+          # The operator first, the way a fresh installation is documented,
+          # though the order does not matter to a fresh one: the service waits
+          # NotReady until the operator writes. Neither release is named after
+          # its chart. The Service has a fixed name that satellites compute
+          # their RLS address from, and with the release named ratelimit the
+          # two coincide and nothing in the suite can tell a fixed name from a
+          # derived one.
+          helm upgrade --install ratelimit-operator-baseline helm-templates/ratelimit-operator \
+            --namespace "${E2E_NAMESPACE}" \
+            -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
+            --set logLevel=debug \
+            --set image.repository=ratelimit-operator \
+            --set image.tag=e2e \
+            --wait --timeout 5m
+
           # The management identity is not the default either: the roles
           # under a nested claim and IdP role names of their own. The suite
           # reads what the release configured off the pod and mints its
           # tokens to match, so a service that ignored these values would
           # refuse every token the suite sends. With the defaults the same
           # run passes whether the values are read or not.
-          #
-          # The release is not named after the chart. The Service has a fixed
-          # name that satellites compute their RLS address from, and with the
-          # release named ratelimit the two coincide and nothing in the suite
-          # can tell a fixed name from a derived one.
-          helm upgrade --install ratelimit-baseline helm-templates/ratelimit \
+          helm upgrade --install ratelimit-service-baseline helm-templates/ratelimit-service \
             --namespace "${E2E_NAMESPACE}" \
-            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
             --set logLevel=debug \
-            --set image.repository=ratelimit \
+            --set image.repository=ratelimit-service \
             --set image.tag=e2e \
             --set redis.addresses=e2e-redis:6379 \
             --set management.enabled=true \
@@ -198,12 +226,18 @@ jobs:
             kubectl rollout status "deployment/${gw}-istio" -n "${E2E_SATELLITE_NAMESPACE}" --timeout=300s
           done
 
-          # The chart as a satellite: BASELINE_ORIGIN names the baseline, and
-          # that alone turns the render into the gateway filters. No store,
-          # no image - there is no Deployment for either to matter to.
-          helm upgrade --install ratelimit-satellite helm-templates/ratelimit \
+          # The same pair of charts as a satellite: BASELINE_ORIGIN names the
+          # baseline, and that alone turns the operator chart's render into
+          # the gateway filters and the service chart's into nothing. No
+          # store, no image: there is no Deployment for either to matter to.
+          helm upgrade --install ratelimit-operator-satellite helm-templates/ratelimit-operator \
             --namespace "${E2E_SATELLITE_NAMESPACE}" \
-            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+            -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
+            --set BASELINE_ORIGIN="${E2E_NAMESPACE}" \
+            --wait --timeout 2m
+          helm upgrade --install ratelimit-service-satellite helm-templates/ratelimit-service \
+            --namespace "${E2E_SATELLITE_NAMESPACE}" \
+            -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
             --set BASELINE_ORIGIN="${E2E_NAMESPACE}" \
             --wait --timeout 2m
 
@@ -272,7 +306,9 @@ jobs:
           kubectl get all,ratelimitpolicies,envoyfilters,gateways.gateway.networking.k8s.io,httproutes \
             -n "${E2E_NAMESPACE}" -o wide || true
           kubectl describe pods -n "${E2E_NAMESPACE}" || true
-          kubectl logs -n "${E2E_NAMESPACE}" -l app.kubernetes.io/name=ratelimit --tail=200 || true
+          kubectl get configmap ratelimit-config -n "${E2E_NAMESPACE}" -o yaml || true
+          kubectl logs -n "${E2E_NAMESPACE}" -l app.kubernetes.io/name=ratelimit-operator --tail=200 || true
+          kubectl logs -n "${E2E_NAMESPACE}" -l app.kubernetes.io/name=ratelimit-service --tail=200 || true
           kubectl get all,envoyfilters,gateways.gateway.networking.k8s.io,httproutes \
             -n "${E2E_SATELLITE_NAMESPACE}" -o wide || true
           kubectl get pods -n istio-system -o wide || true

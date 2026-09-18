@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"sync"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -75,9 +76,53 @@ const (
 // stateView holds the latest published view; nil until the first rebuild.
 var stateView atomic.Pointer[StateView]
 
-// PublishState makes a view the one the next scrape reports. The updater
-// calls it after every successful rebuild.
+// PublishState makes a view the one the next scrape reports. The service's
+// applier calls it after every apply, with the domains it enforces; the one
+// binary's updater calls it with the policies as well.
 func PublishState(view *StateView) { stateView.Store(view) }
+
+// policyViews holds the policy status published one domain at a time, by
+// the operator's status reconciler: it judges one policy per reconcile and
+// has no whole view to publish. While it holds anything, the scrape reports
+// the policy series from it rather than from the view, so the one binary's
+// leader reports the fleet's judgement and its followers their own compile.
+var (
+	policyMu    sync.Mutex
+	policyViews = map[string]PolicyView{}
+)
+
+// PublishPolicy records the status of one policy for the next scrape.
+func PublishPolicy(view PolicyView) {
+	policyMu.Lock()
+	defer policyMu.Unlock()
+	policyViews[view.Domain] = view
+}
+
+// DropPolicy forgets a domain whose policy is gone, so that its series stop
+// being scraped from the operator that judged it.
+func DropPolicy(domain string) {
+	policyMu.Lock()
+	defer policyMu.Unlock()
+	delete(policyViews, domain)
+}
+
+// publishedPolicies returns the policy views the scrape reports: the ones
+// published one at a time when there are any, else the whole view's.
+func publishedPolicies(view *StateView) []PolicyView {
+	policyMu.Lock()
+	defer policyMu.Unlock()
+	if len(policyViews) == 0 {
+		if view == nil {
+			return nil
+		}
+		return view.Policies
+	}
+	out := make([]PolicyView, 0, len(policyViews))
+	for _, p := range policyViews {
+		out = append(out, p)
+	}
+	return out
+}
 
 var (
 	descPolicyReady = prometheus.NewDesc("ratelimit_policy_ready",
@@ -119,18 +164,17 @@ func (stateCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (stateCollector) Collect(ch chan<- prometheus.Metric) {
 	view := stateView.Load()
-	if view == nil {
-		return
+	if view != nil {
+		for _, d := range view.Domains {
+			ch <- prometheus.MustNewConstMetric(descDomainBlocks,
+				prometheus.GaugeValue, float64(d.Blocks), d.Domain)
+			ch <- prometheus.MustNewConstMetric(descDomainBuckets,
+				prometheus.GaugeValue, float64(d.DecisionBuckets), d.Domain)
+			ch <- prometheus.MustNewConstMetric(descPolicyAppliedGeneration,
+				prometheus.GaugeValue, float64(d.AppliedGeneration), d.Domain)
+		}
 	}
-	for _, d := range view.Domains {
-		ch <- prometheus.MustNewConstMetric(descDomainBlocks,
-			prometheus.GaugeValue, float64(d.Blocks), d.Domain)
-		ch <- prometheus.MustNewConstMetric(descDomainBuckets,
-			prometheus.GaugeValue, float64(d.DecisionBuckets), d.Domain)
-		ch <- prometheus.MustNewConstMetric(descPolicyAppliedGeneration,
-			prometheus.GaugeValue, float64(d.AppliedGeneration), d.Domain)
-	}
-	for _, p := range view.Policies {
+	for _, p := range publishedPolicies(view) {
 		ch <- prometheus.MustNewConstMetric(descPolicyReady,
 			prometheus.GaugeValue, boolValue(p.Ready), p.Domain, p.Reason)
 		ch <- prometheus.MustNewConstMetric(descPolicyEnforced,

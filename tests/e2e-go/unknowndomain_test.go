@@ -69,9 +69,9 @@ var _ = Describe("an unknown domain", Ordered, Label("unknown-domain"), func() {
 			"the unknown-domain counter did not grow with the burst")
 
 		// The metric hides the name on purpose; the log carries it.
-		Eventually(operatorLogsSince(since)).Should(SatisfyAll(
+		Eventually(serviceLogsSince(since)).Should(SatisfyAll(
 			ContainSubstring("unknown rate limit domain"),
 			ContainSubstring("domain="+domain),
-		), "the operator did not log the unknown domain by name")
+		), "the service did not log the unknown domain by name")
 	})
 })
