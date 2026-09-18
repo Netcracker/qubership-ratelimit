@@ -1,0 +1,115 @@
+# ============== IMAGE ============================
+image:
+  repository: ghcr.io/netcracker/qubership-ratelimit-operator
+  # Empty takes the chart's appVersion, which is a fixed release. A floating tag
+  # such as "latest" moves under a running workload, so two pods of one rollout
+  # can end up on different builds.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# ============== OPERATOR ============================
+# CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by the
+# resource profile, not here: one source of truth, so the defaults cannot
+# drift away from the profiles. values.schema.json requires them, so installing
+# without `-f resource-profiles/<profile>.yaml` fails with a clear message
+# instead of rendering a Deployment with empty resources.
+#
+# The operator runs one replica and reads no REPLICAS: it writes the policy
+# status and the configuration ConfigMap, and the Lease keeps one writer while
+# two pods overlap during a rollout. GOMEMLIMIT is derived from MEMORY_LIMIT,
+# so it governs the Go heap and not only the cgroup ceiling.
+
+# Passed as LOGGING_LEVEL_ROOT: the platform logger resolves its root level
+# from the logging.level.root property; LOG_LEVEL only applies before the
+# configloader is initialized.
+logLevel: info
+
+# ============== GATEWAY FILTER ============================
+# The install-wide defaults of the rate limit filter on each gateway; each
+# gateway may override any of them under gateways.<role>. The port the filters
+# send checks to is the contract's 9000 and is not a value: a satellite
+# computes the baseline's address from the constant alone.
+filter:
+  timeout: 0.05s
+  # What an unreachable limiter means for the traffic of a gateway. It is a
+  # gateway decision rather than a service one, which is why it renders on the
+  # filter: false keeps the traffic flowing unlimited, true rejects it with a
+  # 503. A public gateway usually prefers flowing, a private one may prefer
+  # rejecting; that is what the per-gateway override is for.
+  failClosed: false
+  # Status the client sees on a refused request. Envoy ignores values below
+  # 400, and 429 is what retry-aware clients expect.
+  rateLimitedStatus: 429
+  # true answers gRPC callers behind the gateway with RESOURCE_EXHAUSTED
+  # instead of UNAVAILABLE, which is the retryable code gRPC clients back off
+  # on.
+  grpcAsResourceExhausted: false
+  # The service supplies x-ratelimit-limit, x-ratelimit-remaining,
+  # x-ratelimit-reset and retry-after itself, as ready response headers.
+  # DRAFT_VERSION_03 would additionally let Envoy render X-RateLimit-* from
+  # per-descriptor statuses, which the service does not populate, so OFF is
+  # the honest default: the flag changes nothing today, and the headers keep
+  # coming from the one place that computes them.
+  xRateLimitHeaders: "OFF"
+
+# Gateway-side switches of the filter itself: the share of requests the filter
+# checks at all, and the share it enforces on. Both are emergency controls,
+# independent of behavior: Shadow in the rules. Dropping enforcedPercent to 0
+# turns every limit into a dry run without touching a single policy, and
+# enabledPercent: 0 takes the filter out of the request path entirely. Wired
+# as Envoy runtime fractions (ratelimit.<gateway>.enabled / .enforced), so a
+# runtime override can flip them without a redeploy.
+runtime:
+  enabledPercent: 100
+  enforcedPercent: 100
+
+# ============== MONITORING DELIVERY ============================
+# The scrape target of the operator, delivered as a PodMonitor for the
+# platform's Prometheus. The deployer sets this platform parameter; off by
+# default because it needs the monitoring operator's CRDs, and installing it
+# into a cluster without monitoring fails the release.
+MONITORING_ENABLED: false
+
+ISTIO_PUBLIC_GATEWAY_NAME: public-gateway
+ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
+
+# ============== COMPOSITE ============================
+# The deployer's composite variables, the same ones core-operator renders by.
+# Both empty is a standalone installation or the baseline of a composite:
+# the whole chart renders. BASELINE_ORIGIN set is a satellite: only the
+# gateway filters render, and they send checks to the baseline's Service at
+# ratelimit.<baseline namespace>:9000, which is why that Service has a fixed
+# name. BASELINE_CONTROLLER is read for parity with control-plane, which
+# resolves the baseline the same way; on this platform the baseline is never
+# blue-green'd, so the deployer leaves it empty.
+BASELINE_ORIGIN: ""
+BASELINE_CONTROLLER: ""
+
+# What this chart owns per gateway: whether to rate limit it, and under which
+# domain. The domain is the binding key: it must equal spec.domain of the
+# RateLimitPolicy that carries this gateway's rules. Nothing validates the
+# match; a typo shows up only as an "unknown rate limit domain" line in the
+# service log.
+#
+# namespace is optional and defaults to the release namespace. timeout,
+# failClosed, rateLimitedStatus and grpcAsResourceExhausted may be set here to
+# override the filter.* defaults for one gateway; the usual case is a private
+# gateway that fails closed while the public one keeps flowing.
+gateways:
+  public:
+    enabled: true
+    domain: gateway.public
+  private:
+    enabled: true
+    domain: gateway.private
+
+# ============== KUBERNETES ============================
+serviceAccount:
+  create: true
+  # Defaults to the chart's fullname when empty.
+  name: ""
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

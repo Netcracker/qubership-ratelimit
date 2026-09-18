@@ -1,0 +1,56 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+# Everything is namespace-scoped, and there is no ClusterRole: the operator
+# watches its own namespace and nothing else. The verbs on the policies, the
+# EndpointSlices, the ConfigMaps and the Deployment are the ones
+# config/rbac/role.yaml generates from the controller markers; the Lease and
+# the Events are what leader election and the writer's records cost.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "ratelimit.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+rules:
+  # Leader election. The lease is always in the operator's own namespace and
+  # keeps one writer while two pods overlap during a rollout. Three verbs are
+  # what taking and renewing a lease costs: get to read the holder, create
+  # when there is none, update to renew or take it over. Nothing lists,
+  # watches, or deletes a lease.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, update]
+  # Leader election records who took the lease as an Event in this namespace
+  # through the legacy core events API; the controllers record through
+  # events.k8s.io. Without these the operator still works, but every handover
+  # logs an API rejection that looks like a real failure.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [ratelimit.netcracker.com]
+    resources: [ratelimitpolicies]
+    verbs: [get, list, watch]
+  - apiGroups: [ratelimit.netcracker.com]
+    resources: [ratelimitpolicies/status]
+    verbs: [update, patch]
+  # The operator asks every ready endpoint of the Service ratelimit which
+  # generation it enforces, which is what makes the Ready condition a
+  # statement about the fleet rather than about the operator's own view.
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  # The configuration ConfigMap, ratelimit-config: the service's configuration
+  # and the last-good state of the namespace in one object, written whole on
+  # every reconcile and recreated when it is deleted.
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # The operator's own Deployment, read once at start to become the owner of
+  # the ConfigMap: the object goes with the operator, never with a policy.
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get]
+{{- end }}

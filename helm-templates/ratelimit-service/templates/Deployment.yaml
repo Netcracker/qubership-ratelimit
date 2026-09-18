@@ -1,0 +1,208 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+{{- include "ratelimit.validateStore" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ratelimit.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.REPLICAS }}
+  selector:
+    matchLabels:
+      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # The gateways must never lose every RLS endpoint at once: with
+      # failClosed=false a gap lets traffic through unchecked, with
+      # failClosed=true it rejects traffic outright.
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "ratelimit.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "ratelimit.serviceAccountName" . }}
+      # The process that parses tokens from the internet reaches no API
+      # server object: no Role, and no token in the pod to try one with. What
+      # it knows of the cluster is the mounted directory below and the
+      # Downward API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: service
+          image: '{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}'
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The base image's entrypoint runs its arguments as the command, so
+          # the binary is the first argument.
+          command:
+            - /usr/bin/entrypoint.sh
+          args:
+            - /app/ratelimit-service
+            # The gRPC port is the contract's: the gateway filters of every
+            # namespace of the composite compute the address from it.
+            - --rls-bind-address=:{{ include "ratelimit.grpcPort" . }}
+            - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            {{- if .Values.management.enabled }}
+            - --management-bind-address=:{{ .Values.management.port }}
+            {{- end }}
+            # The mounted ConfigMap. The binary's default is the same path;
+            # it is spelled out so the volume mount below and the flag are
+            # read side by side.
+            - --config-dir=/etc/ratelimit/config
+          env:
+            # The name the status conditions use for the replicas that lag,
+            # and the name the management API reports for this replica.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LOGGING_LEVEL_ROOT
+              value: '{{ lower .Values.logLevel }}'
+            # The namespace this installation serves, and a segment of every
+            # counter key: the management API and the decision path have to
+            # build the same prefixes. Unset is a startup error.
+            - name: CLOUD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: METRICS_NEAR_LIMIT_RATIO
+              value: '{{ .Values.metrics.nearLimitRatio }}'
+            # Where the counters live. Empty falls back to an in-process store,
+            # which counts per replica and is therefore correct at one replica
+            # only.
+            - name: REDIS_ADDRESSES
+              value: '{{ .Values.redis.addresses }}'
+            - name: REDIS_DB
+              value: '{{ .Values.redis.db }}'
+            {{- with .Values.redis.username }}
+            - name: REDIS_USERNAME
+              value: '{{ . }}'
+            {{- end }}
+            {{- with .Values.redis.masterName }}
+            - name: REDIS_MASTERNAME
+              value: '{{ . }}'
+            {{- end }}
+            {{- if .Values.management.enabled }}
+            # The identity configuration of the management API. Read through
+            # the configloader, which maps MANAGEMENT_CLAIMS_SUBJECT onto
+            # management.claims.subject; the lists are comma-separated.
+            - name: MANAGEMENT_CLAIMS_SUBJECT
+              value: '{{ .Values.management.claims.subject }}'
+            - name: MANAGEMENT_CLAIMS_ROLES
+              value: '{{ .Values.management.claims.roles }}'
+            - name: MANAGEMENT_ROLES_VIEWER
+              value: '{{ join "," .Values.management.roles.viewer }}'
+            - name: MANAGEMENT_ROLES_OPERATOR
+              value: '{{ join "," .Values.management.roles.operator }}'
+            {{- end }}
+            {{- if .Values.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.existingSecret }}
+                  key: {{ .Values.redis.passwordKey }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ include "ratelimit.grpcPort" . }}
+              protocol: TCP
+            - name: probes
+              containerPort: {{ .Values.healthProbe.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- if .Values.management.enabled }}
+            - name: management
+              containerPort: {{ .Values.management.port }}
+              protocol: TCP
+            {{- end }}
+          # On delete the pod leaves the Endpoints at once, but the gateways
+          # keep sending checks until xDS catches up. The pause keeps the
+          # process serving through that window, so a rolling restart refuses
+          # nothing and fails nothing open; the SIGTERM drain then handles the
+          # stragglers. Native sleep handler: no shell in the image.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 7
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          # readyz keeps a replica out of the Endpoints until it has applied
+          # a manifest from the volume, without a timeout: a replica serving
+          # from an empty store would pass every request. An explicitly empty
+          # manifest counts as applied. After the first apply the replica
+          # stays Ready on its in-memory snapshot when the files vanish or a
+          # later manifest is refused.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ratelimit/config
+              readOnly: true
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: '{{ .Values.CPU_REQUEST }}'
+              memory: '{{ .Values.MEMORY_REQUEST }}'
+              # Bounded here rather than in a resource profile: the process
+              # writes no files, so its ephemeral storage is the container log
+              # and nothing else, and that does not vary by install size.
+              ephemeral-storage: 64Mi
+            limits:
+              cpu: '{{ .Values.CPU_LIMIT }}'
+              memory: '{{ .Values.MEMORY_LIMIT }}'
+              ephemeral-storage: 256Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        # The configuration the operator writes: the manifest and one
+        # compressed payload per domain, mounted as a whole directory and
+        # swapped by the kubelet within its sync period. Optional, so the pod
+        # starts before the operator has written; it stays NotReady until
+        # then. No chart renders the object: Helm and Argo CD would overwrite
+        # the operator's writes on every sync.
+        - name: config
+          configMap:
+            name: ratelimit-config
+            optional: true
+      # Long enough for the gRPC drain (--rls-drain-timeout, 10s by default) to
+      # finish before the kubelet sends SIGKILL.
+      terminationGracePeriodSeconds: 30
+{{- end }}
