@@ -276,7 +276,7 @@ team: this is a deploy-time concern, and the service itself never touches the CR
 ## Develop
 
 ```bash
-make build              # compile the manager binary
+make build              # compile both binaries, bin/ratelimit-operator and bin/ratelimit-service
 make test-unit          # unit tests only; no envtest, no cluster, no network
 make test               # everything, including the envtest controller suite
 make manifests generate # regenerate the CRD, the RBAC, and the DeepCopy methods
@@ -339,12 +339,22 @@ structural checks the estimator would not accept live in the compiler instead �
 `replaces` naming a rule of its own block — and a policy failing either is rejected with `Accepted: False`, exactly as
 the API server would have rejected it.
 
-Run the service against your current kubeconfig:
+Run the pair from your host. The operator talks to the cluster of your current kubeconfig; the service talks to
+nothing but a directory, which `make service-config` fills from the live `ratelimit-config` of the namespace:
 
 ```bash
-CLOUD_NAMESPACE=<ns> make run
+CLOUD_NAMESPACE=<ns> make service-config   # export the ConfigMap into bin/config
+CLOUD_NAMESPACE=<ns> make run              # the operator and the service together
+CLOUD_NAMESPACE=<ns> make run-operator     # or one at a time
+CLOUD_NAMESPACE=<ns> make run-service
 ```
 
-`CLOUD_NAMESPACE` has no default. An unset value is a startup error, not a fallback to watching the cluster — it is what
-keeps the service's RBAC a `Role`. It is read through `configloader`, so any property source the platform configures can
-supply it.
+The operator is told its Deployment's name as the chart tells it (`OPERATOR_DEPLOYMENT`, `ratelimit-operator` by
+default); off cluster it warns that there is no Deployment to adopt and writes the ConfigMap without an owner. The
+service reads `SERVICE_CONFIG_DIR` (`bin/config` by default) the way it reads the mounted volume in a pod, and any
+directory holding a manifest and its payloads works. `make docker-build` builds both images, `OPERATOR_IMG` and
+`SERVICE_IMG`, from the two Dockerfiles.
+
+`CLOUD_NAMESPACE` has no default. An unset value is a startup error for either process, not a fallback to watching
+the cluster: it is what keeps the operator's RBAC a `Role`, and it is a segment of every counter key the service
+writes. It is read through `configloader`, so any property source the platform configures can supply it.
