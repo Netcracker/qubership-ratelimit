@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -100,13 +101,16 @@ func render(t *testing.T, chart, namespace string, extra ...string) []object {
 }
 
 // argsOf lists a container's args as strings.
-func argsOf(container node) []string {
-	items := container.at("args").list()
-	args := make([]string, 0, len(items))
-	for _, arg := range items {
-		args = append(args, arg.str2())
+func argsOf(container node) []string { return strs(container.at("args")) }
+
+// strs reads a list of strings.
+func strs(n node) []string {
+	items := n.list()
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.str2())
 	}
-	return args
+	return out
 }
 
 func only(t *testing.T, objects []object, kind string) object {
@@ -238,14 +242,30 @@ func TestOperatorChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
 		containers := deployment.at("spec", "template", "spec", "containers").list()
 		require.Len(t, containers, 1)
 		assert.Contains(t, argsOf(containers[0]), "--deployment="+deployment.name())
-		// The Role grants what the operator needs on the ConfigMap and its
-		// own Deployment, and there is no ClusterRole.
+		// The Role reaches one ConfigMap and one Deployment by name: create
+		// is the only verb granted on ConfigMaps in general, since RBAC
+		// cannot narrow it. Anything wider would let a compromised operator
+		// pod read or overwrite the configuration of the other applications
+		// in the namespace. There is no ClusterRole.
 		assert.NotContains(t, kinds(objects), "ClusterRole")
-		role, err := yaml.Marshal(only(t, objects, "Role"))
-		require.NoError(t, err)
-		assert.Contains(t, string(role), "deployments")
-		assert.Contains(t, string(role), "configmaps")
-		assert.Contains(t, string(role), "leases")
+		for _, rule := range only(t, objects, "Role").at("rules").list() {
+			resources := strs(rule.at("resources"))
+			verbs := strs(rule.at("verbs"))
+			names := strs(rule.at("resourceNames"))
+			switch {
+			case slices.Contains(resources, "configmaps") && len(names) == 0:
+				assert.Equal(t, []string{"create"}, verbs, "an unnamed ConfigMap rule grants create and nothing else")
+			case slices.Contains(resources, "configmaps"):
+				assert.Equal(t, []string{contract.ConfigMapName}, names)
+				assert.NotContains(t, verbs, "delete")
+				assert.NotContains(t, verbs, "patch")
+			case slices.Contains(resources, "deployments"):
+				assert.Equal(t, []string{deployment.name()}, names)
+				assert.Equal(t, []string{"get"}, verbs)
+			case slices.Contains(resources, "ratelimitpolicies/status"):
+				assert.Equal(t, []string{"update"}, verbs, "the status is written with Update, never patched")
+			}
+		}
 	})
 	t.Run("satellite", func(t *testing.T) {
 		objects := render(t, operatorChart, "sat", "--set", "BASELINE_ORIGIN=base", "--set", "MONITORING_ENABLED=true")

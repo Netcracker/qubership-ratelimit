@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
@@ -115,6 +116,21 @@ var _ = Describe("the operator, built", Ordered, func() {
 			defer func() { _ = resp.Body.Close() }()
 			return resp.StatusCode
 		}).WithTimeout(10 * time.Second).Should(Equal(http.StatusOK))
+
+		// The lease is held, and the scrape says so: ratelimit_leader is
+		// what tells a query which pod's status series to read.
+		Eventually(func() float64 {
+			families, err := ctrlmetrics.Registry.Gather()
+			if err != nil {
+				return -1
+			}
+			for _, family := range families {
+				if family.GetName() == "ratelimit_leader" && len(family.GetMetric()) == 1 {
+					return family.GetMetric()[0].GetGauge().GetValue()
+				}
+			}
+			return -1
+		}).WithTimeout(20 * time.Second).Should(Equal(1.0))
 	})
 })
 

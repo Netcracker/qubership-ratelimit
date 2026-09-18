@@ -103,8 +103,7 @@ type FleetProbe interface {
 }
 
 // +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies,verbs=get;list;watch
-// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies/status,verbs=update;patch
-// +kubebuilder:rbac:groups="",namespace=ratelimit-system,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=ratelimit.netcracker.com,namespace=ratelimit-system,resources=ratelimitpolicies/status,verbs=update
 // +kubebuilder:rbac:groups=discovery.k8s.io,namespace=ratelimit-system,resources=endpointslices,verbs=get;list;watch
 
 // Reconcile compiles the domain of the policy, asks the replicas which

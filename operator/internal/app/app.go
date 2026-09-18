@@ -95,8 +95,14 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 		return nil, fmt.Errorf("create manager: %w", err)
 	}
 	// The fleet series of the status reconciler ride the manager's metrics
-	// endpoint.
+	// endpoint. ratelimit_leader marks the scrape that carries them: set once
+	// the lease is held and never cleared, since controller-runtime ends the
+	// process when a held lease is lost.
 	metrics.Register(ctrlmetrics.Registry)
+	go func() {
+		<-mgr.Elected()
+		metrics.SetLeader(true)
+	}()
 
 	// The configuration store reads and writes through an uncached client:
 	// the object is read once per reconcile and written once.

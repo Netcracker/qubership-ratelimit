@@ -1,9 +1,10 @@
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
 # Everything is namespace-scoped, and there is no ClusterRole: the operator
 # watches its own namespace and nothing else. The verbs on the policies, the
-# EndpointSlices, the ConfigMaps and the Deployment are the ones
-# config/rbac/role.yaml generates from the controller markers; the Lease and
-# the Events are what leader election and the writer's records cost.
+# EndpointSlices, the ConfigMap and the Deployment are the ones the operator's
+# markers generate into config/rbac/role.yaml, narrowed to the one object
+# where the object has a name; the Lease and the Events are what leader
+# election and the writer's records cost.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -35,7 +36,7 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [ratelimit.netcracker.com]
     resources: [ratelimitpolicies/status]
-    verbs: [update, patch]
+    verbs: [update]
   # The operator asks every ready endpoint of the Service ratelimit which
   # generation it enforces, which is what makes the Ready condition a
   # statement about the fleet rather than about the operator's own view.
@@ -44,13 +45,23 @@ rules:
     verbs: [get, list, watch]
   # The configuration ConfigMap, ratelimit-config: the service's configuration
   # and the last-good state of the namespace in one object, written whole on
-  # every reconcile and recreated when it is deleted.
+  # every reconcile and recreated when it is deleted. It is the only ConfigMap
+  # the operator touches, so every verb but create is granted on it by name:
+  # create is the one verb RBAC cannot narrow, since the object does not
+  # exist yet. list and watch pass under the name because the operator's
+  # cache selects the object by metadata.name. Nothing here reaches the
+  # ConfigMaps of the other applications in the namespace.
   - apiGroups: [""]
     resources: [configmaps]
-    verbs: [get, list, watch, create, update, patch, delete]
+    verbs: [create]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [ratelimit-config]
+    verbs: [get, list, watch, update]
   # The operator's own Deployment, read once at start to become the owner of
   # the ConfigMap: the object goes with the operator, never with a policy.
   - apiGroups: [apps]
     resources: [deployments]
+    resourceNames: [{{ include "ratelimit.fullname" . }}]
     verbs: [get]
 {{- end }}
