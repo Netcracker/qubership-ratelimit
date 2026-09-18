@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
@@ -64,14 +65,15 @@ func generations(name string) func() [2]int64 {
 	}
 }
 
-// operatorLogsSince concatenates the logs of every ratelimit pod written after
-// the given moment. The store updater subscribes to informers directly, so the
-// pod's own log is the only proof it saw an event.
-func operatorLogsSince(since time.Time) func() string {
+// serviceLogsSince concatenates the logs of every service replica written
+// after the given moment. A replica reads its configuration from its own
+// volume, so the pod's own log is the only proof it saw a change, and the
+// check lines are written by whichever replica the gateway reached.
+func serviceLogsSince(since time.Time) func() string {
 	return func() string {
 		var pods corev1.PodList
 		if err := k8s.List(ctx, &pods, client.InNamespace(namespace),
-			client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"}); err != nil {
+			client.MatchingLabels{"app.kubernetes.io/name": serviceChart}); err != nil {
 			return ""
 		}
 		var out strings.Builder
@@ -171,23 +173,22 @@ func prefixLimits(prefix, rule string, counters []string, requests, periodSecond
 }
 
 // deletePolicies removes the policies of the given domains from the baseline
-// namespace and returns once every running replica has logged the rebuild
-// each removal causes, so that a container's cleanup cannot satisfy the next
-// container's waitStoreRebuilt. A domain without a policy is skipped; any
-// other failure to delete fails the cleanup, because a policy left behind
-// claims the domain in the next container.
+// namespace and returns once every running replica reports the domain gone,
+// so that a container's cleanup cannot leave the next container a domain
+// still enforced somewhere. A domain without a policy is skipped; any other
+// failure to delete fails the cleanup, because a policy left behind claims
+// the domain in the next container.
 func deletePolicies(domains ...string) {
 	for _, domain := range domains {
-		before := storeRebuildsPerPod()
 		err := k8s.Delete(ctx, newPolicy(domain, nil))
 		if apierrors.IsNotFound(err) {
 			continue
 		}
 		Expect(err).NotTo(HaveOccurred(), "could not delete the policy of %s", domain)
 		Eventually(func() []string {
-			return podsNotRebuiltSince(before)
-		}).WithPolling(500*time.Millisecond).Should(BeEmpty(),
-			"replicas that did not rebuild the store after the policy of %s was removed", domain)
+			return replicasReporting(domain, func(d applied.Domain, ok bool) bool { return ok })
+		}).WithTimeout(propagationTimeout).WithPolling(2*time.Second).Should(BeEmpty(),
+			"replicas that still enforce %s after its policy was removed", domain)
 	}
 }
 
@@ -202,52 +203,61 @@ func nextWindow() {
 	time.Sleep(now.Truncate(time.Second).Add(1100 * time.Millisecond).Sub(now))
 }
 
-// storeRebuilds counts the rebuild lines in the logs of the running
-// replicas. A restarted pod starts a fresh log, so counts only compare
-// within one stable set of pods.
-func storeRebuilds() int {
-	total := 0
-	for _, n := range storeRebuildsPerPod() {
-		total += n
+// appliedLine is what a service replica logs when it swaps a configuration
+// in, the successor of the one binary's "rate limit store rebuilt".
+const appliedLine = "configuration applied"
+
+// waitApplied is the bash wait_for_domain: it returns once every running
+// service replica reports the current generation of every named policy on
+// /debug/applied, the same report the operator judges Ready from. A change
+// reaches a replica through the operator's ConfigMap and the kubelet's
+// projection of it, one replica at a time on its own node's clock, and the
+// report is the one signal that says the replica has it. Counting the
+// replica's apply lines instead, the way the one binary's suites counted
+// rebuilds, misreads a change the kubelet folded into another: two writes
+// inside one sync period project once, and a write undone inside one
+// project not at all, and neither leaves a line to count.
+//
+// The generation waited for is the active one, which the operator writes
+// into the ConfigMap: the latest for a policy that compiles, the last-good
+// for one whose latest does not. The status has to have observed the latest
+// generation first, or the active one read is the previous edit's.
+func waitApplied(domains ...string) {
+	for _, domain := range domains {
+		var want applied.Domain
+		Eventually(func(g Gomega) {
+			p, err := getPolicy(domain)
+			g.Expect(err).NotTo(HaveOccurred(), "no policy for %s to wait on", domain)
+			g.Expect(p.Status.ObservedGeneration).To(Equal(p.Generation), "the operator has not observed the edit")
+			g.Expect(p.Status.ActiveGeneration).NotTo(BeZero(), "no generation of %s is enforced", domain)
+			want = applied.Domain{Generation: p.Status.ActiveGeneration, UID: string(p.UID)}
+		}).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed())
+		Eventually(func() []string {
+			return replicasReporting(domain, func(d applied.Domain, ok bool) bool {
+				return !ok || d.Generation != want.Generation || d.UID != want.UID
+			})
+		}).WithTimeout(propagationTimeout).WithPolling(2*time.Second).Should(BeEmpty(),
+			"replicas that do not report generation %d of %s", want.Generation, domain)
 	}
-	return total
 }
 
-// storeRebuildsPerPod counts the rebuild lines per running replica, keyed by
-// pod name.
-func storeRebuildsPerPod() map[string]int {
-	counts := map[string]int{}
-	for _, pod := range operatorPods() {
-		counts[pod.Name] = strings.Count(podLogs(pod.Name, nil), "rate limit store rebuilt")
-	}
-	return counts
-}
-
-// podsNotRebuiltSince names the replicas of before that are still running and
-// have logged no rebuild since before was taken, sorted by name. A replica
-// that has gone away is not named: nobody counts its log any more.
-func podsNotRebuiltSince(before map[string]int) []string {
-	now := storeRebuildsPerPod()
-	var lagging []string
-	for pod, n := range before {
-		if got, ok := now[pod]; ok && got <= n {
-			lagging = append(lagging, pod)
+// replicasReporting names the running service replicas whose report of a
+// domain satisfies the predicate, which is given the domain's entry and
+// whether the report carries one at all; sorted by name, for a message.
+func replicasReporting(domain string, predicate func(d applied.Domain, ok bool) bool) []string {
+	var names []string
+	for _, pod := range servicePods() {
+		entry, ok := appliedReport(pod).Domains[domain]
+		if predicate(entry, ok) {
+			names = append(names, pod.Name)
 		}
 	}
-	slices.Sort(lagging)
-	return lagging
+	slices.Sort(names)
+	return names
 }
 
-// waitStoreRebuilt is the bash wait_for_domain: the store updater logs one
-// line per rebuild, and that line is the only signal the running pod saw the
-// event. Callers snapshot storeRebuilds() before their change and wait for
-// the count to grow. Waiting for "a line after time T" instead would race:
-// the log API filters timestamps at whole-second granularity, so a
-// neighbouring suite's rebuild from the same wall second satisfies it and
-// traffic then runs against a store that has not seen the change. The count
-// is a signal only while no earlier rebuild is still in flight; deletePolicies
-// therefore waits, per replica, for the rebuild its own removal causes.
-func waitStoreRebuilt(before int) {
-	Eventually(storeRebuilds).Should(BeNumerically(">", before),
-		"the store never rebuilt after the change")
-}
+// propagationTimeout bounds one wait for the kubelet's projection: its sync
+// period with the jitter kubelet adds, a minute and a half at the default,
+// with room for the operator's write and the replica's apply on top. The
+// e2e clusters run a period of seconds and never come near it.
+const propagationTimeout = 3 * time.Minute

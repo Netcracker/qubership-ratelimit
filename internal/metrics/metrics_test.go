@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -63,6 +64,73 @@ ratelimit_policy_rule_problems{domain="gateway.public",severity="blocking"} 0
 ratelimit_policy_rule_problems{domain="gateway.public",severity="info"} 1
 `
 	require.NoError(t, testutil.CollectAndCompare(stateCollector{}, strings.NewReader(expected)))
+}
+
+// The operator judges one policy per reconcile and publishes it on its own;
+// while any such view is held, the policy series come from those, and the
+// domain series keep coming from the whole view, which is the service's.
+func TestStateCollector_reportsThePoliciesPublishedOneAtATime(t *testing.T) {
+	PublishState(&StateView{
+		Domains:  []DomainView{{Domain: "gateway.public", Blocks: 1, DecisionBuckets: 2, AppliedGeneration: 3}},
+		Policies: []PolicyView{{Domain: "gateway.public", Ready: true, Enforced: true}},
+	})
+	defer PublishState(nil)
+	PublishPolicy(PolicyView{Domain: "gateway.public", Reason: "ReplicaStale", Enforced: true, GenerationLag: 1})
+	defer DropPolicy("gateway.public")
+
+	expected := `
+# HELP ratelimit_domain_blocks Compiled blocks of the domain. Observed rather than bounded: watch the target scan, do not cap it.
+# TYPE ratelimit_domain_blocks gauge
+ratelimit_domain_blocks{domain="gateway.public"} 1
+# HELP ratelimit_domain_decision_buckets Worst-case buckets one decision can collect across the domain, against the budget of 128.
+# TYPE ratelimit_domain_decision_buckets gauge
+ratelimit_domain_decision_buckets{domain="gateway.public"} 2
+# HELP ratelimit_policy_applied_generation The generation of the domain this replica enforces.
+# TYPE ratelimit_policy_applied_generation gauge
+ratelimit_policy_applied_generation{domain="gateway.public"} 3
+# HELP ratelimit_policy_enforced Whether any generation of the policy is enforced at all.
+# TYPE ratelimit_policy_enforced gauge
+ratelimit_policy_enforced{domain="gateway.public"} 1
+# HELP ratelimit_policy_generation_lag How far the enforced generation trails the latest one.
+# TYPE ratelimit_policy_generation_lag gauge
+ratelimit_policy_generation_lag{domain="gateway.public"} 1
+# HELP ratelimit_policy_ready Whether the latest generation of the policy is the one enforced; reason is empty when it is.
+# TYPE ratelimit_policy_ready gauge
+ratelimit_policy_ready{domain="gateway.public",reason="ReplicaStale"} 0
+# HELP ratelimit_policy_rule_problems Rule diagnostics reported for the latest generation of the policy. Severity blocking means the generation is not enforced; info is a note about one that is.
+# TYPE ratelimit_policy_rule_problems gauge
+ratelimit_policy_rule_problems{domain="gateway.public",severity="blocking"} 0
+ratelimit_policy_rule_problems{domain="gateway.public",severity="info"} 0
+`
+	require.NoError(t, testutil.CollectAndCompare(stateCollector{}, strings.NewReader(expected)))
+
+	// Dropped, the view's own policies are reported again; and with no
+	// view at all, an operator that judged a policy still reports it.
+	DropPolicy("gateway.public")
+	require.NoError(t, testutil.CollectAndCompare(stateCollector{}, strings.NewReader(expected),
+		"ratelimit_domain_blocks"))
+	assert.Equal(t, 1.0, gaugeOf(t, stateCollector{}, "ratelimit_policy_ready"))
+	PublishState(nil)
+	PublishPolicy(PolicyView{Domain: "gateway.lonely", Ready: true})
+	defer DropPolicy("gateway.lonely")
+	assert.Equal(t, 1.0, gaugeOf(t, stateCollector{}, "ratelimit_policy_ready"))
+}
+
+// gaugeOf collects one collector and returns the value of the first sample
+// of the named family.
+func gaugeOf(t *testing.T, c prometheus.Collector, name string) float64 {
+	t.Helper()
+	registry := prometheus.NewPedanticRegistry()
+	require.NoError(t, registry.Register(c))
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() == name {
+			return family.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("no family %s", name)
+	return 0
 }
 
 func TestStateCollector_isSilentBeforeTheFirstRebuild(t *testing.T) {

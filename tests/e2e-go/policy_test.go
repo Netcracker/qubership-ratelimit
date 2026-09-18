@@ -9,10 +9,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
+	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
@@ -62,7 +63,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	It("accepts a valid policy and tracks its generation", func() {
 		Expect(apply(newPolicy(domain, totalLimits(1, 1)))).To(Succeed())
 		Eventually(policyCondition(domain, v1alpha1.ConditionAccepted)).Should(Equal("True"),
-			"policy not accepted; is a reconciler holding the lease?")
+			"policy not accepted; is the operator running?")
 
 		// observedGeneration proves the status was written for the spec that
 		// exists now, not left over from an earlier generation.
@@ -74,24 +75,24 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 			"the status must publish the key set the rules resolve against")
 	})
 
-	// The one property no unit test can show: a leader in a real cluster
-	// reaching /debug/applied on the other pods. Everything below reads the
-	// status that probe writes.
+	// The one property no unit test can show: the operator in a real cluster
+	// reaching /debug/applied on the service pods through the Service.
+	// Everything below reads the status that probe writes.
 	It("reports every ready replica enforcing the generation", func() {
 		Eventually(policyCondition(domain, v1alpha1.ConditionReady)).Should(Equal("True"),
-			"Ready never went true; can the leader reach /debug/applied on the other replicas?")
+			"Ready never went true; can the operator reach /debug/applied on the service replicas?")
 		Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("False"),
 			"a fleet that agrees is not stalled")
 
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(p.Status.Replicas.Total).To(BeNumerically(">", 0),
-			"the leader saw no ready endpoint of its own Service")
+			"the operator saw no ready endpoint of the Service")
 		Expect(p.Status.Replicas.Applied).To(Equal(p.Status.Replicas.Total),
 			"Ready is true while %d of %d replicas enforce the generation",
 			p.Status.Replicas.Applied, p.Status.Replicas.Total)
 		Expect(p.Status.Replicas.LastCheckTime).NotTo(BeNil(),
-			"the status carries no probe time, so nothing says the leader is alive")
+			"the status carries no probe time, so nothing says the operator is alive")
 	})
 
 	It("shows the fleet in the printer columns", func() {
@@ -163,18 +164,16 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	})
 
 	It("keeps the last-good generation running when an edit is invalid", func() {
-		// The half a unit test cannot show: the state survives in a ConfigMap,
-		// so the generation being enforced outlives the edit that broke it.
-		// Breaking the policy before its good generation reached the ConfigMap
-		// would leave nothing to fall back to - the waits ARE the test.
-		Eventually(func() error {
-			return k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: "ratelimit-state-" + domain},
-				&corev1.ConfigMap{})
-		}).Should(Succeed(), "the last-good state was never written to ratelimit-state-%s", domain)
-
+		// The half a unit test cannot show: the last-good state is the
+		// ConfigMap the service mounts, so the generation being enforced
+		// outlives the edit that broke it. Breaking the policy before its
+		// good generation reached the ConfigMap would leave nothing to fall
+		// back to; the waits ARE the test.
 		Eventually(generations(domain)).Should(WithTransform(
 			func(g [2]int64) bool { return g[1] > 0 && g[0] == g[1] }, BeTrue()),
 			"the policy never reached an active generation to fall back to")
+		Eventually(manifestGeneration(domain)).Should(Equal(generations(domain)()[1]),
+			"the last-good generation was never written to %s", contract.ConfigMapName)
 
 		// The edit references a key nothing declares, so it must be refused
 		// while the earlier generation keeps running.
@@ -190,6 +189,8 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		Eventually(generations(domain)).Should(WithTransform(
 			func(g [2]int64) bool { return g[1] > 0 && g[0] != g[1] }, BeTrue()),
 			"expected an earlier generation to stay active while the edit is refused")
+		Expect(manifestGeneration(domain)()).To(Equal(generations(domain)()[1]),
+			"the ConfigMap carries a generation other than the active one")
 
 		// Enforcing an earlier generation is not being ready, and it is a
 		// breakage rather than a rollout: last-good converges on nothing.
@@ -199,12 +200,11 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 			"a generation that does not compile is stuck, not in progress")
 	})
 
-	It("rebuilds the store in every running pod when a policy is deleted", func() {
-		before := storeRebuildsPerPod()
+	It("drops the domain from every running pod when a policy is deleted", func() {
 		Expect(k8s.Delete(ctx, newPolicy(domain, nil))).To(Succeed())
 		Eventually(func() []string {
-			return podsNotRebuiltSince(before)
-		}).WithPolling(500*time.Millisecond).Should(BeEmpty(),
-			"replicas that logged no store rebuild after the policy was deleted")
+			return replicasReporting(domain, func(d applied.Domain, ok bool) bool { return ok })
+		}).WithTimeout(propagationTimeout).WithPolling(2*time.Second).Should(BeEmpty(),
+			"replicas that still report %s after the policy was deleted", domain)
 	})
 })

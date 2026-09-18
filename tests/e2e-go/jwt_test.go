@@ -51,9 +51,8 @@ var _ = Describe("identity extraction through the gateway", Ordered, Label("jwt"
 		policy := newPolicy(domain, limits)
 		policy.Spec.Mappings = []v1alpha1.ClaimMapping{{Key: "tenant", Claim: "org_id"}}
 
-		before := storeRebuilds()
 		Expect(apply(policy)).To(Succeed())
-		waitStoreRebuilt(before)
+		waitApplied(domain)
 	})
 	AfterAll(func() { deletePolicies(domain) })
 

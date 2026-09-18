@@ -21,29 +21,21 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 )
 
-// A replica the leader cannot reach is the case Stalled exists for: a broken
-// informer, a pod behind a policy, a node that lost the mesh. The unit tests
-// pin what the leader concludes from a fabricated probe; only a real fleet
-// shows the leader concluding it from a pod that is Ready by every other
-// measure and silent to the one that matters.
+// A replica the operator cannot reach is the case Stalled exists for: a pod
+// behind a policy, a node that lost the mesh. The unit tests pin what the
+// operator concludes from a fabricated probe; only a real fleet shows it
+// concluding that from a pod that is Ready by every other measure and silent
+// to the one that matters.
 //
 // The replica is silenced with an AuthorizationPolicy that denies its metrics
-// port, which is where the leader reads /debug/applied. Two things about the
-// recipe are not obvious and both were measured rather than assumed:
-//
-// The leader is replaced after the policy lands, because the probe keeps its
-// connections alive and ztunnel enforces a new DENY on new connections only.
-// A policy applied under a running leader changes nothing until that leader
-// reconnects; a fresh leader connects afresh and finds the pod silent.
-//
-// Two followers are denied, not one, because the replaced leader's lease can
-// go to any pod - a denied one included - and ztunnel does not enforce a DENY
-// on a pod's connection to its own IP. A single denied pod that wins the
-// lease probes itself through, probes everyone else through, and reports the
-// fleet whole. With two denied, whichever pod wins probes at least one denied
-// peer afresh, and at least one pod answers, so the verdict is ReplicaStale
-// and never ProbeFailed, regardless of the election.
-var _ = Describe("a replica the leader cannot reach", Ordered, Label("lagging"), func() {
+// port, which is where the operator reads /debug/applied. The operator is
+// replaced after the policy lands, because the probe keeps its connections
+// alive and ztunnel enforces a new DENY on new connections only: a policy
+// applied under a running operator changes nothing until it reconnects, and
+// a fresh one connects afresh and finds the pods silent. Two of three
+// replicas are denied so that the verdict is ReplicaStale on a fleet that
+// still has an answering member, never ProbeFailed on a fleet with none.
+var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"), func() {
 	const (
 		domain   = "gateway.lagging"
 		policy   = "e2e-lagging-deny"
@@ -83,29 +75,33 @@ var _ = Describe("a replica the leader cannot reach", Ordered, Label("lagging"),
 	})
 
 	It("reports the silent replica stale, and names it", func() {
-		leader := leaseHolderPod()
-		Expect(leader).NotTo(BeEmpty(), "no pod holds the lease")
+		operator := leaseHolderPod()
+		Expect(operator).NotTo(BeEmpty(), "no operator pod holds the lease")
 
-		for _, pod := range operatorPods() {
-			if pod.Name == leader || len(denied) == 2 {
-				continue
+		for _, pod := range servicePods() {
+			if len(denied) == 2 {
+				break
 			}
 			labelPod(pod, silenced, "true")
 			denied = append(denied, pod.Name)
 		}
-		Expect(denied).To(HaveLen(2), "the fleet has fewer than two followers to silence")
+		Expect(denied).To(HaveLen(2), "the fleet has fewer than two replicas to silence")
 
+		// The operator is replaced after the policy lands, because the probe
+		// keeps its connections and a DENY in ambient mode applies to new
+		// connections only: a fresh operator connects afresh and finds the
+		// pods silent.
 		Expect(apply(denyPolicy(policy, silenced))).To(Succeed())
 		Expect(k8s.Delete(ctx, &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: leader}})).To(Succeed())
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: operator}})).To(Succeed())
 
-		// Propagating first: a fresh leader sees the silent replicas at once,
-		// and for the length of the propagation deadline that is a rollout
-		// as far as it can tell. The window is thirty seconds wide, so a poll
-		// every second cannot miss it.
-		Eventually(readyReason(domain)).WithTimeout(90*time.Second).WithPolling(time.Second).
+		// Propagating first: a fresh operator sees the silent replicas at
+		// once, and for the length of the propagation deadline that is a
+		// rollout as far as it can tell. The deadline is ninety seconds in
+		// the split, so a poll every second cannot miss the window.
+		Eventually(readyReason(domain)).WithTimeout(2*time.Minute).WithPolling(time.Second).
 			Should(Equal(v1alpha1.ReasonPropagating),
-				"the new leader never reported the silent replicas as propagating")
+				"the new operator never reported the silent replicas as propagating")
 
 		// Then ReplicaStale, once the deadline passes with the pod still
 		// silent. This is the transition worth alerting on, and the message
@@ -129,16 +125,16 @@ var _ = Describe("a replica the leader cannot reach", Ordered, Label("lagging"),
 
 			g.Expect(p.Status.Replicas.Applied).To(BeNumerically("<", p.Status.Replicas.Total),
 				"a stale fleet reported whole: %s", p.Status.Replicas.Summary)
-		}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+		}).WithTimeout(3 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
 	})
 
-	It("publishes the stall on the leader's scrape", func() {
+	It("publishes the stall on the operator's scrape", func() {
 		holder := leaseHolderPod()
 		Expect(holder).NotTo(BeEmpty())
 		families := scrapePod(holder)
 		Expect(gaugeValue(families, "ratelimit_policy_stalled",
 			map[string]string{"domain": domain, "reason": v1alpha1.ReasonReplicaStale})).To(Equal(1.0),
-			"the leader's scrape does not carry the stall")
+			"the operator's scrape does not carry the stall")
 		Expect(gaugeValue(families, "ratelimit_leader", nil)).To(Equal(1.0))
 	})
 
@@ -220,9 +216,9 @@ func namesOneOf(message string, pods []string) bool {
 	return false
 }
 
-// scrapePod fetches and parses /metrics from one pod by name.
+// scrapePod fetches and parses /metrics from one pod of either chart by name.
 func scrapePod(name string) map[string]*dto.MetricFamily {
-	for _, pod := range operatorPods() {
+	for _, pod := range append(operatorPods(), servicePods()...) {
 		if pod.Name == name {
 			merged := map[string]*dto.MetricFamily{}
 			mergeScrape(merged, pod)

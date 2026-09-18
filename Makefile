@@ -1,11 +1,11 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 
-# The charts that ship the CRD: the one-binary chart until #413 retires it,
-# and the operator chart of the split. The service chart ships no CRD.
-CRD_CHART_DIRS ?= helm-templates/ratelimit helm-templates/ratelimit-operator
+# The charts that ship the CRD: the operator chart. The service chart ships
+# no CRD.
+CRD_CHART_DIRS ?= helm-templates/ratelimit-operator
 # Every chart the lint covers.
-CHART_DIRS ?= helm-templates/ratelimit helm-templates/ratelimit-operator helm-templates/ratelimit-service
+CHART_DIRS ?= helm-templates/ratelimit-operator helm-templates/ratelimit-service
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -134,7 +134,7 @@ test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, inc
 test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
 	@mkdir -p "$(E2E_ARTIFACTS)"
 	@rc=0; NAMESPACE="$(E2E_NAMESPACE)" E2E_SATELLITE_NAMESPACE="$(E2E_SATELLITE_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
-	  --flake-attempts=2 --poll-progress-after=120s \
+	  --flake-attempts=2 --poll-progress-after=120s --timeout=2h \
 	  --junit-report=e2e-go.xml --output-dir="$(E2E_ARTIFACTS)" \
 	  ./tests/e2e-go || rc=$$?; \
 	go run ./tests/e2e-go/report "$(E2E_ARTIFACTS)/e2e-go.xml" "$(E2E_ARTIFACTS)/e2e-go.html" \

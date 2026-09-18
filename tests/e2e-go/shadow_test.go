@@ -33,9 +33,8 @@ var _ = Describe("shadow rules", Ordered, Label("shadow"), func() {
 			waitGatewayServes("public-gateway", probePath)
 			limits := prefixLimits(probePath, "dry-run", nil, 1, 3600)
 			limits[0].Rules[0].Behavior = v1alpha1.RuleBehaviorShadow
-			before := storeRebuilds()
 			Expect(apply(newPolicy(domain, limits))).To(Succeed())
-			waitStoreRebuilt(before)
+			waitApplied(domain)
 		}
 	})
 	AfterAll(func() {

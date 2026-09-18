@@ -26,24 +26,36 @@ import (
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
-// operatorDeployment resolves the release's Deployment by its labels rather
-// than by name. The Deployment is named after the chart, the Service has a
-// fixed name, and the release can be called anything - CI names it
-// ratelimit-baseline so that the suite cannot mistake a name derived from the
-// release for a fixed one. None of those three is safe to assume from
-// another, and the instance label this used to return is the release name.
-func operatorDeployment() string {
+// The two charts of the split label their pods with the chart name under
+// app.kubernetes.io/name: ratelimit-operator on the one operator pod,
+// ratelimit-service on the service replicas. Releases can be called
+// anything, and CI names them after the chart plus a suffix so that the
+// suite cannot mistake a name derived from the release for a fixed one.
+const (
+	operatorChart = "ratelimit-operator"
+	serviceChart  = "ratelimit-service"
+)
+
+// chartDeployment resolves the one Deployment of a chart by its label.
+func chartDeployment(chart string) string {
 	var deployments appsv1.DeploymentList
 	Expect(k8s.List(ctx, &deployments, client.InNamespace(namespace),
-		client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"})).To(Succeed())
-	Expect(deployments.Items).To(HaveLen(1), "expected one ratelimit Deployment in %s", namespace)
+		client.MatchingLabels{"app.kubernetes.io/name": chart})).To(Succeed())
+	Expect(deployments.Items).To(HaveLen(1), "expected one %s Deployment in %s", chart, namespace)
 	return deployments.Items[0].Name
 }
 
-func operatorPods() []corev1.Pod {
+// serviceDeployment is the Deployment of the service replicas, the ones that
+// answer checks; operatorDeployment is the Deployment of the operator, the
+// one that writes the status and the configuration.
+func serviceDeployment() string  { return chartDeployment(serviceChart) }
+func operatorDeployment() string { return chartDeployment(operatorChart) }
+
+// chartPods lists the running pods of a chart.
+func chartPods(chart string) []corev1.Pod {
 	var pods corev1.PodList
 	Expect(k8s.List(ctx, &pods, client.InNamespace(namespace),
-		client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"})).To(Succeed())
+		client.MatchingLabels{"app.kubernetes.io/name": chart})).To(Succeed())
 	running := make([]corev1.Pod, 0, len(pods.Items))
 	for _, p := range pods.Items {
 		if p.Status.Phase == corev1.PodRunning && p.DeletionTimestamp == nil {
@@ -52,6 +64,11 @@ func operatorPods() []corev1.Pod {
 	}
 	return running
 }
+
+// servicePods are the running service replicas; operatorPods the running
+// operator pods, one outside a rollout.
+func servicePods() []corev1.Pod  { return chartPods(serviceChart) }
+func operatorPods() []corev1.Pod { return chartPods(operatorChart) }
 
 // execPod runs one command in a container and returns its stdout - the
 // kubectl exec of the suite.
@@ -265,7 +282,7 @@ func waitGatewayServesIn(ns, gateway, path string) {
 		"the gateway %s in %s never served %s", gateway, ns, path)
 }
 
-// podLogs returns one pod's log, whole when since is nil. operatorLogsSince
+// podLogs returns one pod's log, whole when since is nil. serviceLogsSince
 // concatenates every replica; this is for the assertions that need to know
 // which replica wrote a line.
 func podLogs(pod string, since *time.Time) string {
@@ -290,6 +307,13 @@ func podLogs(pod string, since *time.Time) string {
 // bump makes the wait real, and surge brings the new pod up before the old
 // one goes.
 func rolloutRestart(name string) {
+	rolloutRestartNoWait(name)
+	waitRolloutSettled(name)
+}
+
+// rolloutRestartNoWait bumps the template and returns at once, for a spec
+// that expects the rollout to stall on a replacement that never turns Ready.
+func rolloutRestartNoWait(name string) {
 	var dep appsv1.Deployment
 	Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &dep)).To(Succeed())
 	if dep.Spec.Template.Annotations == nil {
@@ -297,7 +321,11 @@ func rolloutRestart(name string) {
 	}
 	dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
 	Expect(k8s.Update(ctx, &dep)).To(Succeed())
+}
 
+// waitRolloutSettled waits until every replica of the Deployment is updated
+// and available.
+func waitRolloutSettled(name string) {
 	Eventually(func(g Gomega) {
 		var d appsv1.Deployment
 		g.Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &d)).To(Succeed())
@@ -313,16 +341,16 @@ func rolloutRestart(name string) {
 		"the %s Deployment did not come back after the restart", name)
 }
 
-// helmScale sets the release's replica count through Helm: a kubectl scale
-// would take field-manager ownership of .spec.replicas and make every later
-// helm upgrade conflict.
+// helmScale sets the service release's replica count through Helm: a kubectl
+// scale would take field-manager ownership of .spec.replicas and make every
+// later helm upgrade conflict.
 //
 // Values are reset to the chart's defaults and re-overlaid with what the
 // install set, rather than reused wholesale: a release installed from an
 // older chart lacks the values that chart has grown since, and reusing them
 // fails the render on the first new required value.
 func helmScale(release string, replicas int32) {
-	chart, err := filepath.Abs(filepath.Join("..", "..", "helm-templates", "ratelimit"))
+	chart, err := filepath.Abs(filepath.Join("..", "..", "helm-templates", serviceChart))
 	Expect(err).NotTo(HaveOccurred())
 	cmd := exec.CommandContext(ctx, "helm", "upgrade", release, chart,
 		"-n", namespace, "--reset-then-reuse-values",
@@ -332,22 +360,22 @@ func helmScale(release string, replicas int32) {
 	Expect(err).NotTo(HaveOccurred(), "helm upgrade failed: %s", out)
 }
 
-// fleetScale is a release scaled for one container, remembering what to put
-// back. The suites that need more than one replica - a rollout with a
-// surviving leader, a follower the leader cannot reach - go through it so
-// that the scale-up and the restore are one pair, and a container that
+// fleetScale is the service release scaled for one container, remembering
+// what to put back. The suites that need more than one replica, a rollout
+// with a surviving replica, a follower the operator cannot reach, go through
+// it so that the scale-up and the restore are one pair, and a container that
 // fails halfway leaves the release the size it found it.
 type fleetScale struct {
 	release  string
 	original int32
 }
 
-// scaleFleet sets the replica count of the release and returns what restores
-// it. The release and its current count are read from the Deployment rather
-// than assumed, the way the leader suite reads them.
+// scaleFleet sets the replica count of the service release and returns what
+// restores it. The release and its current count are read from the
+// Deployment rather than assumed.
 func scaleFleet(replicas int32) *fleetScale {
 	var dep appsv1.Deployment
-	Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: operatorDeployment()}, &dep)).
+	Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: serviceDeployment()}, &dep)).
 		To(Succeed())
 	release := dep.Annotations["meta.helm.sh/release-name"]
 	Expect(release).NotTo(BeEmpty(), "cannot determine the Helm release owning %s", dep.Name)
@@ -361,4 +389,32 @@ func scaleFleet(replicas int32) *fleetScale {
 
 func (f *fleetScale) restore() {
 	helmScale(f.release, f.original)
+}
+
+// scaleDeployment sets a Deployment's replica count through the scale
+// subresource and waits for the count to settle. It is for the operator,
+// whose chart has no replica value to go through Helm with: the scale
+// subresource leaves its own field manager on .spec.replicas, and a later
+// helm upgrade that applies the same value as the chart's meets no
+// conflict, so a suite that puts the count back leaves the release clean.
+func scaleDeployment(name string, replicas int32) {
+	scale, err := clientset.AppsV1().Deployments(namespace).GetScale(ctx, name, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred())
+	scale.Spec.Replicas = replicas
+	_, err = clientset.AppsV1().Deployments(namespace).UpdateScale(ctx, name, scale, metav1.UpdateOptions{})
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(func(g Gomega) {
+		var d appsv1.Deployment
+		g.Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &d)).To(Succeed())
+		g.Expect(d.Status.Replicas).To(Equal(replicas))
+		g.Expect(d.Status.ReadyReplicas).To(Equal(replicas))
+		// The Deployment's count leaves a terminating pod out, and a
+		// terminating operator keeps writing until its grace period ends:
+		// a spec that scaled it to zero has to see every pod gone.
+		var pods corev1.PodList
+		g.Expect(k8s.List(ctx, &pods, client.InNamespace(namespace),
+			client.MatchingLabels(d.Spec.Selector.MatchLabels))).To(Succeed())
+		g.Expect(pods.Items).To(HaveLen(int(replicas)), "pods of %s still around", name)
+	}).WithTimeout(3*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
+		"the %s Deployment did not settle at %d replicas", name, replicas)
 }

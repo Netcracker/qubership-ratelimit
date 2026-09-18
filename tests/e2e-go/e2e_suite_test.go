@@ -1,15 +1,15 @@
 //go:build e2e
 
-// Package e2e drives the operator in a real cluster. It installs nothing and
-// uninstalls nothing: CI installs Istio, the gateways, and the chart first,
-// then runs this suite - the same split the bash suites use, which this
-// package replaces one suite at a time.
+// Package e2e drives the two components in a real cluster. It installs
+// nothing and uninstalls nothing: CI installs Istio, the gateways, and the
+// two charts first, the operator and then the service, and then runs this
+// suite.
 //
 // Environment:
 //
 //	NAMESPACE - business namespace holding the release (default: core)
 //	E2E_SATELLITE_NAMESPACE - a satellite of that namespace: its own gateways
-//	    and the chart in satellite mode. Optional; the composite suite skips
+//	    and both charts in satellite mode. Optional; the composite suite skips
 //	    without it, and every other suite runs against NAMESPACE alone.
 package e2e
 
@@ -51,7 +51,9 @@ func TestE2E(t *testing.T) {
 
 var _ = BeforeSuite(func() {
 	ctx = context.Background()
-	SetDefaultEventuallyTimeout(2 * time.Minute)
+	// The default wait covers the kubelet's projection at its production period
+	// plus the operator's probe cycle; see propagationTimeout.
+	SetDefaultEventuallyTimeout(propagationTimeout)
 	SetDefaultEventuallyPollingInterval(3 * time.Second)
 
 	namespace = os.Getenv("NAMESPACE")
@@ -76,17 +78,23 @@ var _ = BeforeSuite(func() {
 	Expect(k8s.Get(ctx, client.ObjectKey{Name: namespace}, &corev1.Namespace{})).
 		To(Succeed(), "namespace %s not found", namespace)
 
-	var deployments appsv1.DeploymentList
-	Expect(k8s.List(ctx, &deployments, client.InNamespace(namespace),
-		client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"})).To(Succeed())
-	Expect(deployments.Items).NotTo(BeEmpty(),
-		"no ratelimit Deployment in %s; install the chart before running the suite", namespace)
-	operator := deployments.Items[0].Name
-	Eventually(func() bool {
-		var d appsv1.Deployment
-		if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: operator}, &d); err != nil {
-			return false
-		}
-		return d.Status.ReadyReplicas == *d.Spec.Replicas
-	}).Should(BeTrue(), "the ratelimit deployment is not ready")
+	// Both halves of the split have to be up: the operator that writes the
+	// status and the configuration, and the service replicas that enforce
+	// it. A service alone waits NotReady for an operator that never comes,
+	// and an operator alone reports NoReplicas on every policy.
+	for _, chart := range []string{operatorChart, serviceChart} {
+		var deployments appsv1.DeploymentList
+		Expect(k8s.List(ctx, &deployments, client.InNamespace(namespace),
+			client.MatchingLabels{"app.kubernetes.io/name": chart})).To(Succeed())
+		Expect(deployments.Items).NotTo(BeEmpty(),
+			"no %s Deployment in %s; install both charts before running the suite", chart, namespace)
+		name := deployments.Items[0].Name
+		Eventually(func() bool {
+			var d appsv1.Deployment
+			if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &d); err != nil {
+				return false
+			}
+			return d.Status.ReadyReplicas == *d.Spec.Replicas
+		}).Should(BeTrue(), "the %s deployment is not ready", name)
+	}
 })

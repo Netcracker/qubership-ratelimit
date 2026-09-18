@@ -12,9 +12,9 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-// The thing the operator exists for: a gateway calls it on every request and
+// The thing the service exists for: a gateway calls it on every request and
 // honours the verdict. Everything here needs a real gateway, a real Envoy, and
-// the operator's own gRPC endpoint at once - which is why none of it can be a
+// the service's own gRPC endpoint at once - which is why none of it can be a
 // unit test.
 var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit"), func() {
 	const (
@@ -26,10 +26,9 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 	)
 
 	BeforeAll(func() {
-		before := storeRebuilds()
 		Expect(apply(newPolicy(publicDomain, totalLimits(1, 1)))).To(Succeed())
 		Expect(apply(newPolicy(privateDomain, totalLimits(1, 1)))).To(Succeed())
-		waitStoreRebuilt(before)
+		waitApplied(publicDomain, privateDomain)
 		// Both gateways are warmed: a cold gateway answers 503 on its own,
 		// and the not-429 assertions below would take that for an admission.
 		waitGatewayServes("public-gateway", probePath)
@@ -41,7 +40,7 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 	AfterAll(func() { deletePolicies(publicDomain, privateDomain) })
 
 	It("is what the gateway is configured to call", func() {
-		// A wrong cluster name fails exactly like an unreachable operator, so
+		// A wrong cluster name fails exactly like an unreachable service, so
 		// assert the configuration rather than inferring it from behaviour.
 		// The address is the Service's, and the Service has a fixed name:
 		// a satellite in another namespace computes this same address with
@@ -56,7 +55,7 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 	})
 
 	It("receives the four descriptor entries", func() {
-		// The descriptor the gateway sends is the operator's input contract.
+		// The descriptor the gateway sends is the service's input contract.
 		keys := descriptorKeysOf(gatewayPod("public-gateway").Name)
 		Expect(keys).To(ContainElements("path", "method", "token", "request_id"),
 			"a descriptor entry is missing from the gateway config")
@@ -106,7 +105,7 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 
 		Eventually(func() string {
 			var checks []string
-			for _, line := range strings.Split(operatorLogsSince(since)(), "\n") {
+			for _, line := range strings.Split(serviceLogsSince(since)(), "\n") {
 				if strings.Contains(line, "rate limit check") {
 					checks = append(checks, line)
 				}
@@ -116,10 +115,10 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 			ContainSubstring("domain="+publicDomain),
 			ContainSubstring("path="+probePath),
 			ContainSubstring("[request_id="+requestID+"]"),
-		), "the operator did not log the check with its domain, path and request id")
+		), "the service did not log the check with its domain, path and request id")
 
 		// The token is a credential and must never reach a log line, in any form.
-		Expect(operatorLogsSince(since)()).NotTo(ContainSubstring(secret),
+		Expect(serviceLogsSince(since)()).NotTo(ContainSubstring(secret),
 			"the Authorization value was written to the log")
 	})
 
