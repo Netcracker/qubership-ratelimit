@@ -43,6 +43,14 @@ const (
 	domainLabel = "ratelimit.netcracker.com/domain"
 )
 
+// The one-binary packaging writes one ratelimit-state-<domain> ConfigMap per
+// domain, with names known only at run time, so the rule cannot be narrowed
+// to resourceNames; list is label-scoped discovery for the sweep of retired
+// domains. The marker lives here, beside the writer that needs the width,
+// and goes with it under Netcracker/qubership-core-infra#414. The operator
+// writes one object by name, and its marker is narrowed to it.
+// +kubebuilder:rbac:groups="",namespace=ratelimit-system,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+
 // Store reads and writes the last-good state of each domain.
 type Store struct {
 	client    client.Client

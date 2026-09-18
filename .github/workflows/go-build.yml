@@ -245,33 +245,57 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Lint the chart against every resource profile, in every mode
+      - name: Lint every chart against every resource profile, in every mode
         run: make helm-lint
+
+      # The render test in Go: both charts of the split rendered and compared
+      # with the constants of api/contract, the Service name and its ports,
+      # the address in the filters, the ConfigMap of the volume, the mount
+      # path, the pod labels; a satellite rendering the filters alone from the
+      # operator chart and nothing from the service chart. It skips without
+      # helm on PATH; here helm is on PATH and the skip is a failure.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Compare the rendered charts with the contract constants
+        env:
+          CHARTS_TEST_REQUIRE_HELM: "1"
+        run: go test -count=1 ./tests/charts/
 
       # A satellite namespace runs no component. What it gets is the gateway
       # filters, and they have to point at the baseline's Service by its fixed
       # name - a satellite has no other way to know how the baseline was
-      # installed. Both halves are checked: nothing but filters, and the
-      # address they carry.
+      # installed. Both halves are checked for the one-binary chart and the
+      # operator chart: nothing but filters, and the address they carry. The
+      # service chart renders nothing there at all.
       - name: Check what a satellite renders
         run: |
           set -o pipefail
-          rendered=$(helm template t helm-templates/ratelimit -n satellite \
-            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
+          for chart in ratelimit ratelimit-operator; do
+            rendered=$(helm template t helm-templates/$chart -n satellite \
+              -f helm-templates/$chart/resource-profiles/dev.yaml \
+              --set MONITORING_ENABLED=true --set management.enabled=true \
+              --set BASELINE_ORIGIN=baseline)
+            kinds=$(echo "$rendered" | grep '^kind:' | sort -u)
+            [ "$kinds" = "kind: EnvoyFilter" ] || {
+              echo "::error::a satellite of $chart rendered more than its gateway filters:"; echo "$kinds"; exit 1; }
+            echo "$rendered" | grep -q 'ratelimit\.baseline\.svc\.cluster\.local' || {
+              echo "::error::the satellite filters of $chart do not point at the baseline's ratelimit Service"; exit 1; }
+            # A blue-green baseline runs its shared components in the controller
+            # namespace, and that is where the filters must point.
+            helm template t helm-templates/$chart -n satellite \
+              -f helm-templates/$chart/resource-profiles/dev.yaml \
+              --set BASELINE_ORIGIN=baseline --set BASELINE_CONTROLLER=baseline-ctl \
+              | grep -q 'ratelimit\.baseline-ctl\.svc\.cluster\.local' || {
+              echo "::error::the satellite filters of $chart ignore BASELINE_CONTROLLER"; exit 1; }
+          done
+          rendered=$(helm template t helm-templates/ratelimit-service -n satellite \
+            -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
             --set MONITORING_ENABLED=true --set management.enabled=true \
             --set BASELINE_ORIGIN=baseline)
-          kinds=$(echo "$rendered" | grep '^kind:' | sort -u)
-          [ "$kinds" = "kind: EnvoyFilter" ] || {
-            echo "::error::a satellite rendered more than its gateway filters:"; echo "$kinds"; exit 1; }
-          echo "$rendered" | grep -q 'ratelimit\.baseline\.svc\.cluster\.local' || {
-            echo "::error::the satellite filters do not point at the baseline's ratelimit Service"; exit 1; }
-          # A blue-green baseline runs its shared components in the controller
-          # namespace, and that is where the filters must point.
-          helm template t helm-templates/ratelimit -n satellite \
-            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
-            --set BASELINE_ORIGIN=baseline --set BASELINE_CONTROLLER=baseline-ctl \
-            | grep -q 'ratelimit\.baseline-ctl\.svc\.cluster\.local' || {
-            echo "::error::the satellite filters ignore BASELINE_CONTROLLER"; exit 1; }
+          if echo "$rendered" | grep -q '^kind:'; then
+            echo "::error::a satellite of ratelimit-service rendered objects:"; echo "$rendered" | grep '^kind:'; exit 1
+          fi
 
       # The management port is safe only behind its AuthorizationPolicy, and the
       # policy is only worth anything if it names the identity the gateway
@@ -280,15 +304,17 @@ jobs:
       # gateway itself - and nothing in a lint or a unit test can see that.
       - name: Check what the management AuthorizationPolicy allows
         run: |
-          rendered=$(helm template t helm-templates/ratelimit \
-            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
-            --set management.enabled=true \
-            --show-only templates/AuthorizationPolicy.yaml)
-          echo "$rendered"
-          echo "$rendered" | grep -q 'sa/private-gateway-istio' || {
-            echo "::error::the policy does not allow the private gateway's service account"
-            exit 1
-          }
+          for chart in ratelimit ratelimit-service; do
+            rendered=$(helm template t helm-templates/$chart \
+              -f helm-templates/$chart/resource-profiles/dev.yaml \
+              --set management.enabled=true \
+              --show-only templates/AuthorizationPolicy.yaml)
+            echo "$rendered"
+            echo "$rendered" | grep -q 'sa/private-gateway-istio' || {
+              echo "::error::the policy of $chart does not allow the private gateway's service account"
+              exit 1
+            }
+          done
 
       # The port and the policy ship together: a release that opens the port
       # without the policy leaves endpoints that lift rate limits reachable by
@@ -296,13 +322,15 @@ jobs:
       - name: Check that the management port is never rendered alone
         run: |
           set -o pipefail
-          manifests=$(helm template t helm-templates/ratelimit \
-            -f helm-templates/ratelimit/resource-profiles/dev.yaml \
-            --set management.enabled=true)
-          echo "$manifests" | grep -q 'management-bind-address' || {
-            echo "::error::management.enabled did not render the port"; exit 1; }
-          echo "$manifests" | grep -q 'kind: AuthorizationPolicy' || {
-            echo "::error::the management port rendered without its AuthorizationPolicy"; exit 1; }
+          for chart in ratelimit ratelimit-service; do
+            manifests=$(helm template t helm-templates/$chart \
+              -f helm-templates/$chart/resource-profiles/dev.yaml \
+              --set management.enabled=true)
+            echo "$manifests" | grep -q 'management-bind-address' || {
+              echo "::error::management.enabled did not render the port in $chart"; exit 1; }
+            echo "$manifests" | grep -q 'kind: AuthorizationPolicy' || {
+              echo "::error::the management port of $chart rendered without its AuthorizationPolicy"; exit 1; }
+          done
 
       # The management values in every mode. Single and baseline render the
       # port, the policy, and the identity configuration; a satellite runs no
@@ -315,24 +343,26 @@ jobs:
           identity=(--set management.enabled=true
             --set management.claims.roles=realm_access.roles
             --set 'management.roles.viewer={rl-view}' --set 'management.roles.operator={rl-admin}')
-          render() {
-            helm template t helm-templates/ratelimit \
-              -f helm-templates/ratelimit/resource-profiles/dev.yaml "${identity[@]}" "$@"
-          }
-          for mode in single baseline; do
-            extra=(); [ "$mode" = baseline ] && extra=(--set ORIGIN_NAMESPACE=baseline)
-            manifests=$(render "${extra[@]}")
-            for want in 'management-bind-address' 'kind: AuthorizationPolicy' \
-              'MANAGEMENT_CLAIMS_ROLES' "value: 'realm_access.roles'" "value: 'rl-view'" "value: 'rl-admin'"; do
-              echo "$manifests" | grep -qF -- "$want" || {
-                echo "::error::mode $mode did not render: $want"; exit 1; }
+          for chart in ratelimit ratelimit-service; do
+            render() {
+              helm template t helm-templates/$chart \
+                -f helm-templates/$chart/resource-profiles/dev.yaml "${identity[@]}" "$@"
+            }
+            for mode in single baseline; do
+              extra=(); [ "$mode" = baseline ] && extra=(--set ORIGIN_NAMESPACE=baseline)
+              manifests=$(render "${extra[@]}")
+              for want in 'management-bind-address' 'kind: AuthorizationPolicy' \
+                'MANAGEMENT_CLAIMS_ROLES' "value: 'realm_access.roles'" "value: 'rl-view'" "value: 'rl-admin'"; do
+                echo "$manifests" | grep -qF -- "$want" || {
+                  echo "::error::$chart in mode $mode did not render: $want"; exit 1; }
+              done
             done
-          done
-          satellite=$(render -n satellite --set BASELINE_ORIGIN=baseline)
-          for forbidden in 'management-bind-address' 'kind: AuthorizationPolicy' 'MANAGEMENT_'; do
-            if echo "$satellite" | grep -qF -- "$forbidden"; then
-              echo "::error::a satellite rendered $forbidden"; exit 1
-            fi
+            satellite=$(render -n satellite --set BASELINE_ORIGIN=baseline)
+            for forbidden in 'management-bind-address' 'kind: AuthorizationPolicy' 'MANAGEMENT_'; do
+              if echo "$satellite" | grep -qF -- "$forbidden"; then
+                echo "::error::a satellite of $chart rendered $forbidden"; exit 1
+              fi
+            done
           done
 
       # An in-process store above one replica is a limit that admits N per
@@ -340,25 +370,27 @@ jobs:
       # The chart refuses to render it, with the message the runbook names.
       - name: Check that the in-process store is refused above one replica
         run: |
-          set +e
-          out=$(helm template t helm-templates/ratelimit \
-            -f helm-templates/ratelimit/resource-profiles/prod.yaml 2>&1)
-          rc=$?
-          set -e
-          if [ "$rc" -eq 0 ]; then
-            echo "::error::two replicas without redis.addresses rendered"; exit 1
-          fi
-          echo "$out" | grep -q 'in-process store needs exactly one replica; set redis.addresses' || {
-            echo "::error::the render failed for a reason other than validateStore:"; echo "$out"; exit 1; }
-          # And the same profile renders once the store is shared.
-          helm template t helm-templates/ratelimit \
-            -f helm-templates/ratelimit/resource-profiles/prod.yaml \
-            --set redis.addresses=redis:6379 >/dev/null
+          for chart in ratelimit ratelimit-service; do
+            set +e
+            out=$(helm template t helm-templates/$chart \
+              -f helm-templates/$chart/resource-profiles/prod.yaml 2>&1)
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "::error::two replicas without redis.addresses rendered in $chart"; exit 1
+            fi
+            echo "$out" | grep -q 'in-process store needs exactly one replica; set redis.addresses' || {
+              echo "::error::the render of $chart failed for a reason other than validateStore:"; echo "$out"; exit 1; }
+            # And the same profile renders once the store is shared.
+            helm template t helm-templates/$chart \
+              -f helm-templates/$chart/resource-profiles/prod.yaml \
+              --set redis.addresses=redis:6379 >/dev/null
+          done
       - name: Regenerate the manifests and the chart CRDs
         run: make sync-helm-crds
       - name: Fail on drift between the generated files and the commit
         run: |
-          if ! git diff --exit-code -- config/rbac config/crd/bases helm-templates/ratelimit/templates; then
+          if ! git diff --exit-code -- config/rbac config/crd/bases helm-templates/ratelimit/templates helm-templates/ratelimit-operator/templates; then
             echo "::error::generated manifests drifted from the commit: run 'make sync-helm-crds' and commit the result"
             exit 1
           fi

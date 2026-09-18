@@ -189,6 +189,40 @@ An empty `redis.addresses` selects the in-process counter store, which counts pe
 with `REPLICAS: 1`; any other count fails the render with `in-process store needs exactly one replica; set
 redis.addresses`, because a limit of 100 across three replicas would admit 300.
 
+### The two charts of the split
+
+The one-binary chart above stays until the e2e moves over (Netcracker/qubership-core-infra#413). The delivery of
+ADR 0007 is two charts under `helm-templates/`, installed into one namespace in either order:
+
+```bash
+helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
+  --namespace <business-namespace> \
+  -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
+  --set image.tag=<tag>
+helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
+  --namespace <business-namespace> \
+  -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
+  --set image.tag=<tag>
+```
+
+`ratelimit-operator` renders the CRD, one operator replica with the only `Role` of the delivery, one `EnvoyFilter`
+per enabled gateway, and a `PodMonitor`. Its values are the filter's (`filter.*`, the former `rls.*` without
+`rls.port`, which is the contract's 9000 and not a value), `runtime.*`, `gateways.*`, the gateway names, and the
+resource sizes without `REPLICAS`. `ratelimit-service` renders `REPLICAS` service replicas that mount the
+`ratelimit-config` ConfigMap at `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the
+`Service` `ratelimit` with the ports `grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a
+`PodMonitor`, and the dashboard. Its values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`, and the five
+resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way:
+a satellite gets the filters from the operator chart and nothing from the service chart, so the deployer installs the
+same pair in every namespace.
+
+A fresh installation needs no order: the service waits `NotReady` until the operator writes. An upgrade installs the
+service before the operator and a rollback reverses the order, because the service reads the current and the previous
+manifest format version and the operator writes the current one. The root of each schema is open, so the deployer's
+one parameter set reaches both charts and each ignores the other's blocks; the blocks a chart reads are closed. A CI
+test renders both charts and compares the Service name and ports, the filters' address, the volume's ConfigMap, and
+the mount path with the constants of `api/contract`.
+
 ### Composite installations
 
 A business application is installed either into one namespace or as a composite: one baseline namespace plus
@@ -301,8 +335,8 @@ status subresource actually exist — the fake client the other tests use valida
 envtest binaries into `bin/`, so it needs internet; `make test-unit` never does. Both derive their Kubernetes version
 from `go.mod`, so the test control plane cannot drift from the client libraries the service is built against.
 
-`helm-templates/ratelimit/templates/crd-*.yaml` are generated. Edit the Go types and run `make sync-helm-crds` instead
-of editing them.
+`helm-templates/ratelimit/templates/crd-*.yaml` and `helm-templates/ratelimit-operator/templates/crd-*.yaml` are
+generated. Edit the Go types and run `make sync-helm-crds` instead of editing them.
 
 The CRD carries CEL rules, and the cost estimator budgets each one against the declared `MaxLength` and `MaxItems`. Two
 structural checks the estimator would not accept live in the compiler instead — template placeholder uniqueness, and

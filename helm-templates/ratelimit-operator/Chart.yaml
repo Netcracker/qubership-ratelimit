@@ -1,0 +1,7 @@
+apiVersion: v2
+appVersion: "0.1.0"
+description: The rate limit operator for Istio ambient gateways - the RateLimitPolicy CRD, the controller that compiles policies into the service's configuration, and the gateway filters
+name: ratelimit-operator
+type: application
+# The effective version is computed during Helm generation
+version: 0.0.1

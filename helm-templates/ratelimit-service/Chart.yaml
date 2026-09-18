@@ -1,0 +1,7 @@
+apiVersion: v2
+appVersion: "0.1.0"
+description: The Envoy rate limit service for Istio ambient gateways - the data plane that enforces the configuration the ratelimit-operator writes
+name: ratelimit-service
+type: application
+# The effective version is computed during Helm generation
+version: 0.0.1

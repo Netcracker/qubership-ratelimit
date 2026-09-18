@@ -1,0 +1,157 @@
+# ============== IMAGE ============================
+image:
+  repository: ghcr.io/netcracker/qubership-ratelimit-service
+  # Empty takes the chart's appVersion, which is a fixed release. A floating tag
+  # such as "latest" moves under a running workload, so two pods of one rollout
+  # can end up on different builds.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# ============== SERVICE ============================
+# REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
+# the resource profile, not here: one source of truth, so the defaults cannot
+# drift away from the profiles. values.schema.json requires them, so installing
+# without `-f resource-profiles/<profile>.yaml` fails with a clear message
+# instead of rendering a Deployment with empty resources.
+#
+# Every replica answers rate limit checks from the configuration the operator
+# writes, so scaling REPLICAS out needs no other change. GOMEMLIMIT is derived
+# from MEMORY_LIMIT, so it governs the Go heap and not only the cgroup ceiling.
+
+# Passed as LOGGING_LEVEL_ROOT: the platform logger resolves its root level
+# from the logging.level.root property; LOG_LEVEL only applies before the
+# configloader is initialized.
+logLevel: info
+
+# ============== COUNTER STORE ============================
+# Redis holds the counters, and that is what makes a limit a limit of the domain
+# rather than of each replica: with N replicas counting in their own memory, a
+# limit of 100 admits 100*N. An empty address list selects the in-process store,
+# which is correct at one replica and for a developer install.
+#
+# addresses is a comma-separated host:port list: one entry is a standalone server,
+# several are a cluster. Setting masterName selects Sentinel.
+redis:
+  addresses: ""
+  db: 0
+  username: ""
+  masterName: ""
+  # The password comes from a Secret rather than from values: values end up in
+  # the release, and the release is readable by anyone with get on Secrets in the
+  # namespace.
+  existingSecret: ""
+  passwordKey: password
+
+healthProbe:
+  port: 8081
+
+# ============== METRICS ============================
+# The Prometheus endpoint: decisions and their latencies, budget headroom,
+# extraction health, and the applied generation per domain. Plain HTTP,
+# cluster-internal. The Service publishes it under the name metrics, and the
+# operator reads /debug/applied on it to learn which generation each replica
+# enforces.
+metrics:
+  port: 8080
+  # An admission counts as near-limit once the rule has consumed this share of
+  # the capacity of its window: the burst of a GCRA window, the requests of a
+  # fixed one. Quoted so YAML cannot reshape the number before the service
+  # parses it.
+  nearLimitRatio: "0.9"
+
+# ============== MANAGEMENT API ============================
+# The operator interface: read the enforced rules, inspect live counters, and
+# reset them. Off by default, because turning it on opens a port that can lift a
+# rate limit.
+#
+# The service authenticates nobody. It reads the subject and the roles out of
+# the bearer token without verifying the signature, because the gateway's JWT
+# filter has already verified it. That holds only while nothing but the gateway
+# can reach this port, which is what authorizationPolicy is for. Enabling the
+# port without the policy leaves the endpoints open to every workload in the
+# mesh, so keep them together.
+#
+# The port is exposed on the component's own Service, ratelimit, not on a
+# Service of its own. What keeps the port safe is the AuthorizationPolicy,
+# and that is enforced by ztunnel at the pod: a second Service would change
+# nothing about who can reach the port, and would add a second name for the
+# deployer's HTTPRoute to get right. The gateway's route names the port on
+# the one Service, which is what backendRefs.port is for.
+management:
+  enabled: false
+  port: 8082
+
+  # Where the identity is read from in the bearer token. Both are claim
+  # names, and both accept a dotted path for a nested claim: Keycloak issues
+  # the roles under realm_access.roles.
+  claims:
+    subject: sub
+    roles: roles
+
+  # The role names the IdP issues, mapped onto the two this API authorizes
+  # against. Each is a list, and with at least one list set a role on neither
+  # grants nothing. Both lists empty is not "nobody has a role": it switches
+  # the mapping off and the token's roles are read as they are, which is the
+  # canonical names; the schema refuses that combination so it cannot happen
+  # by accident. A read-only deployment sets viewer and leaves operator
+  # empty. The defaults are the canonical names, so a deployment whose IdP
+  # already issues viewer and operator configures nothing here.
+  roles:
+    viewer: [viewer]
+    operator: [operator]
+
+  # Restrict the port to the gateways that front it. The policy denies every
+  # other source, and it is the half of this feature that makes the other half
+  # safe: turn it off only where something outside the mesh already does the
+  # same job, and say so in a review.
+  authorizationPolicy:
+    enabled: true
+
+    # Service accounts allowed to reach the port, in the release namespace.
+    # Empty means the private gateway alone: the management endpoints belong
+    # behind an internal gateway, never on the path public traffic takes.
+    #
+    # Istio's automated deployment names a Gateway API gateway's generated
+    # ServiceAccount after the gateway and its class, so the default is
+    # <ISTIO_PRIVATE_GATEWAY_NAME>-istio. Check it before overriding:
+    #
+    #   kubectl get pod -l gateway.networking.k8s.io/gateway-name=<gateway> \
+    #     -o jsonpath='{.items[0].spec.serviceAccountName}'
+    allowedServiceAccounts: []
+
+# ============== MONITORING DELIVERY ============================
+# The scrape target and the Grafana dashboard, delivered as custom resources:
+# a PodMonitor for the platform's Prometheus and a GrafanaDashboard for
+# grafana-operator v4. The deployer sets this platform parameter; off by
+# default because both need their operators' CRDs, and installing them into a
+# cluster without monitoring fails the release.
+MONITORING_ENABLED: false
+
+# The gateway whose identity the management AuthorizationPolicy allows by
+# default. The filters on the gateways are the operator chart's; this chart
+# reads the private gateway's name and nothing of the public one.
+ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
+
+# ============== COMPOSITE ============================
+# The deployer's composite variables, the same ones core-operator and the
+# operator chart render by. BASELINE_ORIGIN empty is a standalone installation
+# or the baseline of a composite: the whole chart renders. BASELINE_ORIGIN set
+# is a satellite: this chart renders nothing, because a satellite runs no
+# service and its gateway filters send checks to the baseline's. The deployer
+# installs the same pair of charts in every namespace, and the empty render is
+# what keeps a satellite from waiting NotReady for an operator that never
+# comes. BASELINE_CONTROLLER is read for parity with control-plane and the
+# operator chart; it changes no object of this chart.
+BASELINE_ORIGIN: ""
+BASELINE_CONTROLLER: ""
+
+# ============== KUBERNETES ============================
+serviceAccount:
+  create: true
+  # Defaults to the chart's fullname when empty.
+  name: ""
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

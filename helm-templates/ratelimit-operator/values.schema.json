@@ -1,0 +1,356 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "$id": "https://netcracker.com/ratelimit-operator/values.schema.json",
+  "type": "object",
+  "title": "The ratelimit-operator schema.",
+  "description": "JSON Schema for the ratelimit-operator chart. The root stays open: the deployer passes one parameter set to every chart of the application, so the service chart's blocks reach this schema and are ignored. The blocks this chart reads are closed.",
+  "required": [
+    "image",
+    "filter",
+    "ISTIO_PUBLIC_GATEWAY_NAME",
+    "ISTIO_PRIVATE_GATEWAY_NAME",
+    "gateways",
+    "CPU_REQUEST",
+    "MEMORY_REQUEST",
+    "CPU_LIMIT",
+    "MEMORY_LIMIT"
+  ],
+  "properties": {
+    "nameOverride": {
+      "type": "string",
+      "title": "Chart name override",
+      "description": "Replaces the chart name in resource names and labels."
+    },
+    "fullnameOverride": {
+      "type": "string",
+      "title": "Full name override",
+      "description": "Replaces the generated name of the Deployment, ServiceAccount and RBAC pair. The Service of the service chart keeps its fixed name, ratelimit: a satellite computes the RLS address from it and cannot know how the baseline was named."
+    },
+    "image": {
+      "type": "object",
+      "title": "Operator image",
+      "required": [
+        "repository",
+        "tag"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "title": "Image repository"
+        },
+        "tag": {
+          "type": "string",
+          "title": "Image tag"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "title": "Image pull policy",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "logLevel": {
+      "type": "string",
+      "title": "Log level",
+      "enum": [
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ],
+      "default": "info"
+    },
+    "filter": {
+      "type": "object",
+      "title": "Gateway filter",
+      "properties": {
+        "timeout": {
+          "type": "string",
+          "title": "Check timeout",
+          "description": "Envoy-side timeout for a rate limit check, as a protobuf duration: seconds with an optional fraction, e.g. 0.05s. Go-style values such as 50ms are rejected by Envoy.",
+          "pattern": "^[0-9]+(\\.[0-9]+)?s$",
+          "default": "0.05s"
+        },
+        "failClosed": {
+          "type": "boolean",
+          "title": "Fail closed",
+          "description": "true rejects traffic when the rate limit service is unreachable or times out (failure_mode_deny); false lets it flow unlimited.",
+          "default": false
+        },
+        "rateLimitedStatus": {
+          "type": "integer",
+          "title": "Refusal status",
+          "description": "Status the client sees on a refused request. Envoy ignores values below 400.",
+          "minimum": 400,
+          "maximum": 599,
+          "default": 429
+        },
+        "grpcAsResourceExhausted": {
+          "type": "boolean",
+          "title": "gRPC refusal code",
+          "description": "true maps a refusal to RESOURCE_EXHAUSTED for gRPC callers behind the gateway \u2014 the code their clients back off and retry on \u2014 instead of UNAVAILABLE.",
+          "default": false
+        },
+        "xRateLimitHeaders": {
+          "type": "string",
+          "title": "x-ratelimit response headers",
+          "description": "The service supplies the x-ratelimit-* and retry-after headers itself. DRAFT_VERSION_03 additionally lets Envoy render X-RateLimit-* from per-descriptor statuses, which the service does not populate, so OFF is the default.",
+          "enum": [
+            "OFF",
+            "DRAFT_VERSION_03"
+          ],
+          "default": "OFF"
+        }
+      },
+      "description": "The install-wide defaults of the rate limit filter on each gateway; gateways.<role> overrides them per gateway. The port the filters send checks to is the contract's 9000 and is not a value.",
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "title": "Filter switches",
+      "description": "Share of requests the filter checks (enabledPercent) and enforces on (enforcedPercent). Emergency controls independent of behavior: Shadow in the rules; rendered as Envoy runtime fractions, so a runtime override flips them without a redeploy.",
+      "properties": {
+        "enabledPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 100
+        },
+        "enforcedPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "MONITORING_ENABLED": {
+      "$id": "#/properties/MONITORING_ENABLED",
+      "type": "boolean",
+      "title": "The MONITORING_ENABLED schema",
+      "description": "Set to true to render the PodMonitor of the operator. Requires the monitoring operator's CRDs on the target cluster.",
+      "examples": [
+        true,
+        false
+      ]
+    },
+    "ISTIO_PUBLIC_GATEWAY_NAME": {
+      "type": "string",
+      "title": "Public gateway name",
+      "description": "Name of the public Istio gateway. Shared deployment parameter: must equal ISTIO_PUBLIC_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "minLength": 1,
+      "default": "public-gateway"
+    },
+    "ISTIO_PRIVATE_GATEWAY_NAME": {
+      "type": "string",
+      "title": "Private gateway name",
+      "description": "Name of the private Istio gateway. Shared deployment parameter: must equal ISTIO_PRIVATE_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "minLength": 1,
+      "default": "private-gateway"
+    },
+    "gateways": {
+      "type": "object",
+      "title": "Rate limited gateways",
+      "description": "One EnvoyFilter is rendered per enabled gateway. The gateway names come from the ISTIO_*_GATEWAY_NAME parameters, not from here.",
+      "properties": {
+        "public": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render an EnvoyFilter for this gateway.",
+              "default": true
+            },
+            "domain": {
+              "type": "string",
+              "title": "Rate limit domain",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the service log. The pattern is the CRD's spec.domain pattern, so a value the policy side cannot ever carry is refused here too.",
+              "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+              "minLength": 1,
+              "maxLength": 63
+            },
+            "namespace": {
+              "type": "string",
+              "title": "Gateway namespace",
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to the release namespace, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+            },
+            "timeout": {
+              "type": "string",
+              "title": "Check timeout override",
+              "description": "Overrides filter.timeout for this gateway. Same format: a protobuf duration such as 0.05s.",
+              "pattern": "^[0-9]+(\\.[0-9]+)?s$"
+            },
+            "failClosed": {
+              "type": "boolean",
+              "title": "Fail closed override",
+              "description": "Overrides filter.failClosed for this gateway. An explicit false wins over a true default."
+            },
+            "rateLimitedStatus": {
+              "type": "integer",
+              "title": "Refusal status override",
+              "description": "Overrides filter.rateLimitedStatus for this gateway. Envoy ignores values below 400.",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "grpcAsResourceExhausted": {
+              "type": "boolean",
+              "title": "gRPC refusal code override",
+              "description": "Overrides filter.grpcAsResourceExhausted for this gateway."
+            }
+          },
+          "additionalProperties": false
+        },
+        "private": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render an EnvoyFilter for this gateway.",
+              "default": true
+            },
+            "domain": {
+              "type": "string",
+              "title": "Rate limit domain",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the service log. The pattern is the CRD's spec.domain pattern, so a value the policy side cannot ever carry is refused here too.",
+              "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+              "minLength": 1,
+              "maxLength": 63
+            },
+            "namespace": {
+              "type": "string",
+              "title": "Gateway namespace",
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to the release namespace, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+            },
+            "timeout": {
+              "type": "string",
+              "title": "Check timeout override",
+              "description": "Overrides filter.timeout for this gateway. Same format: a protobuf duration such as 0.05s.",
+              "pattern": "^[0-9]+(\\.[0-9]+)?s$"
+            },
+            "failClosed": {
+              "type": "boolean",
+              "title": "Fail closed override",
+              "description": "Overrides filter.failClosed for this gateway. An explicit false wins over a true default."
+            },
+            "rateLimitedStatus": {
+              "type": "integer",
+              "title": "Refusal status override",
+              "description": "Overrides filter.rateLimitedStatus for this gateway. Envoy ignores values below 400.",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "grpcAsResourceExhausted": {
+              "type": "boolean",
+              "title": "gRPC refusal code override",
+              "description": "Overrides filter.grpcAsResourceExhausted for this gateway."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean",
+          "default": true
+        },
+        "name": {
+          "type": "string",
+          "description": "Defaults to the chart's fullname when empty."
+        }
+      },
+      "additionalProperties": false
+    },
+    "podAnnotations": {
+      "type": "object",
+      "title": "Extra pod annotations"
+    },
+    "nodeSelector": {
+      "type": "object",
+      "title": "Node selector"
+    },
+    "tolerations": {
+      "type": "array",
+      "title": "Tolerations"
+    },
+    "affinity": {
+      "type": "object",
+      "title": "Affinity"
+    },
+    "CPU_REQUEST": {
+      "$id": "#/properties/CPU_REQUEST",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The CPU_REQUEST schema",
+      "internal": true,
+      "envSpecific": true
+    },
+    "MEMORY_REQUEST": {
+      "$id": "#/properties/MEMORY_REQUEST",
+      "type": "string",
+      "title": "The MEMORY_REQUEST schema",
+      "description": "Defines minimum amount of memory the container will use to start",
+      "examples": [
+        "256Mi"
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "CPU_LIMIT": {
+      "$id": "#/properties/CPU_LIMIT",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The CPU_LIMIT schema",
+      "internal": true,
+      "envSpecific": true
+    },
+    "MEMORY_LIMIT": {
+      "$id": "#/properties/MEMORY_LIMIT",
+      "type": "string",
+      "title": "The MEMORY_LIMIT schema",
+      "internal": true,
+      "envSpecific": true
+    },
+    "BASELINE_ORIGIN": {
+      "type": "string",
+      "title": "Baseline origin namespace",
+      "description": "Set by the deployer on a satellite namespace of a composite, naming the baseline's origin namespace. Empty means this release is a standalone installation or the baseline itself. When set, only the gateway filters render and they send checks to the baseline's ratelimit Service.",
+      "default": ""
+    },
+    "BASELINE_CONTROLLER": {
+      "type": "string",
+      "title": "Baseline controller namespace",
+      "description": "Read for parity with control-plane, which resolves the baseline the same way; takes precedence over BASELINE_ORIGIN as the namespace of the ratelimit Service a satellite sends checks to. On this platform the baseline is never blue-green'd, so the deployer leaves it empty.",
+      "default": ""
+    }
+  },
+  "definitions": {
+    "integerOrString": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "numberOrString": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    }
+  }
+}
