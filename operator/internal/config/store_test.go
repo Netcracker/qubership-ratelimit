@@ -23,7 +23,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
-	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
 // The store's reading of an object somebody else wrote, or damaged. The
@@ -215,7 +215,7 @@ func TestCacheOptions_watchTheOneConfigMapByName(t *testing.T) {
 	require.True(t, ok, "and scoped to the namespace, or the Role is not enough")
 	require.NotNil(t, config.FieldSelector)
 	assert.Equal(t, "metadata.name="+contract.ConfigMapName, config.FieldSelector.String())
-	assert.True(t, options.ReaderFailOnMissingInformer, "the one-binary packaging's cache rules still hold")
+	assert.True(t, options.ReaderFailOnMissingInformer, "the controller's cache rules still hold")
 }
 
 func keysOf[V any](m map[string]V) []string {

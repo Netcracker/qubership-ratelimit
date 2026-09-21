@@ -19,12 +19,12 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/internal/controller"
-	"github.com/netcracker/qubership-ratelimit/internal/leader"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
-	"github.com/netcracker/qubership-ratelimit/internal/policy"
 	"github.com/netcracker/qubership-ratelimit/internal/process"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/config"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/controller"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/leader"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
 // ManagedBy labels the ConfigMap the operator writes, and names the event
@@ -140,7 +140,7 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 			Service:   contract.ServiceName,
 			Freshness: controller.ProbeInterval,
 		},
-		PropagationDeadline: controller.SplitPropagationDeadline,
+		PropagationDeadline: controller.DefaultPropagationDeadline,
 		ConfigMapLimit:      policy.ConfigMapLimit,
 	}
 	if err := status.SetupWithManager(mgr); err != nil {

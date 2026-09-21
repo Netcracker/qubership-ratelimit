@@ -7,14 +7,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// StateView is one rebuild's status, distilled for the scrape-time collector.
-// The collector emits only the series the current view holds, which is what
-// makes label churn safe: a policy that turns ready, changes its reason, or
-// disappears leaves no stale series behind — the fate a plain GaugeVec cannot
+// StateView is one apply's view of the domains, distilled for the
+// scrape-time collector. The collector emits only the series the current
+// view holds, which is what makes label churn safe: a domain that changes or
+// disappears leaves no stale series behind, the fate a plain GaugeVec cannot
 // avoid.
 type StateView struct {
-	Domains  []DomainView
-	Policies []PolicyView
+	Domains []DomainView
 }
 
 // DomainView carries a domain's capacity facts.
@@ -36,7 +35,7 @@ type DomainView struct {
 	AppliedGeneration int64
 }
 
-// PolicyView is one policy's status as the compiler reported it.
+// PolicyView is one policy's status as the operator judged it.
 type PolicyView struct {
 	// Domain is the domain the policy serves, which under one policy per
 	// domain is also the object's name. The series are labelled by it rather
@@ -77,15 +76,12 @@ const (
 var stateView atomic.Pointer[StateView]
 
 // PublishState makes a view the one the next scrape reports. The service's
-// applier calls it after every apply, with the domains it enforces; the one
-// binary's updater calls it with the policies as well.
+// applier calls it after every apply, with the domains it enforces.
 func PublishState(view *StateView) { stateView.Store(view) }
 
 // policyViews holds the policy status published one domain at a time, by
 // the operator's status reconciler: it judges one policy per reconcile and
-// has no whole view to publish. While it holds anything, the scrape reports
-// the policy series from it rather than from the view, so the one binary's
-// leader reports the fleet's judgement and its followers their own compile.
+// has no whole view to publish.
 var (
 	policyMu    sync.Mutex
 	policyViews = map[string]PolicyView{}
@@ -106,17 +102,10 @@ func DropPolicy(domain string) {
 	delete(policyViews, domain)
 }
 
-// publishedPolicies returns the policy views the scrape reports: the ones
-// published one at a time when there are any, else the whole view's.
-func publishedPolicies(view *StateView) []PolicyView {
+// publishedPolicies returns the policy views the scrape reports.
+func publishedPolicies() []PolicyView {
 	policyMu.Lock()
 	defer policyMu.Unlock()
-	if len(policyViews) == 0 {
-		if view == nil {
-			return nil
-		}
-		return view.Policies
-	}
 	out := make([]PolicyView, 0, len(policyViews))
 	for _, p := range policyViews {
 		out = append(out, p)
@@ -174,7 +163,7 @@ func (stateCollector) Collect(ch chan<- prometheus.Metric) {
 				prometheus.GaugeValue, float64(d.AppliedGeneration), d.Domain)
 		}
 	}
-	for _, p := range publishedPolicies(view) {
+	for _, p := range publishedPolicies() {
 		ch <- prometheus.MustNewConstMetric(descPolicyReady,
 			prometheus.GaugeValue, boolValue(p.Ready), p.Domain, p.Reason)
 		ch <- prometheus.MustNewConstMetric(descPolicyEnforced,

@@ -22,7 +22,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
-	"github.com/netcracker/qubership-ratelimit/internal/store"
+	"github.com/netcracker/qubership-ratelimit/service/internal/store"
 )
 
 const testNamespace = "biz"

@@ -11,12 +11,6 @@ rules:
   - configmaps
   verbs:
   - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - ""
   resourceNames:

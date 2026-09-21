@@ -1,7 +1,7 @@
-// Package metrics defines every Prometheus series the binaries expose. The
-// collectors are package values; Register puts them on the registry a binary
-// serves, the manager's for the one binary and the operator, a plain one for
-// the service, which is why nothing here registers itself at init.
+// Package metrics defines every Prometheus series the two binaries expose.
+// The collectors are package values; Register puts them on the registry a
+// binary serves, the manager's for the operator and a plain one for the
+// service, which is why nothing here registers itself at init.
 //
 // Label cardinality is bounded by configuration on purpose: domains come from
 // the gateway filter config, policies and rules from the custom resources,
@@ -158,16 +158,6 @@ var (
 		Name: "ratelimit_snapshot_timestamp_seconds",
 		Help: "Unix time of the last successful rule store swap.",
 	})
-
-	// StatePersistErrors counts failed operations on the persisted last-good
-	// state. Nothing degrades immediately — the snapshot still serves — but
-	// a failing write means the fallback a restart would need is not being
-	// saved, and a failing delete means a retired domain's state lingers and
-	// retries forever. A delayed-fuse alert either way.
-	StatePersistErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "ratelimit_state_persist_errors_total",
-		Help: "Failed last-good state operations by reason: overflow, delete, other.",
-	}, []string{"reason"})
 )
 
 // Register puts every series of this package on the registry. It is called
@@ -179,7 +169,7 @@ func Register(registry prometheus.Registerer) {
 		Checks, CheckDuration, Decisions, NearLimit, Refusals,
 		UnknownDomainChecks, UnmatchedChecks, ExtractionSkips, Extractions, TokensSeen,
 		StoreRoundtrip, StoreErrors,
-		SnapshotRebuilds, SnapshotTimestamp, StatePersistErrors,
+		SnapshotRebuilds, SnapshotTimestamp,
 		stateCollector{},
 		fleetCollector{},
 	} {

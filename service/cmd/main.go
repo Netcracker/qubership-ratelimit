@@ -19,9 +19,9 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/process"
-	"github.com/netcracker/qubership-ratelimit/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/service/internal/app"
 	"github.com/netcracker/qubership-ratelimit/service/internal/config"
+	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
 )
 
 // loggerName prefixes every log line this process writes. Sub-loggers are

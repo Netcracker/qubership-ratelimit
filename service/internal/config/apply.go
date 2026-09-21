@@ -17,8 +17,8 @@ import (
 	counters "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/internal/convert"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
-	"github.com/netcracker/qubership-ratelimit/internal/ruleview"
-	"github.com/netcracker/qubership-ratelimit/internal/store"
+	"github.com/netcracker/qubership-ratelimit/service/internal/ruleview"
+	"github.com/netcracker/qubership-ratelimit/service/internal/store"
 )
 
 // Applier turns a reading into the rule set the gRPC server decides with,

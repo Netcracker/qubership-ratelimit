@@ -23,12 +23,12 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
-	"github.com/netcracker/qubership-ratelimit/internal/management"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
-	"github.com/netcracker/qubership-ratelimit/internal/rls"
-	"github.com/netcracker/qubership-ratelimit/internal/settings"
-	"github.com/netcracker/qubership-ratelimit/internal/store"
 	"github.com/netcracker/qubership-ratelimit/service/internal/config"
+	"github.com/netcracker/qubership-ratelimit/service/internal/management"
+	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
+	"github.com/netcracker/qubership-ratelimit/service/internal/settings"
+	"github.com/netcracker/qubership-ratelimit/service/internal/store"
 )
 
 // Logger is the platform logger as the gRPC server and the management API

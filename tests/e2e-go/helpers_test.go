@@ -204,7 +204,7 @@ func nextWindow() {
 }
 
 // appliedLine is what a service replica logs when it swaps a configuration
-// in, the successor of the one binary's "rate limit store rebuilt".
+// in.
 const appliedLine = "configuration applied"
 
 // waitApplied is the bash wait_for_domain: it returns once every running
@@ -213,7 +213,7 @@ const appliedLine = "configuration applied"
 // reaches a replica through the operator's ConfigMap and the kubelet's
 // projection of it, one replica at a time on its own node's clock, and the
 // report is the one signal that says the replica has it. Counting the
-// replica's apply lines instead, the way the one binary's suites counted
+// replica's apply lines instead, the way earlier suites counted
 // rebuilds, misreads a change the kubelet folded into another: two writes
 // inside one sync period project once, and a write undone inside one
 // project not at all, and neither leaves a line to count.
