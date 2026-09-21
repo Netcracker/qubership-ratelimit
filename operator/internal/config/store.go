@@ -1,9 +1,8 @@
 // Package config writes the configuration of the namespace: one ConfigMap,
 // ratelimit-config, that the operator owns and the service mounts.
 //
-// It replaces the per-domain ratelimit-state ConfigMaps of the one-binary
-// packaging. The object is the whole channel between the two halves of the
-// split and the last-good state of the namespace at once: under binaryData
+// The object is the whole channel between the two halves of the split and
+// the last-good state of the namespace at once: under binaryData
 // one <domain>.json.gz per domain, the validated spec in the resource's own
 // format, and under data the manifest that indexes them. The operator writes
 // the whole object on every reconcile, creates it with an ownerReference to
@@ -33,8 +32,8 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
-	"github.com/netcracker/qubership-ratelimit/internal/controller"
-	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/controller"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
 // Store reads and writes the namespace's ConfigMap.
@@ -244,8 +243,8 @@ func (s *Store) key() client.ObjectKey {
 	return client.ObjectKey{Namespace: s.namespace, Name: contract.ConfigMapName}
 }
 
-// CacheOptions is the operator's cache: the one-binary packaging's, plus the
-// one ConfigMap this process owns, watched by name so that the informer holds
+// CacheOptions is the operator's cache: the controller's, plus the one
+// ConfigMap this process owns, watched by name so that the informer holds
 // one object and not every ConfigMap of the namespace.
 func CacheOptions(namespace string) cache.Options {
 	options := controller.CacheOptions(namespace)

@@ -2,8 +2,10 @@ package config
 
 import (
 	"context"
+	"errors"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -16,7 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
 // Reconciler writes ratelimit-config. It is the operator's only writer of the
@@ -79,10 +82,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result
 	policy.Fit(input, result, r.limit())
 
 	if err := r.Store.Save(ctx, result.State, r.limit()); err != nil {
+		metrics.ConfigWriteErrors.WithLabelValues(writeErrorReason(err)).Inc()
 		log.Error(err, "failed to write the configuration")
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// writeErrorReason labels a failed write for the scrape: size for a state
+// the object cannot hold, api for an answer of the API server, other for
+// the rest, a client that could not reach it included.
+func writeErrorReason(err error) string {
+	var status *apierrors.StatusError
+	switch {
+	case errors.Is(err, ErrTooLarge):
+		return "size"
+	case errors.As(err, &status):
+		return "api"
+	}
+	return "other"
 }
 
 // SetupWithManager registers the reconciler: it owns the ConfigMap, follows

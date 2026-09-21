@@ -120,11 +120,11 @@ gateway.private   True    3          2       0          5d
 Reading it: the latest generation of `gateway.public` does not compile, an earlier one is still serving its five rules,
 and `Accepted` carries the summary while `ruleProblems` carries the address of the rule at fault.
 
-Last-good specs are persisted, one gzipped ConfigMap per domain (`ratelimit-state-<domain>`), because etcd holds only
-the latest generation — which may be the rejected one. Without the copy a restart would forget what is running and turn
-a rejected edit into an outage at the next rollout. The write happens before the snapshot swap, so a crash in between
-converges to a state that was valid when it was written, and a UID check keeps a recreated object from inheriting the
-spec of its namesake. Only the leader writes; every replica reads once, at startup.
+Last-good specs are what `ratelimit-config` carries: one gzipped payload per domain, the validated spec of the
+generation in effect, beside a manifest with its generation, UID, and hash. etcd holds only the latest generation of
+the policy, which may be the rejected one; the ConfigMap is the copy that lets a service replica born after the edit
+enforce the good spec, and lets the operator restart without forgetting what is running. The operator writes it whole
+on every reconcile, and a UID check keeps a recreated object from inheriting the spec of its namesake.
 
 ### Ready is a statement about every replica
 
@@ -321,15 +321,17 @@ agreed descriptors, that the stub refuses traffic over its limit with 429 and al
 that the two gateways count independently, and that a check logs its domain and path and request id while never logging
 the `Authorization` value.
 
-The `leader` test is the exception to "changes nothing": the leader-election split cannot be observed with a single
-replica, so it scales the release to two, kills the leader, and asserts that rate limiting continues while the lease
-moves and that the new leader resumes status writes. It restores the original replica count through Helm — a `kubectl
-scale` would take field-manager ownership of `.spec.replicas` and make every later `helm upgrade` conflict.
+The `operator` suite is the exception to "changes nothing": that every replica applies the configuration cannot be
+observed with a single one, so it scales the service release to two, deletes the operator pod, and asserts that the
+checks stay clean on every replica while the pod is replaced, that the Lease moves to the replacement, and that the
+replacement resumes the status writes. It restores the original replica count through Helm — a `kubectl scale` would
+take field-manager ownership of `.spec.replicas` and make every later `helm upgrade` conflict.
 
-`make test` runs `internal/controller` against a real API server through envtest, which is where the CRD schema and the
-status subresource actually exist — the fake client the other tests use validates nothing. The first run downloads the
-envtest binaries into `bin/`, so it needs internet; `make test-unit` never does. Both derive their Kubernetes version
-from `go.mod`, so the test control plane cannot drift from the client libraries the service is built against.
+`make test` runs the envtest suites of `operator/internal` against a real API server, which is where the CRD schema
+and the status subresource actually exist — the fake client the other tests use validates nothing. The first run
+downloads the envtest binaries into `bin/`, so it needs internet; `make test-unit` never does. Both derive their
+Kubernetes version from `go.mod`, so the test control plane cannot drift from the client libraries the operator is
+built against.
 
 `helm-templates/ratelimit-operator/templates/crd-*.yaml` is generated. Edit the Go types and run `make sync-helm-crds`
 instead of editing them.

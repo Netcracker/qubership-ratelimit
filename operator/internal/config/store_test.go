@@ -3,15 +3,19 @@ package config
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -23,7 +27,8 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
-	"github.com/netcracker/qubership-ratelimit/internal/policy"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
 // The store's reading of an object somebody else wrote, or damaged. The
@@ -215,7 +220,7 @@ func TestCacheOptions_watchTheOneConfigMapByName(t *testing.T) {
 	require.True(t, ok, "and scoped to the namespace, or the Role is not enough")
 	require.NotNil(t, config.FieldSelector)
 	assert.Equal(t, "metadata.name="+contract.ConfigMapName, config.FieldSelector.String())
-	assert.True(t, options.ReaderFailOnMissingInformer, "the one-binary packaging's cache rules still hold")
+	assert.True(t, options.ReaderFailOnMissingInformer, "the controller's cache rules still hold")
 }
 
 func keysOf[V any](m map[string]V) []string {
@@ -250,8 +255,18 @@ func TestReconcile_returnsAWriteFailure(t *testing.T) {
 	// bundle and the write still carries a manifest the limit refuses.
 	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: New(c, unitNamespace, nil, "v", logr.Discard()), Limit: 8}
 
+	before := testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues("size"))
 	_, err := r.Reconcile(context.Background(), reconcileRequest())
 	require.ErrorIs(t, err, ErrTooLarge)
+	assert.Equal(t, before+1, testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues("size")),
+		"a write the size refused is counted under its reason, which is what the dashboard's panel watches")
+}
+
+func TestWriteErrorReason_namesTheCause(t *testing.T) {
+	assert.Equal(t, "size", writeErrorReason(fmt.Errorf("wrapped: %w", ErrTooLarge)))
+	assert.Equal(t, "api", writeErrorReason(fmt.Errorf("update: %w",
+		apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "ratelimit-config", errors.New("no")))))
+	assert.Equal(t, "other", writeErrorReason(errors.New("connection refused")))
 }
 
 func TestReconcile_writesTheNamespace(t *testing.T) {

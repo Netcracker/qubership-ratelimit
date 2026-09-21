@@ -125,7 +125,7 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 	// The unknown-domain path is deliberately not tested here: proving it
 	// means removing every policy that claims gateway.public, which in a
 	// shared namespace would disrupt whatever else uses the gateway.
-	// internal/rls covers it.
+	// service/internal/rls covers it.
 })
 
 // rateLimitClusterOf digs the ratelimit filter's cluster name out of the

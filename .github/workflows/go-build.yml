@@ -48,7 +48,7 @@ jobs:
       # engine module instead and ships its coverage as a coverage-* artifact,
       # which the Sonar job picks up by glob.
       go-module-dir: .
-      # internal/controller runs against a real API server through envtest.
+      # operator/internal/controller runs against a real API server through envtest.
       # Without this the suite fails on a missing control plane rather than skipping.
       install-envtest: true
       # Matches k8s.io/api in go.mod, so the test control plane cannot drift from
@@ -125,7 +125,7 @@ jobs:
       - name: Measure the decision throughput a replica owes
         env:
           REDIS_ADDR: 127.0.0.1:6379
-        run: go test ./internal/rls/ -run TestLoad -v -count=1
+        run: go test ./service/internal/rls/ -run TestLoad -v -count=1
 
   service-binary:
     name: Service binary carries no Kubernetes client
@@ -187,7 +187,7 @@ jobs:
 
       # The generic workflow runs the root module's tests without -race; this
       # step runs them with the detector on, with the Redis service for
-      # internal/records. The target takes the package list of make test-unit,
+      # service/internal/records. The target takes the package list of make test-unit,
       # so the controller suite is left out the way test-unit leaves it out:
       # it needs the envtest control plane the generic workflow installs for
       # its own run.
@@ -220,7 +220,7 @@ jobs:
       - name: Test the command store against a Redis Cluster
         run: |
           REDIS_ADDR="$(hack/redis-cluster.sh up)" \
-            go test -race ./internal/records/ -count=1
+            go test -race ./service/internal/records/ -count=1
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

@@ -4,7 +4,7 @@
 // platform's logger. It is the root internal package for that reason;
 // operator/ and service/ have internal trees of their own that neither may
 // import from the other. It imports no Kubernetes client, because the service
-// carries none; the leader lease lives in internal/leader.
+// carries none; the leader lease lives in operator/internal/leader.
 package process
 
 import (

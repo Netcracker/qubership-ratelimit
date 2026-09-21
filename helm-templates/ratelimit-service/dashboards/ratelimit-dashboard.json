@@ -1092,7 +1092,7 @@
       "id": 22,
       "type": "timeseries",
       "title": "Configuration plane errors",
-      "description": "Rebuild errors leave the previous snapshot serving - stale rules, silently. Persist errors mean the last-good fallback a restart would need is not being saved.",
+      "description": "Refused configurations leave the replica serving the one it applied last, silently: a manifest or a payload it would not read. Write errors mean the operator could not save the namespace's configuration, so the replicas keep the previous one and the last-good fallback a restart would need is not being saved; the status reports it as ReplicaStale 90 s later. Too-large is the one generation that compiles and does not fit, held on last-good.",
       "gridPos": {
         "h": 8,
         "w": 6,
@@ -1128,13 +1128,18 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ratelimit_snapshot_rebuilds_total{cluster=~\"$cluster\", namespace=~\"$namespace\", result=\"error\"}[$__rate_interval]))",
-          "legendFormat": "rebuild errors"
+          "expr": "sum(rate(ratelimit_snapshot_rebuilds_total{cluster=~\"$cluster\", namespace=~\"$namespace\", result=\"refused\"}[$__rate_interval]))",
+          "legendFormat": "refused configurations"
         },
         {
           "refId": "B",
-          "expr": "sum by (reason) (rate(ratelimit_state_persist_errors_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
-          "legendFormat": "persist {{reason}}"
+          "expr": "sum by (reason) (rate(ratelimit_config_write_errors_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "write {{reason}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(ratelimit_policy_stalled{cluster=~\"$cluster\", namespace=~\"$namespace\", reason=\"ConfigMapTooLarge\"})",
+          "legendFormat": "too large"
         }
       ]
     },

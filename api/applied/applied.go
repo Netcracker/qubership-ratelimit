@@ -18,8 +18,6 @@ type Report struct {
 	Domains map[string]Domain `json:"domains"`
 
 	// FormatVersions lists the manifest format versions this replica reads.
-	// Empty for a replica that reads no manifest, which is the one-binary
-	// packaging.
 	FormatVersions []int `json:"formatVersions,omitempty"`
 
 	// Refusal is set while the replica keeps its snapshot because the
