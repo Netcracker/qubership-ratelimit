@@ -253,10 +253,9 @@ func spendBudget(domain, prefix, rule string, limit int32, applied *bool) string
 	if !*applied {
 		blocks := prefixLimits(prefix, "per-path", []string{"path"}, limit, 3600)
 		blocks[0].Rules[0].Rates[0].Algorithm = v1alpha1.AlgorithmGCRA
-		before := storeRebuilds()
 		Expect(apply(newPolicy(domain, blocks))).To(Succeed())
 		*applied = true
-		waitStoreRebuilt(before)
+		waitApplied(domain)
 		Expect(rule).To(Equal(blocks[0].Name+"/"+blocks[0].Rules[0].Name),
 			"the rule id the flows address is not the one the policy declares")
 	}
@@ -323,7 +322,7 @@ func listedDomains(body string) ([]string, error) {
 }
 
 func managementPort() int32 {
-	pods := operatorPods()
+	pods := servicePods()
 	Expect(pods).NotTo(BeEmpty(), "no running replica to read the ports of")
 	for _, c := range pods[0].Spec.Containers {
 		for _, p := range c.Ports {
@@ -335,13 +334,14 @@ func managementPort() int32 {
 	return 0
 }
 
-// serviceHost is the release's Service, which is what an in-mesh caller
-// resolves and what ztunnel applies the policy to.
+// serviceHost is the contract's Service, which is what an in-mesh caller
+// resolves and what ztunnel applies the policy to. Read from the cluster
+// rather than assumed, so a chart that renamed it fails here.
 func serviceHost() string {
 	var services corev1.ServiceList
 	Expect(k8s.List(ctx, &services, client.InNamespace(namespace),
-		client.MatchingLabels{"app.kubernetes.io/name": "ratelimit"})).To(Succeed())
-	Expect(services.Items).NotTo(BeEmpty(), "no ratelimit Service in %s", namespace)
+		client.MatchingLabels{"app.kubernetes.io/name": serviceChart})).To(Succeed())
+	Expect(services.Items).NotTo(BeEmpty(), "no %s Service in %s", serviceChart, namespace)
 	return services.Items[0].Name + "." + namespace + ".svc.cluster.local"
 }
 
@@ -384,7 +384,7 @@ type managementIdentity struct {
 }
 
 func readManagementIdentity() managementIdentity {
-	pods := operatorPods()
+	pods := servicePods()
 	Expect(pods).NotTo(BeEmpty(), "no running replica to read the identity of")
 	identity := managementIdentity{
 		subjectClaim: "sub", rolesClaim: "roles", viewer: "viewer", operator: "operator"}

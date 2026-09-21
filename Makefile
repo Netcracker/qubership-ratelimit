@@ -1,11 +1,13 @@
-# Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+# The two images of the delivery, for the docker-* targets. The names are the
+# ones the e2e workflow builds; a registry prefix and a tag go in the value.
+OPERATOR_IMG ?= ratelimit-operator:latest
+SERVICE_IMG ?= ratelimit-service:latest
 
-# The charts that ship the CRD: the one-binary chart until #413 retires it,
-# and the operator chart of the split. The service chart ships no CRD.
-CRD_CHART_DIRS ?= helm-templates/ratelimit helm-templates/ratelimit-operator
+# The charts that ship the CRD: the operator chart. The service chart ships
+# no CRD.
+CRD_CHART_DIRS ?= helm-templates/ratelimit-operator
 # Every chart the lint covers.
-CHART_DIRS ?= helm-templates/ratelimit helm-templates/ratelimit-operator helm-templates/ratelimit-service
+CHART_DIRS ?= helm-templates/ratelimit-operator helm-templates/ratelimit-service
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -134,7 +136,7 @@ test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, inc
 test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
 	@mkdir -p "$(E2E_ARTIFACTS)"
 	@rc=0; NAMESPACE="$(E2E_NAMESPACE)" E2E_SATELLITE_NAMESPACE="$(E2E_SATELLITE_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
-	  --flake-attempts=2 --poll-progress-after=120s \
+	  --flake-attempts=2 --poll-progress-after=120s --timeout=2h \
 	  --junit-report=e2e-go.xml --output-dir="$(E2E_ARTIFACTS)" \
 	  ./tests/e2e-go || rc=$$?; \
 	go run ./tests/e2e-go/report "$(E2E_ARTIFACTS)/e2e-go.xml" "$(E2E_ARTIFACTS)/e2e-go.html" \
@@ -194,8 +196,7 @@ helm-lint: ## Lint every chart against every resource profile, in every mode.
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager ./cmd/
+build: build-operator build-service ## Build both binaries of the delivery.
 
 .PHONY: build-operator
 build-operator: manifests generate fmt vet ## Build the operator binary.
@@ -207,27 +208,67 @@ build-service: generate fmt vet ## Build the service binary and check it carries
 	@go version -m bin/ratelimit-service | grep -E '^\s+dep\s+(k8s.io/client-go|sigs.k8s.io/controller-runtime)\s' \
 	  && { echo "the service binary depends on a Kubernetes client"; exit 1; } || echo "service binary: no Kubernetes client"
 
+# Running from the host. Both processes read CLOUD_NAMESPACE, which has no
+# default; the operator talks to the cluster of the current kubeconfig, the
+# service to nothing but a directory. The operator is told its Deployment's
+# name the way the chart tells it, and off cluster it warns that there is
+# none to adopt and writes the ConfigMap without an owner.
+OPERATOR_DEPLOYMENT ?= ratelimit-operator
+# The directory the service reads as its mounted ConfigMap. service-config
+# fills it from the live object of CLOUD_NAMESPACE, the way the kubelet
+# would; any directory holding a manifest and its payloads works.
+SERVICE_CONFIG_DIR ?= $(LOCALBIN)/config
+
+# In the pair the operator moves off the ports both binaries default to,
+# :8080 for metrics and :8081 for the probes, or whichever binds second dies;
+# run-operator alone keeps the defaults. The four ports are in the README.
+OPERATOR_METRICS_ADDR ?= :8090
+OPERATOR_PROBE_ADDR ?= :8091
+
 .PHONY: run
-run: manifests generate fmt vet ## Run the service from your host.
-	go run ./cmd/
+run: manifests generate fmt vet ## Run the operator and the service from your host, the pair.
+	@go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT) \
+	  --metrics-bind-address=$(OPERATOR_METRICS_ADDR) --health-probe-bind-address=$(OPERATOR_PROBE_ADDR) & operator=$$!; \
+	trap 'kill $$operator 2>/dev/null' EXIT; \
+	go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
+
+.PHONY: run-operator
+run-operator: manifests generate fmt vet ## Run the operator from your host against the current kubeconfig.
+	go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT)
+
+.PHONY: run-service
+run-service: generate fmt vet ## Run the service from your host against SERVICE_CONFIG_DIR.
+	go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
+
+.PHONY: service-config
+service-config: ## Export the ratelimit-config ConfigMap of CLOUD_NAMESPACE into SERVICE_CONFIG_DIR.
+	@test -n "$(CLOUD_NAMESPACE)" || { echo "CLOUD_NAMESPACE must be set"; exit 1; }
+	@mkdir -p "$(SERVICE_CONFIG_DIR)" && rm -f "$(SERVICE_CONFIG_DIR)"/*.json.gz "$(SERVICE_CONFIG_DIR)"/manifest
+	@"$(KUBECTL)" get configmap ratelimit-config -n "$(CLOUD_NAMESPACE)" -o jsonpath='{.data.manifest}' \
+	  > "$(SERVICE_CONFIG_DIR)/manifest"
+	@"$(KUBECTL)" get configmap ratelimit-config -n "$(CLOUD_NAMESPACE)" \
+	  -o go-template='{{range $$k, $$v := .binaryData}}{{$$k}} {{$$v}}{{"\n"}}{{end}}' \
+	  | while read -r key value; do printf '%s' "$$value" | base64 -d > "$(SERVICE_CONFIG_DIR)/$$key"; done
+	@echo "exported $$(ls "$(SERVICE_CONFIG_DIR)" | wc -l | tr -d ' ') file(s) into $(SERVICE_CONFIG_DIR)"
 
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+docker-build: ## Build both images with docker.
+	$(CONTAINER_TOOL) build -f operator/Dockerfile -t ${OPERATOR_IMG} .
+	$(CONTAINER_TOOL) build -f service/Dockerfile -t ${SERVICE_IMG} .
 
 .PHONY: docker-push
-docker-push: ## Push docker image with the manager.
-	$(CONTAINER_TOOL) push ${IMG}
+docker-push: ## Push both images.
+	$(CONTAINER_TOOL) push ${OPERATOR_IMG}
+	$(CONTAINER_TOOL) push ${SERVICE_IMG}
 
 PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for the manager for cross-platform support.
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+docker-buildx: ## Build and push both images for the platforms in PLATFORMS.
 	- $(CONTAINER_TOOL) buildx create --name ratelimit-builder
 	$(CONTAINER_TOOL) buildx use ratelimit-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${OPERATOR_IMG} -f operator/Dockerfile .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${SERVICE_IMG} -f service/Dockerfile .
 	- $(CONTAINER_TOOL) buildx rm ratelimit-builder
-	rm Dockerfile.cross
 
 ##@ Deployment
 

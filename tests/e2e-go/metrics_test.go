@@ -19,8 +19,14 @@ import (
 
 // The series asserted here are the contract the dashboard and the alerts are
 // built on: a renamed metric or label would ship a dashboard full of empty
-// panels, and this suite is where that breaks first. Traffic may land on any
-// replica, so every assertion runs against the union of all scrapes.
+// panels, and this suite is where that breaks first. The split puts them on
+// two scrapes: the service replicas carry the checks, the decisions, the
+// applies, and the domain gauges, and traffic may land on any replica, so
+// those assertions run against the union of every replica's scrape; the
+// operator carries the policy status and the fleet, judged once, so those
+// run against its scrape alone. Each chart ships a PodMonitor for its own
+// pods behind MONITORING_ENABLED, which the e2e cluster does not set: the
+// render is pinned by the chart tests, and the scrape by this suite.
 var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 	const (
 		domain    = "gateway.public"
@@ -35,6 +41,7 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 		applied  bool
 		window   time.Time
 		families map[string]*dto.MetricFamily
+		operator map[string]*dto.MetricFamily
 	)
 
 	BeforeAll(func() {
@@ -48,10 +55,9 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 			// Warmed before the policy exists: warm-up probes would come out
 			// of the hour-long budget the burst below is about to spend.
 			waitGatewayServes("public-gateway", probePath)
-			before := storeRebuilds()
 			Expect(apply(newPolicy(domain,
 				prefixLimits(probePath, "per-path", []string{"path"}, limit, 3600)))).To(Succeed())
-			waitStoreRebuilt(before)
+			waitApplied(domain)
 
 			window = time.Now()
 			codes := gatewayBurst("public-gateway", probePath, limit+2, nil)
@@ -59,6 +65,9 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 		}
 
 		families = scrapeAllReplicas()
+		holder := leaseHolderPod()
+		Expect(holder).NotTo(BeEmpty(), "no operator pod holds the lease")
+		operator = scrapePod(holder)
 	})
 	AfterAll(func() {
 		if applied {
@@ -95,16 +104,36 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 			"the check duration histogram lost its 0.05 bucket boundary")
 	})
 
-	It("counts snapshot rebuilds", func() {
+	It("counts the configurations applied", func() {
 		Expect(hasSeries(families, "ratelimit_snapshot_rebuilds_total",
 			map[string]string{"result": "ok"})).To(BeTrue(),
-			"the scrape carries no successful snapshot rebuilds")
+			"the scrape carries no successful apply")
 	})
 
-	It("reports the policy ready", func() {
-		Expect(gaugeValue(families, "ratelimit_policy_ready",
-			map[string]string{"domain": domain, "reason": ""})).To(Equal(1.0),
-			"the scrape does not report %s ready", domain)
+	It("reports the applied generation of the domain", func() {
+		p, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(gaugeValue(families, "ratelimit_policy_applied_generation",
+			map[string]string{"domain": domain})).To(Equal(float64(p.Status.ActiveGeneration)),
+			"the service's scrape does not report the generation it enforces")
+	})
+
+	It("reports the policy ready on the operator's scrape", func() {
+		// Ready is the fleet's judgement, taken a probe cycle after the
+		// replicas applied the generation: the first scrape can still read
+		// the rollout in flight, so the series is waited for, not read once.
+		Eventually(func() float64 {
+			operator = scrapePod(leaseHolderPod())
+			return gaugeValue(operator, "ratelimit_policy_ready", map[string]string{"domain": domain, "reason": ""})
+		}).WithTimeout(propagationTimeout).WithPolling(3*time.Second).Should(Equal(1.0),
+			"the operator's scrape does not report %s ready", domain)
+		Expect(gaugeValue(operator, "ratelimit_policy_enforced",
+			map[string]string{"domain": domain})).To(Equal(1.0))
+		Expect(gaugeValue(operator, "ratelimit_policy_replicas",
+			map[string]string{"domain": domain, "state": "applied"})).To(BeNumerically(">", 0),
+			"the operator's scrape carries no fleet")
+		Expect(gaugeValue(operator, "ratelimit_leader", nil)).To(Equal(1.0),
+			"the operator holds the lease and its scrape has to say so")
 	})
 
 	It("gauges the domain decision buckets", func() {
@@ -113,13 +142,15 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 			"the scrape carries no domain budget gauge")
 	})
 
-	It("carries the Go runtime series", func() {
+	It("carries the Go runtime series on both scrapes", func() {
 		Expect(families).To(HaveKey("go_goroutines"),
-			"the Go runtime series are not riding along")
+			"the Go runtime series are not riding along on the service")
+		Expect(operator).To(HaveKey("go_goroutines"),
+			"the Go runtime series are not riding along on the operator")
 	})
 
 	It("leaves the sampled refusal in the log", func() {
-		Eventually(operatorLogsSince(window)).WithTimeout(30*time.Second).
+		Eventually(serviceLogsSince(window)).WithTimeout(30*time.Second).
 			Should(ContainSubstring("rate limit refused domain="+domain),
 				"no replica logged the sampled refusal line")
 	})
@@ -129,7 +160,7 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 // the parses; a series is asserted against the union because the burst may
 // have landed on any replica.
 func scrapeAllReplicas() map[string]*dto.MetricFamily {
-	pods := operatorPods()
+	pods := servicePods()
 	Expect(pods).NotTo(BeEmpty(), "no running replica to scrape")
 	merged := map[string]*dto.MetricFamily{}
 	for _, pod := range pods {
