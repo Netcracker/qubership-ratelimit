@@ -321,15 +321,17 @@ agreed descriptors, that the stub refuses traffic over its limit with 429 and al
 that the two gateways count independently, and that a check logs its domain and path and request id while never logging
 the `Authorization` value.
 
-The `leader` test is the exception to "changes nothing": the leader-election split cannot be observed with a single
-replica, so it scales the release to two, kills the leader, and asserts that rate limiting continues while the lease
-moves and that the new leader resumes status writes. It restores the original replica count through Helm — a `kubectl
-scale` would take field-manager ownership of `.spec.replicas` and make every later `helm upgrade` conflict.
+The `operator` suite is the exception to "changes nothing": that every replica applies the configuration cannot be
+observed with a single one, so it scales the service release to two, deletes the operator pod, and asserts that the
+checks stay clean on every replica while the pod is replaced, that the Lease moves to the replacement, and that the
+replacement resumes the status writes. It restores the original replica count through Helm — a `kubectl scale` would
+take field-manager ownership of `.spec.replicas` and make every later `helm upgrade` conflict.
 
 `make test` runs the envtest suites of `operator/internal` against a real API server, which is where the CRD schema
 and the status subresource actually exist — the fake client the other tests use validates nothing. The first run
 downloads the envtest binaries into `bin/`, so it needs internet; `make test-unit` never does. Both derive their
-Kubernetes version from `go.mod`, so the test control plane cannot drift from the client libraries the service is built against.
+Kubernetes version from `go.mod`, so the test control plane cannot drift from the client libraries the operator is
+built against.
 
 `helm-templates/ratelimit-operator/templates/crd-*.yaml` is generated. Edit the Go types and run `make sync-helm-crds`
 instead of editing them.

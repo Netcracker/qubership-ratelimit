@@ -1,8 +1,9 @@
 // Package convert turns the resource's spec into the engine's model. The
 // engine never learns that Kubernetes exists, and this package is the only
 // place that knows both vocabularies. It is its own package, rather than a
-// file of internal/policy, so that the service compiles the specs it reads
-// from the mounted ConfigMap without the policy package's Kubernetes client.
+// file of operator/internal/policy, so that the service compiles the specs
+// it reads from the mounted ConfigMap without the policy package's
+// Kubernetes client.
 package convert
 
 import (

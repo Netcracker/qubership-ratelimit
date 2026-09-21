@@ -342,8 +342,7 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(reconciled.Spec.Domain).To(Equal("gateway.public"))
 		})
 
-		// The counterpart of the persist-error event in internal/state: a
-		// generation the author cannot see refused anywhere else. The condition
+		// A generation the author cannot see refused anywhere else. The condition
 		// says the same thing, but nobody watches conditions on an object they
 		// have already applied.
 		It("raises one Warning per generation that does not compile", func() {

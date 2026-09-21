@@ -152,6 +152,18 @@ var (
 		Help: "Rule store rebuilds; an error keeps the previous snapshot serving.",
 	}, []string{"result"})
 
+	// ConfigWriteErrors counts failed writes of the configuration ConfigMap by
+	// the operator, by reason: size, the namespace's state does not fit the
+	// object even after the fit; api, the API server refused the write; other.
+	// Nothing degrades at once, the replicas keep the configuration they
+	// mounted, but the change is not reaching them, and the last-good
+	// fallback a restart would need is not being saved. A delayed-fuse alert,
+	// and the one the status reports 90 s later as ReplicaStale.
+	ConfigWriteErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ratelimit_config_write_errors_total",
+		Help: "Failed writes of the configuration ConfigMap by reason: size, api, other.",
+	}, []string{"reason"})
+
 	// SnapshotTimestamp is when the serving snapshot was last swapped — the
 	// forensic answer to "did the rules change right before the incident".
 	SnapshotTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -169,7 +181,7 @@ func Register(registry prometheus.Registerer) {
 		Checks, CheckDuration, Decisions, NearLimit, Refusals,
 		UnknownDomainChecks, UnmatchedChecks, ExtractionSkips, Extractions, TokensSeen,
 		StoreRoundtrip, StoreErrors,
-		SnapshotRebuilds, SnapshotTimestamp,
+		SnapshotRebuilds, SnapshotTimestamp, ConfigWriteErrors,
 		stateCollector{},
 		fleetCollector{},
 	} {

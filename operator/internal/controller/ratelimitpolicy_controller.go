@@ -1,10 +1,12 @@
 // Package controller writes the status of the custom resources.
 //
-// Status writes are the only leader-gated work in the operator: the rule store
-// and the RLS endpoint run on every replica (see internal/store and internal/rls).
-// A reconciler therefore never decides anything the engine depends on — it reads
-// the same pure compilation the engine reads and reports what it says, plus the
-// one thing only the leader can see: whether every replica agrees.
+// The one operator pod that holds the Lease writes it, from the compile it
+// shares with the ConfigMap writer (operator/internal/config) and the fleet
+// it probes: the service replicas of the Service ratelimit, each asked which
+// generation it enforces. A reconciler therefore never decides anything the
+// service depends on; it reads the same pure compilation the writer reads and
+// reports what it says, plus the one thing only the operator can see: whether
+// every replica agrees.
 package controller
 
 import (
