@@ -8,7 +8,7 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 )
 
-// logrAdapter bridges controller-runtime's logr.LogSink to the platform logger,
+// logrAdapter bridges logr.LogSink to the platform logger.
 type logrAdapter struct {
 	logger logging.Logger
 	name   string
@@ -27,9 +27,18 @@ func (a *logrAdapter) Init(_ logr.RuntimeInfo) {
 	// information, so there is nothing here worth keeping.
 }
 
+// maxVerbosity is the highest logr verbosity the platform level debug
+// enables. Verbosities up to 4 carry controller-runtime's own debug lines and
+// the lines client-go writes about its lists, watches, and request retries;
+// 5 adds two lines per reconcile and the work queue's contents every ten
+// seconds, and 8 adds every request and response body.
+const maxVerbosity = 4
+
+// Enabled implements [logr.LogSink]: level 0 is always enabled, levels 1 to
+// [maxVerbosity] only at the platform level debug, and higher levels never.
 func (a *logrAdapter) Enabled(level int) bool {
 	if level > 0 {
-		return a.logger.GetLevel() >= logging.LvlDebug
+		return level <= maxVerbosity && a.logger.GetLevel() >= logging.LvlDebug
 	}
 	return true
 }
