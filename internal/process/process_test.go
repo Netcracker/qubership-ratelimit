@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
+	"github.com/netcracker/qubership-core-lib-go/v3/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,9 +31,10 @@ func TestNamespace_isTheCloudNamespaceAndNothingElse(t *testing.T) {
 }
 
 // The logr bridge. controller-runtime and client-go log through logr, and
-// the platform logs through its own logger; what is pinned is that levels,
-// names, and key-value pairs survive the crossing.
-func TestLogrAdapter_carriesNamesValuesAndLevels(t *testing.T) {
+// the platform logs through its own logger; what is pinned is that names and
+// key-value pairs survive the crossing. The verbosity mapping is pinned in
+// TestLogrAdapter_boundsVerbosityByThePlatformLevel.
+func TestLogrAdapter_carriesNamesAndValues(t *testing.T) {
 	root := NewLogrLogger("test")
 	sink := root.GetSink().(*logrAdapter)
 	assert.Equal(t, "test", sink.name)
@@ -45,10 +47,6 @@ func TestLogrAdapter_carriesNamesValuesAndLevels(t *testing.T) {
 	// The parent is untouched by the child's values: WithValues copies.
 	assert.Empty(t, sink.kvs)
 
-	// Verbosity: level 0 is info and always enabled; higher levels are debug
-	// and enabled by the platform logger's own level.
-	assert.True(t, sink.Enabled(0))
-
 	// These exercise the write paths; the platform logger's output is not
 	// captured here, and what matters is that neither panics on a nil error
 	// or an odd number of values.
@@ -56,6 +54,41 @@ func TestLogrAdapter_carriesNamesValuesAndLevels(t *testing.T) {
 	named.V(1).Info("detail")
 	named.Error(errors.New("boom"), "failed", "domain", "gateway.public")
 	named.Error(nil, "no error value")
+}
+
+// The platform level bounds the verbosity the bridge enables: level 0 at
+// every platform level, levels 1 to maxVerbosity at debug, and nothing above
+// that at any level. The cap keeps the request and response bodies that
+// client-go logs at verbosity 8 out of a debug log. A new case goes in the
+// table, named by its verbosity and platform level.
+func TestLogrAdapter_boundsVerbosityByThePlatformLevel(t *testing.T) {
+	// One logger per platform level; the registry returns the same instance
+	// to the adapter, so the level the test sets is the one Enabled reads.
+	const atError, atInfo, atDebug = "test/verbosity/error", "test/verbosity/info", "test/verbosity/debug"
+	logging.GetLogger(atError).SetLevel(logging.LvlError)
+	logging.GetLogger(atInfo).SetLevel(logging.LvlInfo)
+	logging.GetLogger(atDebug).SetLevel(logging.LvlDebug)
+	cases := []struct {
+		name    string
+		logger  string
+		level   int
+		enabled bool
+	}{
+		{"level 0 is on at error", atError, 0, true},
+		{"level 0 is on at info", atInfo, 0, true},
+		{"level 1 is off at info", atInfo, 1, false},
+		{"level 0 is on at debug", atDebug, 0, true},
+		{"level 1 is on at debug", atDebug, 1, true},
+		{"level 4, the cap, is on at debug", atDebug, 4, true},
+		{"level 5, above the cap, is off at debug", atDebug, 5, false},
+		{"level 8, the body dumps, is off at debug", atDebug, 8, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := NewLogrLogger(c.logger).V(c.level).Enabled()
+			assert.Equal(t, c.enabled, got, "V(%d).Enabled() on %s", c.level, c.logger)
+		})
+	}
 }
 
 func TestFormatMessage(t *testing.T) {
