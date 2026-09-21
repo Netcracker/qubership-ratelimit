@@ -350,10 +350,14 @@ CLOUD_NAMESPACE=<ns> make run-service
 ```
 
 The operator is told its Deployment's name as the chart tells it (`OPERATOR_DEPLOYMENT`, `ratelimit-operator` by
-default); off cluster it warns that there is no Deployment to adopt and writes the ConfigMap without an owner. The
-service reads `SERVICE_CONFIG_DIR` (`bin/config` by default) the way it reads the mounted volume in a pod, and any
-directory holding a manifest and its payloads works. `make docker-build` builds both images, `OPERATOR_IMG` and
-`SERVICE_IMG`, from the two Dockerfiles.
+default); off cluster it warns that there is no Deployment to adopt and writes the ConfigMap without an owner. It
+probes the service replicas at their pod IPs, so from a host that cannot reach the pod network, kind included, every
+policy reads `Ready: Unknown` with `ProbeFailed`; the status is right, the host is not a peer of the pods. The service
+reads `SERVICE_CONFIG_DIR` (`bin/config` by default) the way it reads the mounted volume in a pod, and any directory
+holding a manifest and its payloads works. In the pair the service keeps the defaults, metrics on `:8080` and probes
+on `:8081`, and the operator moves to `:8090` and `:8091` (`OPERATOR_METRICS_ADDR`, `OPERATOR_PROBE_ADDR`), since
+both binaries default to the same two ports and whichever binds second would die. `make docker-build` builds both
+images, `OPERATOR_IMG` and `SERVICE_IMG`, from the two Dockerfiles.
 
 `CLOUD_NAMESPACE` has no default. An unset value is a startup error for either process, not a fallback to watching
 the cluster: it is what keeps the operator's RBAC a `Role`, and it is a segment of every counter key the service

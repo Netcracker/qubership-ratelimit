@@ -219,9 +219,16 @@ OPERATOR_DEPLOYMENT ?= ratelimit-operator
 # would; any directory holding a manifest and its payloads works.
 SERVICE_CONFIG_DIR ?= $(LOCALBIN)/config
 
+# In the pair the operator moves off the ports both binaries default to,
+# :8080 for metrics and :8081 for the probes, or whichever binds second dies;
+# run-operator alone keeps the defaults. The four ports are in the README.
+OPERATOR_METRICS_ADDR ?= :8090
+OPERATOR_PROBE_ADDR ?= :8091
+
 .PHONY: run
 run: manifests generate fmt vet ## Run the operator and the service from your host, the pair.
-	@go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT) & operator=$$!; \
+	@go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT) \
+	  --metrics-bind-address=$(OPERATOR_METRICS_ADDR) --health-probe-bind-address=$(OPERATOR_PROBE_ADDR) & operator=$$!; \
 	trap 'kill $$operator 2>/dev/null' EXIT; \
 	go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
 
