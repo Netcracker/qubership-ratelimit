@@ -135,6 +135,7 @@ func (a *Applier) Apply(cfg Configuration) {
 		views = append(views, metrics.DomainView{
 			Domain:            domain,
 			Blocks:            len(built.Snapshot.Blocks),
+			Rules:             ruleCount(built.Snapshot),
 			DecisionBuckets:   built.Snapshot.DecisionBuckets,
 			AppliedGeneration: generation,
 		})
@@ -203,6 +204,16 @@ func (a *Applier) Handler() http.Handler {
 			a.Log.V(1).Info("failed to write the applied report", "error", err)
 		}
 	})
+}
+
+// ruleCount is the number of rules across the blocks of a snapshot, the value
+// of ratelimit_domain_rules.
+func ruleCount(snapshot *enginecompile.Snapshot) int {
+	n := 0
+	for i := range snapshot.Blocks {
+		n += len(snapshot.Blocks[i].Rules)
+	}
+	return n
 }
 
 func blocking(problems []enginecompile.Problem) bool {

@@ -224,10 +224,10 @@ func TestShouldRateLimit_countsExtractionsAndSkips(t *testing.T) {
 	server := NewServer(ruleStore, log)
 
 	extractions := func() float64 {
-		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(model.KeyClient))
+		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(domain, model.KeyClient))
 	}
 	skips := func() float64 {
-		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(model.KeyClient, "decode_failed"))
+		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(domain, model.KeyClient, "decode_failed"))
 	}
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice"}`))
 

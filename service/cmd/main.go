@@ -28,6 +28,13 @@ import (
 // derived from it, e.g. ratelimit/rls.
 const loggerName = "ratelimit"
 
+// version is reported as ratelimit_build_info. The chart sets it through
+// SERVICE_VERSION, from the image tag it deploys; this value, set by the
+// build through -ldflags, is the fallback, and "dev" is a local build. The
+// pipeline passes no build arguments to the image, so without the variable
+// every image would say "dev".
+var version = "dev"
+
 func main() {
 	var options app.Options
 
@@ -56,6 +63,7 @@ func main() {
 	options.Log = process.NewLogrLogger(loggerName)
 	options.Platform = setupLog
 	options.Replica = process.PodName()
+	options.Version = serviceVersion()
 
 	namespace, err := process.Namespace()
 	if err != nil {
@@ -68,9 +76,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Infof("starting service namespace=%v pod=%v config=%v", namespace, options.Replica, options.ConfigDir)
+	setupLog.Infof("starting service namespace=%v pod=%v config=%v version=%v",
+		namespace, options.Replica, options.ConfigDir, options.Version)
 	if err := service.Run(process.SignalContext()); err != nil {
 		setupLog.Errorf("service exited with an error: %v", err)
 		os.Exit(1)
 	}
+}
+
+// serviceVersion is SERVICE_VERSION when set, else the build's own stamp.
+func serviceVersion() string {
+	if v := os.Getenv("SERVICE_VERSION"); v != "" {
+		return v
+	}
+	return version
 }

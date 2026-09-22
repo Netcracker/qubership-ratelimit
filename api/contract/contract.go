@@ -39,6 +39,13 @@ const (
 	// compatibility promise beyond the two halves of this delivery.
 	AppliedPath = "/debug/applied"
 
+	// SnapshotPath is where a service replica renders what it enforces, on
+	// the same port and under the same terms as AppliedPath: a summary of
+	// every domain at the path itself, and one domain in full, rules and
+	// resolved client lists included, at SnapshotPath/<domain>. Nothing in
+	// the delivery reads it; it is for a human with a port-forward.
+	SnapshotPath = "/debug/snapshot"
+
 	// ConfigMapName is the one ConfigMap per namespace that the operator
 	// writes and the service mounts. The operator is its only writer; no
 	// chart renders it.

@@ -106,7 +106,7 @@ running.
 
 ## Two generations: observed and active
 
-A policy reports a pair. `observedGeneration` is the latest spec the leader has seen; `activeGeneration` is the one
+A policy reports a pair. `observedGeneration` is the latest spec the operator has seen; `activeGeneration` is the one
 actually being enforced. They diverge when the latest edit does not compile and an earlier, last-good generation keeps
 running. `activeGeneration: 0` means the domain is unprotected: nothing is in effect at all.
 
@@ -128,10 +128,20 @@ on every reconcile, and a UID check keeps a recreated object from inheriting the
 
 ### Ready is a statement about every replica
 
-The leader is the only replica that writes status, but "the rules I wrote are the rules being enforced" is only true
-when every pod receiving traffic says so. The leader therefore reads `/debug/applied` from each ready endpoint of its
-own Service — read-only diagnostics on the metrics port, no mutations and no authentication — and compares the
-generation and UID each replica reports with the one it expects.
+The operator pod holding the Lease is the only process that writes status, but "the rules I wrote are the rules being
+enforced" is only true when every pod receiving traffic says so. The operator therefore reads `/debug/applied` from
+each ready endpoint of the service's Service — read-only diagnostics on the metrics port, no mutations and no
+authentication — and compares the generation and UID each replica reports with the one it expects.
+
+The same port answers `/debug/snapshot` for a human: a summary of the domains a replica enforces, with the generation
+each was applied from, and `/debug/snapshot/<domain>` with the compiled domain in full, the identity keys with the
+claim paths behind them, and every group resolved into the client list the engine tests. Add `?format=yaml` for
+YAML. Read it through a port-forward to one pod, and compare pods when a rollout looks skewed:
+
+```bash
+kubectl -n <namespace> port-forward pod/<service-pod> 8080:metrics
+curl -s localhost:8080/debug/snapshot/gateway.public?format=yaml
+```
 
 The denominator is the ready endpoints, not the Deployment's `spec.replicas`: a pod that is not ready receives no
 traffic, so it neither enforces anything nor belongs in the fraction. That is also what keeps `Ready` from flickering
@@ -149,7 +159,7 @@ does:
 | the Service has no ready endpoint                            | False   | False     | `NoReplicas`   |
 | a replica lags past the threshold: broken informer, or skew  | False   | True      | `ReplicaStale` |
 | the latest generation does not compile, last-good is running | False   | True      | `NotCompiled`  |
-| the leader could not observe the replicas at all             | Unknown | False     | `ProbeFailed`  |
+| the operator could not observe the replicas at all           | Unknown | False     | `ProbeFailed`  |
 
 For Argo CD: `Stalled: True` is Degraded, `Ready: True` is Healthy, everything else is Progressing. A sync wave closes
 only once every pod enforces the rules.
@@ -313,13 +323,13 @@ falling back, that the counters carry the documented key, and that a spent budge
 survives the process that spent it. An install without `redis.addresses` is a
 valid install, so that suite skips rather than fails on one.
 
-It covers what no unit test can: that the installed CRD is the one carrying the current validation, that a policy event
-reaches the store in the running pod, that a mapping revives a policy that referenced its key, that an earlier
-generation keeps running while an edit is rejected and the state reaches its ConfigMap, that the gate refuses a mapping
-which would stop running rules and names the culprit, that the gateway is configured with this release's Service and the
-agreed descriptors, that the stub refuses traffic over its limit with 429 and allows it again when the window reopens,
-that the two gateways count independently, and that a check logs its domain and path and request id while never logging
-the `Authorization` value.
+It covers what no unit test can: that the installed CRD is the one carrying the current validation, that a policy
+change reaches every service replica through the ConfigMap, that an earlier generation keeps running while an edit is
+rejected and the last-good state stays in `ratelimit-config`, that a replica reports what it enforces on
+`/debug/snapshot`, that the gateway is configured with this release's Service and the agreed descriptors, that the
+stub refuses traffic over its limit with 429 and allows it again when the window reopens, that the two gateways count
+independently, and that a check logs its domain and path and request id while never logging the `Authorization`
+value.
 
 The `operator` suite is the exception to "changes nothing": that every replica applies the configuration cannot be
 observed with a single one, so it scales the service release to two, deletes the operator pod, and asserts that the

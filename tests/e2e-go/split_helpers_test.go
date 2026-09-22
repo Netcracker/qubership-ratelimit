@@ -59,6 +59,24 @@ func manifestGeneration(domain string) func() int64 {
 // appliedReport reads a service replica's report over a port-forward to its
 // metrics port, the way the operator's probe reads it through the Service.
 func appliedReport(pod corev1.Pod) applied.Report {
+	body := debugGet(pod, contract.AppliedPath)
+	var report applied.Report
+	Expect(json.Unmarshal(body, &report)).To(Succeed(), "pod %s published a report the suite cannot read: %s",
+		pod.Name, body)
+	return report
+}
+
+// debugGet reads one of the read-only diagnostics of a service replica over
+// a port-forward to its metrics port, and expects a 200.
+func debugGet(pod corev1.Pod, path string) []byte {
+	status, body := debugRequest(pod, path)
+	Expect(status).To(Equal(http.StatusOK), "pod %s answered %d on %s: %s", pod.Name, status, path, body)
+	return body
+}
+
+// debugRequest is debugGet without the expectation on the status, for the
+// spec that asserts a 404.
+func debugRequest(pod corev1.Pod, path string) (int, []byte) {
 	port := 0
 	for _, c := range pod.Spec.Containers {
 		for _, p := range c.Ports {
@@ -71,18 +89,12 @@ func appliedReport(pod corev1.Pod) applied.Report {
 
 	addr, stop := forwardToPod(pod.Name, port)
 	defer stop()
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get("http://" + addr + contract.AppliedPath)
-	Expect(err).NotTo(HaveOccurred(), "pod %s did not answer on %s", pod.Name, contract.AppliedPath)
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Get("http://" + addr + path)
+	Expect(err).NotTo(HaveOccurred(), "pod %s did not answer on %s", pod.Name, path)
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	Expect(err).NotTo(HaveOccurred())
-	Expect(resp.StatusCode).To(Equal(http.StatusOK), "pod %s answered %d on %s: %s",
-		pod.Name, resp.StatusCode, contract.AppliedPath, body)
-
-	var report applied.Report
-	Expect(json.Unmarshal(body, &report)).To(Succeed(), "pod %s published a report the suite cannot read: %s",
-		pod.Name, body)
-	return report
+	return resp.StatusCode, body
 }
 
 // readyServiceEndpoints counts the ready endpoints of the Service ratelimit,

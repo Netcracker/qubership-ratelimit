@@ -20,7 +20,8 @@ import (
 // before the listener is closed the hard way.
 const DefaultDrainTimeout = 10 * time.Second
 
-// Runner serves the RLS gRPC endpoint as a controller-runtime runnable.
+// Runner serves the RLS gRPC endpoint on its own listener until its context
+// ends.
 type Runner struct {
 	Addr         string
 	Server       *Server
@@ -29,10 +30,6 @@ type Runner struct {
 
 	serving atomic.Bool
 }
-
-// NeedLeaderElection reports false: every replica must answer checks, or the
-// gateways would see errors from every pod that is not the leader.
-func (r *Runner) NeedLeaderElection() bool { return false }
 
 func (r *Runner) Serving() bool { return r.serving.Load() }
 
@@ -46,9 +43,8 @@ func (r *Runner) Healthz(_ *http.Request) error {
 // Start listens and serves until ctx is cancelled.
 //
 // Shutdown order is deliberate: stop accepting new calls, drain the in-flight
-// ones, and only then return — the manager releases the leader lease after its
-// runnables are done, so a replica never gives up the lease while it is still
-// answering.
+// ones, and only then return, so that the process leaves the Endpoints with
+// no check cut off mid-answer.
 func (r *Runner) Start(ctx context.Context) error {
 	listener, err := net.Listen("tcp", r.Addr)
 	if err != nil {

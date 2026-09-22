@@ -98,7 +98,7 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 	// endpoint. ratelimit_leader marks the scrape that carries them: set once
 	// the lease is held and never cleared, since controller-runtime ends the
 	// process when a held lease is lost.
-	metrics.Register(ctrlmetrics.Registry)
+	metrics.RegisterOperator(ctrlmetrics.Registry, options.Version)
 	go func() {
 		<-mgr.Elected()
 		metrics.SetLeader(true)

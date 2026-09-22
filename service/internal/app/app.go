@@ -25,6 +25,7 @@ import (
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/service/internal/config"
+	"github.com/netcracker/qubership-ratelimit/service/internal/debug"
 	"github.com/netcracker/qubership-ratelimit/service/internal/management"
 	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/service/internal/settings"
@@ -59,6 +60,10 @@ type Options struct {
 	// Replica names this pod for the management API.
 	Replica string
 
+	// Version is the release the image was tagged with, reported as
+	// ratelimit_build_info; the operator's manifest carries its own.
+	Version string
+
 	// Log is the logr logger the watcher and the runners write through;
 	// Platform is the platform logger the servers write through, and where
 	// the wiring says what it chose.
@@ -91,7 +96,7 @@ func Build(namespace string, options Options) (*Service, error) {
 
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-	metrics.Register(registry)
+	metrics.RegisterService(registry, options.Version)
 
 	backend := settings.CounterStore(platform.Errorf)
 	platform.Infof("counter store selected backend=%v", backend.Description)
@@ -171,6 +176,9 @@ func Build(namespace string, options Options) (*Service, error) {
 		// It is not the management API, carries no authentication, and is
 		// outside the compatibility promises.
 		mux.Handle(contract.AppliedPath, applier.Handler())
+		snapshot := debug.Handler(rules, applier, options.Replica)
+		mux.Handle(contract.SnapshotPath, snapshot)
+		mux.Handle(contract.SnapshotPath+"/", snapshot)
 		service.metrics = &http.Server{Addr: options.MetricsAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	}
 	if enabled(options.ProbeAddr) {

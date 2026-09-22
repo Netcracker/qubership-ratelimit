@@ -24,7 +24,7 @@ func TestStateCollector_rendersThePublishedView(t *testing.T) {
 	// gauge vector could not give.
 	PublishState(&StateView{
 		Domains: []DomainView{{
-			Domain: "gateway.public", Blocks: 3, DecisionBuckets: 65, AppliedGeneration: 7,
+			Domain: "gateway.public", Blocks: 3, Rules: 5, DecisionBuckets: 65, AppliedGeneration: 7,
 		}},
 	})
 	defer PublishState(nil)
@@ -41,6 +41,9 @@ ratelimit_domain_blocks{domain="gateway.public"} 3
 # HELP ratelimit_domain_decision_buckets Worst-case buckets one decision can collect across the domain, against the budget of 128.
 # TYPE ratelimit_domain_decision_buckets gauge
 ratelimit_domain_decision_buckets{domain="gateway.public"} 65
+# HELP ratelimit_domain_rules Compiled rules of the domain across its blocks.
+# TYPE ratelimit_domain_rules gauge
+ratelimit_domain_rules{domain="gateway.public"} 5
 # HELP ratelimit_policy_applied_generation The generation of the domain this replica enforces.
 # TYPE ratelimit_policy_applied_generation gauge
 ratelimit_policy_applied_generation{domain="gateway.public"} 7
@@ -68,7 +71,7 @@ ratelimit_policy_rule_problems{domain="gateway.public",severity="info"} 1
 	// A dropped policy leaves no series behind; the domain series stay.
 	DropPolicy("gateway.private")
 	DropPolicy("gateway.public")
-	assert.Equal(t, 3, testutil.CollectAndCount(stateCollector{}), "the domain series alone remain")
+	assert.Equal(t, 4, testutil.CollectAndCount(stateCollector{}), "the domain series alone remain")
 
 	// And a policy is reported whether or not the service published a view:
 	// the operator's scrape carries no domains at all.
@@ -162,21 +165,21 @@ func TestInstrumentStore_delegatesTheManagementPath(t *testing.T) {
 
 func TestSeedExtractions_makesZeroObservableWithoutResettingLiveSeries(t *testing.T) {
 	before := testutil.CollectAndCount(Extractions)
-	SeedExtractions([]string{"seeded_dead", "seeded_live"})
+	SeedExtractions(map[string][]string{"seed.domain": {"seeded_dead", "seeded_live"}})
 	assert.Equal(t, before+2, testutil.CollectAndCount(Extractions),
 		"seeding has to create the series: a dead claim path never increments, so an unseeded key has no series to alert on")
-	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("seeded_dead")))
+	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("seed.domain", "seeded_dead")))
 
-	Extractions.WithLabelValues("seeded_live").Inc()
-	SeedExtractions([]string{"seeded_live"})
-	assert.Equal(t, 1.0, testutil.ToFloat64(Extractions.WithLabelValues("seeded_live")),
+	Extractions.WithLabelValues("seed.domain", "seeded_live").Inc()
+	SeedExtractions(map[string][]string{"seed.domain": {"seeded_live"}})
+	assert.Equal(t, 1.0, testutil.ToFloat64(Extractions.WithLabelValues("seed.domain", "seeded_live")),
 		"reseeding an existing series is a no-op, not a reset")
 }
 
-// The leader's series. They are absent from every replica that does not hold
-// the lease, which is why ratelimit_leader exists: it says which scrape is the
-// one carrying them.
-func TestFleetCollector_reportsWhatTheLeaderSaw(t *testing.T) {
+// The operator's series. They are absent from the service's scrape, and on
+// an operator pod without the Lease they say so, which is why
+// ratelimit_leader exists: it says which scrape is the one carrying them.
+func TestFleetCollector_reportsWhatTheOperatorSaw(t *testing.T) {
 	t.Cleanup(func() {
 		DropFleet("gateway.public")
 		DropFleet("gateway.private")
@@ -189,7 +192,7 @@ func TestFleetCollector_reportsWhatTheLeaderSaw(t *testing.T) {
 		Applied: 1, Total: 3, Stalled: true, Reason: "ReplicaStale"})
 
 	expected := `
-# HELP ratelimit_leader Whether this replica holds the leader lease. The status series are only written by the replica reporting 1.
+# HELP ratelimit_leader Whether this operator pod holds the Lease. The status series are only written by the pod reporting 1.
 # TYPE ratelimit_leader gauge
 ratelimit_leader 1
 # HELP ratelimit_policy_replicas Replicas of the domain by state: total is the ready fleet, applied is how many of it enforce the active generation.
@@ -215,7 +218,7 @@ func TestFleetCollector_forgetsADeletedDomain(t *testing.T) {
 	DropFleet("gateway.retired")
 
 	expected := `
-# HELP ratelimit_leader Whether this replica holds the leader lease. The status series are only written by the replica reporting 1.
+# HELP ratelimit_leader Whether this operator pod holds the Lease. The status series are only written by the pod reporting 1.
 # TYPE ratelimit_leader gauge
 ratelimit_leader 0
 `
