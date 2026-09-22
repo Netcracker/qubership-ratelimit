@@ -33,7 +33,7 @@ func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 				Name: "cascade",
 				Mode: model.ModeFirstMatch,
 				Target: model.Target{Routes: []model.Route{
-					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes/"}}}},
+					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/invoices/"}}}},
 				Rules: []model.Rule{
 					{Name: "internal", Behavior: model.BehaviorBypass,
 						Matches: []model.Predicate{
@@ -72,8 +72,8 @@ func token(t *testing.T, sub string) string {
 	return "h." + base64.RawURLEncoding.EncodeToString(raw) + ".s"
 }
 
-func quotes(t *testing.T, sub string) engine.Request {
-	return engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, sub)}
+func orderRequest(t *testing.T, sub string) engine.Request {
+	return engine.Request{Path: "/api/invoices/1", Method: "GET", Token: token(t, sub)}
 }
 
 func decide(t *testing.T, e *engine.Engine, req engine.Request) engine.Decision {
@@ -87,7 +87,7 @@ func decide(t *testing.T, e *engine.Engine, req engine.Request) engine.Decision 
 
 func TestBypassLiftsItsBlockOnly(t *testing.T) {
 	e := newEngine(t)
-	d := decide(t, e, quotes(t, "prometheus"))
+	d := decide(t, e, orderRequest(t, "prometheus"))
 	if !d.Allowed {
 		t.Fatalf("decision = %+v", d)
 	}
@@ -108,7 +108,7 @@ func TestBypassLiftsItsBlockOnly(t *testing.T) {
 func TestHeadersComeFromTheStrictestRule(t *testing.T) {
 	e := newEngine(t)
 
-	first := decide(t, e, quotes(t, "alice"))
+	first := decide(t, e, orderRequest(t, "alice"))
 	if !first.Allowed || first.Headers == nil {
 		t.Fatalf("decision = %+v", first)
 	}
@@ -123,7 +123,7 @@ func TestHeadersComeFromTheStrictestRule(t *testing.T) {
 		t.Errorf("rule outcome = %+v: per-rule numbers must come from its own strictest bucket", everyone)
 	}
 
-	second := decide(t, e, quotes(t, "alice"))
+	second := decide(t, e, orderRequest(t, "alice"))
 	if second.Headers.Remaining != 98 {
 		t.Errorf("remaining = %d, want 98 on the second request", second.Headers.Remaining)
 	}
@@ -134,7 +134,7 @@ func TestShadowReportsWithoutVetoing(t *testing.T) {
 
 	var last engine.Decision
 	for i := range 11 {
-		last = decide(t, e, quotes(t, "t1"))
+		last = decide(t, e, orderRequest(t, "t1"))
 		if !last.Allowed {
 			t.Fatalf("request %d denied: a shadow rule influenced the verdict", i+1)
 		}
@@ -158,12 +158,12 @@ func TestShadowReportsWithoutVetoing(t *testing.T) {
 func TestDenialHeaders(t *testing.T) {
 	e := newEngine(t)
 	for i := range 100 {
-		if d := decide(t, e, quotes(t, "alice")); !d.Allowed {
+		if d := decide(t, e, orderRequest(t, "alice")); !d.Allowed {
 			t.Fatalf("request %d denied under a limit of 100", i+1)
 		}
 	}
 
-	d := decide(t, e, quotes(t, "alice"))
+	d := decide(t, e, orderRequest(t, "alice"))
 	if d.Allowed {
 		t.Fatal("request 101 admitted past a 100-per-minute window")
 	}
@@ -175,7 +175,7 @@ func TestDenialHeaders(t *testing.T) {
 func TestCostSemantics(t *testing.T) {
 	e := newEngine(t)
 
-	req := quotes(t, "alice")
+	req := orderRequest(t, "alice")
 	req.Cost = 5
 	if d := decide(t, e, req); d.Headers.Remaining != 95 {
 		t.Errorf("remaining = %d after cost 5, want 95", d.Headers.Remaining)
@@ -189,7 +189,7 @@ func TestCostSemantics(t *testing.T) {
 
 func TestCostThatNeverFits(t *testing.T) {
 	e := newEngine(t)
-	req := quotes(t, "alice")
+	req := orderRequest(t, "alice")
 	req.Cost = 200 // beyond the 100-burst minute window, within the others
 
 	d := decide(t, e, req)
@@ -203,7 +203,7 @@ func TestCostThatNeverFits(t *testing.T) {
 
 func TestExplicitKeysOverrideTheToken(t *testing.T) {
 	e := newEngine(t)
-	req := quotes(t, "alice")
+	req := orderRequest(t, "alice")
 	req.Keys = map[string][]string{model.KeyClient: {"t1"}}
 
 	d := decide(t, e, req)
@@ -214,7 +214,7 @@ func TestExplicitKeysOverrideTheToken(t *testing.T) {
 
 func TestExtractionSkipsPropagate(t *testing.T) {
 	e := newEngine(t)
-	d := decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET", Token: "garbage"})
+	d := decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET", Token: "garbage"})
 
 	if len(d.Skips) != 1 || d.Skips[0].Reason != identity.SkipDecodeFailed {
 		t.Fatalf("skips = %v, want one decode_failed for the planned client key", d.Skips)
@@ -237,7 +237,7 @@ func TestOutsideAllRulesIsAllowedWithoutHeaders(t *testing.T) {
 func TestHeadersAreDeterministicAcrossRuns(t *testing.T) {
 	run := func() engine.Headers {
 		e := newEngine(t)
-		return *decide(t, e, quotes(t, "alice")).Headers
+		return *decide(t, e, orderRequest(t, "alice")).Headers
 	}
 	first := run()
 	for range 3 {
@@ -429,10 +429,10 @@ func TestCacheStatsCountEligibleLookups(t *testing.T) {
 	stats := &engine.CacheStats{}
 	e := newEngine(t, engine.WithCacheStats(stats))
 
-	decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, "alice")})
-	decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, "alice")})
-	decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET"})
-	decide(t, e, engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, "bob")})
+	decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET", Token: token(t, "alice")})
+	decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET", Token: token(t, "alice")})
+	decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET"})
+	decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET", Token: token(t, "bob")})
 
 	if hits, misses := stats.Hits(), stats.Misses(); hits != 1 || misses != 2 {
 		t.Errorf("hits = %d, misses = %d, want 1 and 2", hits, misses)
@@ -444,7 +444,7 @@ func TestCacheStatsCountEligibleLookups(t *testing.T) {
 // the enforcing path would be worse than no listing at all.
 func TestPeek_answersLikeDecideWithoutCharging(t *testing.T) {
 	e := newEngine(t)
-	req := engine.Request{Path: "/api/quotes/1", Method: "GET", Token: token(t, "alice")}
+	req := engine.Request{Path: "/api/invoices/1", Method: "GET", Token: token(t, "alice")}
 
 	first, err := e.Peek(t.Context(), req)
 	if err != nil {
@@ -617,8 +617,8 @@ func TestHeaders_twoCapacityExceededWindowsTieBreakByKey(t *testing.T) {
 func TestCandidates_blocksReportsTheTargetedOnesInOrder(t *testing.T) {
 	p := model.Policy{Domain: domain, Blocks: []model.Block{
 		{
-			Name:   "quotes",
-			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes"}}}},
+			Name:   "invoices",
+			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/invoices"}}}},
 			Rules:  []model.Rule{{Name: "r", Rates: []model.Rate{{Requests: 1, Period: time.Minute}}}},
 		},
 		{
@@ -636,12 +636,12 @@ func TestCandidates_blocksReportsTheTargetedOnesInOrder(t *testing.T) {
 		t.Fatalf("compile problems: %v", problems)
 	}
 
-	targeted := match.Match(snap, "/api/quotes/1", "GET").Blocks()
+	targeted := match.Match(snap, "/api/invoices/1", "GET").Blocks()
 	got := make([]string, 0, len(targeted))
 	for _, block := range targeted {
 		got = append(got, block.Name)
 	}
-	want := []string{"quotes", "everything"}
+	want := []string{"invoices", "everything"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("Blocks() = %v, want %v in snapshot order", got, want)
 	}

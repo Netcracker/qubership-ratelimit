@@ -209,10 +209,10 @@ func TestAcceptanceMultiWindow(t *testing.T) {
 // pattern's place in the acceptance list.
 func TestAcceptanceTierCascade(t *testing.T) {
 	e := newEngine(t)
-	if d := decide(t, e, quotes(t, "prometheus")); !d.Allowed {
+	if d := decide(t, e, orderRequest(t, "prometheus")); !d.Allowed {
 		t.Error("the bypass step of the cascade failed")
 	}
-	trial := decide(t, e, quotes(t, "t1"))
+	trial := decide(t, e, orderRequest(t, "t1"))
 	if !trial.Allowed || len(trial.Rules) != 3 || !trial.Rules[0].Shadow {
 		t.Errorf("decision = %+v: shadow then enforce through the cascade", trial)
 	}

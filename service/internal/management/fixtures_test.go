@@ -42,15 +42,15 @@ const (
 	testNamespace = "core-1-core"
 )
 
-// quoteBlocks is a FirstMatch cascade: an exempt client, a premium tier, and
+// cascadeBlocks is a FirstMatch cascade: an exempt client, a premium tier, and
 // everyone else. It is the shape the applicability analysis exists for — a rule
 // is reachable only if no earlier one decided first.
-func quoteBlocks() []model.Block {
+func cascadeBlocks() []model.Block {
 	return []model.Block{{
 		Name: "cascade",
 		Mode: model.ModeFirstMatch,
 		Target: model.Target{Routes: []model.Route{{
-			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes/"},
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/invoices/"},
 		}}},
 		Rules: []model.Rule{
 			{
@@ -248,7 +248,7 @@ type testAPI struct {
 func newTestAPI(t *testing.T, blocks ...model.Block) *testAPI {
 	t.Helper()
 	if len(blocks) == 0 {
-		blocks = append(quoteBlocks(), orderBlocks()...)
+		blocks = append(cascadeBlocks(), orderBlocks()...)
 	}
 
 	snapshot := compileSnapshot(t, blocks)

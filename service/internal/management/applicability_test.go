@@ -21,7 +21,7 @@ import (
 func annotationsFor(t *testing.T, query string) map[string]ruleview.RuleView {
 	t.Helper()
 
-	snapshot := compileSnapshot(t, append(quoteBlocks(), orderBlocks()...))
+	snapshot := compileSnapshot(t, append(cascadeBlocks(), orderBlocks()...))
 	values, err := url.ParseQuery(query)
 	require.NoError(t, err)
 
@@ -150,7 +150,7 @@ func TestApplicability_anUnnamedAxisIsAGate(t *testing.T) {
 // Deciding a condition decides the axis it reads too, so the gates say each
 // thing once: no missing_axis beside an undecided_condition on the same key.
 func TestApplicability_gatesAreMinimal(t *testing.T) {
-	snapshot := compileSnapshot(t, quoteBlocks())
+	snapshot := compileSnapshot(t, cascadeBlocks())
 	sc, apiErr := parseScope(snapshot, url.Values{"absent": {"plan"}})
 	require.Nil(t, apiErr)
 
@@ -191,7 +191,7 @@ func TestApplicability_sharpensMonotonically(t *testing.T) {
 }
 
 func TestParseScope_refusesWhatItCannotAnswer(t *testing.T) {
-	snapshot := compileSnapshot(t, append(quoteBlocks(), orderBlocks()...))
+	snapshot := compileSnapshot(t, append(cascadeBlocks(), orderBlocks()...))
 
 	cases := map[string]url.Values{
 		"an unknown axis name":        {"axis.tenant": {"acme"}},
@@ -210,8 +210,8 @@ func TestParseScope_refusesWhatItCannotAnswer(t *testing.T) {
 }
 
 func TestParseScope_isAbsentWithoutIdentityParameters(t *testing.T) {
-	snapshot := compileSnapshot(t, quoteBlocks())
-	sc, apiErr := parseScope(snapshot, url.Values{"path": {"/api/quotes/1"}})
+	snapshot := compileSnapshot(t, cascadeBlocks())
+	sc, apiErr := parseScope(snapshot, url.Values{"path": {"/api/invoices/1"}})
 	require.Nil(t, apiErr)
 	require.False(t, sc.present)
 }

@@ -9,7 +9,7 @@ type PathMatchType string
 
 const (
 	// PathMatchExact compares the whole path, byte for byte, with the query
-	// already stripped. There is no normalization: /quotes and /quotes/ are
+	// already stripped. There is no normalization: /orders and /orders/ are
 	// different paths.
 	PathMatchExact PathMatchType = "Exact"
 

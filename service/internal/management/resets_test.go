@@ -165,7 +165,7 @@ func TestBulk_tokenIsBoundToItsSubject(t *testing.T) {
 func TestBulk_domainWideFormStandsAlone(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
-	h.spend(t, "/api/quotes/1", map[string][]string{model.KeyClient: {"bob"}}, 1)
+	h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {"bob"}}, 1)
 
 	preview := h.preview(t, map[string]any{"confirmDomain": testDomain}, "key-preview")
 	require.Equal(t, 2, *preview.MatchedCount)
@@ -318,7 +318,7 @@ func TestBulk_reachesCountersOfRemovedRules(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
 	// The rule leaves the enforced set while its counters live out their TTL.
-	h.replaceRules(t, quoteBlocks()...)
+	h.replaceRules(t, cascadeBlocks()...)
 
 	preview := h.preview(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders/per-client"}},

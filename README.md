@@ -74,8 +74,8 @@ they change in one edit and apply as one generation, so a request never sees new
 built-in `client` key — the `sub` claim, lower-cased — works with no mapping at all, and an entry named `client`
 overrides it.
 
-`config/samples/` holds a full public-gateway policy and a production Azure API Management policy translated into one
-`RateLimitPolicy`. An envtest spec applies all of them against a real API server on every `make test`, so a
+`config/samples/` holds a full public-gateway policy and a tiered one whose group, role, and total limits stack on a
+single request. An envtest spec applies all of them against a real API server on every `make test`, so a
 sample that stopped being valid fails the build.
 
 ### A generation is enforced whole or not at all
