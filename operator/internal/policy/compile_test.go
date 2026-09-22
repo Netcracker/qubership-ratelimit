@@ -79,7 +79,7 @@ func TestCompile_aBlockingProblemKeepsTheWholeGenerationOut(t *testing.T) {
 	// rule silently hands its traffic to the neighbours. The engine drops such a
 	// generation; what is asserted here is that the status says so.
 	object := policyObject(v1alpha1.LimitBlock{
-		Name: "quote-api",
+		Name: "invoices-api",
 		Rules: []v1alpha1.Rule{
 			simpleRule("per-plan", v1alpha1.Predicate{Key: "plan", Operator: v1alpha1.OperatorExists}),
 			simpleRule("total"),
@@ -91,7 +91,7 @@ func TestCompile_aBlockingProblemKeepsTheWholeGenerationOut(t *testing.T) {
 	outcome := result.Policies[key()]
 	require.Len(t, outcome.Problems, 1)
 	assert.Equal(t, v1alpha1.ProblemUnresolvedKeyReference, outcome.Problems[0].Reason)
-	assert.Equal(t, "quote-api", outcome.Problems[0].Block)
+	assert.Equal(t, "invoices-api", outcome.Problems[0].Block)
 	assert.Equal(t, "per-plan", outcome.Problems[0].Rule)
 
 	assert.False(t, outcome.Compiled())

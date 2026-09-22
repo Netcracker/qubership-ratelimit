@@ -23,7 +23,7 @@ func policy(requests int64) model.Policy {
 			Name: "cascade",
 			Mode: model.ModeFirstMatch,
 			Target: model.Target{Routes: []model.Route{{
-				Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes/"},
+				Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/invoices/"},
 			}}},
 			Rules: []model.Rule{{
 				Name: "everyone",
@@ -124,7 +124,7 @@ func TestSplitID_acceptsOnlyTheWholePair(t *testing.T) {
 	// The three-part form is what the layout used to carry; it addresses
 	// nothing now, and accepting it would resolve to a block named after a
 	// policy that no longer exists.
-	for _, id := range []string{"cascade", "quote-api/cascade/everyone", "/everyone", "cascade/", ""} {
+	for _, id := range []string{"cascade", "invoices-api/cascade/everyone", "/everyone", "cascade/", ""} {
 		_, _, ok := ruleview.SplitID(id)
 		require.False(t, ok, "id %q", id)
 	}

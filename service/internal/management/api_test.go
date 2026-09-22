@@ -324,8 +324,8 @@ func TestRules_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 
 func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/quotes/1", map[string][]string{model.KeyClient: {"alice"}}, 4)
-	h.spend(t, "/api/quotes/1", map[string][]string{model.KeyClient: {"bob"}}, 1)
+	h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {"alice"}}, 4)
+	h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {"bob"}}, 1)
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
@@ -348,7 +348,7 @@ func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 // Reading must not spend anyone's budget: the listing goes through Peek.
 func TestCounters_doNotChargeWhatTheyReport(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/quotes/1", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {"alice"}}, 1)
 
 	target := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 	var first, second CounterList
@@ -384,7 +384,7 @@ func TestCounters_refusesAFalseThatPretendsToNarrow(t *testing.T) {
 func TestCounters_axisFiltersAreOrWithinANameAndAndBetweenNames(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol"} {
-		h.spend(t, "/api/quotes/1", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {client}}, 1)
 	}
 
 	var list CounterList
@@ -417,7 +417,7 @@ func TestCounters_anAxisTheRuleLacksMatchesNothing(t *testing.T) {
 func TestCounters_pagesWithACursorBoundToItsSelection(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol", "dave"} {
-		h.spend(t, "/api/quotes/1", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {client}}, 1)
 	}
 	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 
@@ -462,7 +462,7 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 	var response SimulationResponse
 	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
 		Domain: testDomain,
-		Path:   "/api/quotes/1",
+		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
 		Keys:   map[string][]string{model.KeyClient: {"alice"}},
 	}), http.StatusOK, &response)

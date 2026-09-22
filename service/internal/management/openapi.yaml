@@ -7,20 +7,19 @@ info:
     url: https://www.apache.org/licenses/LICENSE-2.0
   description: |
     Control interface of the rate limit service: read what is enforced,
-    inspect and reset live counters, simulate a request, and tap the decision
-    audit stream.
+    inspect and reset live counters, and simulate a request.
 
     Principles:
-    * The API mutates runtime state only (counters, audit taps). Configuration
+    * The API mutates runtime state only: counters, and nothing else. Configuration
       (limits, rules, claim mappings, groups) lives in the RateLimitPolicy of
       the domain, the one custom resource - the GitOps path. There are no
       configuration write endpoints.
     * Reads never charge counters: every read goes through the store's Peek,
       evaluated at cost=1. Judging arbitrary costs is what the simulation
       endpoint is for.
-    * Every mutation is audited - a structured audit log line with the
-      request id and subject is the durable journal; a Kubernetes Event is
-      emitted as an operational signal on top, never as the record.
+    * Every mutation is audited: a structured audit journal line carrying the
+      request id and the subject is the record. The service writes nothing to
+      the API server, so there is no Kubernetes Event.
     * Destructive radius is bounded by construction: DELETE only addresses
       one rule; anything wider goes through the counter-resets action, whose execution step only exists with the single-use confirmation token minted by a mandatory preview - look before you delete is enforced by construction, and the sweep's work is bounded server-side: the walk has a deadline, and a domain runs at most one sweep at a time.
     * The base path is a security boundary: the gateway's auth extension authenticates every call against the platform identity provider, and the service itself authorizes it by the roles the token carries, per path and verb.
@@ -222,7 +221,7 @@ paths:
                       mode: FirstMatch
                       routes:
                       - type: Prefix
-                        value: /api/quotes/
+                        value: /api/invoices/
                         methods:
                         - GET
                         - POST
@@ -288,7 +287,7 @@ paths:
                       mode: All
                       routes:
                       - type: Prefix
-                        value: /api/quotes/
+                        value: /api/invoices/
                       rules:
                       - id: quota/daily
                         block: quota
@@ -495,7 +494,7 @@ paths:
                       mode: FirstMatch
                       routes:
                       - type: Prefix
-                        value: /api/quotes/
+                        value: /api/invoices/
                         methods:
                         - GET
                         - POST
@@ -571,7 +570,7 @@ paths:
                       mode: All
                       routes:
                       - type: Prefix
-                        value: /api/quotes/
+                        value: /api/invoices/
                       rules:
                       - id: quota/daily
                         block: quota
@@ -1328,14 +1327,14 @@ paths:
                 value:
                   selector:
                     ruleIds:
-                    - quote-api/cascade
+                    - invoices-api/cascade
                   dryRun: true
               executeSelector:
                 summary: 'Step two: execute it with the previewed token'
                 value:
                   selector:
                     ruleIds:
-                    - quote-api/cascade
+                    - invoices-api/cascade
                   confirmationToken: ct-5b8e2f9d4a10
               tenantUsers:
                 summary: Preview a tenant's users (OR within the axis)
@@ -1646,8 +1645,7 @@ paths:
         * `keys` - explicit keys only; the form admits no token field.
 
         The token is write-only input: it is never echoed in the response,
-        never written to access or audit logs, never quoted in errors, and
-        never reaches the audit stream.
+        never written to access or audit logs, and never quoted in errors.
 
         The domain travels in the body rather than the path: one mutation-free POST path keeps the role model trivial - viewer holds post on exactly this path and never on the mutations.
       requestBody:
@@ -1661,7 +1659,7 @@ paths:
                 summary: 'Gateway semantics: token extraction with keys overlaid'
                 value:
                   domain: gateway.public
-                  path: /api/quotes/42
+                  path: /api/invoices/42
                   method: GET
                   keys:
                     client:
@@ -1674,7 +1672,7 @@ paths:
                 summary: Pure token - what extraction alone would judge
                 value:
                   domain: gateway.public
-                  path: /api/quotes/42
+                  path: /api/invoices/42
                   method: GET
                   identitySource: token
                   token: eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.sig
@@ -1853,7 +1851,7 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        A bearer JWT issued by the platform identity provider. Authentication is the perimeter's job: the gateway's auth extension validates the token (signature, expiry, issuer) before the request reaches the service, and the mesh restricts the service's ingress to that gateway. Authorization is the service's own, and its trust boundary is explicit: identity is read from EXACTLY ONE source - the bearer token in the Authorization header, whose signature the gateway has already validated; no auxiliary identity header (X-Forwarded-User and kin) is ever consulted, so none can be spoofed. What makes the unvalidated read safe is a DEPLOYMENT REQUIREMENT, not an assumption: the mesh must restrict the service's ingress to the gateway alone; a deployment that cannot enforce that must validate the token signature in-service instead. The service enforces the role model per path and verb - viewer holds every GET and POST /simulations; operator holds the mutations (DELETE on counters, POST on counter-resets, PUT on the audit selection) plus everything viewer holds. Role names and claim locations are deployment configuration; viewer and operator are the canonical defaults. The subject also feeds the audit journal, the Idempotency-Key scope, and the confirmation-token binding. A request without a bearer token is refused outright (401) - but that is hygiene, not the defense: the service does not validate signatures, so with the ingress requirement broken a forged token would pass. The model's security rests on that requirement, or on in-service validation where the mesh cannot provide it. An invalid token is normally rejected at the gateway, in the perimeter's own error format. Roles cannot narrow to particular axis values: whoever holds viewer sees axis values (client ids), which is a documented property of the access model, not an accident.
+        A bearer JWT issued by the platform identity provider. Authentication is the perimeter's job: the gateway's auth extension validates the token (signature, expiry, issuer) before the request reaches the service, and the mesh restricts the service's ingress to that gateway. Authorization is the service's own, and its trust boundary is explicit: identity is read from EXACTLY ONE source - the bearer token in the Authorization header, whose signature the gateway has already validated; no auxiliary identity header (X-Forwarded-User and kin) is ever consulted, so none can be spoofed. What makes the unvalidated read safe is a DEPLOYMENT REQUIREMENT, not an assumption: the mesh must restrict the service's ingress to the gateway alone; a deployment that cannot enforce that must validate the token signature in-service instead. The service enforces the role model per path and verb - viewer holds every GET and POST /simulations; operator holds the mutations (DELETE on counters, POST on counter-resets) plus everything viewer holds. Role names and claim locations are deployment configuration; viewer and operator are the canonical defaults. The subject also feeds the audit journal, the Idempotency-Key scope, and the confirmation-token binding. A request without a bearer token is refused outright (401) - but that is hygiene, not the defense: the service does not validate signatures, so with the ingress requirement broken a forged token would pass. The model's security rests on that requirement, or on in-service validation where the mesh cannot provide it. An invalid token is normally rejected at the gateway, in the perimeter's own error format. Roles cannot narrow to particular axis values: whoever holds viewer sees axis values (client ids), which is a documented property of the access model, not an accident.
   parameters:
     domain:
       name: domain
@@ -2236,7 +2234,7 @@ components:
             Prefix, or Template with placeholders.'
         value:
           type: string
-          example: /api/quotes/
+          example: /api/invoices/
           description: The path pattern; for Template, {name} segments capture into
             identity keys.
         methods:
@@ -2275,7 +2273,7 @@ components:
           - bypass
           description: 'The single mode field; there is no separate boolean to contradict
             it. Lowercase on purpose: this is the API-wide runtime vocabulary, shared
-            with counter, outcome, and audit views - unlike BlockView.mode, which
+            with the counter and outcome views - unlike BlockView.mode, which
             mirrors the custom resource spelling.'
         axes:
           type: array
@@ -2427,8 +2425,7 @@ components:
             of the API compatibility contract.
         ruleId:
           type: string
-          description: The block/rule identity that counters, metrics, and the audit
-            stream share.
+          description: The block/rule identity that counters and metrics share.
         block:
           type: string
           description: The block name - the first segment of the block/rule identity.
@@ -2521,7 +2518,7 @@ components:
           description: The rate limit domain, as the gateway's filter names it.
         path:
           type: string
-          example: /api/quotes/1
+          example: /api/invoices/1
           description: 'The request path; matching ignores the query string. Required:
             a gateway request always has one, and route matching is undefined without
             it.'
@@ -2625,7 +2622,7 @@ components:
       maxLength: 8192
       description: |
         Raw token descriptor value. Write-only: never echoed, never logged,
-        never quoted in errors, never on the audit stream.
+        and never quoted in errors.
     SimulationKeysValue:
       type: object
       minProperties: 1
@@ -2770,8 +2767,8 @@ components:
         id:
           type: string
           example: cascade/everyone
-          description: The block/rule triple - the identity shared by counters,
-            metrics, and audit records.
+          description: The block/rule triple - the identity shared by counters
+            and metrics.
         mode:
           type: string
           enum:
@@ -2834,8 +2831,8 @@ components:
         id:
           type: string
           example: cascade/everyone
-          description: The block/rule triple - the identity shared by counters,
-            metrics, and audit records.
+          description: The block/rule triple - the identity shared by counters
+            and metrics.
         mode:
           type: string
           enum:
@@ -2898,8 +2895,8 @@ components:
         id:
           type: string
           example: cascade/everyone
-          description: The block/rule triple - the identity shared by counters,
-            metrics, and audit records.
+          description: The block/rule triple - the identity shared by counters
+            and metrics.
         mode:
           type: string
           enum:
@@ -3385,7 +3382,7 @@ components:
             description: A full block/rule id or a 1-2 segment prefix form.
           description: Full ids and 1-2 segment prefix forms mix freely.
           example:
-          - quote-api/cascade
+          - invoices-api/cascade
           - search-api
         algorithm:
           type: string
