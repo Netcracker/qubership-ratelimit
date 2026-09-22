@@ -616,7 +616,7 @@ func TestSpecCascadeCompiles(t *testing.T) {
 				Name: "cascade",
 				Mode: model.ModeFirstMatch,
 				Target: model.Target{Routes: []model.Route{
-					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/quotes/"}}}},
+					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/invoices/"}}}},
 				Rules: []model.Rule{
 					{Name: "internal", Behavior: model.BehaviorBypass,
 						Matches: []model.Predicate{

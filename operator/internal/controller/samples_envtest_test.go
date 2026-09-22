@@ -72,7 +72,7 @@ var _ = Describe("the samples in config/samples", func() {
 		// a policy nobody should copy.
 		for _, name := range []string{
 			"ratelimit_v1alpha1_ratelimitpolicy_public.yaml",
-			"ratelimit_v1alpha1_ratelimitpolicy_quote_api.yaml",
+			"ratelimit_v1alpha1_ratelimitpolicy_tiered.yaml",
 		} {
 			raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "samples", name))
 			Expect(err).NotTo(HaveOccurred())

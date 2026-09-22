@@ -1,0 +1,112 @@
+#
+# A policy whose limits stack: a client belongs to a group, carries roles, and
+# calls an API that has a total of its own, so one request is charged against
+# several buckets at once. Blocks are additive, so a POST that a group limit
+# admits still has to fit the role limit, the API total, and the narrower limit
+# on writes.
+#
+# The three shapes it shows are the ones a migration from another rate limiter
+# usually needs: a bucket shared by an enumerated set of clients, a bucket per
+# role read out of an array claim, and an unconditional total.
+#
+apiVersion: ratelimit.netcracker.com/v1alpha1
+kind: RateLimitPolicy
+metadata:
+  name: gateway.partner
+  labels:
+    app.kubernetes.io/name: ratelimit
+spec:
+  domain: gateway.partner
+
+  # The roles claim is an array, which is why extraction lives in the engine at
+  # all: a gateway's claim-to-header cannot carry one.
+  mappings:
+    - { key: roles, claim: realm_access.roles, type: StringArray }
+
+  # A group is written once and referenced by name from any rule of the policy.
+  groups:
+    - name: bulk-clients
+      clients:
+        - 00000000-0000-4000-8000-00000000c001
+        - 00000000-0000-4000-8000-00000000c002
+        - 00000000-0000-4000-8000-00000000c003
+        - 00000000-0000-4000-8000-00000000c004
+    - name: trial-clients
+      clients:
+        - 00000000-0000-4000-8000-00000000d001
+
+  limits:
+    # The API tier: groups, roles, and the total. Mode All, the default, so
+    # every rule that matches applies.
+    - name: integration-api
+      target:
+        routes:
+          - path: { type: Prefix, value: /integration/v1 }
+      rules:
+        # One bucket shared by the whole group: InGroup plus no counting axes.
+        - name: bulk-clients-shared
+          matches:
+            - { key: client, operator: InGroup, value: bulk-clients }
+          counters: []
+          rates:
+            - { requests: 200, periodSeconds: 60 }
+
+        - name: trial-clients-shared
+          matches:
+            - { key: client, operator: InGroup, value: trial-clients }
+          counters: []
+          rates:
+            - { requests: 60, periodSeconds: 60 }
+
+        # One bucket per role, read out of the array claim declared in mappings
+        # above. A rule over a key nothing declares would make the whole
+        # generation invalid, not just that rule.
+        - name: role-crawler
+          matches:
+            - { key: roles, operator: Contains, value: ROLE_Crawler }
+          counters: []
+          rates:
+            - { requests: 150, periodSeconds: 60 }
+
+        - name: role-reader
+          matches:
+            - { key: roles, operator: Contains, value: ROLE_Reader }
+          counters: []
+          rates:
+            - { requests: 80, periodSeconds: 60 }
+
+        - name: role-integrator
+          matches:
+            - { key: roles, operator: Contains, value: ROLE_Integrator }
+          counters: []
+          rates:
+            - { requests: 400, periodSeconds: 60 }
+            - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
+
+        # The unconditional total of the API: empty matches, empty counters.
+        - name: api-total
+          counters: []
+          rates:
+            - { requests: 1000, periodSeconds: 60 }
+
+    # A second block over a narrower target. Its limits are charged on top of
+    # the block above, because blocks add up.
+    - name: integration-api-writes
+      target:
+        routes:
+          - path: { type: Prefix, value: /integration/v1/orders }
+            methods: [POST]
+      rules:
+        - name: bulk-clients-writes
+          matches:
+            - { key: client, operator: InGroup, value: bulk-clients }
+          counters: []
+          rates:
+            - { requests: 30, periodSeconds: 60 }
+
+        - name: trial-clients-writes
+          matches:
+            - { key: client, operator: InGroup, value: trial-clients }
+          counters: []
+          rates:
+            - { requests: 10, periodSeconds: 60 }
