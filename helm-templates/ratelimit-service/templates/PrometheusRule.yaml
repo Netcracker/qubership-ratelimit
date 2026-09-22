@@ -72,7 +72,7 @@ spec:
         - alert: RatelimitKeyDeclaredNotExtracted
           expr: >-
             sum by (namespace, domain, key) (rate(ratelimit_extractions_total{ {{- $sel -}} }[{{ .Values.alerts.keyNotExtractedWindow }}])) == 0
-            and on (namespace) sum by (namespace) (rate(ratelimit_tokens_seen_total{ {{- $sel -}} }[{{ .Values.alerts.keyNotExtractedWindow }}])) > 0
+            and on (namespace, domain) sum by (namespace, domain) (rate(ratelimit_tokens_seen_total{ {{- $sel -}} }[{{ .Values.alerts.keyNotExtractedWindow }}])) > 0
           for: {{ .Values.alerts.keyNotExtractedFor }}
           labels:
             severity: warning
@@ -80,7 +80,7 @@ spec:
             summary: A declared identity key is never extracted from the tokens that arrive
             description: >-
               Domain {{ "{{" }} $labels.domain {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} declares the
-              key {{ "{{" }} $labels.key {{ "}}" }}, tokens arrive, and no request carried a value for it in
+              key {{ "{{" }} $labels.key {{ "}}" }}, its requests carry tokens, and none carried a value for it in
               {{ .Values.alerts.keyNotExtractedWindow }}. The mapping names a claim the tokens do not carry,
               and every client of a rule counting by that key shares one bucket. Read the claim path on
               /debug/snapshot/{{ "{{" }} $labels.domain {{ "}}" }} of a service pod.

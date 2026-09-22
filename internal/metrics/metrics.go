@@ -125,11 +125,14 @@ var (
 	}, []string{"domain", "key"})
 
 	// TokensSeen is the traffic half of the detector: a key whose extraction
-	// series sits at zero while this one grows has a dead claim path.
-	TokensSeen = prometheus.NewCounter(prometheus.CounterOpts{
+	// series sits at zero while this one grows has a dead claim path. It
+	// carries the domain because the detector's other half does: joined
+	// namespace-wide, one domain's traffic would judge another domain's
+	// idle keys and report a dead claim path on a mapping nobody used.
+	TokensSeen = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_tokens_seen_total",
-		Help: "Decisions on a known domain whose request carried a token.",
-	})
+		Help: "Decisions on a known domain whose request carried a token, by domain.",
+	}, []string{"domain"})
 
 	// StoreRoundtrip is the counter store's share of the check. It is labeled
 	// by domain because a domain is pinned to one Redis Cluster slot: shard

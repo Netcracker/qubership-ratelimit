@@ -264,8 +264,12 @@ jobs:
         with:
           go-version-file: go.mod
       # The alert rules each chart ships go through promtool check rules in
-      # the same test; the binary comes from the Prometheus release the
-      # Makefile pins, and its absence is a failure here as helm's is.
+      # the same test, and through the rule tests under tests/charts/testdata,
+      # which replay the drill the ticket asks for: a lone store error, a
+      # stray unknown-domain check, an idle domain beside a busy one, and a
+      # Lease changing hands, none of which may page. The binary comes from
+      # the Prometheus release the Makefile pins, and its absence is a
+      # failure here as helm's is.
       - name: Download promtool
         run: make promtool
       - name: Compare the rendered charts with the contract constants

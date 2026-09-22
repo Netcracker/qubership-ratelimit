@@ -162,37 +162,38 @@
           "description": "Render the PrometheusRule of the data plane. Read only with MONITORING_ENABLED."
         },
         "latencyBudgetSeconds": {
-          "$ref": "#/definitions/numberOrString",
-          "default": "0.01",
-          "description": "The p99 of a check, in seconds, above which RatelimitDecisionLatencyHigh fires."
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 0.01,
+          "description": "The p99 of a check, in seconds, above which RatelimitDecisionLatencyHigh fires. A value at or below zero would render a comparison every check satisfies."
         },
         "latencyFor": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "10m",
           "description": "How long the p99 stays above the budget before RatelimitDecisionLatencyHigh fires."
         },
         "unknownDomainFor": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "5m",
           "description": "How long unknown-domain checks keep arriving before RatelimitUnknownDomain fires."
         },
         "storeErrorsFor": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
-          "default": "2m",
-          "description": "How long store errors keep arriving before RatelimitStoreErrors fires."
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long store errors keep arriving before RatelimitStoreErrors fires. At least the 5m window of the expression, or a single error fires the alert while it still fills the window."
         },
         "keyNotExtractedWindow": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "15m",
           "description": "The rate window of RatelimitKeyDeclaredNotExtracted."
         },
         "keyNotExtractedFor": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "30m",
           "description": "How long a declared key stays at zero extractions next to tokens before RatelimitKeyDeclaredNotExtracted fires."
         },

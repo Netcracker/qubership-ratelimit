@@ -4,12 +4,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
+
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 )
 
 // The alert rules each chart ships behind MONITORING_ENABLED: the set of
@@ -55,7 +59,7 @@ func TestCharts_shipTheAlertRulesBehindMonitoring(t *testing.T) {
 			}
 			assert.ElementsMatch(t, wanted, names)
 
-			checkRules(t, rule)
+			checkRules(t, chart, rule)
 		})
 	}
 }
@@ -71,26 +75,44 @@ func TestCharts_renderNoAlertRulesWhenOff(t *testing.T) {
 	}
 }
 
-// checkRules writes the rendered groups as a rule file and runs promtool
-// check rules over it, the check the ticket asks of CI.
-func checkRules(t *testing.T, rule object) {
+// checkRules writes the rendered groups as a rule file, runs promtool check
+// rules over it, and replays the chart's rule tests against it: the drill of
+// the ticket's definition of done, reproduced by CI instead of by a stand.
+// The cases that matter are the negative ones — a lone error, a stray check,
+// an idle domain, a Lease changing hands — since an alert set that pages
+// when nothing is wrong is the failure this pins.
+func checkRules(t *testing.T, chart string, rule object) {
 	t.Helper()
 	promtool := findPromtool()
 	if promtool == "" {
 		if os.Getenv("CHARTS_TEST_REQUIRE_PROMTOOL") != "" {
 			t.Fatal("promtool is not available and CHARTS_TEST_REQUIRE_PROMTOOL is set")
 		}
-		t.Log("promtool is not available; the rule syntax check is skipped")
+		t.Log("promtool is not available; the rule syntax check and the rule tests are skipped")
 		return
 	}
 	groups, err := yaml.Marshal(map[string]any{"groups": rule.at("spec", "groups").v})
 	require.NoError(t, err)
-	file := filepath.Join(t.TempDir(), "rules.yaml")
-	require.NoError(t, os.WriteFile(file, groups, 0o600))
+	dir := t.TempDir()
+	rules := filepath.Join(dir, "rules.yaml")
+	require.NoError(t, os.WriteFile(rules, groups, 0o600))
 
-	out, err := exec.Command(promtool, "check", "rules", file).CombinedOutput()
+	out, err := exec.Command(promtool, "check", "rules", rules).CombinedOutput()
 	require.NoError(t, err, "promtool check rules: %s", out)
 	assert.Contains(t, string(out), "SUCCESS", "promtool did not report success: %s", out)
+
+	// The rule test file names rules.yaml beside itself, so it is copied
+	// into the directory the rendering was written to.
+	cases, err := os.ReadFile(filepath.Join("testdata", chart+".rules.test.yaml"))
+	require.NoError(t, err)
+	test := filepath.Join(dir, chart+".rules.test.yaml")
+	require.NoError(t, os.WriteFile(test, cases, 0o600))
+
+	cmd := exec.Command(promtool, "test", "rules", filepath.Base(test))
+	cmd.Dir = dir
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, "promtool test rules: %s", out)
+	assert.Contains(t, string(out), "SUCCESS", "the rule tests did not pass: %s", out)
 }
 
 func findPromtool() string {
@@ -108,15 +130,13 @@ func findPromtool() string {
 	return ""
 }
 
-// The rendered expressions are what the runbook and the dashboard quote;
-// a change to a metric name shows up here before it shows up on a stand.
+// The rendered expressions are what the runbook and the dashboard quote, so
+// every series one reads has to be a series a binary publishes. The set
+// comes from the registrations themselves rather than from a list kept by
+// hand: a series renamed in internal/metrics fails here instead of leaving
+// a rule that matches nothing and a test that still passes.
 func TestCharts_alertExpressionsReadTheSeriesTheCodeDefines(t *testing.T) {
-	defined := []string{
-		"ratelimit_unknown_domain_checks_total", "ratelimit_store_errors_total",
-		"ratelimit_check_duration_seconds_bucket", "ratelimit_extractions_total", "ratelimit_tokens_seen_total",
-		"ratelimit_domain_decision_buckets", "ratelimit_policy_stalled", "ratelimit_policy_ready",
-		"ratelimit_policy_rule_problems", "ratelimit_config_write_errors_total", "ratelimit_leader",
-	}
+	defined := registeredSeries()
 	for chart := range alertsOf {
 		rule := only(t, render(t, chart, "biz", "--set", "MONITORING_ENABLED=true"), "PrometheusRule")
 		for _, group := range rule.at("spec", "groups").list() {
@@ -126,10 +146,75 @@ func TestCharts_alertExpressionsReadTheSeriesTheCodeDefines(t *testing.T) {
 					return c != '_' && (c < 'a' || c > 'z') && (c < '0' || c > '9')
 				}) {
 					if strings.HasPrefix(word, "ratelimit_") {
-						assert.Contains(t, defined, word, "%s reads a series the code does not define", r.at("alert").str2())
+						assert.Contains(t, defined, word,
+							"%s reads %s, which no binary publishes", r.at("alert").str2(), word)
 					}
 				}
 			}
 		}
+	}
+}
+
+// fqName reads the metric name out of a Desc, which prints as
+// Desc{fqName: "...", help: ...}.
+var fqName = regexp.MustCompile(`fqName: "([^"]+)"`)
+
+// registeredSeries lists what the two registrations put on a registry, each
+// histogram and summary also under the suffixed names a query reads.
+func registeredSeries() []string {
+	collectors := &collecting{}
+	metrics.RegisterService(collectors, "test")
+	metrics.RegisterOperator(collectors, "test")
+
+	descs := make(chan *prometheus.Desc, 256)
+	go func() {
+		for _, c := range collectors.collectors {
+			c.Describe(descs)
+		}
+		close(descs)
+	}()
+	var names []string
+	for desc := range descs {
+		match := fqName.FindStringSubmatch(desc.String())
+		if match == nil {
+			continue
+		}
+		names = append(names, match[1])
+		for _, suffix := range []string{"_bucket", "_sum", "_count"} {
+			names = append(names, match[1]+suffix)
+		}
+	}
+	return names
+}
+
+// collecting is a Registerer that keeps what it is handed instead of
+// registering it: the registrations are the source of the names, and a real
+// registry would reject the collectors the two share.
+type collecting struct{ collectors []prometheus.Collector }
+
+func (c *collecting) Register(collector prometheus.Collector) error {
+	c.collectors = append(c.collectors, collector)
+	return nil
+}
+func (c *collecting) MustRegister(collectors ...prometheus.Collector) {
+	c.collectors = append(c.collectors, collectors...)
+}
+func (c *collecting) Unregister(prometheus.Collector) bool { return false }
+
+// The schema refuses the values that would render a rule which never fires,
+// or a group Prometheus will not load: one bad duration takes every rule of
+// the chart with it.
+func TestCharts_refuseAlertValuesThatBreakTheRules(t *testing.T) {
+	for _, bad := range []struct{ chart, set string }{
+		{serviceChart, "alerts.latencyBudgetSeconds=0"},
+		{serviceChart, "alerts.latencyBudgetSeconds=-1"},
+		{serviceChart, "alerts.latencyBudgetSeconds=abc"},
+		{serviceChart, "alerts.keyNotExtractedWindow=0m"},
+		{serviceChart, "alerts.storeErrorsFor=abc"},
+		{operatorChart, "alerts.stalledFor=0s"},
+		{operatorChart, "alerts.configWriteErrorsWindow=0m"},
+	} {
+		_, err := renderErr(bad.chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", bad.set)
+		assert.Error(t, err, "%s accepts %s", bad.chart, bad.set)
 	}
 }

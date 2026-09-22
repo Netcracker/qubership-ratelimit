@@ -152,31 +152,31 @@
         },
         "stalledFor": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "5m",
           "description": "How long a domain stays Stalled before RatelimitStalled fires."
         },
         "notReadyFor": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "30m",
           "description": "How long a policy stays not Ready before RatelimitNotReadyLong fires."
         },
         "ruleProblemsFor": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "5m",
           "description": "How long a blocking problem stays on the latest generation before RatelimitRuleProblems fires."
         },
         "configWriteErrorsWindow": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "15m",
           "description": "The window over which any ConfigMap write error fires RatelimitConfigWriteErrors."
         },
         "noLeaderFor": {
           "type": "string",
-          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
           "default": "5m",
           "description": "How long no operator pod holds the Lease before RatelimitNoOperatorLeader fires."
         }

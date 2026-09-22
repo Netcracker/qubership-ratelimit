@@ -140,7 +140,7 @@ alerts:
   # timeout sits above it, and a p99 past the budget is the store, the token
   # cache, or the node saturating, before the timeout turns checks into the
   # gateway's failure mode. Held for latencyFor so a burst does not page.
-  latencyBudgetSeconds: "0.01"
+  latencyBudgetSeconds: 0.01
   latencyFor: 10m
 
   # RatelimitUnknownDomain: checks for a domain no policy claims pass
@@ -151,15 +151,18 @@ alerts:
 
   # RatelimitStoreErrors: a failed counter store decision is a check the
   # gateway's failure mode decided, whichever way it is set. Any increase over
-  # the window fires; held for storeErrorsFor to let one retried timeout
-  # pass.
-  storeErrorsFor: 2m
+  # the 5m window fires. The hold is the window's own length, so a single
+  # error ages out of the window before the hold ends and one retried timeout
+  # never pages; a shorter hold would fire inside the window the lone error
+  # still fills. Lower it only where every store error must page at once.
+  storeErrorsFor: 5m
 
   # RatelimitKeyDeclaredNotExtracted: a declared identity key whose
-  # extraction series stays at zero while tokens arrive is a claim path the
-  # tokens do not carry, and every client of that rule shares one bucket. The
-  # window is long because the series are rates of low-volume counters; the
-  # rule needs no traffic on the key, only tokens on the process.
+  # extraction series stays at zero while the domain's own requests carry
+  # tokens is a claim path the tokens do not carry, and every client of that
+  # rule shares one bucket. Both halves are per domain, so an idle domain has
+  # no tokens to be judged against and never pages on another's traffic. The
+  # window is long because the series are rates of low-volume counters.
   keyNotExtractedWindow: 15m
   keyNotExtractedFor: 30m
 

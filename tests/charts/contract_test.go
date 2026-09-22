@@ -80,11 +80,8 @@ func (n node) num() float64 {
 // extra arguments, and parses every document it produced.
 func render(t *testing.T, chart, namespace string, extra ...string) []object {
 	t.Helper()
-	dir := filepath.Join("..", "..", "helm-templates", chart)
-	args := append([]string{"template", "t", dir, "-n", namespace,
-		"-f", filepath.Join(dir, "resource-profiles", "dev.yaml")}, extra...)
-	out, err := exec.Command("helm", args...).CombinedOutput()
-	require.NoError(t, err, "helm %s\n%s", strings.Join(args, " "), out)
+	out, err := renderErr(chart, namespace, extra...)
+	require.NoError(t, err, "%s", out)
 
 	var objects []object
 	for doc := range bytes.SplitSeq(out, []byte("\n---")) {
@@ -98,6 +95,19 @@ func render(t *testing.T, chart, namespace string, extra ...string) []object {
 		}
 	}
 	return objects
+}
+
+// renderErr is render without the expectation that it succeeds: the schema
+// tests assert that a value is refused, and a refusal is helm's exit code.
+func renderErr(chart, namespace string, extra ...string) ([]byte, error) {
+	dir := filepath.Join("..", "..", "helm-templates", chart)
+	args := append([]string{"template", "t", dir, "-n", namespace,
+		"-f", filepath.Join(dir, "resource-profiles", "dev.yaml")}, extra...)
+	out, err := exec.Command("helm", args...).CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("helm %s: %w\n%s", strings.Join(args, " "), err, out)
+	}
+	return out, nil
 }
 
 // argsOf lists a container's args as strings.

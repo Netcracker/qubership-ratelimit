@@ -167,7 +167,7 @@ func (s *Server) ShouldRateLimit(
 	allowed := true
 	for _, er := range requests {
 		if er.Token != "" {
-			metrics.TokensSeen.Inc()
+			metrics.TokensSeen.WithLabelValues(domain).Inc()
 		}
 		decision, err := eng.Decide(ctx, er)
 		if err != nil {
