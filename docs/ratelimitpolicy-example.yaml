@@ -9,8 +9,8 @@ apiVersion: ratelimit.netcracker.com/v1alpha1
 kind: RateLimitPolicy
 metadata:
   name: gateway.public              # name == spec.domain (CEL); a second object for the domain is unrepresentable
-  namespace: core-1-core            # business namespace: the single namespace or a composite's baseline,
-                                    # next to the component
+  # Business namespace: the single namespace or a composite's baseline, next to the component.
+  namespace: core-1-core
 spec:
   # Binding to the gateway: the string must match domain in this gateway's EnvoyFilter (installed by the Helm chart).
   domain: gateway.public
@@ -18,7 +18,7 @@ spec:
   # Which token claims become descriptor keys. client <- sub is built in, no need to declare it.
   mappings:
   - { key: roles, claim: realm_access.roles, type: StringArray }   # array: the Contains/In/InGroup operators
-  - { key: plan,  claim: plan, normalization: Lowercase }               # scalar: Equals/In, usable in counters
+  - { key: plan, claim: plan, normalization: Lowercase }         # scalar: Equals/In, usable in counters
 
   # Named client groups. The client value = the sub claim, lowercased.
   groups:

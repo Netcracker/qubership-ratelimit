@@ -166,7 +166,7 @@ spec:
 The compiled map (what GET /rules returns):
 
 | ruleId | mode | axes | windows |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | cascade/internal | bypass | - | - |
 | cascade/trial | shadow | [client] | gcra 10/1m |
 | cascade/premium | enforce | [client] | gcra 300/1m burst 50 |
@@ -193,6 +193,7 @@ The domain list:
 ```bash
 api "$BASE/domains"
 ```
+
 ```json
 {"items": [{"domain": "gateway.public", "ruleSetVersion": "7c31a9f4e0d2",
   "blocks": 8, "rules": 15,
@@ -212,6 +213,7 @@ Which rules guard a specific API: the engine's matcher, with segment-based Prefi
 api "$BASE/domains/gateway.public/rules?path=/api/invoices/42&method=GET" \
   | jq '[.blocks[].rules[].id]'
 ```
+
 ```json
 ["cascade/internal", "cascade/trial",
  "cascade/premium", "cascade/everyone",
@@ -245,6 +247,7 @@ api "$BASE/domains/gateway.public/rules?axis.client=alice" \
   | jq '{tochno:        [.blocks[].rules[] | select(.applicability == "always") | .id],
          teoreticheski: [.blocks[].rules[] | select(.applicability == "conditional") | .id]}'
 ```
+
 ```json
 {"tochno": ["quota/daily", "services/per-service",
             "total/all", "search/per-client"],
@@ -295,6 +298,7 @@ api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
   "keys": {"client": ["alice"], "tenant": ["acme"], "plan": ["gold"]}
 }'
 ```
+
 ```json
 {
   "allowed": true,
@@ -327,6 +331,7 @@ api -X POST "$BASE/simulations" -d '{
   "keys": {"client": ["bob"], "tenant": ["acme"]}
 }' | jq '[.rules[] | {id, allowed, remaining}]'
 ```
+
 ```json
 [{"id": "cascade/everyone", "allowed": true, "remaining": 17},
  {"id": "quota/daily", "allowed": true, "remaining": 40},
@@ -354,6 +359,7 @@ api -X POST "$BASE/simulations" -d '{
   "keys": {"client": ["trial-1"]}
 }' | jq '{allowed, evaluatedAt, trial: [.rules[] | select(.mode == "shadow")]}'
 ```
+
 ```json
 {"allowed": true, "evaluatedAt": "2026-08-24T14:02:33Z",
  "trial": [{"id": "cascade/trial", "mode": "shadow", "allowed": false,
@@ -407,6 +413,7 @@ api -X POST "$BASE/simulations" -d '{
   "identitySource": "token", "token": "garbage"
 }' | jq .skips
 ```
+
 ```json
 [{"key": "client", "reason": "decode_failed"},
  {"key": "plan", "reason": "decode_failed"},
@@ -421,6 +428,7 @@ A rule's counters:
 ```bash
 api "$BASE/domains/gateway.public/counters?ruleId=cascade/everyone"
 ```
+
 ```json
 {"items": [
   {"key": "rl:v1:{core/gateway.public}:cascade/everyone:gcra:60:bob:",
@@ -452,6 +460,7 @@ completeness):
 api "$BASE/domains/gateway.public/counters?axis.client=alice" \
   | jq '[.items[] | {ruleId, axes, remaining}]'
 ```
+
 ```json
 [{"ruleId": "cascade/premium", "axes": {"client": "alice"}, "remaining": 254},
  {"ruleId": "quota/daily", "axes": {"client": "alice"}, "remaining": 61},
@@ -468,6 +477,7 @@ Who is blocked right now (cost=1):
 api "$BASE/domains/gateway.public/counters?limited=true" \
   | jq '[.items[] | {ruleId, axes, mode}]'
 ```
+
 ```json
 [{"ruleId": "cascade/everyone", "axes": {"client": "crawler"}, "mode": "enforce"},
  {"ruleId": "cascade/trial", "axes": {"client": "trial-1"}, "mode": "shadow"},
@@ -541,6 +551,7 @@ it from bulk, whose sweep cannot be expressed as one script. Record retention is
 # one client of one rule (all windows)
 opk -X DELETE "$BASE/domains/gateway.public/counters?ruleId=quota/daily&axis.client=alice"
 ```
+
 ```json
 {"dryRun": false, "domain": "gateway.public", "ruleId": "quota/daily",
  "ruleSetVersion": "7c31a9f4e0d2",

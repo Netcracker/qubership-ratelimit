@@ -23,12 +23,12 @@ served by `GET /openapi.yaml`. Worked scenarios are in the [cookbook](management
 ## Surface
 
 | Method and path | Role | Semantics |
-|---|---|---|
+| --- | --- | --- |
 | GET /domains | viewer | The domains of the enforced set: per-domain ruleSetVersion, sizes (blocks/rules), effectiveKeys. No pagination: domains are few. |
-| GET /domains/{d}/rules?path=&method=&axis.<n>= | viewer | The domain's enforced set (which can be a last-good generation, not the latest object in the cluster) plus its ruleSetVersion. The axes list of each rule is the contract of the addressed DELETE; RuleView carries replacedRules (a narrow rule silences a wide one; All blocks only). path/method filter down to blocks with the engine's matcher; method without path is 0400. axis.<n>= scopes the view by a partial identity (a scalar key takes one value, and a repeat is 0400; a list-valued key from listValuedKeys is repeatable, and the values form the complete set; names are validated against effectiveKeys+captures): every rule is annotated (the scope is formed by axis.* and/or absent) with applicability always/conditional/never plus conditionalOn (missing_axis / undecided_condition / may_be_preempted), taking FirstMatch, bypass, and replacedRules into account; adding axes narrows the answer monotonically. |
-| GET /domains/{d}/counters?<grammar>&pageSize=&cursor= | viewer | A Peek listing over the full selector grammar plus pagination. The listing skips counters of rules outside the enforced set (scanned counts them). |
-| DELETE /domains/{d}/counters?ruleId=&axis.<n>=&algorithm=&period=&limited=&expectedRuleSetVersion=&dryRun= | operator | The addressed form. The invariant is key computability: one full ruleId plus ALL of the rule's axes with single values (a rule with no axes takes no axis parameters); keys are computed from the snapshot, never scanned. The window is optional (the window set is finite and known); algorithm/period only narrow what was computed. A partial axis set is 0400, not a silent widening. dryRun and limited are enum [true] (false-as-non-selection is inexpressible). expectedRuleSetVersion is an optional version pin; Idempotency-Key is mandatory. A rule outside the enforced set is 404 (without the rule the keys cannot be computed). |
-| POST /domains/{d}/counter-resets | operator | The bulk form: the body is a oneOf of four forms (preview/execute x selector/domain), additionalProperties:false both on the envelope and inside the selector. The two-step is enforced: execution accepts only a confirmationToken from a preview of the same normalized selection. Always executes synchronously: the selection is swept to the end, and the response is 200. The domain-wide form is confirmDomain equal to the path's domain, strictly on its own. Idempotency-Key is mandatory. |
+| `GET /domains/{d}/rules?path=&method=&axis.<n>=` | viewer | The domain's enforced set, which can be a last-good generation rather than the latest object in the cluster, plus its ruleSetVersion. `path` and `method` filter down to blocks with the engine's matcher, and `axis.<n>` annotates every rule with its applicability under a partial identity, see "Applicability for a partial identity". |
+| `GET /domains/{d}/counters?<grammar>&pageSize=&cursor=` | viewer | A Peek listing over the full selector grammar plus pagination. The listing skips counters of rules outside the enforced set (scanned counts them). |
+| `DELETE /domains/{d}/counters?ruleId=&axis.<n>=&algorithm=&period=&limited=&expectedRuleSetVersion=&dryRun=` | operator | The addressed form: one full ruleId plus every axis of that rule, so the keys are computed from the snapshot rather than scanned. A partial axis set is 0400, and a rule outside the enforced set is 404. Idempotency-Key is mandatory; see "Selector grammar and work bounds". |
+| POST /domains/{d}/counter-resets | operator | The bulk form, a oneOf of four bodies: preview or execute, over a selector or over the whole domain. Execution accepts only a confirmationToken minted by a preview of the same selection, runs to the end inside the call, and answers 200. Idempotency-Key is mandatory. |
 | POST /simulations | viewer (post on the exact path) | Body {domain, path, method, identitySource?, token?, keys?, cost?} → a Peek decision: allowed, headers, per-rule verdicts, skips, extractedKeys. Not under /domains/{d}/: one non-mutating POST path with its own verb makes the role model trivial (viewer holds post here only). |
 | GET /status | viewer | Per-replica view: the replica, the snapshot swap time, ruleSetVersions {domain: version} (skew between replicas during a rollout and last-good divergence), the store backend. |
 | GET /openapi.yaml | viewer | The embedded specification (go:embed): what the binary was built against. |
@@ -38,11 +38,11 @@ served by `GET /openapi.yaml`. Worked scenarios are in the [cookbook](management
 A selection = rules x window x identity x state. Where it lives:
 
 - GET /counters: the full grammar in the query: ruleId is repeatable, a one-segment value is a block prefix;
-  algorithm; period (normalized, 1m == 60s); axis.<name>: OR within one name, AND between names, and a counter of a rule
-  without the named axis never matches; limited (enum [true]).
+  algorithm; period (normalized, 1m == 60s); `axis.<name>`: OR within one name, AND between names, and a counter of a
+  rule without the named axis never matches; limited (enum [true]).
 - DELETE /counters: the addressed subset: one full ruleId plus all of the rule's axes.
-- POST /counter-resets: the full grammar in the JSON body (a URL is no place for bulk); a dryRun preview; confirmDomain
-  is the domain-wide form, strictly on its own.
+- POST /counter-resets: the full grammar in the JSON body (a URL is no place for bulk); a dryRun preview;
+  confirmDomain is the domain-wide form, strictly on its own.
 
 The canonical form of a selector (the single input for the confirmation token, the cursor fingerprint, and the
 Idempotency hash): ruleIds are sorted and deduplicated; axis names are sorted; values within an axis are sorted and
@@ -88,7 +88,7 @@ responses do not need the field: there the confirmationToken forcibly binds the 
 steps is 409). ETag/If-Match on /rules is rejected: it would imply a conditional GET/304; the version is a body field
 and an explicit parameter.
 
-Applicability for a partial identity (the "the client knows only its name" scenario): GET /rules with axis.<name>
+Applicability for a partial identity (the "the client knows only its name" scenario): GET /rules with `axis.<name>`
 answers two questions at once: "which rules definitely apply to this client" (applicability: always, under every
 completion of the unknown keys) and "which could" (conditional, under some completion; the gates are enumerated: a
 missing axis, an undecided condition, possible preemption by an earlier deciding FirstMatch rule or by replacedRules).
@@ -98,8 +98,9 @@ because of premium, heavy because of gold's replacedRules). never is not hidden 
 decide against it; scalar keys take one value, and a repeat is 0400. The absent parameter declares a key KNOWN ABSENT
 (an empty set, which is exactly how the engine reads Exists/DoesNotExist; for a list-valued key that is the same as "an
 empty list"): DoesNotExist decides as satisfied, Exists as failed, and rules that count by such a key become never; a
-key both in axis.* and in absent is a contradiction, 0400, and absent on its own forms a scope: the annotations appear
-even without a single axis.*. Gates are minimal: missing_axis is not reported alongside undecided_condition on the same
+key both in `axis.*` and in absent is a contradiction, 0400, and absent on its own forms a scope: the annotations
+appear even without a single `axis.*`. Gates are minimal: missing_axis is not reported alongside
+undecided_condition on the same
 key; deciding the condition decides the axis too, and a single condition stands as the gate. The simulation remains the
 fact-finding tool (a real token, a real path); applicability is its static sibling.
 
@@ -143,7 +144,7 @@ Record retention is at least 24 hours AFTER the recorded outcome; an interrupted
 acceptance. The record state table (a retry of the same key and command):
 
 | Record | The retry gets | Transition |
-|---|---|---|
+| --- | --- | --- |
 | none | executed as new (refusals bind nothing) | acceptance: one atomic write |
 | accepted, lease live | 202 + Retry-After, no body (the sweep is running, the retry is the poll) | the owner writes the outcome |
 | accepted, lease expired | finalization: failed 0501 (interrupted) + partialReset from progress | CAS to terminal |
