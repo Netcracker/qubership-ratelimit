@@ -233,6 +233,14 @@ func TestApplier_compilesEveryDomainAndReportsItsGeneration(t *testing.T) {
 	assert.Equal(t, "uid-gateway.public", report.Domains["gateway.public"].UID)
 	assert.Nil(t, report.Refusal)
 
+	// The report is the rule set's own facts: the generation rides on the
+	// domain the engine is bound to, so the report and the rules a reader
+	// pairs it with come from one load.
+	d, ok := a.Store.Load().Domain("gateway.public")
+	require.True(t, ok)
+	assert.Equal(t, report.Domains["gateway.public"], applied.Domain{Generation: d.Generation, UID: d.UID, AppliedAt: d.AppliedAt})
+	assert.Equal(t, a.Store.SwappedAt(), a.Store.Load().SwappedAt(), "the swap time is stamped on the set that was swapped in")
+
 	// The handler serves the same report.
 	recorder := httptest.NewRecorder()
 	a.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, contract.AppliedPath, nil))

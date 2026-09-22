@@ -50,23 +50,34 @@ func policy() model.Policy {
 	}
 }
 
+// reporter stands in for the applier: the handler takes nothing from it but
+// the refusal, and the fixture's report carries no domains at all, so a
+// generation in a document can only have come from the rule set.
 type reporter applied.Report
 
 func (r reporter) Report() applied.Report { return applied.Report(r) }
 
-func fixture(t *testing.T) (http.Handler, *compile.Snapshot) {
+var appliedAt = time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+
+func ruleSet(t *testing.T, generation int64) (*store.RuleSet, *compile.Snapshot) {
 	t.Helper()
 	p := policy()
 	snapshot, problems := compile.Compile(namespace, domain, &p)
 	require.Empty(t, problems, "broken fixture")
+	return store.NewRuleSet(map[string]store.Domain{
+		domain: {
+			Engine: engine.New(snapshot, memory.New()), Snapshot: snapshot, Version: ruleview.Version(snapshot),
+			Generation: generation, UID: "uid-7", AppliedAt: appliedAt,
+		},
+	}), snapshot
+}
+
+func fixture(t *testing.T) (http.Handler, *compile.Snapshot) {
+	t.Helper()
+	set, snapshot := ruleSet(t, 7)
 	rules := store.New()
-	rules.Replace(store.NewRuleSet(map[string]store.Domain{
-		domain: {Engine: engine.New(snapshot, memory.New()), Snapshot: snapshot, Version: ruleview.Version(snapshot)},
-	}))
-	report := reporter{Domains: map[string]applied.Domain{
-		domain: {Generation: 7, UID: "uid-7", AppliedAt: time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)},
-	}}
-	return debug.Handler(rules, report, "ratelimit-0"), snapshot
+	rules.Replace(set)
+	return debug.Handler(rules, reporter{}, "ratelimit-0"), snapshot
 }
 
 func get(t *testing.T, h http.Handler, path string, accept string) *httptest.ResponseRecorder {
@@ -95,6 +106,7 @@ func TestSummary_listsEveryDomainWithItsGeneration(t *testing.T) {
 	assert.Equal(t, domain, row.Domain)
 	assert.Equal(t, int64(7), row.Generation)
 	assert.Equal(t, "uid-7", row.UID)
+	assert.Equal(t, appliedAt, row.AppliedAt)
 	assert.Equal(t, ruleview.Version(snapshot), row.RuleSetVersion,
 		"the version is the one the management API reports, so the two listings compare")
 	assert.Equal(t, 1, row.Blocks)
@@ -148,6 +160,33 @@ func TestDomain_answersYAMLOnRequest(t *testing.T) {
 		assert.Equal(t, domain, doc.Domain, name)
 		assert.Len(t, doc.Blocks, 1, name)
 	}
+}
+
+// The pairing that the endpoint exists for: the rules and the generation
+// they were applied from come off one rule set, so a document built from a
+// set carries that set's generation with that set's rules, and a set swapped
+// in during the request cannot lend either.
+func TestSummarize_pairsTheRulesWithTheGenerationOfTheSameSet(t *testing.T) {
+	older, _ := ruleSet(t, 7)
+	newer, snapshot := ruleSet(t, 8)
+
+	summary := debug.Summarize(older, "ratelimit-0", nil)
+	require.Len(t, summary.Domains, 1)
+	assert.Equal(t, int64(7), summary.Domains[0].Generation)
+
+	summary = debug.Summarize(newer, "ratelimit-0", &applied.Refusal{FormatVersion: 9, Reason: "unsupported"})
+	require.Len(t, summary.Domains, 1)
+	assert.Equal(t, int64(8), summary.Domains[0].Generation)
+	assert.Equal(t, ruleview.Version(snapshot), summary.Domains[0].RuleSetVersion)
+	require.NotNil(t, summary.Refusal)
+	assert.Equal(t, 9, summary.Refusal.FormatVersion, "the refusal is passed through beside the set")
+
+	d, ok := newer.Domain(domain)
+	require.True(t, ok)
+	doc := debug.Render(d)
+	assert.Equal(t, int64(8), doc.Generation)
+	assert.Equal(t, domain, doc.Domain)
+	assert.Len(t, doc.Blocks, 1)
 }
 
 func TestDomain_isNotFoundForAnUnboundDomain(t *testing.T) {

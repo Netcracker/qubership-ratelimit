@@ -3,6 +3,7 @@
 package engine_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/netcracker/qubership-ratelimit/engine/match"
@@ -20,11 +21,14 @@ import (
 //
 // The shape is a ratio, so the machine cancels out: eight times the blocks
 // may cost at most eight times the nanoseconds, with headroom for the noise
-// of a shared runner. The constant is an absolute ceiling per route, set an
-// order of magnitude above what the scan costs, so a slow runner passes and
-// a regression does not. The race detector multiplies every memory access
-// and would measure itself, so the file is out of a -race build; the load
-// floor job runs it without one.
+// of a shared runner. Each size is the minimum of three measurements: a GC
+// pause or a stolen CPU slice that lands in one run of one size would move
+// the ratio, and a minimum absorbs it where a bound cannot, while a
+// regression still shows in every run and so in the minimum. The constant
+// is an absolute ceiling per route, set an order of magnitude above what
+// the scan costs, so a slow runner passes and a regression does not. The
+// race detector multiplies every memory access and would measure itself, so
+// the file is out of a -race build; the load floor job runs it without one.
 func TestMatchManyBlocks_scanStaysLinear(t *testing.T) {
 	if testing.Short() {
 		t.Skip("the scan guard is not a -short test")
@@ -40,21 +44,28 @@ func TestMatchManyBlocks_scanStaysLinear(t *testing.T) {
 
 		// ceilingPerRoute is nanoseconds; the scan costs about five.
 		ceilingPerRoute = 100.0
+
+		// runs per size, of which the minimum is taken.
+		runs = 3
 	)
 
 	cost := func(blocks int) float64 {
 		snap := manyBlocksSnapshot(t, blocks)
 		path := lastBlockPath(blocks)
-		result := testing.Benchmark(func(b *testing.B) {
-			for b.Loop() {
-				match.Match(snap, path, "GET")
-			}
-		})
-		return float64(result.NsPerOp())
+		best := math.Inf(1)
+		for range runs {
+			result := testing.Benchmark(func(b *testing.B) {
+				for b.Loop() {
+					match.Match(snap, path, "GET")
+				}
+			})
+			best = min(best, float64(result.NsPerOp()))
+		}
+		return best
 	}
 
 	fewCost, manyCost := cost(few), cost(many)
-	t.Logf("scan of %d blocks: %.0f ns; of %d blocks: %.0f ns", few, fewCost, many, manyCost)
+	t.Logf("scan of %d blocks: %.0f ns; of %d blocks: %.0f ns (best of %d)", few, fewCost, many, manyCost, runs)
 
 	ratio := manyCost / fewCost
 	if ratio > float64(many/few)*1.5 {

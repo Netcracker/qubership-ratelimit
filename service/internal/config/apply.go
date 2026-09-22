@@ -52,9 +52,12 @@ type Applier struct {
 	domains map[string]store.Domain
 	hashes  map[string]string
 
-	// report is what the applied endpoint serves. It carries the domains of
-	// the last apply and the refusal of the last reading, when there was one.
-	report atomic.Pointer[applied.Report]
+	// refusal is the last reading this replica would not apply, kept until
+	// the next apply. It is the one fact of the report that changes without
+	// a swap, so it lives beside the rule set rather than on it; the domains
+	// of the report are read off the set, with the rules they were applied
+	// with.
+	refusal atomic.Pointer[applied.Refusal]
 
 	// ready flips once and stays: the first apply.
 	ready atomic.Bool
@@ -63,12 +66,22 @@ type Applier struct {
 // Ready reports whether this replica has applied a manifest.
 func (a *Applier) Ready() bool { return a.ready.Load() }
 
-// Report is what this replica enforces, for the operator's probe.
+// Report is what this replica enforces, for the operator's probe. The
+// domains are derived from the current rule set in one load, so the report
+// and the snapshot endpoint describe the same configuration, and a report
+// read during an apply is the whole of one configuration or the other.
 func (a *Applier) Report() applied.Report {
-	if current := a.report.Load(); current != nil {
-		return *current
+	set := a.Store.Load()
+	report := applied.Report{
+		Domains:        make(map[string]applied.Domain, set.Len()),
+		FormatVersions: manifest.SupportedVersions(),
+		Refusal:        a.refusal.Load(),
 	}
-	return applied.Report{Domains: map[string]applied.Domain{}, FormatVersions: manifest.SupportedVersions()}
+	for _, domain := range set.Domains() {
+		d, _ := set.Domain(domain)
+		report.Domains[domain] = applied.Domain{Generation: d.Generation, UID: d.UID, AppliedAt: d.AppliedAt}
+	}
+	return report
 }
 
 // Apply compiles every domain of the reading and swaps the rule set.
@@ -86,14 +99,9 @@ func (a *Applier) Apply(cfg Configuration) {
 	defer a.mu.Unlock()
 
 	now := time.Now().UTC()
-	previous := a.Report().Domains
 	domains := make(map[string]store.Domain, len(cfg.Specs))
 	hashes := make(map[string]string, len(cfg.Specs))
 	snapshots := make(map[string]*enginecompile.Snapshot, len(cfg.Specs))
-	report := applied.Report{
-		Domains:        make(map[string]applied.Domain, len(cfg.Specs)),
-		FormatVersions: manifest.SupportedVersions(),
-	}
 	views := make([]metrics.DomainView, 0, len(cfg.Specs))
 
 	for _, domain := range sortedDomains(cfg.Manifest) {
@@ -113,8 +121,7 @@ func (a *Applier) Apply(cfg Configuration) {
 				break
 			}
 			if kept {
-				last := previous[domain]
-				generation, uid = last.Generation, last.UID
+				generation, uid = built.Generation, built.UID
 				a.Log.Error(nil, "the validated spec of a domain does not compile in this build; keeping the last-good engine",
 					"domain", domain, "generation", entry.Generation, "enforcing", generation, "problems", len(problems))
 				// The hash recorded is the previous one: the engine belongs
@@ -128,14 +135,14 @@ func (a *Applier) Apply(cfg Configuration) {
 			built = a.build(domain, snapshot)
 			generation = 0
 		}
+		built.Generation, built.UID, built.AppliedAt = generation, uid, now
 		domains[domain] = built
 		hashes[domain] = entry.Hash
 		snapshots[domain] = built.Snapshot
-		report.Domains[domain] = applied.Domain{Generation: generation, UID: uid, AppliedAt: now}
 		views = append(views, metrics.DomainView{
 			Domain:            domain,
 			Blocks:            len(built.Snapshot.Blocks),
-			Rules:             ruleCount(built.Snapshot),
+			Rules:             ruleview.Summary(built.Snapshot, built.Version).Rules,
 			DecisionBuckets:   built.Snapshot.DecisionBuckets,
 			AppliedGeneration: generation,
 		})
@@ -143,8 +150,14 @@ func (a *Applier) Apply(cfg Configuration) {
 
 	a.domains = domains
 	a.hashes = hashes
+	// One publication: the set carries the rules, the generations, and the
+	// swap time, so a reader of the report or the snapshot endpoint gets
+	// one configuration whole. The refusal is cleared after it; a reader in
+	// between sees the new set with the refusal of the reading before it,
+	// which the operator's judge treats as a whole replica when the
+	// generation is current.
 	a.Store.Replace(store.NewRuleSet(domains))
-	a.report.Store(&report)
+	a.refusal.Store(nil)
 	a.ready.Store(true)
 
 	metrics.SnapshotRebuilds.WithLabelValues("ok").Inc()
@@ -166,9 +179,7 @@ func (a *Applier) Refuse(refusal *Refusal) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	report := a.Report()
-	report.Refusal = &applied.Refusal{FormatVersion: refusal.FormatVersion, Reason: refusal.Err.Error()}
-	a.report.Store(&report)
+	a.refusal.Store(&applied.Refusal{FormatVersion: refusal.FormatVersion, Reason: refusal.Err.Error()})
 	metrics.SnapshotRebuilds.WithLabelValues("refused").Inc()
 	a.Log.Error(refusal.Err, "configuration refused, keeping the applied snapshot",
 		"formatVersion", refusal.FormatVersion, "reads", manifest.SupportedVersions())
@@ -204,16 +215,6 @@ func (a *Applier) Handler() http.Handler {
 			a.Log.V(1).Info("failed to write the applied report", "error", err)
 		}
 	})
-}
-
-// ruleCount is the number of rules across the blocks of a snapshot, the value
-// of ratelimit_domain_rules.
-func ruleCount(snapshot *enginecompile.Snapshot) int {
-	n := 0
-	for i := range snapshot.Blocks {
-		n += len(snapshot.Blocks[i].Rules)
-	}
-	return n
 }
 
 func blocking(problems []enginecompile.Problem) bool {

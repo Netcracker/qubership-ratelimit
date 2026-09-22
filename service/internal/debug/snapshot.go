@@ -10,6 +10,12 @@
 // generation the domain was applied from and the identity keys with the
 // claim paths behind them, which is the half of a "why is nobody limited"
 // question the management API does not carry.
+//
+// Every document is built from one load of the rule set: the rules, the
+// version, the generation and UID they were applied from, and the swap time
+// all ride on the set, so a request that lands inside an apply describes one
+// configuration whole. The refusal is the one fact read beside it, since a
+// refused reading leaves the set as it is.
 package debug
 
 import (
@@ -106,8 +112,8 @@ type KeyView struct {
 	Normalization string `json:"normalization,omitempty"`
 }
 
-// Reporter is the applied report's source: the applier, which knows the
-// generation each domain was applied from.
+// Reporter is the applied report's source: the applier, for the refusal it
+// holds beside the rule set.
 type Reporter interface {
 	Report() applied.Report
 }
@@ -132,55 +138,64 @@ type handler struct {
 
 func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
 	set := h.rules.Load()
-	report := h.reporter.Report()
+	write(w, r, Summarize(set, h.replica, h.reporter.Report().Refusal))
+}
+
+// Summarize builds the summary of one rule set. It is a function of the set
+// alone, which is what makes the pairing of rules and generations hold by
+// construction: there is no second source to read them from.
+func Summarize(set *store.RuleSet, replica string, refusal *applied.Refusal) Summary {
 	summary := Summary{
-		Replica:   h.replica,
-		SwappedAt: h.rules.SwappedAt(),
-		Refusal:   report.Refusal,
+		Replica:   replica,
+		SwappedAt: set.SwappedAt(),
+		Refusal:   refusal,
 		Domains:   make([]DomainSummary, 0, set.Len()),
 	}
 	for _, domain := range set.Domains() {
-		snapshot := set.Snapshot(domain)
-		counts := ruleview.Summary(snapshot, set.Version(domain))
-		from := report.Domains[domain]
+		d, _ := set.Domain(domain)
+		counts := ruleview.Summary(d.Snapshot, d.Version)
 		summary.Domains = append(summary.Domains, DomainSummary{
 			Domain:          domain,
-			Generation:      from.Generation,
-			UID:             from.UID,
-			AppliedAt:       from.AppliedAt,
+			Generation:      d.Generation,
+			UID:             d.UID,
+			AppliedAt:       d.AppliedAt,
 			RuleSetVersion:  counts.RuleSetVersion,
 			Blocks:          counts.Blocks,
 			Rules:           counts.Rules,
-			DecisionBuckets: snapshot.DecisionBuckets,
+			DecisionBuckets: d.Snapshot.DecisionBuckets,
 			EffectiveKeys:   counts.EffectiveKeys,
 			ListValuedKeys:  counts.ListValuedKeys,
 		})
 	}
-	write(w, r, summary)
+	return summary
 }
 
 func (h *handler) domain(w http.ResponseWriter, r *http.Request) {
 	domain := r.PathValue("domain")
-	set := h.rules.Load()
-	snapshot := set.Snapshot(domain)
-	if snapshot == nil {
+	d, ok := h.rules.Load().Domain(domain)
+	if !ok {
 		http.Error(w, "no configuration is applied for domain "+domain, http.StatusNotFound)
 		return
 	}
-	view := ruleview.Render(snapshot)
-	from := h.reporter.Report().Domains[domain]
-	write(w, r, DomainSnapshot{
-		Domain:          domain,
-		Generation:      from.Generation,
-		UID:             from.UID,
-		AppliedAt:       from.AppliedAt,
-		RuleSetVersion:  set.Version(domain),
-		DecisionBuckets: snapshot.DecisionBuckets,
+	write(w, r, Render(d))
+}
+
+// Render builds the full document of one bound domain, from that domain
+// alone.
+func Render(d store.Domain) DomainSnapshot {
+	view := ruleview.Render(d.Snapshot)
+	return DomainSnapshot{
+		Domain:          d.Snapshot.Domain,
+		Generation:      d.Generation,
+		UID:             d.UID,
+		AppliedAt:       d.AppliedAt,
+		RuleSetVersion:  d.Version,
+		DecisionBuckets: d.Snapshot.DecisionBuckets,
 		EffectiveKeys:   view.EffectiveKeys,
 		ListValuedKeys:  view.ListValuedKeys,
-		Keys:            keys(snapshot),
+		Keys:            keys(d.Snapshot),
 		Blocks:          view.Blocks,
-	})
+	}
 }
 
 // keys renders the extraction plan of a snapshot.

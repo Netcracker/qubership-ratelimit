@@ -8,6 +8,10 @@
 FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
 ARG TARGETOS
 ARG TARGETARCH
+# The build's own version stamp, and the fallback only: the pipeline passes
+# no build arguments, so ratelimit_build_info reports SERVICE_VERSION from
+# the container's environment, which the chart sets.
+ARG VERSION=dev
 # Allow Go toolchain auto-download when the image patch (e.g. 1.26.1) is
 # older than the minimum declared in go.mod (e.g. 1.26.5).
 ENV GOTOOLCHAIN=auto
@@ -26,7 +30,7 @@ COPY . .
 # avoid QEMU emulation; Go cross-compiles through TARGETOS/TARGETARCH.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
-    go build -o ratelimit-service ./service/cmd/
+    go build -ldflags "-X main.version=${VERSION}" -o ratelimit-service ./service/cmd/
 
 # The binary carries no Kubernetes client, and the image proves it: the same
 # check CI runs, so an image that leaks one is never pushed.
