@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -109,4 +110,21 @@ func TestDomain_returnsTheWholeBoundDomain(t *testing.T) {
 
 	_, ok = set.Domain("gateway.public")
 	assert.False(t, ok, "an unbound domain is reported as such rather than as a zero value to read fields off")
+}
+
+func TestRefuse_publishesTheRefusalOnTheCurrentSetWithoutASwap(t *testing.T) {
+	s := New()
+	s.Replace(ruleSetOf(t, policySpec("gateway.private")))
+	before := s.Load()
+
+	s.Refuse(&applied.Refusal{FormatVersion: 9, Reason: "unsupported"})
+	refused := s.Load()
+	require.NotNil(t, refused.Refusal())
+	assert.Equal(t, 9, refused.Refusal().FormatVersion)
+	assert.True(t, refused.Has("gateway.private"), "the rules stay as they were")
+	assert.Equal(t, before.SwappedAt(), refused.SwappedAt(), "a refusal is not a swap")
+	assert.Nil(t, before.Refusal(), "the set a reader already holds is not rewritten under it")
+
+	s.Replace(ruleSetOf(t, policySpec("gateway.public")))
+	assert.Nil(t, s.Load().Refusal(), "an applied set answers the refused reading")
 }

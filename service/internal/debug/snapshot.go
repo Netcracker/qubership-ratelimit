@@ -12,10 +12,9 @@
 // question the management API does not carry.
 //
 // Every document is built from one load of the rule set: the rules, the
-// version, the generation and UID they were applied from, and the swap time
-// all ride on the set, so a request that lands inside an apply describes one
-// configuration whole. The refusal is the one fact read beside it, since a
-// refused reading leaves the set as it is.
+// version, the generation and UID they were applied from, the swap time,
+// and the refusal all ride on the set, so a request that lands inside an
+// apply or a refusal describes one state whole.
 package debug
 
 import (
@@ -45,7 +44,7 @@ type Summary struct {
 	SwappedAt time.Time `json:"swappedAt"`
 
 	// Refusal is the applied report's: set while the replica keeps its
-	// snapshot because the last manifest could not be read.
+	// snapshot because the last reading could not be applied.
 	Refusal *applied.Refusal `json:"refusal,omitempty"`
 
 	Domains []DomainSummary `json:"domains"`
@@ -112,18 +111,12 @@ type KeyView struct {
 	Normalization string `json:"normalization,omitempty"`
 }
 
-// Reporter is the applied report's source: the applier, for the refusal it
-// holds beside the rule set.
-type Reporter interface {
-	Report() applied.Report
-}
-
 // Handler answers GET on contract.SnapshotPath and on
 // contract.SnapshotPath/{domain}, as JSON, or as YAML when the query says
 // format=yaml or the Accept header names it. Every other method is 405: the
 // endpoint reads the store and nothing else.
-func Handler(rules *store.Store, reporter Reporter, replica string) http.Handler {
-	h := &handler{rules: rules, reporter: reporter, replica: replica}
+func Handler(rules *store.Store, replica string) http.Handler {
+	h := &handler{rules: rules, replica: replica}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+contract.SnapshotPath, h.summary)
 	mux.HandleFunc("GET "+contract.SnapshotPath+"/{domain}", h.domain)
@@ -131,24 +124,22 @@ func Handler(rules *store.Store, reporter Reporter, replica string) http.Handler
 }
 
 type handler struct {
-	rules    *store.Store
-	reporter Reporter
-	replica  string
+	rules   *store.Store
+	replica string
 }
 
 func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
-	set := h.rules.Load()
-	write(w, r, Summarize(set, h.replica, h.reporter.Report().Refusal))
+	write(w, r, Summarize(h.rules.Load(), h.replica))
 }
 
 // Summarize builds the summary of one rule set. It is a function of the set
-// alone, which is what makes the pairing of rules and generations hold by
-// construction: there is no second source to read them from.
-func Summarize(set *store.RuleSet, replica string, refusal *applied.Refusal) Summary {
+// alone, which is what makes the pairing of rules, generations, and refusal
+// hold by construction: there is no second source to read any of them from.
+func Summarize(set *store.RuleSet, replica string) Summary {
 	summary := Summary{
 		Replica:   replica,
 		SwappedAt: set.SwappedAt(),
-		Refusal:   refusal,
+		Refusal:   set.Refusal(),
 		Domains:   make([]DomainSummary, 0, set.Len()),
 	}
 	for _, domain := range set.Domains() {

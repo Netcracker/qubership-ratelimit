@@ -218,6 +218,34 @@ func TestApplier_aRefusalBeforeTheFirstApplyIsReportedAndNotReady(t *testing.T) 
 	assert.Empty(t, a.Report().Domains)
 }
 
+// The report is one set's facts: a refused reading rides on the set it left
+// in place, with that set's generations, and the applied set that follows
+// carries the new generation and no refusal. No reader can pair the two.
+func TestApplier_reportsTheRefusalOnTheSetItLeftInPlace(t *testing.T) {
+	f := newFixture(t)
+	f.write(4, spec("gateway.public", 10))
+	cfg, err := Read(f.dir)
+	require.NoError(t, err)
+	a := newApplier()
+	a.Apply(cfg)
+
+	a.Refuse(&Refusal{FormatVersion: 99, Err: errors.New("unsupported")})
+	refused := a.Store.Load()
+	report := ReportOf(refused)
+	assert.Equal(t, int64(4), report.Domains["gateway.public"].Generation)
+	require.NotNil(t, report.Refusal)
+	assert.Equal(t, 99, report.Refusal.FormatVersion)
+
+	f.write(5, spec("gateway.public", 11))
+	cfg, err = Read(f.dir)
+	require.NoError(t, err)
+	a.Apply(cfg)
+	report = a.Report()
+	assert.Equal(t, int64(5), report.Domains["gateway.public"].Generation)
+	assert.Nil(t, report.Refusal, "the applied set answers the refused reading")
+	assert.Equal(t, 99, ReportOf(refused).Refusal.FormatVersion, "the set a reader holds is not rewritten under it")
+}
+
 func TestApplier_compilesEveryDomainAndReportsItsGeneration(t *testing.T) {
 	f := newFixture(t)
 	f.write(4, spec("gateway.public", 10), spec("gateway.private", 20))

@@ -50,13 +50,6 @@ func policy() model.Policy {
 	}
 }
 
-// reporter stands in for the applier: the handler takes nothing from it but
-// the refusal, and the fixture's report carries no domains at all, so a
-// generation in a document can only have come from the rule set.
-type reporter applied.Report
-
-func (r reporter) Report() applied.Report { return applied.Report(r) }
-
 var appliedAt = time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 
 func ruleSet(t *testing.T, generation int64) (*store.RuleSet, *compile.Snapshot) {
@@ -77,7 +70,7 @@ func fixture(t *testing.T) (http.Handler, *compile.Snapshot) {
 	set, snapshot := ruleSet(t, 7)
 	rules := store.New()
 	rules.Replace(set)
-	return debug.Handler(rules, reporter{}, "ratelimit-0"), snapshot
+	return debug.Handler(rules, "ratelimit-0"), snapshot
 }
 
 func get(t *testing.T, h http.Handler, path string, accept string) *httptest.ResponseRecorder {
@@ -162,24 +155,31 @@ func TestDomain_answersYAMLOnRequest(t *testing.T) {
 	}
 }
 
-// The pairing that the endpoint exists for: the rules and the generation
-// they were applied from come off one rule set, so a document built from a
-// set carries that set's generation with that set's rules, and a set swapped
-// in during the request cannot lend either.
+// The pairing that the endpoint exists for: the rules, the generation they
+// were applied from, and the refusal come off one rule set, so a document
+// built from a set carries that set's facts and nothing of a set swapped in
+// during the request.
 func TestSummarize_pairsTheRulesWithTheGenerationOfTheSameSet(t *testing.T) {
+	rules := store.New()
 	older, _ := ruleSet(t, 7)
+	rules.Replace(older)
+	rules.Refuse(&applied.Refusal{FormatVersion: 9, Reason: "unsupported"})
+	refused := rules.Load()
 	newer, snapshot := ruleSet(t, 8)
+	rules.Replace(newer)
 
-	summary := debug.Summarize(older, "ratelimit-0", nil)
+	summary := debug.Summarize(refused, "ratelimit-0")
 	require.Len(t, summary.Domains, 1)
 	assert.Equal(t, int64(7), summary.Domains[0].Generation)
+	require.NotNil(t, summary.Refusal, "the refused reading rides on the set it left in place")
+	assert.Equal(t, 9, summary.Refusal.FormatVersion)
+	assert.Equal(t, older.SwappedAt(), summary.SwappedAt, "a refusal is not a swap")
 
-	summary = debug.Summarize(newer, "ratelimit-0", &applied.Refusal{FormatVersion: 9, Reason: "unsupported"})
+	summary = debug.Summarize(rules.Load(), "ratelimit-0")
 	require.Len(t, summary.Domains, 1)
 	assert.Equal(t, int64(8), summary.Domains[0].Generation)
 	assert.Equal(t, ruleview.Version(snapshot), summary.Domains[0].RuleSetVersion)
-	require.NotNil(t, summary.Refusal)
-	assert.Equal(t, 9, summary.Refusal.FormatVersion, "the refusal is passed through beside the set")
+	assert.Nil(t, summary.Refusal, "the applied set carries no refusal, whatever the reading before it")
 
 	d, ok := newer.Domain(domain)
 	require.True(t, ok)

@@ -52,13 +52,6 @@ type Applier struct {
 	domains map[string]store.Domain
 	hashes  map[string]string
 
-	// refusal is the last reading this replica would not apply, kept until
-	// the next apply. It is the one fact of the report that changes without
-	// a swap, so it lives beside the rule set rather than on it; the domains
-	// of the report are read off the set, with the rules they were applied
-	// with.
-	refusal atomic.Pointer[applied.Refusal]
-
 	// ready flips once and stays: the first apply.
 	ready atomic.Bool
 }
@@ -66,16 +59,21 @@ type Applier struct {
 // Ready reports whether this replica has applied a manifest.
 func (a *Applier) Ready() bool { return a.ready.Load() }
 
-// Report is what this replica enforces, for the operator's probe. The
-// domains are derived from the current rule set in one load, so the report
-// and the snapshot endpoint describe the same configuration, and a report
-// read during an apply is the whole of one configuration or the other.
+// Report is what this replica enforces, for the operator's probe. It is
+// derived from the current rule set in one load, the domains and the
+// refusal alike, so the report and the snapshot endpoint describe the same
+// configuration, and a report read during an apply or a refusal is the
+// whole of one state or the other.
 func (a *Applier) Report() applied.Report {
-	set := a.Store.Load()
+	return ReportOf(a.Store.Load())
+}
+
+// ReportOf is the applied report of one rule set.
+func ReportOf(set *store.RuleSet) applied.Report {
 	report := applied.Report{
 		Domains:        make(map[string]applied.Domain, set.Len()),
 		FormatVersions: manifest.SupportedVersions(),
-		Refusal:        a.refusal.Load(),
+		Refusal:        set.Refusal(),
 	}
 	for _, domain := range set.Domains() {
 		d, _ := set.Domain(domain)
@@ -150,14 +148,11 @@ func (a *Applier) Apply(cfg Configuration) {
 
 	a.domains = domains
 	a.hashes = hashes
-	// One publication: the set carries the rules, the generations, and the
-	// swap time, so a reader of the report or the snapshot endpoint gets
-	// one configuration whole. The refusal is cleared after it; a reader in
-	// between sees the new set with the refusal of the reading before it,
-	// which the operator's judge treats as a whole replica when the
-	// generation is current.
+	// One publication: the set carries the rules, the generations, the swap
+	// time, and no refusal, so a reader of the report or the snapshot
+	// endpoint gets one configuration whole, never the new set with the
+	// refusal of the reading before it.
 	a.Store.Replace(store.NewRuleSet(domains))
-	a.refusal.Store(nil)
 	a.ready.Store(true)
 
 	metrics.SnapshotRebuilds.WithLabelValues("ok").Inc()
@@ -172,14 +167,14 @@ func (a *Applier) Apply(cfg Configuration) {
 		"domains", len(domains))
 }
 
-// Refuse records a reading this replica will not apply. The rule set and
-// the domains of the report stay as they are; the refusal rides beside them
-// until the next apply clears it.
+// Refuse records a reading this replica will not apply. The rules and the
+// domains stay as they are; the refusal is published on the set that stays
+// current, and the next apply's set carries none.
 func (a *Applier) Refuse(refusal *Refusal) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	a.refusal.Store(&applied.Refusal{FormatVersion: refusal.FormatVersion, Reason: refusal.Err.Error()})
+	a.Store.Refuse(&applied.Refusal{FormatVersion: refusal.FormatVersion, Reason: refusal.Err.Error()})
 	metrics.SnapshotRebuilds.WithLabelValues("refused").Inc()
 	a.Log.Error(refusal.Err, "configuration refused, keeping the applied snapshot",
 		"formatVersion", refusal.FormatVersion, "reads", manifest.SupportedVersions())

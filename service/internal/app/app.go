@@ -176,7 +176,7 @@ func Build(namespace string, options Options) (*Service, error) {
 		// It is not the management API, carries no authentication, and is
 		// outside the compatibility promises.
 		mux.Handle(contract.AppliedPath, applier.Handler())
-		snapshot := debug.Handler(rules, applier, options.Replica)
+		snapshot := debug.Handler(rules, options.Replica)
 		mux.Handle(contract.SnapshotPath, snapshot)
 		mux.Handle(contract.SnapshotPath+"/", snapshot)
 		service.metrics = &http.Server{Addr: options.MetricsAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}

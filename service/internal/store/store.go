@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/netcracker/qubership-ratelimit/api/applied"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
 )
@@ -56,6 +57,14 @@ type RuleSet struct {
 	// Replace, on the set itself, so that a reader of the set gets the time
 	// of the swap it observed rather than the time of a later one.
 	swappedAt time.Time
+
+	// refusal is the reading this replica would not apply while this set
+	// stayed current, nil when the last reading was applied. It rides on
+	// the set for the same reason the applied facts do: the operator's
+	// probe reads the generations and the refusal in one report, and a
+	// refusal beside a set it does not belong to is judged as a replica
+	// that refuses the manifest it just applied.
+	refusal *applied.Refusal
 }
 
 // NewRuleSet builds a RuleSet over ready domains. The map is cloned, not
@@ -81,6 +90,12 @@ func (r *RuleSet) Domain(domain string) (d Domain, ok bool) {
 // set that never was, such as the empty one a Store starts with.
 func (r *RuleSet) SwappedAt() time.Time {
 	return r.swappedAt
+}
+
+// Refusal is the reading this replica would not apply while the set stayed
+// current, nil when the last reading was applied.
+func (r *RuleSet) Refusal() *applied.Refusal {
+	return r.refusal
 }
 
 // Engine returns the domain's engine, or nil when no policy is bound to the
@@ -139,13 +154,27 @@ func (s *Store) Load() *RuleSet {
 	return s.current.Load()
 }
 
-// Replace swaps in a new snapshot, stamped with the time of the swap.
+// Replace swaps in a new snapshot, stamped with the time of the swap and
+// carrying no refusal: a set that was applied is the answer to the reading
+// before it.
 func (s *Store) Replace(rs *RuleSet) {
 	if rs == nil {
 		rs = NewRuleSet(nil)
 	}
 	rs.swappedAt = time.Now()
+	rs.refusal = nil
 	s.current.Store(rs)
+}
+
+// Refuse publishes a refusal on the current set: the same domains and the
+// same swap time, since the rules did not change, with the refusal beside
+// them in the one object a reader loads. The caller serializes it against
+// Replace, as the applier does under its mutex; two writers racing here
+// could publish a refusal on a set that was just retired.
+func (s *Store) Refuse(refusal *applied.Refusal) {
+	current := s.Load()
+	refused := &RuleSet{domains: current.domains, swappedAt: current.swappedAt, refusal: refusal}
+	s.current.Store(refused)
 }
 
 // SwappedAt is when this replica last swapped its rule set, or the zero time
