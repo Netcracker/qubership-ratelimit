@@ -27,9 +27,6 @@ func TestRunner_servesUntilTheContextEnds(t *testing.T) {
 		Log:          discardLogger{},
 		DrainTimeout: time.Second,
 	}
-	require.False(t, runner.NeedLeaderElection(),
-		"every replica serves this API, like every replica answers checks")
-
 	ctx, cancel := context.WithCancel(t.Context())
 	stopped := make(chan error, 1)
 	go func() { stopped <- runner.Start(ctx) }()

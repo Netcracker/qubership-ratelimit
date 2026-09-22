@@ -81,6 +81,7 @@ func TestService_isNotReadyWithoutAConfigurationAndReadyOnAnEmptyOne(t *testing.
 		Resync:         100 * time.Millisecond,
 		DrainTimeout:   time.Second,
 		Replica:        "ratelimit-0",
+		Version:        "test-build",
 		Log:            logr.Discard(),
 		Platform:       logging.GetLogger("test"),
 	}
@@ -136,6 +137,8 @@ func TestService_isNotReadyWithoutAConfigurationAndReadyOnAnEmptyOne(t *testing.
 	code, body = get(t, "http://"+options.MetricsAddr+"/metrics")
 	require.Equal(t, http.StatusOK, code)
 	assert.Contains(t, body, `ratelimit_snapshot_rebuilds_total{result="ok"} 1`)
+	assert.Contains(t, body, `ratelimit_build_info{component="service",version="test-build"} 1`)
+	assert.NotContains(t, body, "ratelimit_leader", "the operator's series have no place on the service's scrape")
 	assert.Contains(t, body, "go_goroutines")
 
 	// The management API is up, on its own listener.
@@ -150,6 +153,11 @@ func TestService_isNotReadyWithoutAConfigurationAndReadyOnAnEmptyOne(t *testing.
 		return strings.Contains(body, `"gateway.public"`)
 	}, 5*time.Second, 20*time.Millisecond)
 	assert.NoError(t, service.Ready())
+
+	// And the snapshot endpoint renders it, on the same listener.
+	code, body = get(t, "http://"+options.MetricsAddr+contract.SnapshotPath+"/gateway.public")
+	require.Equal(t, http.StatusOK, code, body)
+	assert.Contains(t, body, `"id": "api/total"`)
 }
 
 func TestService_buildsWithEveryListenerOff(t *testing.T) {

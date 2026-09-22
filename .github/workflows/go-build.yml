@@ -126,6 +126,12 @@ jobs:
         env:
           REDIS_ADDR: 127.0.0.1:6379
         run: go test ./service/internal/rls/ -run TestLoad -v -count=1
+      # The target scan is linear in the routes of a domain by design; the
+      # guard measures the shape and the per-route constant. It is built out
+      # of the -race runs for the same reason as the floor above.
+      - name: Guard the linear target scan
+        working-directory: engine
+        run: go test . -run TestMatchManyBlocks_scanStaysLinear -v -count=1
 
   service-binary:
     name: Service binary carries no Kubernetes client

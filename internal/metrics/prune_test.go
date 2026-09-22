@@ -12,7 +12,7 @@ func pruneTestSet() *ActiveSet {
 	return &ActiveSet{
 		Domains: map[string]struct{}{"prune.alive": {}},
 		Rules:   map[string]struct{}{"b/kept": {}},
-		Keys:    map[string]struct{}{"tenant": {}},
+		Keys:    map[string]map[string]struct{}{"prune.alive": {"tenant": {}}},
 	}
 }
 
@@ -25,7 +25,8 @@ func TestPruneStale_dropsTheSeriesOfRenamedObjects(t *testing.T) {
 	Decisions.WithLabelValues("prune.alive", "b/renamed", OutcomeOK).Inc()
 	Checks.WithLabelValues("prune.retired", VerdictOK).Inc()
 	Checks.WithLabelValues(UnknownDomain, VerdictOK).Inc()
-	Extractions.WithLabelValues("dropped-key").Inc()
+	Extractions.WithLabelValues("prune.alive", "dropped-key").Inc()
+	Extractions.WithLabelValues("prune.retired", "tenant").Inc()
 
 	PruneStale(pruneTestSet())
 
@@ -37,8 +38,10 @@ func TestPruneStale_dropsTheSeriesOfRenamedObjects(t *testing.T) {
 		"the retired domain's series is gone")
 	assert.GreaterOrEqual(t, testutil.ToFloat64(Checks.WithLabelValues(UnknownDomain, VerdictOK)), 1.0,
 		"the unknown-domain placeholder is never pruned")
-	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("dropped-key")),
+	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("prune.alive", "dropped-key")),
 		"the removed identity key's series is gone")
+	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("prune.retired", "tenant")),
+		"a key another domain still declares is pruned with the domain that dropped it")
 }
 
 func TestPruneOnce_sweepsASeriesRecreatedByAnInFlightCheck(t *testing.T) {
@@ -88,7 +91,7 @@ func TestPruneStale_isSafeUnderConcurrentPublication(t *testing.T) {
 	churn := &ActiveSet{
 		Domains: map[string]struct{}{"prune.churn": {}},
 		Rules:   map[string]struct{}{"b/churn": {}},
-		Keys:    map[string]struct{}{},
+		Keys:    map[string]map[string]struct{}{},
 	}
 	var wg sync.WaitGroup
 	for range 4 {

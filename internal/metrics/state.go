@@ -25,6 +25,10 @@ type DomainView struct {
 	// be watched, not to be enforced.
 	Blocks int
 
+	// Rules is the count across the blocks, the same number the summary of
+	// the snapshot endpoint reports.
+	Rules int
+
 	// DecisionBuckets is the worst case one decision can collect across the
 	// domain — the headroom before an edit stops compiling.
 	DecisionBuckets int
@@ -133,6 +137,9 @@ var (
 	descDomainBlocks = prometheus.NewDesc("ratelimit_domain_blocks",
 		"Compiled blocks of the domain. Observed rather than bounded: watch the target scan, do not cap it.",
 		[]string{"domain"}, nil)
+	descDomainRules = prometheus.NewDesc("ratelimit_domain_rules",
+		"Compiled rules of the domain across its blocks.",
+		[]string{"domain"}, nil)
 	descDomainBuckets = prometheus.NewDesc("ratelimit_domain_decision_buckets",
 		"Worst-case buckets one decision can collect across the domain, against the budget of 128.",
 		[]string{"domain"}, nil)
@@ -148,6 +155,7 @@ func (stateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descPolicyRuleProblems
 	ch <- descPolicyAppliedGeneration
 	ch <- descDomainBlocks
+	ch <- descDomainRules
 	ch <- descDomainBuckets
 }
 
@@ -157,6 +165,8 @@ func (stateCollector) Collect(ch chan<- prometheus.Metric) {
 		for _, d := range view.Domains {
 			ch <- prometheus.MustNewConstMetric(descDomainBlocks,
 				prometheus.GaugeValue, float64(d.Blocks), d.Domain)
+			ch <- prometheus.MustNewConstMetric(descDomainRules,
+				prometheus.GaugeValue, float64(d.Rules), d.Domain)
 			ch <- prometheus.MustNewConstMetric(descDomainBuckets,
 				prometheus.GaugeValue, float64(d.DecisionBuckets), d.Domain)
 			ch <- prometheus.MustNewConstMetric(descPolicyAppliedGeneration,

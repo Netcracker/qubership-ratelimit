@@ -948,13 +948,13 @@
       ]
     },
     {
-      "id": 19,
-      "type": "bargauge",
-      "title": "Domain worst case, buckets",
-      "description": "Worst-case buckets one request can collect across the domain. At 128 the runtime backstop starts refusing overlapping requests; the admission gate stops edits before that.",
+      "id": 27,
+      "type": "timeseries",
+      "title": "Replicas enforcing the active generation",
+      "description": "Per domain, the ready replicas that enforce the active generation against the ready fleet, as the operator judged it on its last probe. The two lines apart is a rollout or a projection in flight; apart past the propagation deadline is Stalled.",
       "gridPos": {
         "h": 8,
-        "w": 6,
+        "w": 12,
         "x": 12,
         "y": 40
       },
@@ -967,91 +967,48 @@
           "unit": "short",
           "decimals": 0,
           "min": 0,
-          "max": 128,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 100
-              },
-              {
-                "color": "red",
-                "value": 128
-              }
-            ]
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
         }
       },
       "options": {
-        "reduceOptions": {
-          "values": false,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "table",
+          "placement": "bottom",
           "calcs": [
-            "lastNotNull"
-          ]
+            "lastNotNull",
+            "max"
+          ],
+          "sortBy": "Last *",
+          "sortDesc": true
         },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (domain) (ratelimit_domain_decision_buckets{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
-          "legendFormat": "{{domain}}"
-        }
-      ]
-    },
-    {
-      "id": 20,
-      "type": "bargauge",
-      "title": "Domain blocks",
-      "description": "Compiled blocks of the domain. Observed rather than bounded: the object size keeps the target scan cheap on its own, so this is a number to watch, not a cap.",
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 40
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ]
+          "expr": "max by (domain) (ratelimit_policy_replicas{cluster=~\"$cluster\", namespace=~\"$namespace\", state=\"applied\"})",
+          "legendFormat": "{{domain}} applied"
         },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
-      },
-      "targets": [
         {
-          "refId": "A",
-          "expr": "max by (domain) (ratelimit_domain_blocks{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
-          "legendFormat": "{{domain}}"
+          "refId": "B",
+          "expr": "max by (domain) (ratelimit_policy_replicas{cluster=~\"$cluster\", namespace=~\"$namespace\", state=\"total\"})",
+          "legendFormat": "{{domain}} ready"
         }
       ]
     },
     {
       "id": 21,
       "type": "bargauge",
-      "title": "Enforced generation per domain",
-      "description": "The generation each domain is enforcing on this replica. It falling behind the object's metadata.generation is the same divergence the policy status reports.",
+      "title": "Lowest enforced generation per domain",
+      "description": "The lowest generation any ready replica enforces for the domain, across the fleet. A replica that fell behind shows as the fleet's floor here while the operator reports the domain Propagating or Stalled; the replicas panel above says how many are behind.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1083,7 +1040,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(15, max by (domain) (ratelimit_policy_applied_generation{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
+          "expr": "topk(15, min by (domain) (ratelimit_policy_applied_generation{cluster=~\"$cluster\", namespace=~\"$namespace\"}))",
           "legendFormat": "{{domain}}"
         }
       ]
@@ -1147,7 +1104,7 @@
       "id": 23,
       "type": "stat",
       "title": "Last snapshot swap",
-      "description": "When the serving rule set last changed - the forensic answer to whether the rules moved right before an incident.",
+      "description": "When a replica last swapped its rule set, latest across the fleet: the forensic answer to whether the rules moved right before an incident.",
       "gridPos": {
         "h": 8,
         "w": 6,
@@ -1194,6 +1151,330 @@
       ]
     },
     {
+      "id": 19,
+      "type": "bargauge",
+      "title": "Domain worst case, buckets",
+      "description": "Worst-case buckets one request can collect across the domain, against the budget of 128. The operator refuses a generation past it as DomainBudgetExceeded and keeps the last-good one running, so this is the headroom an edit has left.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "max": 128,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 128
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (domain) (ratelimit_domain_decision_buckets{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "{{domain}}"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "bargauge",
+      "title": "Domain blocks",
+      "description": "Compiled blocks of the domain. Observed rather than bounded: the object size keeps the target scan cheap on its own, so this is a number to watch, not a cap.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (domain) (ratelimit_domain_blocks{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "{{domain}}"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "bargauge",
+      "title": "Domain rules",
+      "description": "Compiled rules of the domain across its blocks, the count the snapshot endpoint's summary reports. Observed, like the blocks.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 56
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (domain) (ratelimit_domain_rules{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "{{domain}}"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "state-timeline",
+      "title": "Stalled domains",
+      "description": "Whether the operator judges a domain stuck rather than progressing, and which way: a replica behind past the deadline, a manifest format a replica does not read, or a generation that does not fit the ConfigMap. Ready above turns False for the same domain; this is the reason.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Progressing",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Stalled",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "lineWidth": 0,
+            "fillOpacity": 80
+          }
+        }
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "alignValue": "center",
+        "rowHeight": 0.9,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (domain, reason) (ratelimit_policy_stalled{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "legendFormat": "{{domain}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "table",
+      "title": "Versions in the fleet",
+      "description": "Pods per component and build, from ratelimit_build_info. Two versions of one component is a rollout in progress; the service ahead of the operator is a replica that may read a manifest the operator wrote in an older format.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 12,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Component",
+            "desc": false
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true
+            },
+            "renameByName": {
+              "component": "Component",
+              "version": "Version",
+              "Value": "Pods"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "instant": true,
+          "expr": "count by (component, version) (ratelimit_build_info{cluster=~\"$cluster\", namespace=~\"$namespace\"})"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Lease holder",
+      "description": "The operator pod that holds the Lease: the one writing the ConfigMap and the policy status, and the one whose scrape carries the fleet series. None means no operator is elected and nothing is being reconciled.",
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 20,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "orientation": "auto",
+        "textMode": "name",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (pod) (ratelimit_leader{cluster=~\"$cluster\", namespace=~\"$namespace\"} == 1)",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
       "id": 26,
       "type": "row",
       "title": "Extraction",
@@ -1201,20 +1482,20 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 56
+        "y": 72
       },
       "collapsed": true,
       "panels": [
         {
           "id": 24,
           "type": "timeseries",
-          "title": "Extraction skips by key and reason",
-          "description": "Identity extraction anomalies. A steady band of decode_failed next to normal traffic means the tokens changed shape - clients are folding into one shared bucket.",
+          "title": "Extraction skips by domain, key, and reason",
+          "description": "Identity extraction anomalies, per domain and declared key. A steady band of decode_failed next to normal traffic means the tokens changed shape and clients are folding into one shared bucket; the domain says whose mapping to read.",
           "gridPos": {
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 57
+            "y": 73
           },
           "datasource": {
             "type": "prometheus",
@@ -1251,21 +1532,21 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by (key, reason) (rate(ratelimit_extraction_skips_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
-              "legendFormat": "{{key}}/{{reason}}"
+              "expr": "sum by (domain, key, reason) (rate(ratelimit_extraction_skips_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
+              "legendFormat": "{{domain}} {{key}}/{{reason}}"
             }
           ]
         },
         {
           "id": 25,
           "type": "timeseries",
-          "title": "Extractions by key",
-          "description": "Requests that carried a value for the declared key. A key flat at zero while tokens arrive is a dead claim path - the other half of the detector.",
+          "title": "Extractions by domain and key",
+          "description": "Decisions whose request carried a value for the declared key, per domain. Seeded at zero on every apply: a key flat at zero while the domain's checks flow is a dead claim path, a mapping that names a claim the tokens do not carry.",
           "gridPos": {
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 57
+            "y": 73
           },
           "datasource": {
             "type": "prometheus",
@@ -1302,8 +1583,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by (key) (rate(ratelimit_extractions_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
-              "legendFormat": "{{key}}"
+              "expr": "sum by (domain, key) (rate(ratelimit_extractions_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
+              "legendFormat": "{{domain}} {{key}}"
             }
           ]
         }

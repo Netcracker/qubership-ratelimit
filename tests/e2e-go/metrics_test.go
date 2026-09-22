@@ -136,10 +136,41 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 			"the operator holds the lease and its scrape has to say so")
 	})
 
-	It("gauges the domain decision buckets", func() {
+	It("gauges the domain facts", func() {
 		Expect(hasSeries(families, "ratelimit_domain_decision_buckets",
 			map[string]string{"domain": domain})).To(BeTrue(),
 			"the scrape carries no domain budget gauge")
+		Expect(gaugeValue(families, "ratelimit_domain_blocks",
+			map[string]string{"domain": domain})).To(Equal(1.0))
+		Expect(gaugeValue(families, "ratelimit_domain_rules",
+			map[string]string{"domain": domain})).To(Equal(1.0),
+			"the scrape does not count the rules of the domain")
+	})
+
+	It("labels the extraction series by domain", func() {
+		// Seeded at zero on apply: the series exists before any token
+		// arrives, and it is the domain's, since a key is declared per
+		// domain and a dead claim path is a fact about one domain's mapping.
+		Expect(hasSeries(families, "ratelimit_extractions_total",
+			map[string]string{"domain": domain, "key": "client"})).To(BeTrue(),
+			"the scrape carries no seeded extraction series for the domain's built-in key")
+	})
+
+	It("names its version on both scrapes", func() {
+		for name, scrape := range map[string]map[string]*dto.MetricFamily{
+			"service": families, "operator": operator,
+		} {
+			series := seriesOf(scrape, "ratelimit_build_info", map[string]string{"component": name})
+			Expect(series).NotTo(BeNil(), "the %s scrape carries no build info", name)
+			Expect(series.GetGauge().GetValue()).To(Equal(1.0), name)
+			var version string
+			for _, pair := range series.GetLabel() {
+				if pair.GetName() == "version" {
+					version = pair.GetValue()
+				}
+			}
+			Expect(version).NotTo(BeEmpty(), "the %s scrape names no version", name)
+		}
 	})
 
 	It("carries the Go runtime series on both scrapes", func() {

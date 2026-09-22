@@ -191,11 +191,23 @@ func BenchmarkMatchEvaluate(b *testing.B) {
 // BenchmarkMatchManyBlocks scans a domain of 64 single-rule blocks whose
 // routes all miss until the last one: the worst case of the linear target
 // scan, and the number that decides whether a route index is worth its
-// complexity.
+// complexity. TestMatchManyBlocks_scanStaysLinear guards the shape in CI.
 func BenchmarkMatchManyBlocks(b *testing.B) {
 	const blocks = 64
+	snap := manyBlocksSnapshot(b, blocks)
+	path := lastBlockPath(blocks)
+	b.ReportAllocs()
+	for b.Loop() {
+		match.Match(snap, path, "GET")
+	}
+}
+
+// manyBlocksSnapshot compiles a domain of n single-rule blocks with four
+// prefix routes each, none of which shares a prefix with another block.
+func manyBlocksSnapshot(tb testing.TB, n int) *compile.Snapshot {
+	tb.Helper()
 	p := model.Policy{Domain: domain}
-	for i := range blocks {
+	for i := range n {
 		routes := make([]model.Route, 0, 4)
 		for _, sub := range []string{"a", "b", "c", "d"} {
 			routes = append(routes, model.Route{
@@ -210,13 +222,15 @@ func BenchmarkMatchManyBlocks(b *testing.B) {
 	}
 	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
-		b.Fatalf("compile problems: %v", problems)
+		tb.Fatalf("compile problems: %v", problems)
 	}
-	path := fmt.Sprintf("/svc%d/d/x", blocks-1)
-	b.ReportAllocs()
-	for b.Loop() {
-		match.Match(snap, path, "GET")
-	}
+	return snap
+}
+
+// lastBlockPath is a path only the last route of the last block matches, so
+// a scan of n blocks visits every route before it finds one.
+func lastBlockPath(n int) string {
+	return fmt.Sprintf("/svc%d/d/x", n-1)
 }
 
 func BenchmarkKeyBucket(b *testing.B) {

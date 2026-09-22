@@ -303,10 +303,10 @@ func (s *Server) observeDecision(domain string, decision engine.Decision) {
 		}
 	}
 	for _, skip := range decision.Skips {
-		metrics.ExtractionSkips.WithLabelValues(skip.Key, string(skip.Reason)).Inc()
+		metrics.ExtractionSkips.WithLabelValues(domain, skip.Key, string(skip.Reason)).Inc()
 	}
 	for _, key := range decision.ExtractedKeys {
-		metrics.Extractions.WithLabelValues(key).Inc()
+		metrics.Extractions.WithLabelValues(domain, key).Inc()
 	}
 }
 

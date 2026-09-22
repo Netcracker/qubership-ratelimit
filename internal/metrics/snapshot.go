@@ -11,13 +11,15 @@ func ActiveSetOf(snapshots map[string]*compile.Snapshot) *ActiveSet {
 	active := &ActiveSet{
 		Domains: make(map[string]struct{}, len(snapshots)),
 		Rules:   map[string]struct{}{},
-		Keys:    map[string]struct{}{},
+		Keys:    make(map[string]map[string]struct{}, len(snapshots)),
 	}
 	for domain, snapshot := range snapshots {
 		active.Domains[domain] = struct{}{}
+		keys := make(map[string]struct{}, len(snapshot.EffectiveKeys))
 		for _, key := range snapshot.EffectiveKeys {
-			active.Keys[key] = struct{}{}
+			keys[key] = struct{}{}
 		}
+		active.Keys[domain] = keys
 		for i := range snapshot.Blocks {
 			block := &snapshot.Blocks[i]
 			for _, rule := range block.Rules {
@@ -28,23 +30,19 @@ func ActiveSetOf(snapshots map[string]*compile.Snapshot) *ActiveSet {
 	return active
 }
 
-// ExtractionKeysOf lists the keys the snapshots extract from a token: the
-// built-in client plus the mapped keys of every domain. Their series are
+// ExtractionKeysOf lists, per domain, the keys the snapshot extracts from a
+// token: the built-in client plus the domain's mapped keys. Their series are
 // seeded so that "declared but never extracted" is a visible zero rather
 // than a missing series. path and method are resolved from the request, not
 // extracted, and stay out.
-func ExtractionKeysOf(snapshots map[string]*compile.Snapshot) []string {
-	seen := map[string]struct{}{}
-	var keys []string
-	for _, snapshot := range snapshots {
+func ExtractionKeysOf(snapshots map[string]*compile.Snapshot) map[string][]string {
+	keys := make(map[string][]string, len(snapshots))
+	for domain, snapshot := range snapshots {
+		names := make([]string, 0, len(snapshot.Extraction))
 		for i := range snapshot.Extraction {
-			key := snapshot.Extraction[i].Key
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			keys = append(keys, key)
+			names = append(names, snapshot.Extraction[i].Key)
 		}
+		keys[domain] = names
 	}
 	return keys
 }

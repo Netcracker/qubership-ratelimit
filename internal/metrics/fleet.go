@@ -7,17 +7,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// The series in this file are the leader's, not the replica's.
+// The series in this file are the operator's, not the service replica's.
 //
-// Everything in state.go is published by the store updater, which runs on
-// every replica and reports what that replica compiled. What is here can only
-// be known by the pod holding the lease: how many replicas enforce a
-// generation, and whether a domain has been stuck long enough to say so. On
-// every other replica these series are simply absent, which is what
-// ratelimit_leader is for - it tells a query which scrape is the one carrying
+// The domain view in state.go is published by the service's applier, which
+// runs on every replica and reports what that replica enforces. What is here
+// can only be known by the operator pod holding the Lease: how many replicas
+// enforce a generation, and whether a domain has been stuck long enough to
+// say so. RegisterOperator alone puts them on a registry, so the service's
+// scrape carries none of them, and on the operator pod that lost the
+// election they read as an absent fleet and a leader of 0, which is what
+// ratelimit_leader is for: it tells a query which scrape is the one carrying
 // them.
 
-// FleetSample is what the leader saw for one domain on its last reconcile.
+// FleetSample is what the operator saw for one domain on its last reconcile.
 type FleetSample struct {
 	// Applied and Total are the fraction the status reports.
 	Applied int32
@@ -40,13 +42,13 @@ var (
 	fleetMu     sync.RWMutex
 	fleetSample = map[string]FleetSample{}
 
-	// leader is set once this replica takes the lease. It is never unset:
-	// controller-runtime ends the process when a held lease is lost, so a
-	// replica that stops being the leader stops scraping too.
+	// leader is set once this operator pod takes the Lease. It is never
+	// unset: controller-runtime ends the process when a held Lease is lost,
+	// so a pod that stops holding it stops scraping too.
 	leader atomic.Bool
 )
 
-// PublishFleet records what the leader saw for one domain.
+// PublishFleet records what the operator saw for one domain.
 func PublishFleet(domain string, sample FleetSample) {
 	fleetMu.Lock()
 	defer fleetMu.Unlock()
@@ -54,7 +56,7 @@ func PublishFleet(domain string, sample FleetSample) {
 }
 
 // DropFleet forgets a domain. Without it the series of a deleted policy would
-// keep being scraped from this replica for as long as it stayed the leader,
+// keep being scraped from this pod for as long as it held the Lease,
 // and an alert on a stalled domain would fire forever on an object nobody can
 // fix because it is gone.
 func DropFleet(domain string) {
@@ -63,7 +65,7 @@ func DropFleet(domain string) {
 	delete(fleetSample, domain)
 }
 
-// SetLeader records whether this replica holds the lease.
+// SetLeader records whether this operator pod holds the Lease.
 func SetLeader(held bool) { leader.Store(held) }
 
 // Replica states of ratelimit_policy_replicas.
@@ -74,7 +76,7 @@ const (
 
 var (
 	descLeader = prometheus.NewDesc("ratelimit_leader",
-		"Whether this replica holds the leader lease. The status series are only written by the replica reporting 1.",
+		"Whether this operator pod holds the Lease. The status series are only written by the pod reporting 1.",
 		nil, nil)
 	descPolicyStalled = prometheus.NewDesc("ratelimit_policy_stalled",
 		"Whether the domain is stuck rather than progressing; reason names which way.",
@@ -84,7 +86,7 @@ var (
 		[]string{"domain", "state"}, nil)
 )
 
-// fleetCollector renders what the leader last saw, on every scrape.
+// fleetCollector renders what the operator last saw, on every scrape.
 type fleetCollector struct{}
 
 func (fleetCollector) Describe(ch chan<- *prometheus.Desc) {

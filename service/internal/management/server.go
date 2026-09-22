@@ -42,9 +42,9 @@ const (
 // service answers like every other service of the platform: the same context
 // propagation, the same security middleware, and the same TMF error envelope
 // for anything the handlers do not answer themselves. The instrumentation
-// endpoints stay off, because health and metrics are served by the manager's own
-// listener and a second copy of them here would be a second answer to the same
-// question.
+// endpoints stay off, because health and metrics are served on the probe and
+// metrics listeners and a second copy of them here would be a second answer
+// to the same question.
 func NewApp(api *API) (*fiber.App, error) {
 	// The builder requires a security middleware to be registered. A deployment
 	// that installs its own registers it first and wins by priority; without
@@ -86,12 +86,12 @@ func NewApp(api *API) (*fiber.App, error) {
 	return app, nil
 }
 
-// Runner serves the management app as a controller-runtime runnable.
+// Runner serves the management app on its own listener until its context ends.
 type Runner struct {
 	Addr string
 	App  *fiber.App
 
-	// API is the mounted API, so an accepted sweep runs under this runnable's
+	// API is the mounted API, so an accepted sweep runs under this runner's
 	// context: a client that goes away does not stop it, and shutdown does.
 	API *API
 
@@ -111,15 +111,6 @@ func (r *Runner) boundAddr() string {
 	}
 	return ""
 }
-
-// NeedLeaderElection reports false.
-//
-// Every replica serves this API for the same reason every replica answers rate
-// limit checks: the Service load-balances across all of them, and an endpoint
-// only the leader answered would fail on most calls. Reads describe the replica
-// that served them, and a reset against a shared store is global wherever it
-// lands.
-func (r *Runner) NeedLeaderElection() bool { return false }
 
 // Start listens and serves until ctx is cancelled.
 func (r *Runner) Start(ctx context.Context) error {

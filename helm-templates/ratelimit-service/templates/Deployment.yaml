@@ -77,6 +77,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Reported as ratelimit_build_info: the image tag, which is the
+            # release. The pipeline passes no build arguments to the image,
+            # so without this every scrape would say "dev".
+            - name: SERVICE_VERSION
+              value: '{{ .Values.image.tag | default .Chart.AppVersion }}'
             - name: METRICS_NEAR_LIMIT_RATIO
               value: '{{ .Values.metrics.nearLimitRatio }}'
             # Where the counters live. Empty falls back to an in-process store,

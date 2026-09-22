@@ -111,15 +111,18 @@ var (
 
 	// ExtractionSkips and Extractions are the two halves of the "key declared,
 	// tokens arriving, zero extractions" detector: skips say extraction is
-	// failing, a flat zero next to traffic says the claim path is dead.
+	// failing, a flat zero next to traffic says the claim path is dead. Both
+	// carry the domain: a key is declared per domain, and two domains can map
+	// the same name to different claims, so a dead claim path is a fact about
+	// one domain's mapping, and the alert names the domain to fix.
 	ExtractionSkips = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_extraction_skips_total",
-		Help: "Identity extraction anomalies by declared key and reason.",
-	}, []string{"key", "reason"})
+		Help: "Identity extraction anomalies by domain, declared key, and reason.",
+	}, []string{"domain", "key", "reason"})
 	Extractions = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_extractions_total",
-		Help: "Decisions whose request carried a value for the declared identity key.",
-	}, []string{"key"})
+		Help: "Decisions whose request carried a value for the declared identity key, by domain.",
+	}, []string{"domain", "key"})
 
 	// TokensSeen is the traffic half of the detector: a key whose extraction
 	// series sits at zero while this one grows has a dead claim path.
@@ -172,19 +175,37 @@ var (
 	})
 )
 
-// Register puts every series of this package on the registry. It is called
+// RegisterService puts the data plane's series on the service's registry:
+// the checks, the decisions, the extraction detector, the store, the
+// snapshot swaps, the domain view, and the build's version. It is called
 // once per process, at wiring time; a second call on the same registry is a
 // no-op rather than the panic prometheus raises for a duplicate, so that a
 // test which builds a process twice does not need to know.
-func Register(registry prometheus.Registerer) {
-	for _, collector := range []prometheus.Collector{
+func RegisterService(registry prometheus.Registerer, version string) {
+	register(registry,
 		Checks, CheckDuration, Decisions, NearLimit, Refusals,
 		UnknownDomainChecks, UnmatchedChecks, ExtractionSkips, Extractions, TokensSeen,
 		StoreRoundtrip, StoreErrors,
-		SnapshotRebuilds, SnapshotTimestamp, ConfigWriteErrors,
+		SnapshotRebuilds, SnapshotTimestamp,
+		stateCollector{},
+		buildInfo(ComponentService, version))
+}
+
+// RegisterOperator puts the control plane's series on the operator's
+// registry: the policy status, the fleet, the ConfigMap writer's errors, and
+// the build's version. Nothing of the data plane is on it, so a scrape of the
+// operator carries no check counter at zero for a query to exclude. Idempotent
+// like RegisterService.
+func RegisterOperator(registry prometheus.Registerer, version string) {
+	register(registry,
+		ConfigWriteErrors,
 		stateCollector{},
 		fleetCollector{},
-	} {
+		buildInfo(ComponentOperator, version))
+}
+
+func register(registry prometheus.Registerer, collectors ...prometheus.Collector) {
+	for _, collector := range collectors {
 		var already prometheus.AlreadyRegisteredError
 		if err := registry.Register(collector); err != nil && !errors.As(err, &already) {
 			panic(err)
@@ -193,15 +214,38 @@ func Register(registry prometheus.Registerer) {
 }
 
 // SeedExtractions creates a zero-valued extraction series for every declared
-// key of the new snapshot. Counter series appear on their first increment,
-// and a dead claim path never increments, so without seeding the one key the
-// detector exists for is exactly the one with no series to alert on. Seeding
-// an existing series is a no-op, and the pruner keeps seeded keys alive:
-// declared keys are part of its active set.
-func SeedExtractions(keys []string) {
-	for _, key := range keys {
-		Extractions.WithLabelValues(key)
+// key of every domain of the new snapshot. Counter series appear on their
+// first increment, and a dead claim path never increments, so without
+// seeding the one key the detector exists for is exactly the one with no
+// series to alert on. Seeding an existing series is a no-op, and the pruner
+// keeps seeded keys alive: declared keys are part of its active set.
+func SeedExtractions(keys map[string][]string) {
+	for domain, names := range keys {
+		for _, key := range names {
+			Extractions.WithLabelValues(domain, key)
+		}
 	}
+}
+
+// Components of ratelimit_build_info.
+const (
+	ComponentOperator = "operator"
+	ComponentService  = "service"
+)
+
+// buildInfo is the version of the binary as a constant 1, so that the
+// version reads as a label. The operator stamps the same value into the
+// manifest as operatorVersion; the service carries the release its image was
+// tagged with. Next to each other on one dashboard the two show a rollout in
+// progress, and next to the manifest's version a replica reading a manifest
+// written by a newer operator.
+func buildInfo(component, version string) prometheus.Collector {
+	info := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ratelimit_build_info",
+		Help: "The version of the binary serving this scrape; the value is always 1.",
+	}, []string{"component", "version"})
+	info.WithLabelValues(component, version).Set(1)
+	return info
 }
 
 // CacheStatsCollectors turns the engine's shared token-cache counters into

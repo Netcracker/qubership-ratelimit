@@ -25,12 +25,6 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-func TestRunner_needsNoLeaderElection(t *testing.T) {
-	// Every replica must answer checks. Gating the endpoint on the lease would
-	// make every non-leader pod fail the gateways' calls.
-	assert.False(t, (&Runner{}).NeedLeaderElection())
-}
-
 func TestRunner_servesAndStopsGracefully(t *testing.T) {
 	log, _ := recordingLogger()
 	ruleStore := store.New()

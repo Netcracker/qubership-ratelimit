@@ -218,6 +218,34 @@ func TestApplier_aRefusalBeforeTheFirstApplyIsReportedAndNotReady(t *testing.T) 
 	assert.Empty(t, a.Report().Domains)
 }
 
+// The report is one set's facts: a refused reading rides on the set it left
+// in place, with that set's generations, and the applied set that follows
+// carries the new generation and no refusal. No reader can pair the two.
+func TestApplier_reportsTheRefusalOnTheSetItLeftInPlace(t *testing.T) {
+	f := newFixture(t)
+	f.write(4, spec("gateway.public", 10))
+	cfg, err := Read(f.dir)
+	require.NoError(t, err)
+	a := newApplier()
+	a.Apply(cfg)
+
+	a.Refuse(&Refusal{FormatVersion: 99, Err: errors.New("unsupported")})
+	refused := a.Store.Load()
+	report := ReportOf(refused)
+	assert.Equal(t, int64(4), report.Domains["gateway.public"].Generation)
+	require.NotNil(t, report.Refusal)
+	assert.Equal(t, 99, report.Refusal.FormatVersion)
+
+	f.write(5, spec("gateway.public", 11))
+	cfg, err = Read(f.dir)
+	require.NoError(t, err)
+	a.Apply(cfg)
+	report = a.Report()
+	assert.Equal(t, int64(5), report.Domains["gateway.public"].Generation)
+	assert.Nil(t, report.Refusal, "the applied set answers the refused reading")
+	assert.Equal(t, 99, ReportOf(refused).Refusal.FormatVersion, "the set a reader holds is not rewritten under it")
+}
+
 func TestApplier_compilesEveryDomainAndReportsItsGeneration(t *testing.T) {
 	f := newFixture(t)
 	f.write(4, spec("gateway.public", 10), spec("gateway.private", 20))
@@ -232,6 +260,14 @@ func TestApplier_compilesEveryDomainAndReportsItsGeneration(t *testing.T) {
 	assert.Equal(t, int64(4), report.Domains["gateway.public"].Generation)
 	assert.Equal(t, "uid-gateway.public", report.Domains["gateway.public"].UID)
 	assert.Nil(t, report.Refusal)
+
+	// The report is the rule set's own facts: the generation rides on the
+	// domain the engine is bound to, so the report and the rules a reader
+	// pairs it with come from one load.
+	d, ok := a.Store.Load().Domain("gateway.public")
+	require.True(t, ok)
+	assert.Equal(t, report.Domains["gateway.public"], applied.Domain{Generation: d.Generation, UID: d.UID, AppliedAt: d.AppliedAt})
+	assert.Equal(t, a.Store.SwappedAt(), a.Store.Load().SwappedAt(), "the swap time is stamped on the set that was swapped in")
 
 	// The handler serves the same report.
 	recorder := httptest.NewRecorder()

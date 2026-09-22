@@ -49,7 +49,7 @@ var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 	// The fleet series a spec scrapes below ride the manager's registry, as
 	// they do in the binaries.
-	metrics.Register(ctrlmetrics.Registry)
+	metrics.RegisterOperator(ctrlmetrics.Registry, "envtest")
 
 	ctx, cancel = context.WithCancel(context.TODO())
 
