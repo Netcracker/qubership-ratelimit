@@ -1,0 +1,146 @@
+# The drill on the data plane's rules, as promtool replays it: one synthetic
+# series set per case, run against the rules the chart renders with its
+# default values. The cases that matter are the negative ones — a single
+# error and a single stray check must age out of their window before the
+# hold ends, and an idle domain must not be judged by another domain's
+# traffic — because those are the ways an alert set pages when nothing is
+# wrong. rules.yaml is written beside this file by the chart test.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Steady unknown-domain traffic fires; the rule's whole point is that the
+  # checks keep coming.
+  - interval: 1m
+    name: unknown-domain checks that keep arriving
+    input_series:
+      - series: 'ratelimit_unknown_domain_checks_total{namespace="biz", pod="ratelimit-service-0"}'
+        values: "0+10x15"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RatelimitUnknownDomain
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RatelimitUnknownDomain
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              severity: warning
+            exp_annotations:
+              summary: Checks for a domain no policy claims pass unlimited
+              description: >-
+                The rate limit service in biz answered 50 checks in 5m for domains no RateLimitPolicy claims;
+                that traffic passes unlimited. The domain name is in the service log (unknown rate limit
+                domain): a typo in a gateway filter's domain, or a deleted policy.
+
+  # One stray check never pages: the hold is the window's own length, so the
+  # increment leaves the window before the hold ends.
+  - interval: 1m
+    name: one stray unknown-domain check
+    input_series:
+      - series: 'ratelimit_unknown_domain_checks_total{namespace="biz", pod="ratelimit-service-0"}'
+        values: "0 0 1 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: RatelimitUnknownDomain
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: RatelimitUnknownDomain
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: RatelimitUnknownDomain
+        exp_alerts: []
+
+  # Store errors that keep arriving fire, with the reason that produced them.
+  - interval: 1m
+    name: store errors that keep arriving
+    input_series:
+      - series: 'ratelimit_store_errors_total{namespace="biz", pod="ratelimit-service-0", reason="timeout"}'
+        values: "0+3x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RatelimitStoreErrors
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              reason: timeout
+              severity: critical
+            exp_annotations:
+              summary: Counter store errors; checks fall to the gateway's failure mode
+              description: >-
+                The rate limit service in biz failed 15 store decisions in 5m with reason timeout. Every
+                failed check is decided by the gateway's failure mode, unlimited under fail-open. timeout is
+                load or distance to the store, server is the store answering an error, other is connectivity.
+
+  # One error, retried and gone, never pages. This is the case storeErrorsFor
+  # is set to the window's length for.
+  - interval: 1m
+    name: one retried store error
+    input_series:
+      - series: 'ratelimit_store_errors_total{namespace="biz", pod="ratelimit-service-0", reason="timeout"}'
+        values: "0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RatelimitStoreErrors
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: RatelimitStoreErrors
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: RatelimitStoreErrors
+        exp_alerts: []
+
+  # A dead claim path on one domain fires; an idle domain beside it does not,
+  # however much traffic the first one carries. Both halves of the detector
+  # are per domain, which is what keeps gateway.private quiet here.
+  - interval: 1m
+    name: a dead claim path next to an idle domain
+    input_series:
+      - series: 'ratelimit_extractions_total{namespace="biz", pod="ratelimit-service-0", domain="gateway.public", key="tenant"}'
+        values: "0x40"
+      - series: 'ratelimit_tokens_seen_total{namespace="biz", pod="ratelimit-service-0", domain="gateway.public"}'
+        values: "0+20x40"
+      - series: 'ratelimit_extractions_total{namespace="biz", pod="ratelimit-service-0", domain="gateway.private", key="client"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: RatelimitKeyDeclaredNotExtracted
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              domain: gateway.public
+              key: tenant
+              severity: warning
+            exp_annotations:
+              summary: A declared identity key is never extracted from the tokens that arrive
+              description: >-
+                Domain gateway.public in biz declares the key tenant, its requests carry tokens, and none
+                carried a value for it in 15m. The mapping names a claim the tokens do not carry, and every
+                client of a rule counting by that key shares one bucket. Read the claim path on
+                /debug/snapshot/gateway.public of a service pod.
+
+  # The budget warning is a level, not a rate: at the warning mark it fires,
+  # one bucket under it does not.
+  - interval: 1m
+    name: the domain budget warning level
+    input_series:
+      - series: 'ratelimit_domain_decision_buckets{namespace="biz", pod="ratelimit-service-0", domain="gateway.public"}'
+        values: "104x5"
+      - series: 'ratelimit_domain_decision_buckets{namespace="biz", pod="ratelimit-service-0", domain="gateway.private"}'
+        values: "103x5"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RatelimitDomainBudgetNearLimit
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              domain: gateway.public
+              severity: warning
+            exp_annotations:
+              summary: A domain is close to the decision budget; the next edit may not compile
+              description: >-
+                Domain gateway.public in biz can collect 104 buckets in one decision, against the budget of
+                128. An edit past the budget is rejected as DomainBudgetExceeded and the domain stays on its
+                last-good generation. Narrow the rules' routes or split the domain before it gets there.
