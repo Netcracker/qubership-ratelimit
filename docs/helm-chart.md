@@ -32,7 +32,9 @@ helm-templates/ratelimit-operator/templates/
 │                                  #   its own namespace
 ├── RoleBinding.yaml
 ├── EnvoyFilter.yaml               # one per enabled gateway (public/private roles); in all modes
-└── PodMonitor.yaml                # behind MONITORING_ENABLED
+├── PodMonitor.yaml                # behind MONITORING_ENABLED
+└── PrometheusRule.yaml            # the alert rules over the policy status, behind MONITORING_ENABLED and
+                                   #   alerts.enabled
 ```
 
 The service chart:
@@ -51,6 +53,8 @@ helm-templates/ratelimit-service/templates/
 ├── AuthorizationPolicy.yaml       # DENY on the management port for every source but the private gateway;
 │                                  #   behind management.enabled
 ├── PodMonitor.yaml                # behind MONITORING_ENABLED
+├── PrometheusRule.yaml            # the alert rules over the data plane, behind MONITORING_ENABLED and
+│                                  #   alerts.enabled
 └── Dashboard.yaml                 # GrafanaDashboard CR (grafana-operator), behind MONITORING_ENABLED
 ```
 
@@ -63,7 +67,7 @@ the deployment; the empty render protects against that mistake. The defaults are
 
 | Deployment scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | the CRD, the operator (Deployment, SA, Role/RoleBinding), the filters, its PodMonitor | the service (Deployment, Service, SA), the AuthorizationPolicy, its PodMonitor, the dashboard |
+| single namespace | the CRD, the operator (Deployment, SA, Role/RoleBinding), the filters, its PodMonitor and PrometheusRule | the service (Deployment, Service, SA), the AuthorizationPolicy, its PodMonitor and PrometheusRule, the dashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | only the filters, which target the baseline RLS; no operator, no ServiceAccount, no RBAC, no CRD | nothing: an empty release |
 
@@ -83,8 +87,8 @@ operator chart uses the Service name and port to compute the RLS address from th
 the constant `ratelimit` and depends on neither the release name nor `fullnameOverride`. The port is a contract
 constant, so `rls.port` exists in neither chart. The namespace half of that address is `BASELINE_ORIGIN`, or
 `BASELINE_CONTROLLER` when the deployer sets it: the operator chart reads it for parity with `control-plane`, which
-resolves the baseline the same way; on this platform the baseline is never Blue-Green'd, so it stays empty. There is
-no `PrometheusRule` in the delivery, see "Alerts".
+resolves the baseline the same way; on this platform the baseline is never Blue-Green'd, so it stays empty. Each
+chart ships its own alert rules as a `PrometheusRule`, see "Alerts".
 
 ## The CRD in the operator chart
 
@@ -111,7 +115,7 @@ only the keys its templates read:
 | --- | --- | --- |
 | `REPLICAS` | the service chart | the replica count of the service; the operator runs one replica and reads no `REPLICAS` |
 | `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT` | both | installation size; there are NO defaults in values, the resource profile supplies them |
-| `MONITORING_ENABLED` | both | enables the PodMonitor of each chart and the GrafanaDashboard of the service chart; false by default, since both need the CRDs of their operators |
+| `MONITORING_ENABLED` | both | enables the PodMonitor and the PrometheusRule of each chart and the GrafanaDashboard of the service chart; false by default, since all three need the CRDs of their operators |
 | `ISTIO_PUBLIC_GATEWAY_NAME` | the operator chart | the name of the public Gateway object the filter targets; it must match the parameters of qubership-core-mesh-config, which creates the Gateways |
 | `ISTIO_PRIVATE_GATEWAY_NAME` | both | the name of the private Gateway object: the filter target in the operator chart, the default principal of the management AuthorizationPolicy in the service chart; it must match qubership-core-mesh-config the same way |
 | `BASELINE_ORIGIN` | both | the baseline namespace, set only in a satellite; absent or empty renders the whole stack of each chart, non-empty renders the filters only from the operator chart, targeting `ratelimit.<BASELINE_ORIGIN>.svc:9000`, and nothing from the service chart |
@@ -158,7 +162,16 @@ runtime:                             # EnvoyFilter.yaml: gateway-side kill switc
                                      # override without a redeploy: enforcedPercent 0 = global dry run,
                                      # enabledPercent 0 = filter off
 
-MONITORING_ENABLED: false            # PodMonitor.yaml; see "Platform parameters"
+MONITORING_ENABLED: false            # PodMonitor.yaml, PrometheusRule.yaml; see "Platform parameters"
+
+alerts:                              # PrometheusRule.yaml: the rules over the policy status; see "Alerts"
+  enabled: true                      # read only with MONITORING_ENABLED; false keeps the scrape, drops the rules
+  stalledFor: 5m                     # RatelimitStalled: above the propagation deadline, so a late rollout is quiet
+  notReadyFor: 30m                   # RatelimitNotReadyLong: longer than any rollout, shorter than a shift
+  ruleProblemsFor: 5m                # RatelimitRuleProblems: room for an author to fix a typo
+  configWriteErrorsWindow: 15m       # RatelimitConfigWriteErrors: any write error in the window fires
+  noLeaderFor: 5m                    # RatelimitNoOperatorLeader: past the Lease's own handover
+
 ISTIO_PUBLIC_GATEWAY_NAME: public-gateway     # EnvoyFilter.yaml: the Gateway of the public role
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway   # EnvoyFilter.yaml: the Gateway of the private role
 BASELINE_ORIGIN: ""                  # _helpers.tpl (mode, serviceNamespace): the deployer's composite variables,
@@ -234,7 +247,19 @@ management:                          # Deployment.yaml, Service.yaml, Authorizat
     viewer: [viewer]                 #   them non-empty (both empty would switch the mapping off, so the schema
     operator: [operator]             #   refuses it); a read-only deployment sets viewer alone
 
-MONITORING_ENABLED: false            # PodMonitor.yaml, Dashboard.yaml; see "Platform parameters"
+MONITORING_ENABLED: false            # PodMonitor.yaml, PrometheusRule.yaml, Dashboard.yaml; see "Platform
+                                     #   parameters"
+
+alerts:                              # PrometheusRule.yaml: the rules over the data plane; see "Alerts"
+  enabled: true                      # read only with MONITORING_ENABLED; false keeps the scrape, drops the rules
+  latencyBudgetSeconds: 0.01         # RatelimitDecisionLatencyHigh: the decision budget, a number above zero
+  latencyFor: 10m                    # so a burst does not page
+  unknownDomainFor: 5m               # RatelimitUnknownDomain: the window's own length, so one stray check ages out
+  storeErrorsFor: 5m                 # RatelimitStoreErrors: likewise, so one retried timeout never pages
+  keyNotExtractedWindow: 15m         # RatelimitKeyDeclaredNotExtracted: the rate window of both halves
+  keyNotExtractedFor: 30m            # and the hold over it
+  domainBudgetWarnAt: 104            # RatelimitDomainBudgetNearLimit: 80 percent of the budget of 128
+
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway   # AuthorizationPolicy.yaml: the default allowed principal
 BASELINE_ORIGIN: ""                  # _helpers.tpl (mode): the deployer's composite variables, see "Platform
 BASELINE_CONTROLLER: ""              #   parameters": BASELINE_ORIGIN empty = the whole stack (single namespace or
@@ -260,7 +285,6 @@ What is **deliberately absent** from values:
 | sanity bounds (token size and the like) | constants in the binaries | not knobs: nobody tunes them |
 | `replicaCount`, `resources` | resource profiles (`REPLICAS` for the service, `CPU_*`, `MEMORY_*`) | one source of truth with the deployer |
 | the RLS address for a satellite | computed from `BASELINE_ORIGIN` | the Service name and port are fixed by contract |
-| alerts | none | neither chart ships a `PrometheusRule`; see "Alerts" |
 | `DestinationRule` for the service cluster | none | see "What the charts do not install" |
 
 ## values.schema.json
@@ -274,6 +298,10 @@ the cluster. Key points:
 - `filter.timeout` is a protobuf duration (`^[0-9]+(\.[0-9]+)?s$`): Envoy rejects Go forms like `50ms`;
 - `filter.rateLimitedStatus` is 400..599 (Envoy ignores anything below 400); `runtime.*Percent` is 0..100;
 - the profile's resource parameters are required in both charts (see above);
+- every `alerts.*` duration is a positive Prometheus duration (`^[1-9][0-9]*(ms|s|m|h|d|w|y)$`) and
+  `alerts.latencyBudgetSeconds` is a number above zero: a zero duration renders `[0m]` or `for: 0m`, which Prometheus
+  refuses to load, taking the chart's other rules with it, and a budget at or below zero renders a comparison every
+  check satisfies;
 - the root of each schema stays **open**, and each chart closes its own blocks, the ones its templates read. The
   deployer distributes common installation parameters to the charts and passes one parameter set to every chart of
   the application. The service's `redis` block therefore reaches the operator chart, and the operator's `filter`
@@ -419,12 +447,12 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 
 ### Observability: PodMonitor and Dashboard
 
-Each chart ships a PodMonitor behind `MONITORING_ENABLED`; the dashboard ships with the service chart, behind the same
-flag. Both PodMonitors scrape the `metrics` port of their pods (30s, HTTP) and carry the label
-`app.kubernetes.io/processed-by-operator: victoriametrics-operator`. The dashboard ships as a `GrafanaDashboard` CR
-(grafana-operator); its uid is the namespace with a hash suffix (uniqueness under truncation, the Grafana limit is 40
-characters); auto-refresh is deliberately off, since a dashboard that redraws itself during an incident tampers with
-the evidence.
+Each chart ships a PodMonitor and a PrometheusRule (see "Alerts") behind `MONITORING_ENABLED`; the dashboard ships
+with the service chart, behind the same flag. Both PodMonitors scrape the `metrics` port of their pods (30s, HTTP)
+and carry the label `app.kubernetes.io/processed-by-operator: victoriametrics-operator`. The dashboard ships as a
+`GrafanaDashboard` CR (grafana-operator); its uid is the namespace with a hash suffix (uniqueness under truncation,
+the Grafana limit is 40 characters); auto-refresh is deliberately off, since a dashboard that redraws itself during an
+incident tampers with the evidence.
 
 ## Metrics: the naming contract
 
@@ -446,7 +474,7 @@ exclude.
 | `ratelimit_unmatched_checks_total` | `domain` | checks that applied no rule |
 | `ratelimit_extraction_skips_total` | `domain`, `key`, `reason: decode_failed\|bad_type\|too_long\|too_many_items` | extraction anomalies; `domain` because mappings live on the policy, and two domains of one namespace may declare the same key |
 | `ratelimit_extractions_total` | `domain`, `key` | decisions whose request carried a value for the declared key; the series are SEEDED with zero from the extraction plan at snapshot swap, so "zero" is observable |
-| `ratelimit_tokens_seen_total` | none | decisions with a token on a known domain; the detector's denominator |
+| `ratelimit_tokens_seen_total` | `domain` | decisions with a token on a known domain; the detector's denominator, per domain so that an idle domain's declared keys are not judged by another domain's traffic |
 | `ratelimit_store_roundtrip_seconds` | `domain` | store round-trip histogram (a domain = one shard) |
 | `ratelimit_store_errors_total` | `domain`, `reason: timeout\|server\|other` | store errors |
 | `ratelimit_snapshot_rebuilds_total` | `result: ok\|refused` | applies and swaps of the in-memory snapshot on a service replica; `refused` is a reading the replica would not apply (a format it does not read, an unknown field, a payload that fails the decoder or decompresses past 8 MiB), the snapshot stays and the reason is on `/debug/applied` |
@@ -524,34 +552,46 @@ chart rendered nothing.
 
 ## Alerts
 
-**Neither chart ships alert rules.** A platform that wants them writes its own against the names above; these
-expressions cover the conditions that mean silent misconfiguration or degradation:
+Each chart ships its alert rules as one `PrometheusRule` in the release namespace, rendered with
+`MONITORING_ENABLED` and `alerts.enabled`; a satellite renders neither. The split follows the series: the service
+chart alerts on the data plane, the operator chart on the policy status, and every expression carries
+`namespace="<release namespace>"`, so a namespace's rules judge its own pods.
 
-```yaml
-- alert: RatelimitUnknownDomain          # a domain typo silently switches limits off
-  expr: increase(ratelimit_unknown_domain_checks_total[5m]) > 0
-- alert: RatelimitStoreErrors
-  expr: increase(ratelimit_store_errors_total[5m]) > 0
-- alert: RatelimitDecisionLatencyHigh    # p99 against the 10 ms decision budget
-  expr: histogram_quantile(0.99, rate(ratelimit_check_duration_seconds_bucket[5m])) > 0.01
-- alert: RatelimitKeyDeclaredNotExtracted  # detector of a broken claim path, per domain/key pair; the series are
-                                           #   seeded, zero is observable
-  expr: rate(ratelimit_extractions_total[15m]) == 0 and on() rate(ratelimit_tokens_seen_total[15m]) > 0
-- alert: RatelimitRuleProblems           # blocking compilation problems: references, windows, budgets, schema
-                                         #   version skew; informational ones (shadowing) wake nobody
-  expr: max(ratelimit_policy_rule_problems{severity="blocking"}) > 0
-- alert: RatelimitStalled                # a replica fell behind or the generation is stuck on last-good
-  expr: max(ratelimit_policy_stalled) == 1
-  for: 5m
-- alert: RatelimitNotReadyLong           # Ready is not True for longer than any reasonable rollout
-  expr: min(ratelimit_policy_ready) == 0
-  for: 30m
-- alert: RatelimitConfigWriteErrors      # ratelimit-config not written: policy changes stop reaching the service
-  expr: increase(ratelimit_config_write_errors_total[15m]) > 0
-```
+The service chart, group `ratelimit-service`:
 
-One more worth adding: the domain budget headroom, `ratelimit_domain_decision_buckets` approaching 128, which warns
-before a generation stops compiling, and `ratelimit_domain_rules` approaching the object capacity.
+| Alert | Severity | Fires when |
+| --- | --- | --- |
+| `RatelimitUnknownDomain` | warning | `increase(ratelimit_unknown_domain_checks_total[5m]) > 0` for `unknownDomainFor`: checks arrive for a domain no policy claims, and pass unlimited. The domain name is in the service log, not in a label |
+| `RatelimitStoreErrors` | critical | `increase(ratelimit_store_errors_total[5m]) > 0` by `reason`, for `storeErrorsFor`: the counter store is failing, and every failed check is decided by the gateway's failure mode |
+| `RatelimitDecisionLatencyHigh` | warning | the p99 of `ratelimit_check_duration_seconds` is above `latencyBudgetSeconds` for `latencyFor` |
+| `RatelimitKeyDeclaredNotExtracted` | warning | a declared key's `ratelimit_extractions_total` rate is zero over `keyNotExtractedWindow` while the same domain's `ratelimit_tokens_seen_total` grows, for `keyNotExtractedFor`: the mapping names a claim the tokens do not carry |
+| `RatelimitDomainBudgetNearLimit` | warning | `ratelimit_domain_decision_buckets` reaches `domainBudgetWarnAt` of the budget of 128, with no hold: the next edit may stop compiling |
+
+The operator chart, group `ratelimit-operator`:
+
+| Alert | Severity | Fires when |
+| --- | --- | --- |
+| `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1` for `stalledFor`, with the reason in the label: `ReplicaStale`, `ReplicaFormatUnsupported`, or `ConfigMapTooLarge` |
+| `RatelimitNotReadyLong` | warning | `ratelimit_policy_ready == 0` for `notReadyFor`: the latest generation is not the one enforced |
+| `RatelimitRuleProblems` | warning | `ratelimit_policy_rule_problems{severity="blocking"} > 0` for `ruleProblemsFor`: the latest generation is not enforced and last-good runs instead |
+| `RatelimitConfigWriteErrors` | critical | `increase(ratelimit_config_write_errors_total[configWriteErrorsWindow]) > 0` by `reason`, with no hold: policy changes stop reaching the service |
+| `RatelimitNoOperatorLeader` | critical | `absent(ratelimit_leader == 1)` for `noLeaderFor`: no operator pod holds the Lease, so nothing compiles policies or writes `ratelimit-config` |
+
+Every rule carries a `summary` and a `description`; the description names the number, what it means for traffic, and
+where to look next, which is the sentence the [runbook](runbook.md) expands.
+
+The thresholds and hold durations are the `alerts.*` values of each chart, listed with their defaults in "Values
+reference" and bounded by the schema. Two pairings are load-bearing rather than taste: `unknownDomainFor` and
+`storeErrorsFor` are each at least the 5 m window of their expression, because `increase(...[5m]) > 0` stays true for
+five minutes after a single increment and a shorter hold would fire inside that window, paging on one stray check or
+one retried timeout; and both halves of `RatelimitKeyDeclaredNotExtracted` are summed by `domain`, so a domain with
+no traffic is never judged by a busy neighbour's tokens. Lower a hold below its window only where every single event
+must page.
+
+`tests/charts` replays these rules through `promtool test rules` against the fixtures in
+`tests/charts/testdata/*.rules.test.yaml`: the negative cases (a lone store error, a stray unknown-domain check, an
+idle domain beside a busy one, a Lease handed over during a rollout) are pinned beside the positive ones, so a
+threshold moved without its rationale fails CI rather than a pager.
 
 ## Management API port
 

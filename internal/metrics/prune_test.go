@@ -24,6 +24,8 @@ func TestPruneStale_dropsTheSeriesOfRenamedObjects(t *testing.T) {
 	Decisions.WithLabelValues("prune.alive", "b/kept", OutcomeOK).Inc()
 	Decisions.WithLabelValues("prune.alive", "b/renamed", OutcomeOK).Inc()
 	Checks.WithLabelValues("prune.retired", VerdictOK).Inc()
+	TokensSeen.WithLabelValues("prune.alive").Inc()
+	TokensSeen.WithLabelValues("prune.retired").Inc()
 	Checks.WithLabelValues(UnknownDomain, VerdictOK).Inc()
 	Extractions.WithLabelValues("prune.alive", "dropped-key").Inc()
 	Extractions.WithLabelValues("prune.retired", "tenant").Inc()
@@ -36,6 +38,10 @@ func TestPruneStale_dropsTheSeriesOfRenamedObjects(t *testing.T) {
 		"the renamed rule's series is gone")
 	assert.Zero(t, testutil.ToFloat64(Checks.WithLabelValues("prune.retired", VerdictOK)),
 		"the retired domain's series is gone")
+	assert.Equal(t, 1.0, testutil.ToFloat64(TokensSeen.WithLabelValues("prune.alive")),
+		"the live domain keeps the traffic half of the extraction detector")
+	assert.Zero(t, testutil.ToFloat64(TokensSeen.WithLabelValues("prune.retired")),
+		"the retired domain's token counter is gone")
 	assert.GreaterOrEqual(t, testutil.ToFloat64(Checks.WithLabelValues(UnknownDomain, VerdictOK)), 1.0,
 		"the unknown-domain placeholder is never pruned")
 	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("prune.alive", "dropped-key")),

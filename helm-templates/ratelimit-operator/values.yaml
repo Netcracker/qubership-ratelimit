@@ -64,11 +64,49 @@ runtime:
   enforcedPercent: 100
 
 # ============== MONITORING DELIVERY ============================
-# The scrape target of the operator, delivered as a PodMonitor for the
-# platform's Prometheus. The deployer sets this platform parameter; off by
-# default because it needs the monitoring operator's CRDs, and installing it
-# into a cluster without monitoring fails the release.
+# The scrape target and the alert rules of the operator, delivered as a
+# PodMonitor and a PrometheusRule for the platform's Prometheus. The deployer
+# sets this platform parameter; off by default because both need the
+# monitoring operator's CRDs, and installing them into a cluster without
+# monitoring fails the release.
 MONITORING_ENABLED: false
+
+# The alert rules over the policy status, one PrometheusRule scoped to the
+# release namespace. Every rule reads the operator's own series, the ones the
+# pod holding the Lease publishes; the service chart ships the rules over the
+# data plane. The durations below are the ones a deployer may need to move;
+# the expressions stay in the template.
+alerts:
+  enabled: true
+
+  # RatelimitStalled: the operator judged a domain stuck rather than
+  # progressing, with the reason in the label: a replica behind past the
+  # propagation deadline, a manifest format a replica does not read, or a
+  # generation that does not fit the ConfigMap. Held for stalledFor, above
+  # the deadline itself, so a rollout that lands late does not page.
+  stalledFor: 5m
+
+  # RatelimitNotReadyLong: the latest generation of a policy is not the one
+  # enforced. Reconciling and Propagating are normal for the kubelet's sync
+  # period; held for notReadyFor, an edit stuck on last-good or a rollout
+  # that never completes is what fires.
+  notReadyFor: 30m
+
+  # RatelimitRuleProblems: the latest generation has a blocking problem and
+  # is not enforced; last-good runs instead. Held for ruleProblemsFor so an
+  # author fixing a typo within minutes does not page.
+  ruleProblemsFor: 5m
+
+  # RatelimitConfigWriteErrors: the operator could not save the namespace's
+  # configuration. The replicas keep the previous one and the last-good
+  # fallback a restart would need is not being saved; any increase over the
+  # window fires.
+  configWriteErrorsWindow: 15m
+
+  # RatelimitNoOperatorLeader: no operator pod holds the Lease, so nothing
+  # compiles policies or writes the ConfigMap; the replicas keep enforcing
+  # what they have. Held for noLeaderFor, past the Lease's own handover.
+  noLeaderFor: 5m
 
 ISTIO_PUBLIC_GATEWAY_NAME: public-gateway
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway

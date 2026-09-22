@@ -1,0 +1,97 @@
+{{- /*
+The alert rules over the policy status. Every expression is scoped to the
+release namespace by the label the scrape adds, and every rule reads a series
+the operator pod holding the Lease publishes: the data plane's series and
+their rules are the service chart's. The hold durations come from
+.Values.alerts, where each one carries its rationale; the shape of each
+expression is fixed here.
+
+A label written as {{ "{{" }} $labels.x {{ "}}" }} is Prometheus's template
+syntax passed through Helm's.
+*/ -}}
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+{{- if and .Values.MONITORING_ENABLED .Values.alerts.enabled }}
+{{- $ns := .Release.Namespace }}
+{{- $sel := printf "namespace=%q" $ns }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ printf "%s-alerts" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/processed-by-operator: victoriametrics-operator
+spec:
+  groups:
+    - name: ratelimit-operator
+      rules:
+        - alert: RatelimitStalled
+          expr: max by (namespace, domain, reason) (ratelimit_policy_stalled{ {{- $sel -}} }) == 1
+          for: {{ .Values.alerts.stalledFor }}
+          labels:
+            severity: critical
+          annotations:
+            summary: A domain is stuck rather than progressing
+            description: >-
+              The operator judges domain {{ "{{" }} $labels.domain {{ "}}" }} in
+              {{ "{{" }} $labels.namespace {{ "}}" }} stalled with reason {{ "{{" }} $labels.reason {{ "}}" }}:
+              ReplicaStale is a replica behind past the propagation deadline, ReplicaFormatUnsupported a
+              replica that does not read the manifest's format, ConfigMapTooLarge a generation that does not
+              fit the ConfigMap. The policy's Ready condition names the replicas.
+
+        - alert: RatelimitNotReadyLong
+          expr: min by (namespace, domain) (ratelimit_policy_ready{ {{- $sel -}} }) == 0
+          for: {{ .Values.alerts.notReadyFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: The latest generation of a policy has not been enforced for long
+            description: >-
+              Domain {{ "{{" }} $labels.domain {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} has not
+              had its latest generation enforced for {{ .Values.alerts.notReadyFor }}. Reconciling and
+              Propagating pass within the kubelet's sync period; what stays is an edit held on last-good,
+              a fleet that cannot be probed, or a rollout that never completes. The reason is on the
+              policy's Ready condition and on the ratelimit_policy_ready series.
+
+        - alert: RatelimitRuleProblems
+          expr: max by (namespace, domain) (ratelimit_policy_rule_problems{ {{- $sel -}} , severity="blocking"}) > 0
+          for: {{ .Values.alerts.ruleProblemsFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: The latest generation of a policy has a blocking problem
+            description: >-
+              The latest generation of domain {{ "{{" }} $labels.domain {{ "}}" }} in
+              {{ "{{" }} $labels.namespace {{ "}}" }} carries {{ "{{" }} $value | printf "%.0f" {{ "}}" }} blocking
+              problems and is not enforced; the previous generation keeps running. The problems are listed
+              in the policy's status.
+
+        - alert: RatelimitConfigWriteErrors
+          expr: sum by (namespace, reason) (increase(ratelimit_config_write_errors_total{ {{- $sel -}} }[{{ .Values.alerts.configWriteErrorsWindow }}])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: The operator cannot save the namespace's configuration
+            description: >-
+              The operator in {{ "{{" }} $labels.namespace {{ "}}" }} failed
+              {{ "{{" }} $value | printf "%.0f" {{ "}}" }} writes of the ratelimit-config ConfigMap in
+              {{ .Values.alerts.configWriteErrorsWindow }} with reason {{ "{{" }} $labels.reason {{ "}}" }}.
+              The replicas keep the previous configuration and the last-good fallback a restart would need
+              is not being saved. size is a state the object cannot hold, api an answer of the API server,
+              other the rest; the operator log has the error.
+
+        - alert: RatelimitNoOperatorLeader
+          expr: absent(ratelimit_leader{ {{- $sel -}} } == 1)
+          for: {{ .Values.alerts.noLeaderFor }}
+          labels:
+            severity: critical
+            namespace: {{ $ns }}
+          annotations:
+            summary: No operator pod holds the Lease
+            description: >-
+              No ratelimit operator pod in {{ $ns }} reports holding the Lease, so no policy is compiled,
+              no status is written, and the ConfigMap is not maintained; the service replicas keep enforcing
+              what they applied last. Check the operator Deployment and its scrape.
+{{- end }}
+{{- end }}

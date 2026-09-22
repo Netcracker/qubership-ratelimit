@@ -1,0 +1,167 @@
+# The drill on the control plane's rules, as promtool replays it: one
+# synthetic series set per case, run against the rules the chart renders with
+# its default values. The negative cases carry the weight — a domain that
+# reaches Ready inside the hold, and a Lease that changes hands — because an
+# alert set that pages through a normal rollout is worse than none.
+# rules.yaml is written beside this file by the chart test.
+rule_files:
+  - rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # A stalled domain fires with the reason the operator judged, and a domain
+  # that is merely propagating does not.
+  - interval: 1m
+    name: a stalled domain beside a progressing one
+    input_series:
+      - series: 'ratelimit_policy_stalled{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", reason="ReplicaStale"}'
+        values: "1x10"
+      - series: 'ratelimit_policy_stalled{namespace="biz", pod="ratelimit-operator-0", domain="gateway.private", reason="Progressing"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RatelimitStalled
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RatelimitStalled
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              domain: gateway.public
+              reason: ReplicaStale
+              severity: critical
+            exp_annotations:
+              summary: A domain is stuck rather than progressing
+              description: >-
+                The operator judges domain gateway.public in biz stalled with reason ReplicaStale:
+                ReplicaStale is a replica behind past the propagation deadline, ReplicaFormatUnsupported a
+                replica that does not read the manifest's format, ConfigMapTooLarge a generation that does
+                not fit the ConfigMap. The policy's Ready condition names the replicas.
+
+  # A generation that takes a while to reach every replica is not an alert:
+  # the rule waits half an hour, and a rollout that completes inside it never
+  # pages.
+  - interval: 1m
+    name: a policy that turns Ready inside the hold
+    input_series:
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", reason="Propagating"}'
+        values: "0x20"
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", reason=""}'
+        values: "_x20 1x20"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: RatelimitNotReadyLong
+        exp_alerts: []
+
+  # One that never gets there fires, with the domain to look at.
+  - interval: 1m
+    name: a policy that never reaches its latest generation
+    input_series:
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", reason="ReplicaStale"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RatelimitNotReadyLong
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: RatelimitNotReadyLong
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              domain: gateway.public
+              severity: warning
+            exp_annotations:
+              summary: The latest generation of a policy has not been enforced for long
+              description: >-
+                Domain gateway.public in biz has not had its latest generation enforced for 30m. Reconciling
+                and Propagating pass within the kubelet's sync period; what stays is an edit held on
+                last-good, a fleet that cannot be probed, or a rollout that never completes. The reason is
+                on the policy's Ready condition and on the ratelimit_policy_ready series.
+
+  # A blocking problem on the latest generation fires; the informational
+  # severity beside it is not an alert.
+  - interval: 1m
+    name: blocking problems on the latest generation
+    input_series:
+      - series: 'ratelimit_policy_rule_problems{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", severity="blocking"}'
+        values: "2x10"
+      - series: 'ratelimit_policy_rule_problems{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", severity="info"}'
+        values: "3x10"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: RatelimitRuleProblems
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              domain: gateway.public
+              severity: warning
+            exp_annotations:
+              summary: The latest generation of a policy has a blocking problem
+              description: >-
+                The latest generation of domain gateway.public in biz carries 2 blocking problems and is not
+                enforced; the previous generation keeps running. The problems are listed in the policy's
+                status.
+
+  # A failed write of the configuration ConfigMap fires at once: the replicas
+  # are already running on the previous configuration.
+  - interval: 1m
+    name: a failed write of the configuration
+    input_series:
+      - series: 'ratelimit_config_write_errors_total{namespace="biz", pod="ratelimit-operator-0", reason="api"}'
+        values: "0 0 1 2 2 2 2 2 2 2"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: RatelimitConfigWriteErrors
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: RatelimitConfigWriteErrors
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              reason: api
+              severity: critical
+            exp_annotations:
+              summary: The operator cannot save the namespace's configuration
+              description: >-
+                The operator in biz failed 2 writes of the ratelimit-config ConfigMap in 15m with reason api.
+                The replicas keep the previous configuration and the last-good fallback a restart would need
+                is not being saved. size is a state the object cannot hold, api an answer of the API server,
+                other the rest; the operator log has the error.
+
+  # The Lease changing hands is a rollout, not an outage: the replacement
+  # takes it inside the hold and nothing pages.
+  - interval: 1m
+    name: the Lease handed over during a rollout
+    input_series:
+      - series: 'ratelimit_leader{namespace="biz", pod="ratelimit-operator-0"}'
+        values: "1x4 0x10"
+      - series: 'ratelimit_leader{namespace="biz", pod="ratelimit-operator-1"}'
+        values: "_x5 1x10"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RatelimitNoOperatorLeader
+        exp_alerts: []
+
+  # No pod holding it at all fires.
+  - interval: 1m
+    name: no operator holds the Lease
+    input_series:
+      - series: 'ratelimit_leader{namespace="biz", pod="ratelimit-operator-0"}'
+        values: "1x3 0x15"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RatelimitNoOperatorLeader
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RatelimitNoOperatorLeader
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              severity: critical
+            exp_annotations:
+              summary: No operator pod holds the Lease
+              description: >-
+                No ratelimit operator pod in biz reports holding the Lease, so no policy is compiled, no
+                status is written, and the ConfigMap is not maintained; the service replicas keep enforcing
+                what they applied last. Check the operator Deployment and its scrape.

@@ -46,7 +46,7 @@ charged, and reported, and it refuses nobody. What to look at, and where each ob
 | --- | --- | --- |
 | the domain is wired to the gateway | `ratelimit_unknown_domain_checks_total`, `ratelimit_checks_total{domain}` | the first stays at zero, the second grows at the gateway's request rate |
 | the blocks' routes match the traffic | `ratelimit_unmatched_checks_total{domain}` | the share of requests no block targets, and nothing else |
-| every declared key arrives | `ratelimit_extractions_total{domain, key}` against `ratelimit_tokens_seen_total`, `ratelimit_extraction_skips_total` | every key above zero while tokens are seen; skips at zero |
+| every declared key arrives | `ratelimit_extractions_total{domain, key}` against `ratelimit_tokens_seen_total{domain}`, `ratelimit_extraction_skips_total` | every key above zero while tokens are seen; skips at zero |
 | every rule matched at least once | `ratelimit_decisions_total{rule}` | one `ok` series per rule; a rule with no series never matched |
 | who would be refused, and how often | `outcome="shadow_over_limit"` per rule, `GET /counters?limited=true` | the identities and the share the business accepts |
 | the generation is the one enforced | `kubectl get rlp`, `Ready: True` | `REPLICAS` reads `n/n`, `PROBLEMS` blank |
@@ -70,7 +70,7 @@ ratelimit_decisions_total{domain="gateway.public",outcome="shadow_over_limit",ru
 ratelimit_extractions_total{domain="gateway.public",key="client"} 15
 ratelimit_extractions_total{domain="gateway.public",key="plan"} 0
 ratelimit_extractions_total{domain="gateway.public",key="roles"} 15
-ratelimit_tokens_seen_total 15
+ratelimit_tokens_seen_total{domain="gateway.public"} 15
 ratelimit_unknown_domain_checks_total 0
 ```
 
@@ -405,7 +405,7 @@ writes the status.
 | --- | --- | --- |
 | the domain is wired | `ratelimit_unknown_domain_checks_total`, `ratelimit_checks_total{domain, verdict}` | as named |
 | routes match | `ratelimit_unmatched_checks_total{domain}` | as named |
-| keys arrive | `ratelimit_extractions_total{domain, key}`, `ratelimit_extraction_skips_total{domain, key, reason}`, `ratelimit_tokens_seen_total` | as named |
+| keys arrive | `ratelimit_extractions_total{domain, key}`, `ratelimit_extraction_skips_total{domain, key, reason}`, `ratelimit_tokens_seen_total{domain}` | as named |
 | a rule matched | `ratelimit_decisions_total{domain, rule, outcome="ok"}` | as named |
 | would-be refusals | `ratelimit_decisions_total{outcome="shadow_over_limit"}`, `GET /counters?limited=true` | as named |
 | refusals after enablement | `ratelimit_decisions_total{outcome="over_limit"}`, `ratelimit_checks_total{verdict="over_limit"}` | as named |

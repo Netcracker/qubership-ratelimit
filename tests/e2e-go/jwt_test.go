@@ -73,17 +73,21 @@ var _ = Describe("identity extraction through the gateway", Ordered, Label("jwt"
 		Expect(gatewayGet("public-gateway", probePath, clientB)).NotTo(Equal(429),
 			"client B was refused out of client A's bucket")
 
-		// The detector's two halves moved: tokens arrived, and the declared
-		// key extracted values for them.
+		// The detector's two halves moved, both on this domain: tokens
+		// arrived, and the declared key extracted values for them. Both are
+		// read with the domain label, which is what keeps one domain's
+		// traffic from answering for another domain's declared keys.
 		sent := float64(limit + 2)
+		extractions := map[string]string{"domain": domain, "key": "tenant"}
+		tokens := map[string]string{"domain": domain}
 		Eventually(func() bool {
 			after := scrapeAllReplicas()
-			return counterSum(after, "ratelimit_extractions_total", map[string]string{"key": "tenant"})-
-				counterSum(beforeFamilies, "ratelimit_extractions_total", map[string]string{"key": "tenant"}) >= sent &&
-				counterSum(after, "ratelimit_tokens_seen_total", nil)-
-					counterSum(beforeFamilies, "ratelimit_tokens_seen_total", nil) >= sent
+			return counterSum(after, "ratelimit_extractions_total", extractions)-
+				counterSum(beforeFamilies, "ratelimit_extractions_total", extractions) >= sent &&
+				counterSum(after, "ratelimit_tokens_seen_total", tokens)-
+					counterSum(beforeFamilies, "ratelimit_tokens_seen_total", tokens) >= sent
 		}).WithTimeout(30*time.Second).Should(BeTrue(),
-			"the extraction series did not grow with the tokens")
+			"the extraction series of %s did not grow with the tokens", domain)
 	})
 })
 

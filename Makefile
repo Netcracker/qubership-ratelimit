@@ -297,10 +297,20 @@ CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
 GINKGO = $(LOCALBIN)/ginkgo
+PROMTOOL = $(LOCALBIN)/promtool
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
 GOLANGCI_LINT_VERSION ?= v2.8.0
+
+# promtool checks the charts' alert rules. It comes from the Prometheus
+# release tarball, verified against the release's sha256sums.txt: the module
+# is not go-installable, its go.mod carries replace directives. The manifest
+# is downloaded, the tarball's line required in it, and that one line handed
+# to the checksum tool, because a tool given empty input is not reliably an
+# error: Apple's sha256sum exits 0 on it, and the recipe would then unpack a
+# tarball nothing verified.
+PROMTOOL_VERSION ?= 3.14.0
 
 # The ginkgo CLI version follows go.mod, so the runner and the library cannot
 # drift apart.
@@ -345,6 +355,30 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 ginkgo: $(GINKGO) ## Download the ginkgo CLI locally if necessary.
 $(GINKGO): $(LOCALBIN)
 	$(call go-install-tool,$(GINKGO),github.com/onsi/ginkgo/v2/ginkgo,$(GINKGO_VERSION))
+
+.PHONY: promtool
+promtool: $(PROMTOOL) ## Download promtool from the Prometheus release locally if necessary.
+$(PROMTOOL): $(LOCALBIN)
+	@[ -f "$(PROMTOOL)-$(PROMTOOL_VERSION)" ] && [ "$$(readlink -- "$(PROMTOOL)" 2>/dev/null)" = "$(PROMTOOL)-$(PROMTOOL_VERSION)" ] || { \
+	set -e; \
+	os=$$(go env GOOS); arch=$$(go env GOARCH); \
+	dist=prometheus-$(PROMTOOL_VERSION).$$os-$$arch; \
+	base=https://github.com/prometheus/prometheus/releases/download/v$(PROMTOOL_VERSION); \
+	echo "Downloading $$base/$$dist.tar.gz"; \
+	curl -sSfL -o "$(LOCALBIN)/$$dist.tar.gz" "$$base/$$dist.tar.gz"; \
+	curl -sSfL -o "$(LOCALBIN)/sha256sums.txt" "$$base/sha256sums.txt"; \
+	grep -q " $$dist.tar.gz$$" "$(LOCALBIN)/sha256sums.txt" || \
+		{ echo "no checksum for $$dist.tar.gz in the release manifest"; exit 1; }; \
+	if command -v sha256sum >/dev/null 2>&1; then sum="sha256sum"; else sum="shasum -a 256"; fi; \
+	grep " $$dist.tar.gz$$" "$(LOCALBIN)/sha256sums.txt" > "$(LOCALBIN)/$$dist.sha256"; \
+	(cd "$(LOCALBIN)" && $$sum -c "$$dist.sha256"); \
+	rm -f "$(LOCALBIN)/sha256sums.txt" "$(LOCALBIN)/$$dist.sha256"; \
+	rm -f "$(PROMTOOL)"; \
+	tar -xzf "$(LOCALBIN)/$$dist.tar.gz" -C "$(LOCALBIN)" --strip-components=1 "$$dist/promtool"; \
+	rm -f "$(LOCALBIN)/$$dist.tar.gz"; \
+	mv "$(PROMTOOL)" "$(PROMTOOL)-$(PROMTOOL_VERSION)"; \
+	} ;\
+	ln -sf "$(PROMTOOL)-$(PROMTOOL_VERSION)" "$(PROMTOOL)"
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

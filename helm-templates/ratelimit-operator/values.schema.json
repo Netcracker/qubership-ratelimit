@@ -140,6 +140,49 @@
         false
       ]
     },
+    "alerts": {
+      "type": "object",
+      "title": "Alert rules",
+      "description": "The PrometheusRule of the chart, rendered with MONITORING_ENABLED; the thresholds and hold durations the expressions read.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the PrometheusRule over the policy status. Read only with MONITORING_ENABLED."
+        },
+        "stalledFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long a domain stays Stalled before RatelimitStalled fires."
+        },
+        "notReadyFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "30m",
+          "description": "How long a policy stays not Ready before RatelimitNotReadyLong fires."
+        },
+        "ruleProblemsFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long a blocking problem stays on the latest generation before RatelimitRuleProblems fires."
+        },
+        "configWriteErrorsWindow": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "15m",
+          "description": "The window over which any ConfigMap write error fires RatelimitConfigWriteErrors."
+        },
+        "noLeaderFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long no operator pod holds the Lease before RatelimitNoOperatorLeader fires."
+        }
+      },
+      "additionalProperties": false
+    },
     "ISTIO_PUBLIC_GATEWAY_NAME": {
       "type": "string",
       "title": "Public gateway name",

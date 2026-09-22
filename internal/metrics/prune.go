@@ -78,7 +78,9 @@ func sweep() {
 		_, ok := active.Domains[domain]
 		return ok
 	}
-	for _, vec := range []deletableVec{Checks, CheckDuration, UnmatchedChecks, Refusals, StoreRoundtrip, StoreErrors} {
+	for _, vec := range []deletableVec{
+		Checks, CheckDuration, UnmatchedChecks, Refusals, TokensSeen, StoreRoundtrip, StoreErrors,
+	} {
 		pruneVec(vec, domainAlive)
 	}
 	for _, vec := range []deletableVec{Decisions, NearLimit} {

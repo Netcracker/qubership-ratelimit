@@ -302,18 +302,19 @@ sum by (domain) (rate(ratelimit_unmatched_checks_total[5m]))   # checks that app
 
 An unknown domain is a typo between the gateway filter and `spec.domain`; the name itself is in the sampled log of the
 service, not in a label. And the extraction detector: a declared key that never arrives in a token. The extraction
-counters carry the domain and the declared key, so two domains of one namespace that declare the same key keep
-separate series:
+counters carry the domain and the declared key, and so does the token counter they are judged against, so two
+domains of one namespace keep separate series and an idle domain is never judged by a busy one's traffic:
 
 ```promql
-rate(ratelimit_extractions_total{key="plan"}[15m]) == 0 and on() rate(ratelimit_tokens_seen_total[15m]) > 0
+sum by (domain, key) (rate(ratelimit_extractions_total{key="plan"}[15m])) == 0
+  and on (domain) sum by (domain) (rate(ratelimit_tokens_seen_total[15m])) > 0
 ```
 
 ```text
 ratelimit_extractions_total{domain="gateway.public",key="client"} 44
 ratelimit_extractions_total{domain="gateway.public",key="plan"} 44
 ratelimit_extractions_total{domain="gateway.public",key="roles"} 44
-ratelimit_tokens_seen_total 69
+ratelimit_tokens_seen_total{domain="gateway.public"} 69
 ```
 
 The gap between the tokens seen and the extractions is the warm-up probes without a token and the simulations.
@@ -456,7 +457,8 @@ ratelimit_policy_replicas{domain="gateway.public",state="applied"} 1
 ratelimit_policy_replicas{domain="gateway.public",state="total"} 3
 ```
 
-The alert is `max(ratelimit_policy_stalled) == 1`, the `RatelimitStalled` rule of the [Helm doc](helm-chart.md); the
+The alert is the operator chart's `RatelimitStalled`, `ratelimit_policy_stalled == 1` held for `alerts.stalledFor`
+([Helm doc](helm-chart.md)); the
 generation each service pod enforces stays readable per pod:
 
 ```promql
@@ -897,7 +899,7 @@ controller and probe metrics from the operator pod.
 | `ratelimit_decisions_total{domain, rule, outcome}` | service pods | `shadow_over_limit` while introducing a limit (section 6) |
 | `ratelimit_near_limit_total{domain, rule}` | service pods | clients close to a limit before it fires; the margin is a share of the window's capacity, `burst` for GCRA |
 | `ratelimit_unknown_domain_checks_total` | service pods | a domain typo between the gateway and the policy (section 2) |
-| `ratelimit_extractions_total{domain, key}`, `ratelimit_tokens_seen_total` | service pods | the extraction detector (section 2) |
+| `ratelimit_extractions_total{domain, key}`, `ratelimit_tokens_seen_total{domain}` | service pods | the extraction detector (section 2) |
 | `ratelimit_store_errors_total{domain, reason}`, `ratelimit_store_roundtrip_seconds{domain}` | service pods | the store (section 1) |
 | `ratelimit_policy_ready{domain, reason}`, `ratelimit_policy_generation_lag{domain}` | operator pod | the status as gauges |
 | `ratelimit_policy_stalled{domain, reason}` | operator pod | `1` is a breakage: `ReplicaStale` or `ReplicaFormatUnsupported` (section 4), `NotCompiled` (sections 3 and 5), or `ConfigMapTooLarge`; `Progressing` at `0` |

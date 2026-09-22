@@ -391,7 +391,7 @@ func TestShouldRateLimit_countsTokensSeen(t *testing.T) {
 	log, _ := recordingLogger()
 	server := NewServer(ruleStore, log)
 
-	tokens := func() float64 { return testutil.ToFloat64(metrics.TokensSeen) }
+	tokens := func() float64 { return testutil.ToFloat64(metrics.TokensSeen.WithLabelValues(domain)) }
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice"}`))
 
 	assert.Equal(t, 1.0, delta(tokens, func() {
