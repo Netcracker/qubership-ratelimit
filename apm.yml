@@ -11,7 +11,7 @@ targets:
   - cursor
 dependencies:
   apm:
-    - Netcracker/qubership-ai-packages/agent-packages/qubership-repo-essentials
+    - Netcracker/qubership-ai-packages/agent-packages/qubership-repo-essentials#v1.2.0  # marketplace release
   mcp: []
 includes: auto
 scripts: {}
