@@ -67,7 +67,7 @@ the deployment; the empty render protects against that mistake. The defaults are
 
 | Deployment scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | the CRD, the operator (Deployment, SA, Role/RoleBinding), the filters, its PodMonitor | the service (Deployment, Service, SA), the AuthorizationPolicy, its PodMonitor, the dashboard |
+| single namespace | the CRD, the operator (Deployment, SA, Role/RoleBinding), the filters, its PodMonitor and PrometheusRule | the service (Deployment, Service, SA), the AuthorizationPolicy, its PodMonitor and PrometheusRule, the dashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | only the filters, which target the baseline RLS; no operator, no ServiceAccount, no RBAC, no CRD | nothing: an empty release |
 
