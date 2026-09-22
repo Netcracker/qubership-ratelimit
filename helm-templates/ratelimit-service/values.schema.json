@@ -151,6 +151,61 @@
         false
       ]
     },
+    "alerts": {
+      "type": "object",
+      "title": "Alert rules",
+      "description": "The PrometheusRule of the chart, rendered with MONITORING_ENABLED; the thresholds and hold durations the expressions read.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the PrometheusRule of the data plane. Read only with MONITORING_ENABLED."
+        },
+        "latencyBudgetSeconds": {
+          "$ref": "#/definitions/numberOrString",
+          "default": "0.01",
+          "description": "The p99 of a check, in seconds, above which RatelimitDecisionLatencyHigh fires."
+        },
+        "latencyFor": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "default": "10m",
+          "description": "How long the p99 stays above the budget before RatelimitDecisionLatencyHigh fires."
+        },
+        "unknownDomainFor": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long unknown-domain checks keep arriving before RatelimitUnknownDomain fires."
+        },
+        "storeErrorsFor": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "default": "2m",
+          "description": "How long store errors keep arriving before RatelimitStoreErrors fires."
+        },
+        "keyNotExtractedWindow": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "default": "15m",
+          "description": "The rate window of RatelimitKeyDeclaredNotExtracted."
+        },
+        "keyNotExtractedFor": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h|d|w|y)$",
+          "default": "30m",
+          "description": "How long a declared key stays at zero extractions next to tokens before RatelimitKeyDeclaredNotExtracted fires."
+        },
+        "domainBudgetWarnAt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128,
+          "default": 104,
+          "description": "The worst-case decision buckets of a domain at which RatelimitDomainBudgetNearLimit fires; the budget is 128."
+        }
+      },
+      "additionalProperties": false
+    },
     "ISTIO_PRIVATE_GATEWAY_NAME": {
       "type": "string",
       "title": "Private gateway name",

@@ -1,0 +1,100 @@
+{{- /*
+The alert rules of the data plane. Every expression is scoped to the release
+namespace by the label the scrape adds, so a namespace's rules fire on its own
+service and not on a neighbour's, and every rule reads a series the service
+publishes: the operator's series and their rules are the operator chart's.
+The thresholds and hold durations come from .Values.alerts, where each one
+carries its rationale; the shape of each expression is fixed here.
+
+A label written as {{ "{{" }} $labels.x {{ "}}" }} is Prometheus's template
+syntax passed through Helm's.
+*/ -}}
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+{{- if and .Values.MONITORING_ENABLED .Values.alerts.enabled }}
+{{- $ns := .Release.Namespace }}
+{{- $sel := printf "namespace=%q" $ns }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ printf "%s-alerts" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/processed-by-operator: victoriametrics-operator
+spec:
+  groups:
+    - name: ratelimit-service
+      rules:
+        - alert: RatelimitUnknownDomain
+          expr: sum by (namespace) (increase(ratelimit_unknown_domain_checks_total{ {{- $sel -}} }[5m])) > 0
+          for: {{ .Values.alerts.unknownDomainFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: Checks for a domain no policy claims pass unlimited
+            description: >-
+              The rate limit service in {{ "{{" }} $labels.namespace {{ "}}" }} answered
+              {{ "{{" }} $value | printf "%.0f" {{ "}}" }} checks in 5m for domains no RateLimitPolicy claims;
+              that traffic passes unlimited. The domain name is in the service log
+              (unknown rate limit domain): a typo in a gateway filter's domain, or a deleted policy.
+
+        - alert: RatelimitStoreErrors
+          expr: sum by (namespace, reason) (increase(ratelimit_store_errors_total{ {{- $sel -}} }[5m])) > 0
+          for: {{ .Values.alerts.storeErrorsFor }}
+          labels:
+            severity: critical
+          annotations:
+            summary: Counter store errors; checks fall to the gateway's failure mode
+            description: >-
+              The rate limit service in {{ "{{" }} $labels.namespace {{ "}}" }} failed
+              {{ "{{" }} $value | printf "%.0f" {{ "}}" }} store decisions in 5m with reason
+              {{ "{{" }} $labels.reason {{ "}}" }}. Every failed check is decided by the gateway's failure
+              mode, unlimited under fail-open. timeout is load or distance to the store, server is the
+              store answering an error, other is connectivity.
+
+        - alert: RatelimitDecisionLatencyHigh
+          expr: >-
+            histogram_quantile(0.99, sum by (namespace, le) (rate(ratelimit_check_duration_seconds_bucket{ {{- $sel -}} }[5m])))
+            > {{ .Values.alerts.latencyBudgetSeconds }}
+          for: {{ .Values.alerts.latencyFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: The p99 of a rate limit check is past the decision budget
+            description: >-
+              The p99 of a whole check in {{ "{{" }} $labels.namespace {{ "}}" }} is
+              {{ "{{" }} $value | humanizeDuration {{ "}}" }}, past the budget of
+              {{ .Values.alerts.latencyBudgetSeconds }}s. The gateway's filter timeout sits above the budget;
+              past the timeout, checks are decided by its failure mode. Read the store roundtrip and the
+              token cache hit ratio on the dashboard to see which half is slow.
+
+        - alert: RatelimitKeyDeclaredNotExtracted
+          expr: >-
+            sum by (namespace, domain, key) (rate(ratelimit_extractions_total{ {{- $sel -}} }[{{ .Values.alerts.keyNotExtractedWindow }}])) == 0
+            and on (namespace) sum by (namespace) (rate(ratelimit_tokens_seen_total{ {{- $sel -}} }[{{ .Values.alerts.keyNotExtractedWindow }}])) > 0
+          for: {{ .Values.alerts.keyNotExtractedFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: A declared identity key is never extracted from the tokens that arrive
+            description: >-
+              Domain {{ "{{" }} $labels.domain {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} declares the
+              key {{ "{{" }} $labels.key {{ "}}" }}, tokens arrive, and no request carried a value for it in
+              {{ .Values.alerts.keyNotExtractedWindow }}. The mapping names a claim the tokens do not carry,
+              and every client of a rule counting by that key shares one bucket. Read the claim path on
+              /debug/snapshot/{{ "{{" }} $labels.domain {{ "}}" }} of a service pod.
+
+        - alert: RatelimitDomainBudgetNearLimit
+          expr: max by (namespace, domain) (ratelimit_domain_decision_buckets{ {{- $sel -}} }) >= {{ .Values.alerts.domainBudgetWarnAt }}
+          labels:
+            severity: warning
+          annotations:
+            summary: A domain is close to the decision budget; the next edit may not compile
+            description: >-
+              Domain {{ "{{" }} $labels.domain {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} can collect
+              {{ "{{" }} $value | printf "%.0f" {{ "}}" }} buckets in one decision, against the budget of 128.
+              An edit past the budget is rejected as DomainBudgetExceeded and the domain stays on its
+              last-good generation. Narrow the rules' routes or split the domain before it gets there.
+{{- end }}
+{{- end }}

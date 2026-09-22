@@ -120,12 +120,55 @@ management:
     allowedServiceAccounts: []
 
 # ============== MONITORING DELIVERY ============================
-# The scrape target and the Grafana dashboard, delivered as custom resources:
-# a PodMonitor for the platform's Prometheus and a GrafanaDashboard for
-# grafana-operator v4. The deployer sets this platform parameter; off by
-# default because both need their operators' CRDs, and installing them into a
-# cluster without monitoring fails the release.
+# The scrape target, the alert rules, and the Grafana dashboard, delivered as
+# custom resources: a PodMonitor and a PrometheusRule for the platform's
+# Prometheus and a GrafanaDashboard for grafana-operator v4. The deployer
+# sets this platform parameter; off by default because all three need their
+# operators' CRDs, and installing them into a cluster without monitoring
+# fails the release.
 MONITORING_ENABLED: false
+
+# The alert rules of the data plane, one PrometheusRule scoped to the release
+# namespace. Every rule reads the service's own series; the operator chart
+# ships the rules over the policy status. The thresholds below are the ones a
+# deployer may need to move; the expressions stay in the template.
+alerts:
+  enabled: true
+
+  # RatelimitDecisionLatencyHigh: the p99 of a whole check, in seconds, above
+  # which the alert fires. The decision budget is 10 ms: the gateway's filter
+  # timeout sits above it, and a p99 past the budget is the store, the token
+  # cache, or the node saturating, before the timeout turns checks into the
+  # gateway's failure mode. Held for latencyFor so a burst does not page.
+  latencyBudgetSeconds: "0.01"
+  latencyFor: 10m
+
+  # RatelimitUnknownDomain: checks for a domain no policy claims pass
+  # unlimited, so the alert fires on any increase over the window, held for
+  # unknownDomainFor. A typo in a filter's domain or a deleted policy is
+  # steady traffic, not a spike; one stray check is not.
+  unknownDomainFor: 5m
+
+  # RatelimitStoreErrors: a failed counter store decision is a check the
+  # gateway's failure mode decided, whichever way it is set. Any increase over
+  # the window fires; held for storeErrorsFor to let one retried timeout
+  # pass.
+  storeErrorsFor: 2m
+
+  # RatelimitKeyDeclaredNotExtracted: a declared identity key whose
+  # extraction series stays at zero while tokens arrive is a claim path the
+  # tokens do not carry, and every client of that rule shares one bucket. The
+  # window is long because the series are rates of low-volume counters; the
+  # rule needs no traffic on the key, only tokens on the process.
+  keyNotExtractedWindow: 15m
+  keyNotExtractedFor: 30m
+
+  # RatelimitDomainBudgetNearLimit: the worst-case buckets one decision can
+  # collect across a domain, against the budget of 128 the compiler enforces.
+  # Past the budget an edit stops compiling and the domain stays on its
+  # last-good generation; the warning fires at this many so the author has
+  # room left when it does. 104 is 80 percent of the budget.
+  domainBudgetWarnAt: 104
 
 # The gateway whose identity the management AuthorizationPolicy allows by
 # default. The filters on the gateways are the operator chart's; this chart

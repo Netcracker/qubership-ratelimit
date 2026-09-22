@@ -263,9 +263,15 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # The alert rules each chart ships go through promtool check rules in
+      # the same test; the binary comes from the Prometheus release the
+      # Makefile pins, and its absence is a failure here as helm's is.
+      - name: Download promtool
+        run: make promtool
       - name: Compare the rendered charts with the contract constants
         env:
           CHARTS_TEST_REQUIRE_HELM: "1"
+          CHARTS_TEST_REQUIRE_PROMTOOL: "1"
         run: go test -count=1 ./tests/charts/
 
       # A satellite namespace runs no component. What it gets is the gateway

@@ -189,18 +189,29 @@ The profile is not optional. Each chart's `resource-profiles/` holds the four th
 so it governs when the Go heap starts collecting.
 
 `ratelimit-operator` renders the CRD, one operator replica with the only `Role` of the delivery, one `EnvoyFilter`
-per enabled gateway, and a `PodMonitor`. Its values are the filter's (`filter.*`; the port the filters send checks
-to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`, the gateway names, and the resource sizes
-without `REPLICAS`. It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap
+per enabled gateway, a `PodMonitor`, and a `PrometheusRule`. Its values are the filter's (`filter.*`; the port the
+filters send checks to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`, `alerts.*`, the gateway
+names, and the resource sizes without `REPLICAS`. It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap
 `ratelimit-config` and the operator's own Deployment by name, and nothing else in the namespace beyond the policies,
 the Lease, the Events, and the EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
 `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
-`grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `PodMonitor`, and the dashboard. Its
-values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`, and the five resource keys. Neither chart renders
-the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way: a satellite gets the filters from the
-operator chart and nothing from the service chart, so the deployer installs the same pair in every namespace.
+`grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `PodMonitor`, a `PrometheusRule`, and
+the dashboard. Its values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`, `alerts.*`, and the five
+resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way:
+a satellite gets the filters from the operator chart and nothing from the service chart, so the deployer installs the
+same pair in every namespace.
+
+The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
+`MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the
+way the series are: the service chart alerts on the data plane (`RatelimitUnknownDomain`, `RatelimitStoreErrors`,
+`RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`) and the
+operator chart on the policy status (`RatelimitStalled`, `RatelimitNotReadyLong`, `RatelimitRuleProblems`,
+`RatelimitConfigWriteErrors`, `RatelimitNoOperatorLeader`). Every expression is scoped to the release namespace. The
+thresholds and hold durations are under `alerts.*` of each chart, each with its rationale beside it in `values.yaml`;
+`alerts.enabled=false` keeps the scrape and drops the rules. `tests/charts` renders both rule sets and runs
+`promtool check rules` over them (`make promtool` fetches the binary from the Prometheus release the Makefile pins).
 
 The `Service` is named `ratelimit` whatever the release is called, and `fullnameOverride` does not rename it. A
 satellite computes the RLS address from that name and the baseline's namespace, so the name cannot depend on how the
