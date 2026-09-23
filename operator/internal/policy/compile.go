@@ -18,7 +18,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	enginecompile "github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/internal/convert"
 )
@@ -29,14 +29,14 @@ type Input struct {
 	// Namespace is the component's own, a segment of every counter key.
 	Namespace string
 
-	Policies []v1alpha1.RateLimitPolicy
+	Policies []v1.RateLimitPolicy
 
 	// Skew names, per object, the fields the stored object carries that this
 	// build's schema does not define. An entry keeps its object out of the
 	// enforced set whatever the decoded part of the spec would compile to,
 	// because the decoded part is not the spec: it is the subset of it this
 	// build could read.
-	Skew map[client.ObjectKey][]v1alpha1.RuleProblem
+	Skew map[client.ObjectKey][]v1.RuleProblem
 
 	// State is the persisted last-good state, keyed by domain. An empty map is a
 	// cold start: the latest specs are validated, and there is nothing to fall
@@ -62,7 +62,7 @@ type Outcome struct {
 
 	// Problems describes the latest generation. A single blocking entry keeps it
 	// out of the snapshot entirely.
-	Problems []v1alpha1.RuleProblem
+	Problems []v1.RuleProblem
 
 	// Err summarizes the blocking problems of the latest generation, and is nil
 	// when it compiles.
@@ -138,8 +138,8 @@ func Compile(in Input) *Result {
 				UID:        string(object.UID),
 				Generation: object.Generation,
 				Err:        mismatch,
-				Problems: []v1alpha1.RuleProblem{{
-					Reason:  v1alpha1.ProblemInvalidSpec,
+				Problems: []v1.RuleProblem{{
+					Reason:  v1.ProblemInvalidSpec,
 					Message: mismatch.Error(),
 				}},
 			}
@@ -162,9 +162,9 @@ func Compile(in Input) *Result {
 // the domain being unknown, and the snapshot has to say so.
 func compileDomain(
 	namespace string,
-	object *v1alpha1.RateLimitPolicy,
+	object *v1.RateLimitPolicy,
 	previous Bundle,
-	skew []v1alpha1.RuleProblem,
+	skew []v1.RuleProblem,
 ) (Outcome, *enginecompile.Snapshot, Bundle) {
 	return compileDomainFitting(namespace, object, previous, skew, "")
 }
@@ -175,9 +175,9 @@ func compileDomain(
 // last-good machinery below serves either case; the outcome says which.
 func compileDomainFitting(
 	namespace string,
-	object *v1alpha1.RateLimitPolicy,
+	object *v1.RateLimitPolicy,
 	previous Bundle,
-	skew []v1alpha1.RuleProblem,
+	skew []v1.RuleProblem,
 	tooLarge string,
 ) (Outcome, *enginecompile.Snapshot, Bundle) {
 	domain := object.Spec.Domain
@@ -200,7 +200,7 @@ func compileDomainFitting(
 		outcome.TooLarge = true
 		outcome.TooLargeReason = tooLarge
 		snapshot, _ = enginecompile.Compile(namespace, domain,
-			convert.Policy(&v1alpha1.RateLimitPolicySpec{Domain: domain}))
+			convert.Policy(&v1.RateLimitPolicySpec{Domain: domain}))
 	}
 
 	// The latest generation is invalid as a whole, or does not fit. Whatever
@@ -243,8 +243,8 @@ func compileDomainFitting(
 // claimed and enforces nothing until either the object or this build changes.
 func latestGeneration(
 	namespace string,
-	object *v1alpha1.RateLimitPolicy,
-	skew []v1alpha1.RuleProblem,
+	object *v1.RateLimitPolicy,
+	skew []v1.RuleProblem,
 ) (*enginecompile.Snapshot, Outcome) {
 	outcome := Outcome{
 		UID:        string(object.UID),
@@ -252,10 +252,10 @@ func latestGeneration(
 	}
 	if len(skew) > 0 {
 		empty, _ := enginecompile.Compile(namespace, object.Spec.Domain,
-			convert.Policy(&v1alpha1.RateLimitPolicySpec{Domain: object.Spec.Domain}))
+			convert.Policy(&v1.RateLimitPolicySpec{Domain: object.Spec.Domain}))
 		outcome.Problems = skew
 		outcome.Err = fmt.Errorf("%d %s this schema does not define (%s)",
-			len(skew), plural(len(skew), "field"), v1alpha1.ProblemInvalidSpec)
+			len(skew), plural(len(skew), "field"), v1.ProblemInvalidSpec)
 		return empty, outcome
 	}
 
@@ -292,8 +292,8 @@ func Domains(in Input) []string {
 
 // sortedPolicies orders the objects so that a compilation is a function of the
 // set rather than of the order events arrived in.
-func sortedPolicies(policies []v1alpha1.RateLimitPolicy) []*v1alpha1.RateLimitPolicy {
-	out := make([]*v1alpha1.RateLimitPolicy, len(policies))
+func sortedPolicies(policies []v1.RateLimitPolicy) []*v1.RateLimitPolicy {
+	out := make([]*v1.RateLimitPolicy, len(policies))
 	for i := range policies {
 		out[i] = &policies[i]
 	}
@@ -307,13 +307,13 @@ func sortedPolicies(policies []v1alpha1.RateLimitPolicy) []*v1alpha1.RateLimitPo
 }
 
 // ruleProblems renders the compiler's findings for the status.
-func ruleProblems(problems []enginecompile.Problem) []v1alpha1.RuleProblem {
+func ruleProblems(problems []enginecompile.Problem) []v1.RuleProblem {
 	if len(problems) == 0 {
 		return nil
 	}
-	out := make([]v1alpha1.RuleProblem, 0, len(problems))
+	out := make([]v1.RuleProblem, 0, len(problems))
 	for _, problem := range problems {
-		out = append(out, v1alpha1.RuleProblem{
+		out = append(out, v1.RuleProblem{
 			Block:   problem.Block,
 			Rule:    problem.Rule,
 			Reason:  string(problem.Reason),

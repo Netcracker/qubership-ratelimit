@@ -26,7 +26,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
@@ -43,7 +43,7 @@ func unitScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(s))
-	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, v1.AddToScheme(s))
 	return s
 }
 
@@ -53,9 +53,9 @@ func storeOver(t *testing.T, objects ...client.Object) *Store {
 	return New(c, unitNamespace, nil, "0.0.0-unit", logr.Discard())
 }
 
-func goodSpec(domain string) v1alpha1.RateLimitPolicySpec {
-	return v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: []v1alpha1.LimitBlock{{
-		Name: "a", Rules: []v1alpha1.Rule{{Name: "total", Rates: []v1alpha1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}}
+func goodSpec(domain string) v1.RateLimitPolicySpec {
+	return v1.RateLimitPolicySpec{Domain: domain, Limits: []v1.LimitBlock{{
+		Name: "a", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}}
 }
 
 // written renders an object the way Save would, then lets a test damage it.
@@ -246,7 +246,7 @@ func TestReconcile_returnsAReadFailure(t *testing.T) {
 }
 
 func TestReconcile_returnsAWriteFailure(t *testing.T) {
-	object := &v1alpha1.RateLimitPolicy{
+	object := &v1.RateLimitPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: "gateway.public", UID: "u", Generation: 1},
 		Spec:       goodSpec("gateway.public"),
 	}
@@ -270,7 +270,7 @@ func TestWriteErrorReason_namesTheCause(t *testing.T) {
 }
 
 func TestReconcile_writesTheNamespace(t *testing.T) {
-	object := &v1alpha1.RateLimitPolicy{
+	object := &v1.RateLimitPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: "gateway.public", UID: "u", Generation: 1},
 		Spec:       goodSpec("gateway.public"),
 	}

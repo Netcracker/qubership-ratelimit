@@ -9,7 +9,7 @@
 # usually needs: a bucket shared by an enumerated set of clients, a bucket per
 # role read out of an array claim, and an unconditional total.
 #
-apiVersion: ratelimit.netcracker.com/v1alpha1
+apiVersion: ratelimit.netcracker.com/v1
 kind: RateLimitPolicy
 metadata:
   name: gateway.partner

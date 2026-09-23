@@ -31,7 +31,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/controller"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
@@ -113,7 +113,7 @@ func (s *Store) Load(ctx context.Context, domains []string) (map[string]policy.B
 			s.log.Error(nil, "the manifest names a domain without a payload", "domain", domain)
 			continue
 		}
-		var spec v1alpha1.RateLimitPolicySpec
+		var spec v1.RateLimitPolicySpec
 		hash, err := manifest.DecodePayload(raw, &spec)
 		if err != nil {
 			s.log.Error(err, "skipping an unreadable payload", "domain", domain)

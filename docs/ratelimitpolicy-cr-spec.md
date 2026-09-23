@@ -1,6 +1,6 @@
 # RateLimitPolicy resource specification
 
-`RateLimitPolicy` is a namespace-scoped custom resource in the `ratelimit.netcracker.com` group, version `v1alpha1`,
+`RateLimitPolicy` is a namespace-scoped custom resource in the `ratelimit.netcracker.com` group, version `v1`,
 and the only resource of the service. **One object per domain**: it holds the rate-limiting rules, the extraction of
 identity keys from the JWT, and the named client groups. The operator of the same namespace validates it and
 writes it into the ConfigMap `ratelimit-config`; the service of the same namespace enforces it and serves the Istio
@@ -70,7 +70,7 @@ baseline and from the satellites are indistinguishable and are charged to the sa
 ## Spec structure
 
 ```yaml
-apiVersion: ratelimit.netcracker.com/v1alpha1
+apiVersion: ratelimit.netcracker.com/v1
 kind: RateLimitPolicy
 metadata:
   name: gateway.public                       # must equal spec.domain (CEL)

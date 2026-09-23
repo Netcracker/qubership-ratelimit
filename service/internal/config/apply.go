@@ -11,7 +11,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	enginecompile "github.com/netcracker/qubership-ratelimit/engine/compile"
 	counters "github.com/netcracker/qubership-ratelimit/engine/store"
@@ -129,7 +129,7 @@ func (a *Applier) Apply(cfg Configuration) {
 			}
 			a.Log.Error(nil, "the validated spec of a domain does not compile in this build; the domain enforces nothing",
 				"domain", domain, "generation", entry.Generation, "problems", len(problems))
-			snapshot, _ = enginecompile.Compile(a.Namespace, domain, convert.Policy(&v1alpha1.RateLimitPolicySpec{Domain: domain}))
+			snapshot, _ = enginecompile.Compile(a.Namespace, domain, convert.Policy(&v1.RateLimitPolicySpec{Domain: domain}))
 			built = a.build(domain, snapshot)
 			generation = 0
 		}

@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // The management port is reachable through the private gateway and nowhere
@@ -70,7 +70,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		// The listing reads the snapshot a replica swaps in once the generation
 		// compiles, and the gateway may reach any replica, so the policy has to
 		// be enforced everywhere before a listing can be expected to carry it.
-		Eventually(policyCondition(domain, v1alpha1.ConditionReady)).WithTimeout(2*time.Minute).
+		Eventually(policyCondition(domain, v1.ConditionReady)).WithTimeout(2*time.Minute).
 			Should(Equal("True"), "the policy of this suite never became Ready")
 
 		// The chart ships no HTTPRoute: on the platform the route to an
@@ -252,7 +252,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 func spendBudget(domain, prefix, rule string, limit int32, applied *bool) string {
 	if !*applied {
 		blocks := prefixLimits(prefix, "per-path", []string{"path"}, limit, 3600)
-		blocks[0].Rules[0].Rates[0].Algorithm = v1alpha1.AlgorithmGCRA
+		blocks[0].Rules[0].Rates[0].Algorithm = v1.AlgorithmGCRA
 		Expect(apply(newPolicy(domain, blocks))).To(Succeed())
 		*applied = true
 		waitApplied(domain)

@@ -22,7 +22,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // Configuration is one reading of the mounted directory: the manifest and
@@ -31,7 +31,7 @@ type Configuration struct {
 	Manifest manifest.Manifest
 
 	// Specs is keyed by domain; every domain of the manifest has one.
-	Specs map[string]v1alpha1.RateLimitPolicySpec
+	Specs map[string]v1.RateLimitPolicySpec
 
 	// Raw is the manifest as read, the identity of a reading: the watcher
 	// applies a reading whose bytes differ from the last one's, and the
@@ -82,14 +82,14 @@ func Read(dir string) (Configuration, error) {
 			Err: fmt.Errorf("domain %s: %w", domain, err), raw: raw}
 	}
 
-	cfg := Configuration{Manifest: m, Specs: make(map[string]v1alpha1.RateLimitPolicySpec, len(m.Domains)), Raw: raw}
+	cfg := Configuration{Manifest: m, Specs: make(map[string]v1.RateLimitPolicySpec, len(m.Domains)), Raw: raw}
 	for _, domain := range sortedDomains(m) {
 		entry := m.Domains[domain]
 		compressed, err := os.ReadFile(filepath.Join(dir, manifest.PayloadKey(domain)))
 		if err != nil {
 			return refuse(domain, fmt.Errorf("read the payload: %w", err))
 		}
-		var spec v1alpha1.RateLimitPolicySpec
+		var spec v1.RateLimitPolicySpec
 		hash, err := manifest.DecodePayload(compressed, &spec)
 		if err != nil {
 			return refuse(domain, err)

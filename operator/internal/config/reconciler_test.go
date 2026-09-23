@@ -18,7 +18,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 const testNamespace = "ratelimit-config-envtest"
@@ -33,28 +33,28 @@ var _ = Describe("the configuration writer", Ordered, func() {
 		reconciler *Reconciler
 	)
 
-	policyWith := func(domain string, blocks ...v1alpha1.LimitBlock) *v1alpha1.RateLimitPolicy {
-		return &v1alpha1.RateLimitPolicy{
+	policyWith := func(domain string, blocks ...v1.LimitBlock) *v1.RateLimitPolicy {
+		return &v1.RateLimitPolicy{
 			ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: domain},
-			Spec:       v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: blocks},
+			Spec:       v1.RateLimitPolicySpec{Domain: domain, Limits: blocks},
 		}
 	}
-	oneRule := func(name string) v1alpha1.LimitBlock {
-		return v1alpha1.LimitBlock{Name: name, Rules: []v1alpha1.Rule{{
-			Name: "total", Rates: []v1alpha1.Rate{{Requests: 10, PeriodSeconds: 60}}}}}
+	oneRule := func(name string) v1.LimitBlock {
+		return v1.LimitBlock{Name: name, Rules: []v1.Rule{{
+			Name: "total", Rates: []v1.Rate{{Requests: 10, PeriodSeconds: 60}}}}}
 	}
 	// wide is a block payload large enough to measure against a small limit:
 	// many blocks on disjoint paths with names that compress poorly, under
 	// the 128-bucket budget.
-	wide := func(prefix string, blocks int) []v1alpha1.LimitBlock {
-		out := make([]v1alpha1.LimitBlock, 0, blocks)
+	wide := func(prefix string, blocks int) []v1.LimitBlock {
+		out := make([]v1.LimitBlock, 0, blocks)
 		for i := range blocks {
-			out = append(out, v1alpha1.LimitBlock{
+			out = append(out, v1.LimitBlock{
 				Name: fmt.Sprintf("%s-%d-%x", prefix, i, i*2654435761),
-				Target: &v1alpha1.Target{Routes: []v1alpha1.Route{{
-					Path: v1alpha1.PathMatch{Type: v1alpha1.PathMatchPrefix, Value: fmt.Sprintf("/%s/%d/", prefix, i)}}}},
-				Rules: []v1alpha1.Rule{{Name: fmt.Sprintf("r-%x", i*40503),
-					Rates: []v1alpha1.Rate{{Requests: int32(100 + i), PeriodSeconds: 60}}}},
+				Target: &v1.Target{Routes: []v1.Route{{
+					Path: v1.PathMatch{Type: v1.PathMatchPrefix, Value: fmt.Sprintf("/%s/%d/", prefix, i)}}}},
+				Rules: []v1.Rule{{Name: fmt.Sprintf("r-%x", i*40503),
+					Rates: []v1.Rate{{Requests: int32(100 + i), PeriodSeconds: 60}}}},
 			})
 		}
 		return out
@@ -72,7 +72,7 @@ var _ = Describe("the configuration writer", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "the manifest the writer wrote does not decode")
 		return &object, m
 	}
-	create := func(policy *v1alpha1.RateLimitPolicy) {
+	create := func(policy *v1.RateLimitPolicy) {
 		DeferCleanup(func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, policy))).To(Succeed())
 		})
@@ -117,7 +117,7 @@ var _ = Describe("the configuration writer", Ordered, func() {
 
 		raw, ok := object.BinaryData[manifest.PayloadKey("gateway.one")]
 		Expect(ok).To(BeTrue(), "the payload key is <domain>.json.gz")
-		var spec v1alpha1.RateLimitPolicySpec
+		var spec v1.RateLimitPolicySpec
 		hash, err := manifest.DecodePayload(raw, &spec)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(hash).To(Equal(entry.Hash), "the manifest's hash is the payload's")
@@ -161,7 +161,7 @@ var _ = Describe("the configuration writer", Ordered, func() {
 
 		// A limit the small generation fits and the wide one does not.
 		reconciler.Limit = 1024
-		var latest v1alpha1.RateLimitPolicy
+		var latest v1.RateLimitPolicy
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(small), &latest)).To(Succeed())
 		latest.Spec.Limits = wide("wide", 100)
 		Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
@@ -171,7 +171,7 @@ var _ = Describe("the configuration writer", Ordered, func() {
 		object, m := read()
 		Expect(m.Domains["gateway.size"].Generation).To(Equal(int64(1)),
 			"the generation that does not fit is not written; last-good stays")
-		var spec v1alpha1.RateLimitPolicySpec
+		var spec v1.RateLimitPolicySpec
 		_, err := manifest.DecodePayload(object.BinaryData[manifest.PayloadKey("gateway.size")], &spec)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(spec.Limits).To(HaveLen(1), "the payload is the last-good spec")

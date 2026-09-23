@@ -25,7 +25,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 func freeAddr(t *testing.T) string {
@@ -39,7 +39,7 @@ func freeAddr(t *testing.T) string {
 
 // writeConfiguration puts a manifest with the given specs in dir, as the
 // kubelet would.
-func writeConfiguration(t *testing.T, dir string, specs ...v1alpha1.RateLimitPolicySpec) {
+func writeConfiguration(t *testing.T, dir string, specs ...v1.RateLimitPolicySpec) {
 	t.Helper()
 	m := manifest.Manifest{OperatorVersion: "t", Domains: map[string]manifest.Domain{}}
 	for _, s := range specs {
@@ -146,8 +146,8 @@ func TestService_isNotReadyWithoutAConfigurationAndReadyOnAnEmptyOne(t *testing.
 	assert.NotEqual(t, 0, code, "the listener answers")
 
 	// A domain arrives: enforced, reported.
-	writeConfiguration(t, dir, v1alpha1.RateLimitPolicySpec{Domain: "gateway.public", Limits: []v1alpha1.LimitBlock{{
-		Name: "api", Rules: []v1alpha1.Rule{{Name: "total", Rates: []v1alpha1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}})
+	writeConfiguration(t, dir, v1.RateLimitPolicySpec{Domain: "gateway.public", Limits: []v1.LimitBlock{{
+		Name: "api", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}})
 	require.Eventually(t, func() bool {
 		_, body := get(t, "http://"+options.MetricsAddr+contract.AppliedPath)
 		return strings.Contains(body, `"gateway.public"`)

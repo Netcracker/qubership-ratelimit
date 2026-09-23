@@ -21,7 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
-	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	ratelimitv1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
@@ -35,7 +35,7 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(s))
-	require.NoError(t, ratelimitv1alpha1.AddToScheme(s))
+	require.NoError(t, ratelimitv1.AddToScheme(s))
 	return s
 }
 
@@ -49,7 +49,7 @@ func fakeClientWith(t *testing.T, objects ...client.Object) (client.Client, *run
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(objects...).
-		WithStatusSubresource(&ratelimitv1alpha1.RateLimitPolicy{}).
+		WithStatusSubresource(&ratelimitv1.RateLimitPolicy{}).
 		Build()
 	return fakeClient, scheme
 }
@@ -98,23 +98,23 @@ func newReconciler(t *testing.T, probe FleetProbe, objects ...client.Object) (
 	}, fakeClient
 }
 
-func testPolicy(generation int64, rules ...ratelimitv1alpha1.Rule) *ratelimitv1alpha1.RateLimitPolicy {
+func testPolicy(generation int64, rules ...ratelimitv1.Rule) *ratelimitv1.RateLimitPolicy {
 	if len(rules) == 0 {
-		rules = []ratelimitv1alpha1.Rule{{
+		rules = []ratelimitv1.Rule{{
 			Name:  "total",
-			Rates: []ratelimitv1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}},
+			Rates: []ratelimitv1.Rate{{Requests: 100, PeriodSeconds: 60}},
 		}}
 	}
-	return &ratelimitv1alpha1.RateLimitPolicy{
+	return &ratelimitv1.RateLimitPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:  testNamespace,
 			Name:       testDomain,
 			Generation: generation,
 			UID:        testUID,
 		},
-		Spec: ratelimitv1alpha1.RateLimitPolicySpec{
+		Spec: ratelimitv1.RateLimitPolicySpec{
 			Domain: testDomain,
-			Limits: []ratelimitv1alpha1.LimitBlock{{Name: "api", Rules: rules}},
+			Limits: []ratelimitv1.LimitBlock{{Name: "api", Rules: rules}},
 		},
 	}
 }
@@ -123,9 +123,9 @@ func testRequest() ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testDomain}}
 }
 
-func fetch(t *testing.T, c client.Client) *ratelimitv1alpha1.RateLimitPolicy {
+func fetch(t *testing.T, c client.Client) *ratelimitv1.RateLimitPolicy {
 	t.Helper()
-	var object ratelimitv1alpha1.RateLimitPolicy
+	var object ratelimitv1.RateLimitPolicy
 	require.NoError(t, c.Get(context.Background(), testRequest().NamespacedName, &object))
 	return &object
 }
@@ -150,17 +150,17 @@ func TestReconcile_reportsAHealthyGeneration(t *testing.T) {
 	assert.Zero(t, stored.Status.Problems)
 	assert.Subset(t, stored.Status.EffectiveKeys, []string{"client", "method", "path"})
 
-	accepted := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
+	accepted := condition(t, stored.Status.Conditions, ratelimitv1.ConditionAccepted)
 	assert.Equal(t, metav1.ConditionTrue, accepted.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonRulesCompiled, accepted.Reason)
+	assert.Equal(t, ratelimitv1.ReasonRulesCompiled, accepted.Reason)
 
-	ready := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	ready := condition(t, stored.Status.Conditions, ratelimitv1.ConditionReady)
 	assert.Equal(t, metav1.ConditionTrue, ready.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonAllReplicas, ready.Reason)
+	assert.Equal(t, ratelimitv1.ReasonAllReplicas, ready.Reason)
 
-	stalled := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+	stalled := condition(t, stored.Status.Conditions, ratelimitv1.ConditionStalled)
 	assert.Equal(t, metav1.ConditionFalse, stalled.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonProgressing, stalled.Reason)
+	assert.Equal(t, ratelimitv1.ReasonProgressing, stalled.Reason)
 
 	assert.Equal(t, int32(3), stored.Status.Replicas.Total)
 	assert.Equal(t, int32(3), stored.Status.Replicas.Applied)
@@ -197,10 +197,10 @@ func TestReconcile_isIdempotent(t *testing.T) {
 }
 
 func TestReconcile_aBlockingProblemStallsTheGeneration(t *testing.T) {
-	broken := testPolicy(1, ratelimitv1alpha1.Rule{
+	broken := testPolicy(1, ratelimitv1.Rule{
 		Name:    "per-plan",
-		Matches: []ratelimitv1alpha1.Predicate{{Key: "plan", Operator: ratelimitv1alpha1.OperatorExists}},
-		Rates:   []ratelimitv1alpha1.Rate{{Requests: 10, PeriodSeconds: 60}},
+		Matches: []ratelimitv1.Predicate{{Key: "plan", Operator: ratelimitv1.OperatorExists}},
+		Rates:   []ratelimitv1.Rate{{Requests: 10, PeriodSeconds: 60}},
 	})
 	reconciler, fakeClient := newReconciler(t, unanimous(1), broken)
 
@@ -209,24 +209,24 @@ func TestReconcile_aBlockingProblemStallsTheGeneration(t *testing.T) {
 
 	stored := fetch(t, fakeClient)
 	require.Len(t, stored.Status.RuleProblems, 1)
-	assert.Equal(t, ratelimitv1alpha1.ProblemUnresolvedKeyReference, stored.Status.RuleProblems[0].Reason)
+	assert.Equal(t, ratelimitv1.ProblemUnresolvedKeyReference, stored.Status.RuleProblems[0].Reason)
 	assert.Equal(t, int32(1), stored.Status.Problems)
 	assert.Zero(t, stored.Status.ActiveGeneration)
 
-	accepted := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
+	accepted := condition(t, stored.Status.Conditions, ratelimitv1.ConditionAccepted)
 	assert.Equal(t, metav1.ConditionFalse, accepted.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonCompilationFailed, accepted.Reason)
-	assert.Contains(t, accepted.Message, ratelimitv1alpha1.ProblemUnresolvedKeyReference,
+	assert.Equal(t, ratelimitv1.ReasonCompilationFailed, accepted.Reason)
+	assert.Contains(t, accepted.Message, ratelimitv1.ProblemUnresolvedKeyReference,
 		"the summary names the reasons; the addresses stay in ruleProblems")
 
-	ready := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	ready := condition(t, stored.Status.Conditions, ratelimitv1.ConditionReady)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonNotCompiled, ready.Reason)
+	assert.Equal(t, ratelimitv1.ReasonNotCompiled, ready.Reason)
 	assert.Contains(t, ready.Message, "domain is unprotected")
 
-	stalled := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+	stalled := condition(t, stored.Status.Conditions, ratelimitv1.ConditionStalled)
 	assert.Equal(t, metav1.ConditionTrue, stalled.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonNotCompiled, stalled.Reason)
+	assert.Equal(t, ratelimitv1.ReasonNotCompiled, stalled.Reason)
 }
 
 // fakeState hands the reconciler a persisted last-good spec.
@@ -246,10 +246,10 @@ func TestReconcile_reportsTheGenerationThatKeepsRunning(t *testing.T) {
 	// A rejected edit costs the author an answer, never the gateway its limits:
 	// the divergence of the two generations is what says so.
 	good := testPolicy(1)
-	broken := testPolicy(2, ratelimitv1alpha1.Rule{
+	broken := testPolicy(2, ratelimitv1.Rule{
 		Name:    "per-plan",
-		Matches: []ratelimitv1alpha1.Predicate{{Key: "plan", Operator: ratelimitv1alpha1.OperatorExists}},
-		Rates:   []ratelimitv1alpha1.Rate{{Requests: 10, PeriodSeconds: 60}},
+		Matches: []ratelimitv1.Predicate{{Key: "plan", Operator: ratelimitv1.OperatorExists}},
+		Rates:   []ratelimitv1.Rate{{Requests: 10, PeriodSeconds: 60}},
 	})
 
 	reconciler, fakeClient := newReconciler(t, unanimous(2), broken)
@@ -265,8 +265,8 @@ func TestReconcile_reportsTheGenerationThatKeepsRunning(t *testing.T) {
 	assert.Equal(t, int64(1), stored.Status.ActiveGeneration)
 	assert.Equal(t, int32(1), stored.Status.Rules, "the last-good generation is the one counted")
 
-	ready := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionReady)
-	assert.Equal(t, ratelimitv1alpha1.ReasonNotCompiled, ready.Reason)
+	ready := condition(t, stored.Status.Conditions, ratelimitv1.ConditionReady)
+	assert.Equal(t, ratelimitv1.ReasonNotCompiled, ready.Reason)
 	assert.Contains(t, ready.Message, "generation 1 remains enforced")
 }
 
@@ -280,11 +280,11 @@ func TestReconcile_aFleetThatCannotBeObservedIsUnknown(t *testing.T) {
 	require.NoError(t, err)
 
 	stored := fetch(t, fakeClient)
-	ready := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	ready := condition(t, stored.Status.Conditions, ratelimitv1.ConditionReady)
 	assert.Equal(t, metav1.ConditionUnknown, ready.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonProbeFailed, ready.Reason)
+	assert.Equal(t, ratelimitv1.ReasonProbeFailed, ready.Reason)
 
-	stalled := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+	stalled := condition(t, stored.Status.Conditions, ratelimitv1.ConditionStalled)
 	assert.Equal(t, metav1.ConditionFalse, stalled.Status,
 		"a leader that cannot see the fleet has not established that anything is stuck")
 	assert.Nil(t, stored.Status.Replicas.LastCheckTime,
@@ -300,9 +300,9 @@ func TestReconcile_withoutAProbeTheFleetIsUnobserved(t *testing.T) {
 	_, err := reconciler.Reconcile(context.Background(), testRequest())
 	require.NoError(t, err)
 
-	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1.ConditionReady)
 	assert.Equal(t, metav1.ConditionUnknown, ready.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonProbeFailed, ready.Reason)
+	assert.Equal(t, ratelimitv1.ReasonProbeFailed, ready.Reason)
 }
 
 func TestReconcile_requeuesWhileTheGenerationSpreads(t *testing.T) {
@@ -318,13 +318,13 @@ func TestReconcile_requeuesWhileTheGenerationSpreads(t *testing.T) {
 		"a fleet still taking up a generation converges without an event")
 
 	stored := fetch(t, fakeClient)
-	ready := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	ready := condition(t, stored.Status.Conditions, ratelimitv1.ConditionReady)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, ratelimitv1alpha1.ReasonPropagating, ready.Reason)
+	assert.Equal(t, ratelimitv1.ReasonPropagating, ready.Reason)
 	assert.Contains(t, ready.Message, "2 of 3 replicas enforce generation 7")
 	assert.Contains(t, ready.Message, "ratelimit-7c9d-x2k1")
 
-	stalled := condition(t, stored.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+	stalled := condition(t, stored.Status.Conditions, ratelimitv1.ConditionStalled)
 	assert.Equal(t, metav1.ConditionFalse, stalled.Status, "a rollout is not a breakage")
 }
 
@@ -341,7 +341,7 @@ func TestReconcile_re_checksTheFleetWhileTheGenerationIsHealthy(t *testing.T) {
 	assert.Equal(t, ProbeInterval, result.RequeueAfter,
 		"a replica that falls behind after the status went green produces no event")
 
-	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1.ConditionReady)
 	assert.Equal(t, metav1.ConditionTrue, ready.Status)
 }
 
@@ -359,7 +359,7 @@ func TestReconcile_returnsTheErrorOfAFailedStatusWrite(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(testPolicy(1)).
-		WithStatusSubresource(&ratelimitv1alpha1.RateLimitPolicy{}).
+		WithStatusSubresource(&ratelimitv1.RateLimitPolicy{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(
 				context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption,
@@ -410,50 +410,50 @@ func TestJudge_walksTheReadyTable(t *testing.T) {
 		{
 			name:    "all ready replicas enforce the latest generation",
 			outcome: compiled, view: FleetView{Total: 3, Applied: 3},
-			ready: metav1.ConditionTrue, readyReason: ratelimitv1alpha1.ReasonAllReplicas,
-			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1alpha1.ReasonProgressing,
+			ready: metav1.ConditionTrue, readyReason: ratelimitv1.ReasonAllReplicas,
+			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1.ReasonProgressing,
 		},
 		{
 			name:    "no replica has it yet",
 			outcome: compiled, view: FleetView{Total: 3},
-			ready: metav1.ConditionFalse, readyReason: ratelimitv1alpha1.ReasonReconciling,
-			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1alpha1.ReasonProgressing,
+			ready: metav1.ConditionFalse, readyReason: ratelimitv1.ReasonReconciling,
+			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1.ReasonProgressing,
 		},
 		{
 			name:    "some replicas have it, within the deadline",
 			outcome: compiled, view: FleetView{Total: 3, Applied: 2}, since: 5 * time.Second,
-			ready: metav1.ConditionFalse, readyReason: ratelimitv1alpha1.ReasonPropagating,
-			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1alpha1.ReasonProgressing,
+			ready: metav1.ConditionFalse, readyReason: ratelimitv1.ReasonPropagating,
+			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1.ReasonProgressing,
 		},
 		{
 			name:    "no ready endpoint at all",
 			outcome: compiled, view: FleetView{},
-			ready: metav1.ConditionFalse, readyReason: ratelimitv1alpha1.ReasonNoReplicas,
-			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1alpha1.ReasonProgressing,
+			ready: metav1.ConditionFalse, readyReason: ratelimitv1.ReasonNoReplicas,
+			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1.ReasonProgressing,
 		},
 		{
 			name:    "a replica lags past the deadline",
 			outcome: compiled, view: FleetView{Total: 3, Applied: 2}, since: DefaultPropagationDeadline + time.Second,
-			ready: metav1.ConditionFalse, readyReason: ratelimitv1alpha1.ReasonReplicaStale,
-			stalled: metav1.ConditionTrue, stalledReason: ratelimitv1alpha1.ReasonReplicaStale,
+			ready: metav1.ConditionFalse, readyReason: ratelimitv1.ReasonReplicaStale,
+			stalled: metav1.ConditionTrue, stalledReason: ratelimitv1.ReasonReplicaStale,
 		},
 		{
 			name:    "the latest generation does not compile",
 			outcome: notCompiled, view: FleetView{Total: 3, Applied: 3},
-			ready: metav1.ConditionFalse, readyReason: ratelimitv1alpha1.ReasonNotCompiled,
-			stalled: metav1.ConditionTrue, stalledReason: ratelimitv1alpha1.ReasonNotCompiled,
+			ready: metav1.ConditionFalse, readyReason: ratelimitv1.ReasonNotCompiled,
+			stalled: metav1.ConditionTrue, stalledReason: ratelimitv1.ReasonNotCompiled,
 		},
 		{
 			name:    "the fleet could not be probed",
 			outcome: compiled, probeErr: errors.New("unavailable"),
-			ready: metav1.ConditionUnknown, readyReason: ratelimitv1alpha1.ReasonProbeFailed,
-			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1alpha1.ReasonProgressing,
+			ready: metav1.ConditionUnknown, readyReason: ratelimitv1.ReasonProbeFailed,
+			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1.ReasonProgressing,
 		},
 		{
 			name:    "a generation that does not compile outranks an unobservable fleet",
 			outcome: notCompiled, probeErr: errors.New("unavailable"),
-			ready: metav1.ConditionFalse, readyReason: ratelimitv1alpha1.ReasonNotCompiled,
-			stalled: metav1.ConditionTrue, stalledReason: ratelimitv1alpha1.ReasonNotCompiled,
+			ready: metav1.ConditionFalse, readyReason: ratelimitv1.ReasonNotCompiled,
+			stalled: metav1.ConditionTrue, stalledReason: ratelimitv1.ReasonNotCompiled,
 		},
 	}
 
@@ -477,7 +477,7 @@ func TestJudge_notCompiledOutranksTheFleet(t *testing.T) {
 
 	got := judge(outcome, FleetView{Total: 3, Applied: 3}, nil, 0, 0)
 
-	assert.Equal(t, ratelimitv1alpha1.ReasonNotCompiled, got.readyReason)
+	assert.Equal(t, ratelimitv1.ReasonNotCompiled, got.readyReason)
 	assert.Equal(t, metav1.ConditionTrue, got.stalled)
 }
 
@@ -499,9 +499,9 @@ func TestReadyAge_restartsTheClockOnANewGeneration(t *testing.T) {
 	now := time.Now()
 	object := testPolicy(5)
 	object.Status.Conditions = []metav1.Condition{{
-		Type:               ratelimitv1alpha1.ConditionReady,
+		Type:               ratelimitv1.ConditionReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             ratelimitv1alpha1.ReasonPropagating,
+		Reason:             ratelimitv1.ReasonPropagating,
 		LastTransitionTime: metav1.Time{Time: now.Add(-time.Hour)},
 		ObservedGeneration: 5,
 	}}
@@ -526,7 +526,7 @@ func TestReadyAge_restartsTheClockWhenPropagationBegins(t *testing.T) {
 	object := testPolicy(5)
 	stampedAnHourAgo := func(reason string) {
 		object.Status.Conditions = []metav1.Condition{{
-			Type:               ratelimitv1alpha1.ConditionReady,
+			Type:               ratelimitv1.ConditionReady,
 			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			LastTransitionTime: metav1.Time{Time: now.Add(-time.Hour)},
@@ -535,19 +535,19 @@ func TestReadyAge_restartsTheClockWhenPropagationBegins(t *testing.T) {
 	}
 
 	for _, reason := range []string{
-		ratelimitv1alpha1.ReasonNoReplicas,
-		ratelimitv1alpha1.ReasonProbeFailed,
-		ratelimitv1alpha1.ReasonAllReplicas,
-		ratelimitv1alpha1.ReasonNotCompiled,
+		ratelimitv1.ReasonNoReplicas,
+		ratelimitv1.ReasonProbeFailed,
+		ratelimitv1.ReasonAllReplicas,
+		ratelimitv1.ReasonNotCompiled,
 	} {
 		stampedAnHourAgo(reason)
 		assert.Zero(t, readyAge(object, now), "%s is not time spent propagating", reason)
 	}
 
 	for _, reason := range []string{
-		ratelimitv1alpha1.ReasonReconciling,
-		ratelimitv1alpha1.ReasonPropagating,
-		ratelimitv1alpha1.ReasonReplicaStale,
+		ratelimitv1.ReasonReconciling,
+		ratelimitv1.ReasonPropagating,
+		ratelimitv1.ReasonReplicaStale,
 	} {
 		stampedAnHourAgo(reason)
 		assert.InDelta(t, time.Hour, readyAge(object, now), float64(time.Second),
@@ -569,7 +569,7 @@ func TestReconcile_namesSilentReplicasApartFromLaggingOnes(t *testing.T) {
 	_, err := reconciler.Reconcile(context.Background(), testRequest())
 	require.NoError(t, err)
 
-	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1.ConditionReady)
 	assert.Contains(t, ready.Message, "ratelimit-lagging report another")
 	assert.Contains(t, ready.Message, "ratelimit-quiet did not answer")
 }
@@ -643,18 +643,18 @@ func TestPoliciesBehind_mapsTheFleetsOwnSliceToEveryPolicy(t *testing.T) {
 func TestReconcile_aSecondProbeStaysPropagatingAfterAnOutage(t *testing.T) {
 	object := testPolicy(7)
 	object.Status.Conditions = []metav1.Condition{{
-		Type:               ratelimitv1alpha1.ConditionReady,
+		Type:               ratelimitv1.ConditionReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             ratelimitv1alpha1.ReasonNoReplicas,
+		Reason:             ratelimitv1.ReasonNoReplicas,
 		LastTransitionTime: metav1.Time{Time: time.Now().Add(-time.Hour)},
 		ObservedGeneration: 7,
 	}}
 	probe := &stubProbe{view: FleetView{Total: 2, Applied: 1, Behind: []string{"ratelimit-b"}}}
 	reconciler, fakeClient := newReconciler(t, probe, object)
 
-	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1.ReasonPropagating,
 		"the first probe after an outage is the start of a rollout, not an hour into one")
-	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1.ReasonPropagating,
 		"the second probe read a stamp from before this rollout began")
 }
 
@@ -764,18 +764,18 @@ func TestReconcile_stampsTheTimeTheFleetWasAsked(t *testing.T) {
 func TestReconcile_aSecondProbeStaysPropagatingAfterAFixedGeneration(t *testing.T) {
 	object := testPolicy(6)
 	object.Status.Conditions = []metav1.Condition{{
-		Type:               ratelimitv1alpha1.ConditionReady,
+		Type:               ratelimitv1.ConditionReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             ratelimitv1alpha1.ReasonNotCompiled,
+		Reason:             ratelimitv1.ReasonNotCompiled,
 		LastTransitionTime: metav1.Time{Time: time.Now().Add(-24 * time.Hour)},
 		ObservedGeneration: 5,
 	}}
 	probe := &stubProbe{view: FleetView{Total: 2, Applied: 1, Behind: []string{"ratelimit-b"}}}
 	reconciler, fakeClient := newReconciler(t, probe, object)
 
-	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1.ReasonPropagating,
 		"a generation that now compiles starts its own rollout")
-	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonPropagating,
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1.ReasonPropagating,
 		"the second probe inherited the stamp of the generation that was broken")
 }
 
@@ -784,18 +784,18 @@ func TestReconcile_aSecondProbeStaysPropagatingAfterAFixedGeneration(t *testing.
 func TestReconcile_aRolloutPastTheDeadlineIsStale(t *testing.T) {
 	object := testPolicy(7)
 	object.Status.Conditions = []metav1.Condition{{
-		Type:               ratelimitv1alpha1.ConditionReady,
+		Type:               ratelimitv1.ConditionReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             ratelimitv1alpha1.ReasonPropagating,
+		Reason:             ratelimitv1.ReasonPropagating,
 		LastTransitionTime: metav1.Time{Time: time.Now().Add(-DefaultPropagationDeadline - time.Minute)},
 		ObservedGeneration: 7,
 	}}
 	probe := &stubProbe{view: FleetView{Total: 2, Applied: 1, Behind: []string{"ratelimit-b"}}}
 	reconciler, fakeClient := newReconciler(t, probe, object)
 
-	requireProbeReports(t, reconciler, fakeClient, ratelimitv1alpha1.ReasonReplicaStale,
+	requireProbeReports(t, reconciler, fakeClient, ratelimitv1.ReasonReplicaStale,
 		"a replica lagging past the deadline is what Stalled exists to page on")
-	stalled := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+	stalled := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1.ConditionStalled)
 	assert.Equal(t, metav1.ConditionTrue, stalled.Status)
 }
 
@@ -811,7 +811,7 @@ func requireProbeReports(
 	_, err := reconciler.Reconcile(context.Background(), testRequest())
 	require.NoError(t, err)
 
-	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1alpha1.ConditionReady)
+	ready := condition(t, fetch(t, fakeClient).Status.Conditions, ratelimitv1.ConditionReady)
 	require.Equal(t, reason, ready.Reason, because)
 }
 
@@ -824,9 +824,9 @@ func TestJudge_aRefusingReplicaIsFormatUnsupportedNotStale(t *testing.T) {
 	// refusal is the cause and gets named, the lag is the symptom.
 	got := judge(compiled, view, nil, time.Hour, 0)
 	assert.Equal(t, metav1.ConditionFalse, got.ready)
-	assert.Equal(t, ratelimitv1alpha1.ReasonReplicaFormatUnsupported, got.readyReason)
+	assert.Equal(t, ratelimitv1.ReasonReplicaFormatUnsupported, got.readyReason)
 	assert.Equal(t, metav1.ConditionTrue, got.stalled)
-	assert.Equal(t, ratelimitv1alpha1.ReasonReplicaFormatUnsupported, got.stalledReason)
+	assert.Equal(t, ratelimitv1.ReasonReplicaFormatUnsupported, got.stalledReason)
 	assert.Contains(t, got.readyMessage, "ratelimit-c")
 	assert.Contains(t, got.readyMessage, "upgrade the service before the operator")
 }
@@ -840,9 +840,9 @@ func TestJudge_aGenerationThatDoesNotFitIsTooLargeNotNotCompiled(t *testing.T) {
 
 	got := judge(outcome, FleetView{Total: 3, Applied: 3}, nil, 0, 0)
 	assert.Equal(t, metav1.ConditionFalse, got.ready)
-	assert.Equal(t, ratelimitv1alpha1.ReasonConfigMapTooLarge, got.readyReason)
+	assert.Equal(t, ratelimitv1.ReasonConfigMapTooLarge, got.readyReason)
 	assert.Equal(t, metav1.ConditionTrue, got.stalled)
-	assert.Equal(t, ratelimitv1alpha1.ReasonConfigMapTooLarge, got.stalledReason)
+	assert.Equal(t, ratelimitv1.ReasonConfigMapTooLarge, got.stalledReason)
 	assert.Contains(t, got.readyMessage, "generation 7 keeps serving")
 
 	// And a generation that does not compile stays NotCompiled whatever its
@@ -850,7 +850,7 @@ func TestJudge_aGenerationThatDoesNotFitIsTooLargeNotNotCompiled(t *testing.T) {
 	broken := outcome
 	broken.Err = errors.New("1 blocking problem (InvalidWindow)")
 	got = judge(broken, FleetView{Total: 3, Applied: 3}, nil, 0, 0)
-	assert.Equal(t, ratelimitv1alpha1.ReasonNotCompiled, got.readyReason)
+	assert.Equal(t, ratelimitv1.ReasonNotCompiled, got.readyReason)
 }
 
 func TestJudge_honorsTheConfiguredDeadline(t *testing.T) {
@@ -861,9 +861,9 @@ func TestJudge_honorsTheConfiguredDeadline(t *testing.T) {
 	// minute to project a change, stale under a configured 30 s. Zero is the
 	// default.
 	got := judge(compiled, lagging, nil, 45*time.Second, 0)
-	assert.Equal(t, ratelimitv1alpha1.ReasonPropagating, got.readyReason)
+	assert.Equal(t, ratelimitv1.ReasonPropagating, got.readyReason)
 	got = judge(compiled, lagging, nil, 45*time.Second, 30*time.Second)
-	assert.Equal(t, ratelimitv1alpha1.ReasonReplicaStale, got.readyReason)
+	assert.Equal(t, ratelimitv1.ReasonReplicaStale, got.readyReason)
 	got = judge(compiled, lagging, nil, DefaultPropagationDeadline+time.Second, DefaultPropagationDeadline)
-	assert.Equal(t, ratelimitv1alpha1.ReasonReplicaStale, got.readyReason)
+	assert.Equal(t, ratelimitv1.ReasonReplicaStale, got.readyReason)
 }

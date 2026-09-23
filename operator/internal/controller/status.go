@@ -11,7 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
@@ -65,17 +65,17 @@ func compile(
 // A false Accepted always carries CompilationFailed and a summary: the
 // individual causes live in RuleProblems, because conditions are a map keyed by
 // type and a generation can break in several places at once.
-func setAccepted(object *v1alpha1.RateLimitPolicy, outcome policy.Outcome) {
+func setAccepted(object *v1.RateLimitPolicy, outcome policy.Outcome) {
 	if outcome.Compiled() {
-		setCondition(&object.Status.Conditions, v1alpha1.ConditionAccepted, metav1.ConditionTrue,
-			v1alpha1.ReasonRulesCompiled,
+		setCondition(&object.Status.Conditions, v1.ConditionAccepted, metav1.ConditionTrue,
+			v1.ReasonRulesCompiled,
 			fmt.Sprintf("generation %d compiles: %d blocks, %d rules",
 				outcome.Generation, outcome.Blocks, outcome.Rules),
 			object.Generation)
 		return
 	}
-	setCondition(&object.Status.Conditions, v1alpha1.ConditionAccepted, metav1.ConditionFalse,
-		v1alpha1.ReasonCompilationFailed,
+	setCondition(&object.Status.Conditions, v1.ConditionAccepted, metav1.ConditionFalse,
+		v1.ReasonCompilationFailed,
 		fmt.Sprintf("generation %d does not compile: %s", outcome.Generation, outcome.Err),
 		object.Generation)
 }
@@ -88,8 +88,8 @@ func setAccepted(object *v1alpha1.RateLimitPolicy, outcome policy.Outcome) {
 // would put a Warning on the object every ten seconds for as long as the
 // author left it broken. The generation the previous condition was written
 // for is what distinguishes a new failure from the same one still standing.
-func turnedNotCompiled(before *v1alpha1.RateLimitPolicyStatus, generation int64) bool {
-	previous := meta.FindStatusCondition(before.Conditions, v1alpha1.ConditionAccepted)
+func turnedNotCompiled(before *v1.RateLimitPolicyStatus, generation int64) bool {
+	previous := meta.FindStatusCondition(before.Conditions, v1.ConditionAccepted)
 	if previous == nil {
 		return true
 	}
@@ -114,7 +114,7 @@ type fleetStatus struct {
 // every ready replica reports it. Stalled separates "still in progress" from
 // "stuck", so that a rollout does not page anyone and a broken informer does.
 func judge(outcome policy.Outcome, view FleetView, probeErr error, since, deadline time.Duration) fleetStatus {
-	progressing := fleetStatus{stalled: metav1.ConditionFalse, stalledReason: v1alpha1.ReasonProgressing}
+	progressing := fleetStatus{stalled: metav1.ConditionFalse, stalledReason: v1.ReasonProgressing}
 	if deadline <= 0 {
 		deadline = DefaultPropagationDeadline
 	}
@@ -125,10 +125,10 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since, deadli
 	case !outcome.Compiled():
 		return fleetStatus{
 			ready:         metav1.ConditionFalse,
-			readyReason:   v1alpha1.ReasonNotCompiled,
+			readyReason:   v1.ReasonNotCompiled,
 			readyMessage:  notCompiledMessage(outcome),
 			stalled:       metav1.ConditionTrue,
-			stalledReason: v1alpha1.ReasonNotCompiled,
+			stalledReason: v1.ReasonNotCompiled,
 		}
 
 	// A generation that compiles but does not fit the namespace's ConfigMap
@@ -137,16 +137,16 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since, deadli
 	case outcome.TooLarge:
 		return fleetStatus{
 			ready:         metav1.ConditionFalse,
-			readyReason:   v1alpha1.ReasonConfigMapTooLarge,
+			readyReason:   v1.ReasonConfigMapTooLarge,
 			readyMessage:  tooLargeMessage(outcome),
 			stalled:       metav1.ConditionTrue,
-			stalledReason: v1alpha1.ReasonConfigMapTooLarge,
+			stalledReason: v1.ReasonConfigMapTooLarge,
 		}
 
 	case probeErr != nil:
 		// The leader does not know, and a guess would be worse than saying so.
 		progressing.ready = metav1.ConditionUnknown
-		progressing.readyReason = v1alpha1.ReasonProbeFailed
+		progressing.readyReason = v1.ReasonProbeFailed
 		progressing.readyMessage = fmt.Sprintf("the replicas could not be observed: %v", probeErr)
 
 	case view.Total == 0:
@@ -154,12 +154,12 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since, deadli
 		// pod at all there is nobody to write this, and the age of
 		// lastCheckTime is what shows that instead.
 		progressing.ready = metav1.ConditionFalse
-		progressing.readyReason = v1alpha1.ReasonNoReplicas
+		progressing.readyReason = v1.ReasonNoReplicas
 		progressing.readyMessage = "the service has no ready endpoint: nothing is enforcing this policy"
 
 	case view.Applied == view.Total:
 		progressing.ready = metav1.ConditionTrue
-		progressing.readyReason = v1alpha1.ReasonAllReplicas
+		progressing.readyReason = v1.ReasonAllReplicas
 		progressing.readyMessage = fmt.Sprintf("all %d ready replicas enforce generation %d",
 			view.Total, outcome.ActiveGeneration)
 
@@ -170,29 +170,29 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since, deadli
 	case len(view.Refusing) > 0:
 		return fleetStatus{
 			ready:         metav1.ConditionFalse,
-			readyReason:   v1alpha1.ReasonReplicaFormatUnsupported,
+			readyReason:   v1.ReasonReplicaFormatUnsupported,
 			readyMessage:  refusingMessage(outcome, view),
 			stalled:       metav1.ConditionTrue,
-			stalledReason: v1alpha1.ReasonReplicaFormatUnsupported,
+			stalledReason: v1.ReasonReplicaFormatUnsupported,
 		}
 
 	case since > deadline:
 		return fleetStatus{
 			ready:         metav1.ConditionFalse,
-			readyReason:   v1alpha1.ReasonReplicaStale,
+			readyReason:   v1.ReasonReplicaStale,
 			readyMessage:  behindMessage(outcome, view),
 			stalled:       metav1.ConditionTrue,
-			stalledReason: v1alpha1.ReasonReplicaStale,
+			stalledReason: v1.ReasonReplicaStale,
 		}
 
 	case view.Applied == 0:
 		progressing.ready = metav1.ConditionFalse
-		progressing.readyReason = v1alpha1.ReasonReconciling
+		progressing.readyReason = v1.ReasonReconciling
 		progressing.readyMessage = behindMessage(outcome, view)
 
 	default:
 		progressing.ready = metav1.ConditionFalse
-		progressing.readyReason = v1alpha1.ReasonPropagating
+		progressing.readyReason = v1.ReasonPropagating
 		progressing.readyMessage = behindMessage(outcome, view)
 	}
 	return progressing
@@ -260,9 +260,9 @@ func someOf(names []string) string {
 // way to the replicas". Only time spent in one of them counts toward the
 // deadline that turns Propagating into ReplicaStale.
 var propagationReasons = map[string]bool{
-	v1alpha1.ReasonReconciling:  true,
-	v1alpha1.ReasonPropagating:  true,
-	v1alpha1.ReasonReplicaStale: true,
+	v1.ReasonReconciling:  true,
+	v1.ReasonPropagating:  true,
+	v1.ReasonReplicaStale: true,
 }
 
 // readyAge is how long this generation has been propagating, which is what
@@ -272,8 +272,8 @@ var propagationReasons = map[string]bool{
 // together: this one refuses to count a probe that has not entered propagation
 // yet, and setReadyCondition makes sure the stamp the *next* probe reads marks
 // the moment propagation began rather than some older transition.
-func readyAge(object *v1alpha1.RateLimitPolicy, now time.Time) time.Duration {
-	condition := meta.FindStatusCondition(object.Status.Conditions, v1alpha1.ConditionReady)
+func readyAge(object *v1.RateLimitPolicy, now time.Time) time.Duration {
+	condition := meta.FindStatusCondition(object.Status.Conditions, v1.ConditionReady)
 	if condition == nil || condition.ObservedGeneration != object.Generation {
 		return 0
 	}
@@ -309,14 +309,14 @@ func setReadyCondition(
 	generation int64,
 	now time.Time,
 ) {
-	if existing := meta.FindStatusCondition(*conditions, v1alpha1.ConditionReady); existing != nil &&
+	if existing := meta.FindStatusCondition(*conditions, v1.ConditionReady); existing != nil &&
 		restartsPropagationClock(existing, reason, generation) {
 		// Written through the pointer into the slice, so that
 		// meta.SetStatusCondition carries it forward when it keeps the
 		// condition it already has.
 		existing.LastTransitionTime = metav1.Time{Time: now}
 	}
-	setCondition(conditions, v1alpha1.ConditionReady, status, reason, message, generation)
+	setCondition(conditions, v1.ConditionReady, status, reason, message, generation)
 }
 
 // restartsPropagationClock reports whether the age readyAge is about to measure

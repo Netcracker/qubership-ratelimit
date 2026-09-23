@@ -29,7 +29,7 @@ shape (no axes / client / client+path / capture / tenant), groups and claim mapp
 has one policy: the object name == the domain.
 
 ```yaml
-apiVersion: ratelimit.netcracker.com/v1alpha1
+apiVersion: ratelimit.netcracker.com/v1
 kind: RateLimitPolicy
 metadata:
   name: gateway.public         # name == domain: one object per domain

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // ErrBundleOverflow reports a bundle too large to persist. Callers use it to
@@ -37,7 +37,7 @@ type Bundle struct {
 	GoodGeneration int64 `json:"goodGeneration"`
 
 	// GoodSpec is the spec being enforced.
-	GoodSpec v1alpha1.RateLimitPolicySpec `json:"goodSpec"`
+	GoodSpec v1.RateLimitPolicySpec `json:"goodSpec"`
 }
 
 // good returns the persisted spec of a policy, or nil when the bundle holds

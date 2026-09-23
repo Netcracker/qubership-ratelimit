@@ -9,7 +9,7 @@ package convert
 import (
 	"time"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 )
 
@@ -19,7 +19,7 @@ import (
 // rather than trusting them to.
 
 // Policy converts one policy spec, which is the whole of a domain.
-func Policy(spec *v1alpha1.RateLimitPolicySpec) *model.Policy {
+func Policy(spec *v1.RateLimitPolicySpec) *model.Policy {
 	if spec == nil {
 		return nil
 	}
@@ -48,7 +48,7 @@ func Policy(spec *v1alpha1.RateLimitPolicySpec) *model.Policy {
 	return out
 }
 
-func modelRoutes(routes []v1alpha1.Route) []model.Route {
+func modelRoutes(routes []v1.Route) []model.Route {
 	if len(routes) == 0 {
 		return nil
 	}
@@ -69,7 +69,7 @@ func modelRoutes(routes []v1alpha1.Route) []model.Route {
 	return out
 }
 
-func modelRule(rule *v1alpha1.Rule) model.Rule {
+func modelRule(rule *v1.Rule) model.Rule {
 	out := model.Rule{
 		Name:          rule.Name,
 		Counters:      rule.Counters,
@@ -103,7 +103,7 @@ func modelRule(rule *v1alpha1.Rule) model.Rule {
 	return out
 }
 
-func modelMappings(mappings []v1alpha1.ClaimMapping) []model.KeyMapping {
+func modelMappings(mappings []v1.ClaimMapping) []model.KeyMapping {
 	if len(mappings) == 0 {
 		return nil
 	}
@@ -122,7 +122,7 @@ func modelMappings(mappings []v1alpha1.ClaimMapping) []model.KeyMapping {
 	return out
 }
 
-func modelGroups(groups []v1alpha1.ClientGroup) []model.Group {
+func modelGroups(groups []v1.ClientGroup) []model.Group {
 	if len(groups) == 0 {
 		return nil
 	}

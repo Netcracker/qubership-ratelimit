@@ -12,7 +12,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // The seams of the split: what each half does when the other is missing or
@@ -31,7 +31,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 		BeforeAll(func() {
 			Expect(apply(newPolicy(domain, totalLimits(1000, 60)))).To(Succeed())
 			waitApplied(domain)
-			Eventually(readyReason(domain)).Should(Equal(v1alpha1.ReasonAllReplicas))
+			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas))
 		})
 		AfterAll(func() {
 			if fleet != nil {
@@ -46,8 +46,8 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			// so rather than reporting a fleet of none as whole.
 			fleet = scaleFleet(0)
 			Eventually(readyReason(domain)).WithTimeout(2*time.Minute).WithPolling(2*time.Second).
-				Should(Equal(v1alpha1.ReasonNoReplicas), "the operator did not report the missing service")
-			Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("False"),
+				Should(Equal(v1.ReasonNoReplicas), "the operator did not report the missing service")
+			Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("False"),
 				"a fleet of none is not stuck; it is absent")
 			p, err := getPolicy(domain)
 			Expect(err).NotTo(HaveOccurred())
@@ -58,7 +58,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			fleet.restore()
 			fleet = nil
 			Eventually(readyReason(domain)).WithTimeout(propagationTimeout).WithPolling(2*time.Second).
-				Should(Equal(v1alpha1.ReasonAllReplicas), "the fleet did not come back: %s", describeReplicas(domain))
+				Should(Equal(v1.ReasonAllReplicas), "the fleet did not come back: %s", describeReplicas(domain))
 		})
 	})
 
@@ -68,7 +68,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 		BeforeAll(func() {
 			Expect(apply(newPolicy(domain, prefixLimits(probePath, "total", nil, 1, 1)))).To(Succeed())
 			waitApplied(domain)
-			Eventually(readyReason(domain)).Should(Equal(v1alpha1.ReasonAllReplicas))
+			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas))
 		})
 		AfterAll(func() {
 			if operatorOff {
@@ -134,9 +134,9 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			scaleDeployment(operatorDeployment(), 1)
 			operatorOff = false
 			Eventually(readyReason(domain)).WithTimeout(time.Minute).WithPolling(200*time.Millisecond).
-				Should(Equal(v1alpha1.ReasonReplicaFormatUnsupported),
+				Should(Equal(v1.ReasonReplicaFormatUnsupported),
 					"the operator never reported the refusing replicas")
-			Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("True"),
+			Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("True"),
 				"a replica that will never take the generation up is stuck, not in progress")
 			Eventually(func() int {
 				m, err := configManifest()
@@ -146,7 +146,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 				return m.FormatVersion
 			}).WithTimeout(time.Minute).Should(Equal(manifest.FormatVersion), "the operator did not rewrite the manifest")
 			Eventually(readyReason(domain)).WithTimeout(propagationTimeout).WithPolling(time.Second).
-				Should(Equal(v1alpha1.ReasonAllReplicas), "Ready did not come back after the rewrite")
+				Should(Equal(v1.ReasonAllReplicas), "Ready did not come back after the rewrite")
 			for _, pod := range servicePods() {
 				Expect(appliedReport(pod).Refusal).To(BeNil(), "replica %s still reports a refusal", pod.Name)
 			}
@@ -170,8 +170,8 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			Expect(apply(newPolicy(bigA, totalLimits(100, 60)))).To(Succeed())
 			Expect(apply(withClients(newPolicy(bigB, totalLimits(100, 60)), bigClients))).To(Succeed())
 			waitApplied(bigA, bigB)
-			Eventually(readyReason(bigA)).Should(Equal(v1alpha1.ReasonAllReplicas))
-			Eventually(readyReason(bigB)).Should(Equal(v1alpha1.ReasonAllReplicas))
+			Eventually(readyReason(bigA)).Should(Equal(v1.ReasonAllReplicas))
+			Eventually(readyReason(bigB)).Should(Equal(v1.ReasonAllReplicas))
 			Expect(manifestGeneration(bigA)()).To(Equal(int64(1)))
 
 			// The second generation of A does not fit beside B. A's first
@@ -182,14 +182,14 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			Expect(k8s.Update(ctx, p)).To(Succeed())
 
 			Eventually(readyReason(bigA)).WithTimeout(propagationTimeout).WithPolling(2*time.Second).
-				Should(Equal(v1alpha1.ReasonConfigMapTooLarge), "the operator did not refuse the generation for its size")
-			Expect(policyCondition(bigA, v1alpha1.ConditionStalled)()).To(Equal("True"),
+				Should(Equal(v1.ReasonConfigMapTooLarge), "the operator did not refuse the generation for its size")
+			Expect(policyCondition(bigA, v1.ConditionStalled)()).To(Equal("True"),
 				"a generation that does not fit is stuck, not in progress")
-			Expect(policyCondition(bigA, v1alpha1.ConditionAccepted)()).To(Equal("True"),
+			Expect(policyCondition(bigA, v1.ConditionAccepted)()).To(Equal("True"),
 				"the generation compiles; it is the size that refuses it")
 			Expect(generations(bigA)()).To(Equal([2]int64{2, 1}), "last-good is not the active generation")
 			Expect(manifestGeneration(bigA)()).To(Equal(int64(1)), "the generation that does not fit reached the object")
-			Expect(readyReason(bigB)()).To(Equal(v1alpha1.ReasonAllReplicas), "the other domain was touched")
+			Expect(readyReason(bigB)()).To(Equal(v1.ReasonAllReplicas), "the other domain was touched")
 
 			// The object stays within the limit, as read from the API.
 			cm, err := configMap()
@@ -206,7 +206,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 		BeforeAll(func() {
 			Expect(apply(newPolicy(domain, prefixLimits(probePath, "total", nil, 1, 1)))).To(Succeed())
 			waitApplied(domain)
-			Eventually(readyReason(domain)).Should(Equal(v1alpha1.ReasonAllReplicas))
+			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas))
 			waitGatewayServes("public-gateway", probePath)
 		})
 		AfterAll(func() { deletePolicies(domain) })
@@ -238,7 +238,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			Expect(codes[0]).NotTo(Equal(429), "the first request of the burst was refused")
 			Expect(codes).To(ContainElement(429), "the limit is not enforced after the deletion")
 			Consistently(readyReason(domain)).WithTimeout(15*time.Second).WithPolling(time.Second).
-				Should(Equal(v1alpha1.ReasonAllReplicas), "Ready flickered over a deletion that changed no rule")
+				Should(Equal(v1.ReasonAllReplicas), "Ready flickered over a deletion that changed no rule")
 		})
 	})
 })
@@ -250,7 +250,7 @@ const bigClients = 26000
 // withClients gives the policy a group of n random client names and a rule
 // that references it, so the payload compresses poorly: the spec on the
 // size limit needs bytes gzip cannot fold.
-func withClients(p *v1alpha1.RateLimitPolicy, n int) *v1alpha1.RateLimitPolicy {
+func withClients(p *v1.RateLimitPolicy, n int) *v1.RateLimitPolicy {
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	clients := make([]string, 0, n)
 	name := make([]byte, 32)
@@ -260,13 +260,13 @@ func withClients(p *v1alpha1.RateLimitPolicy, n int) *v1alpha1.RateLimitPolicy {
 		}
 		clients = append(clients, string(name))
 	}
-	p.Spec.Groups = []v1alpha1.ClientGroup{{Name: "tenants", Clients: clients}}
-	p.Spec.Limits = append(p.Spec.Limits, v1alpha1.LimitBlock{
+	p.Spec.Groups = []v1.ClientGroup{{Name: "tenants", Clients: clients}}
+	p.Spec.Limits = append(p.Spec.Limits, v1.LimitBlock{
 		Name: "tenants",
-		Rules: []v1alpha1.Rule{{
+		Rules: []v1.Rule{{
 			Name:    "listed",
-			Matches: []v1alpha1.Predicate{{Key: "client", Operator: v1alpha1.OperatorInGroup, Value: "tenants"}},
-			Rates:   []v1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}},
+			Matches: []v1.Predicate{{Key: "client", Operator: v1.OperatorInGroup, Value: "tenants"}},
+			Rates:   []v1.Rate{{Requests: 100, PeriodSeconds: 60}},
 		}},
 	})
 	return p

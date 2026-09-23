@@ -24,7 +24,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	ratelimitv1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/internal/process"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/app"
 )
@@ -43,7 +43,7 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	utilruntime.Must(ratelimitv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(ratelimitv1.AddToScheme(scheme))
 }
 
 func main() {

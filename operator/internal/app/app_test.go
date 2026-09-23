@@ -17,7 +17,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 const testNamespace = "ratelimit-app-envtest"
@@ -73,10 +73,10 @@ var _ = Describe("the operator, built", Ordered, func() {
 				&corev1.ConfigMap{})
 		}).WithTimeout(20*time.Second).Should(Succeed(), "the writer did not write the empty manifest at start")
 
-		policy := &v1alpha1.RateLimitPolicy{
+		policy := &v1.RateLimitPolicy{
 			ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "gateway.app"},
-			Spec: v1alpha1.RateLimitPolicySpec{Domain: "gateway.app", Limits: []v1alpha1.LimitBlock{{
-				Name: "a", Rules: []v1alpha1.Rule{{Name: "total", Rates: []v1alpha1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}},
+			Spec: v1.RateLimitPolicySpec{Domain: "gateway.app", Limits: []v1.LimitBlock{{
+				Name: "a", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}},
 		}
 		Expect(k8sClient.Create(ctx, policy)).To(Succeed())
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, policy))).To(Succeed()) })
@@ -95,17 +95,17 @@ var _ = Describe("the operator, built", Ordered, func() {
 			return keys
 		}).WithTimeout(20 * time.Second).Should(ContainElement("gateway.app.json.gz"))
 		Eventually(func() string {
-			var got v1alpha1.RateLimitPolicy
+			var got v1.RateLimitPolicy
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), &got); err != nil {
 				return ""
 			}
 			for _, c := range got.Status.Conditions {
-				if c.Type == v1alpha1.ConditionReady {
+				if c.Type == v1.ConditionReady {
 					return c.Reason
 				}
 			}
 			return ""
-		}).WithTimeout(20 * time.Second).Should(Equal(v1alpha1.ReasonNoReplicas))
+		}).WithTimeout(20 * time.Second).Should(Equal(v1.ReasonNoReplicas))
 
 		// And the probes answer.
 		Eventually(func() int {

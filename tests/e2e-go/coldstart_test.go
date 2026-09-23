@@ -10,7 +10,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // Cold start of the service: what a replica born with nothing but its volume
@@ -130,11 +130,11 @@ var _ = Describe("cold start of the service", Ordered, Label("coldstart"), func(
 		Eventually(manifestGeneration(domain)).Should(Equal(good),
 			"the good generation never reached %s", contract.ConfigMapName)
 
-		p.Spec.Limits[0].Rules[0].Matches = []v1alpha1.Predicate{{
-			Key: "tenant", Operator: v1alpha1.OperatorExists}}
+		p.Spec.Limits[0].Rules[0].Matches = []v1.Predicate{{
+			Key: "tenant", Operator: v1.OperatorExists}}
 		Expect(k8s.Update(ctx, p)).To(Succeed())
 
-		Eventually(policyCondition(domain, v1alpha1.ConditionReady)).Should(Equal("False"),
+		Eventually(policyCondition(domain, v1.ConditionReady)).Should(Equal("False"),
 			"the breaking edit was not rejected")
 		Eventually(generations(domain)).Should(WithTransform(
 			func(g [2]int64) bool { return g[0] > good && g[1] == good }, BeTrue()),

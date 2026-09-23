@@ -20,7 +20,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	"github.com/netcracker/qubership-ratelimit/service/internal/store"
 )
@@ -39,14 +39,14 @@ func newFixture(t *testing.T) *fixture {
 	return &fixture{t: t, dir: t.TempDir()}
 }
 
-func spec(domain string, requests int32) v1alpha1.RateLimitPolicySpec {
-	return v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: []v1alpha1.LimitBlock{{
-		Name: "api", Rules: []v1alpha1.Rule{{Name: "total", Rates: []v1alpha1.Rate{{Requests: requests, PeriodSeconds: 60}}}}}}}
+func spec(domain string, requests int32) v1.RateLimitPolicySpec {
+	return v1.RateLimitPolicySpec{Domain: domain, Limits: []v1.LimitBlock{{
+		Name: "api", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: requests, PeriodSeconds: 60}}}}}}}
 }
 
 // write puts the specs in the directory under a manifest at the given
 // generation for every domain.
-func (f *fixture) write(generation int64, specs ...v1alpha1.RateLimitPolicySpec) manifest.Manifest {
+func (f *fixture) write(generation int64, specs ...v1.RateLimitPolicySpec) manifest.Manifest {
 	f.t.Helper()
 	m := manifest.Manifest{OperatorVersion: "t", Domains: map[string]manifest.Domain{}}
 	for _, s := range specs {
@@ -301,11 +301,11 @@ func TestApplier_reusesTheEngineOfAnUnchangedDomain(t *testing.T) {
 
 // A spec the operator validated under rules this build does not share: two
 // rules of one name, which the compiler refuses.
-func badSpec(domain string) v1alpha1.RateLimitPolicySpec {
-	return v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: []v1alpha1.LimitBlock{{
-		Name: "api", Rules: []v1alpha1.Rule{
-			{Name: "total", Rates: []v1alpha1.Rate{{Requests: 1, PeriodSeconds: 60}}},
-			{Name: "total", Rates: []v1alpha1.Rate{{Requests: 2, PeriodSeconds: 60}}},
+func badSpec(domain string) v1.RateLimitPolicySpec {
+	return v1.RateLimitPolicySpec{Domain: domain, Limits: []v1.LimitBlock{{
+		Name: "api", Rules: []v1.Rule{
+			{Name: "total", Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60}}},
+			{Name: "total", Rates: []v1.Rate{{Requests: 2, PeriodSeconds: 60}}},
 		}}}}
 }
 

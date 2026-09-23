@@ -18,7 +18,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // A replica the operator cannot reach is the case Stalled exists for: a pod
@@ -100,7 +100,7 @@ var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"
 		// rollout as far as it can tell. The deadline is ninety seconds in
 		// the split, so a poll every second cannot miss the window.
 		Eventually(readyReason(domain)).WithTimeout(2*time.Minute).WithPolling(time.Second).
-			Should(Equal(v1alpha1.ReasonPropagating),
+			Should(Equal(v1.ReasonPropagating),
 				"the new operator never reported the silent replicas as propagating")
 
 		// Then ReplicaStale, once the deadline passes with the pod still
@@ -110,15 +110,15 @@ var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"
 			p, err := getPolicy(domain)
 			g.Expect(err).NotTo(HaveOccurred())
 
-			stalled := meta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionStalled)
+			stalled := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionStalled)
 			g.Expect(stalled).NotTo(BeNil())
 			g.Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(stalled.Reason).To(Equal(v1alpha1.ReasonReplicaStale))
+			g.Expect(stalled.Reason).To(Equal(v1.ReasonReplicaStale))
 
-			ready := meta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
 			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(ready.Reason).To(Equal(v1alpha1.ReasonReplicaStale))
+			g.Expect(ready.Reason).To(Equal(v1.ReasonReplicaStale))
 			g.Expect(ready.Message).To(ContainSubstring("did not answer"))
 			g.Expect(namesOneOf(ready.Message, denied)).To(BeTrue(),
 				"the message names none of the silenced pods %v: %q", denied, ready.Message)
@@ -133,7 +133,7 @@ var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"
 		Expect(holder).NotTo(BeEmpty())
 		families := scrapePod(holder)
 		Expect(gaugeValue(families, "ratelimit_policy_stalled",
-			map[string]string{"domain": domain, "reason": v1alpha1.ReasonReplicaStale})).To(Equal(1.0),
+			map[string]string{"domain": domain, "reason": v1.ReasonReplicaStale})).To(Equal(1.0),
 			"the operator's scrape does not carry the stall")
 		Expect(gaugeValue(families, "ratelimit_leader", nil)).To(Equal(1.0))
 	})
@@ -147,10 +147,10 @@ var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"
 		Eventually(func(g Gomega) {
 			p, err := getPolicy(domain)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(readyReason(domain)()).To(Equal(v1alpha1.ReasonAllReplicas))
+			g.Expect(readyReason(domain)()).To(Equal(v1.ReasonAllReplicas))
 			g.Expect(p.Status.Replicas.Summary).To(Equal("3/3"))
 
-			stalled := meta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionStalled)
+			stalled := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionStalled)
 			g.Expect(stalled).NotTo(BeNil())
 			g.Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
 		}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
@@ -198,7 +198,7 @@ func readyReason(name string) func() string {
 		if err != nil {
 			return ""
 		}
-		c := meta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionReady)
+		c := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionReady)
 		if c == nil {
 			return ""
 		}
