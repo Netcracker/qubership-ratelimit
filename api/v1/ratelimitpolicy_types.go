@@ -308,6 +308,16 @@ type RateLimitPolicySpec struct {
 	Limits []LimitBlock `json:"limits"`
 }
 
+const (
+	// MaxRuleProblems is the most entries status.ruleProblems holds.
+	// status.problems still counts every one of them.
+	MaxRuleProblems = 64
+
+	// MaxRuleProblemMessage is the longest message of one entry, in
+	// characters, as the API server counts a string's maxLength.
+	MaxRuleProblemMessage = 1024
+)
+
 // RuleProblem describes what is wrong with one rule. Problems live outside
 // conditions because conditions are a map keyed by type, and a generation can
 // hold several problems at once.
@@ -400,7 +410,9 @@ type RateLimitPolicyStatus struct {
 	// +optional
 	Rules int32 `json:"rules,omitempty"`
 
-	// Problems is the length of RuleProblems, for the same reason.
+	// Problems is how many problems the latest generation has, for the same
+	// reason. It counts every one, including those past the MaxRuleProblems
+	// entries RuleProblems holds.
 	// +optional
 	Problems int32 `json:"problems,omitempty"`
 
@@ -409,9 +421,11 @@ type RateLimitPolicyStatus struct {
 	// false with reason NotCompiled, and the last-good generation keeps running
 	// where there is one. An informational entry, such as
 	// CaptureShadowsMappedKey, leaves both alone — a fact to alert on rather
-	// than a failure of the object.
+	// than a failure of the object. Past MaxRuleProblems entries the list is
+	// cut, the blocking entries kept first; Problems holds the full count.
 	// +optional
 	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=64
 	RuleProblems []RuleProblem `json:"ruleProblems,omitempty"`
 }
 

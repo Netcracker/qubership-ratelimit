@@ -31,10 +31,11 @@ logLevel: info
 # computes the baseline's address from the constant alone.
 filter:
   timeout: 0.05s
-  # What an unreachable limiter means for the traffic of a gateway. It is a
-  # gateway decision rather than a service one, which is why it renders on the
-  # filter: false keeps the traffic flowing unlimited, true rejects it with a
-  # 503. A public gateway usually prefers flowing, a private one may prefer
+  # What an unavailable limiter means for the traffic of a gateway: the
+  # service unreachable or timing out, and the service answering UNAVAILABLE
+  # because its counter store failed. It is a gateway decision rather than a
+  # service one, which is why it renders on the filter: false keeps the traffic
+  # flowing unlimited, true rejects it with a 503. A public gateway usually prefers flowing, a private one may prefer
   # rejecting; that is what the per-gateway override is for.
   failClosed: false
   # Status the client sees on a refused request. Envoy ignores values below

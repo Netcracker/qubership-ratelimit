@@ -148,8 +148,8 @@ filter:                              # EnvoyFilter.yaml: installation defaults; 
                                      # (there is no rls.port value: 9000 is a contract constant)
   timeout: 0.05s                     # protobuf duration (seconds with a fraction); Envoy rejects Go forms like 50ms
   failClosed: false                  # limiter unavailable: false = traffic flows without limits, true = 503;
-                                     # only when the RLS itself is unreachable or times out (the filter's
-                                     # failure_mode_deny); a store failure inside the engine always fails open
+                                     # the filter's failure_mode_deny, applied when the RLS is unreachable or
+                                     # times out and when its counter store fails (the service answers UNAVAILABLE)
   rateLimitedStatus: 429             # refusal status for the client; Envoy ignores values < 400
   grpcAsResourceExhausted: false     # RESOURCE_EXHAUSTED instead of UNAVAILABLE for gRPC calls behind the gateway
   xRateLimitHeaders: "OFF"           # the filter always gets OFF: the response carries no per-descriptor statuses
@@ -362,8 +362,10 @@ typed_config:
       envoy_grpc: { cluster_name: <rlsCluster>, authority: <rlsAuthority> }
 ```
 
-`failure_mode_deny` covers exactly the unavailability and the timeout of the RLS itself, and that is the only fail
-closed there is: the engine handles a store failure on its own and always fails open; the filter sees a regular `OK`.
+`failure_mode_deny` is the one failure-mode switch, and it covers two cases: the RLS itself is unreachable or times out,
+and the RLS answers `UNAVAILABLE` because its counter store failed. Either way the check is counted as
+`verdict="unavailable"` on the service's scrape when the service answered, and `failClosed` decides whether the traffic
+flows unlimited or gets a 503.
 
 There are four descriptor actions (VIRTUAL_HOST, MERGE), and they are a contract with the service:
 

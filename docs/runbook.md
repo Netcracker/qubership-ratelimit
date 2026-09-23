@@ -687,7 +687,10 @@ intent, switch `behavior` to `Enforce`; the counters carry over, the keys do not
 **The emergency brakes on the gateway.** Two values of the operator chart on the filter, independent of any policy:
 `runtime.enforcedPercent` at `0` turns every limit of the gateway into a dry run, `runtime.enabledPercent` at `0` takes
 the filter out of the request path. They are Envoy runtime fractions `ratelimit.<gateway>.enabled` and `.enforced`, so
-a runtime override flips them without a redeploy; a values change on the operator release is the durable form.
+a runtime override flips them without a redeploy; a values change on the operator release is the durable form, and it
+lasts only while the release's values carry it. An upgrade with `-f` and `--set` and no `--reuse-values` drops it and
+restores enforcement at once; keep the brake in the deployer's values file or the Argo CD application, and check it
+after every upgrade ([rollout procedure](rollout-procedure.md), section 4).
 
 **Switching an algorithm or a window.** The counter key carries the algorithm and the period:
 

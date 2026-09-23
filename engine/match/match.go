@@ -305,11 +305,22 @@ func matchPath(route *compile.Route, path string) (map[string]string, bool) {
 	case model.PathExact:
 		return nil, path == route.Value
 	case model.PathPrefix:
-		return nil, strings.HasPrefix(path, route.Value)
+		return nil, matchPrefix(route.Value, path)
 	case model.PathTemplate:
 		return matchTemplate(route.Segments, path)
 	}
 	return nil, false
+}
+
+// matchPrefix is a prefix on a segment boundary: the match ends at the end of
+// the path or at a slash, so /api/v1/orders covers /api/v1/orders/42 and not
+// /api/v1/orders-archive. A value that already ends in a slash covers its
+// sub-paths only, and / covers every path.
+func matchPrefix(value, path string) bool {
+	if !strings.HasPrefix(path, value) {
+		return false
+	}
+	return len(path) == len(value) || strings.HasSuffix(value, "/") || path[len(value)] == '/'
 }
 
 // matchTemplate compares segment-wise: a placeholder takes exactly one

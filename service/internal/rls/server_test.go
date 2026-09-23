@@ -132,6 +132,25 @@ func TestShouldRateLimit_reportsAnUnknownDomain(t *testing.T) {
 	assert.Contains(t, output, domain)
 }
 
+// The unknown domain is chosen by whoever calls the port, so it is logged
+// the way the path is: no control character can forge a second record, and
+// no length can flood the log.
+func TestShouldRateLimit_sanitizesTheUnknownDomainItLogs(t *testing.T) {
+	log, logged := recordingLogger()
+	forged := "gateway.typo\nINFO unknown rate limit domain: no RateLimitPolicy is bound to it domain=forged"
+	_, err := NewServer(store.New(), log).ShouldRateLimit(context.Background(), request(forged, nil))
+	require.NoError(t, err)
+	output := logged()
+	assert.Equal(t, 1, strings.Count(output, "\n"), "the domain forged a second record: %q", output)
+	assert.Contains(t, output, "domain=gateway.typoINFO", "the control character was not stripped: %q", output)
+
+	log, logged = recordingLogger()
+	_, err = NewServer(store.New(), log).ShouldRateLimit(context.Background(),
+		request("gateway."+strings.Repeat("x", 100_000), nil))
+	require.NoError(t, err)
+	assert.Less(t, len(logged()), 2*maxLoggedValueLength+512, "the domain's length reached the log whole")
+}
+
 func TestShouldRateLimit_saysNothingAboutAKnownDomain(t *testing.T) {
 	const domain = "gateway.public"
 	ruleStore := store.New()

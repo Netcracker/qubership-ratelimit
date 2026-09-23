@@ -136,13 +136,16 @@ func (s *Server) ShouldRateLimit(
 		// CRs have drifted apart; nothing else detects it. No policy also
 		// means no limit to enforce, so the traffic passes. The series have no
 		// domain label — the name is caller-controlled — so the sampled log
-		// line here is where the name lives.
+		// line here is where the name lives, sanitized like the path beside
+		// it: any caller of the port chooses the name, and a raw one could
+		// forge a second line or flood the log. Past this branch the domain
+		// is one a policy claims, bounded by the CRD's pattern.
 		metrics.UnknownDomainChecks.Inc()
 		metrics.Checks.WithLabelValues(metrics.UnknownDomain, metrics.VerdictOK).Inc()
 		metrics.CheckDuration.WithLabelValues(metrics.UnknownDomain).Observe(time.Since(start).Seconds())
 		if ok, dropped := s.unknownLog.admit(start.Unix()); ok {
 			s.log.InfoC(ctx, "unknown rate limit domain: no RateLimitPolicy is bound to it domain=%v path=%v suppressed=%v",
-				domain, path, dropped)
+				sanitizeValue(domain), path, dropped)
 		}
 		return &envoyratelimit.RateLimitResponse{OverallCode: envoyratelimit.RateLimitResponse_OK}, nil
 	}

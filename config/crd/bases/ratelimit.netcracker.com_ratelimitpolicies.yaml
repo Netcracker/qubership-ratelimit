@@ -542,8 +542,10 @@ spec:
                 format: int64
                 type: integer
               problems:
-                description: Problems is the length of RuleProblems, for the same
-                  reason.
+                description: |-
+                  Problems is how many problems the latest generation has, for the same
+                  reason. It counts every one, including those past the MaxRuleProblems
+                  entries RuleProblems holds.
                 format: int32
                 type: integer
               replicas:
@@ -581,7 +583,8 @@ spec:
                   false with reason NotCompiled, and the last-good generation keeps running
                   where there is one. An informational entry, such as
                   CaptureShadowsMappedKey, leaves both alone — a fact to alert on rather
-                  than a failure of the object.
+                  than a failure of the object. Past MaxRuleProblems entries the list is
+                  cut, the blocking entries kept first; Problems holds the full count.
                 items:
                   description: |-
                     RuleProblem describes what is wrong with one rule. Problems live outside
@@ -613,6 +616,7 @@ spec:
                   required:
                   - reason
                   type: object
+                maxItems: 64
                 type: array
                 x-kubernetes-list-type: atomic
               rules:

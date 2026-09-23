@@ -267,12 +267,14 @@ The full contract, the interfaces, and the implementations are in the [store con
   counter.
 - **Time comes from the store** (`TIME` inside the script), not from the replicas: clock skew between pods does not
   affect decisions.
-- **A storage failure or timeout fails open**: the request is allowed and an error metric is incremented. Fail closed
-  exists only for the unavailability or timeout of the RLS itself, and the gateway filter implements it
-  (`failure_mode_deny`, the operator chart's `gateways.<role>.failClosed`), per domain, for consumers that prefer
-  rejection over unlimited traffic. A store failure inside the engine always fails open.
-- **Store operations carry a budget** of tens of milliseconds, enforced with context timeouts, so a slow store degrades
-  to fail-open rather than stalling the gateway filter.
+- **A storage failure or timeout is decided by the gateway**: the service answers the check with gRPC `UNAVAILABLE`,
+  counts it as `verdict="unavailable"`, and the gateway filter applies its failure mode, the same one it applies when
+  the service itself is unreachable (`failure_mode_deny`, the operator chart's `filter.failClosed` and
+  `gateways.<role>.failClosed`). With `failClosed: false`, the default, the request passes unlimited; with `true`, the
+  gateway answers 503. One exception: a check that a rule already refused before the store failed answers
+  `OVER_LIMIT` whatever the setting, so a refusal never turns into unlimited traffic.
+- **Store operations carry a budget** of tens of milliseconds, enforced with context timeouts, so a slow store reaches
+  the gateway's failure mode rather than stalling the filter.
 
 ## Token and identity
 

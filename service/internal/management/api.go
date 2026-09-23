@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"strconv"
 	"sync"
 	"time"
@@ -340,8 +341,12 @@ func (a *API) handleSimulation(c *fiber.Ctx) error {
 // The journal is the primary carrier: who called, which key they used, what they
 // addressed, and what came of it, in one line the platform's log pipeline
 // collects. The request id is not among the fields because the logger puts it
-// there from the context. Caller-supplied values are recorded verbatim, which is
-// why they had to pass a log-safe pattern to get here.
+// there from the context. The key passed a log-safe pattern to get here, and the
+// domain and the rule id were resolved against the enforced set. The axis
+// values are the exception: they are counter identities a data-plane client
+// chose through its own token, and refusing an unsafe one would leave its
+// counter unaddressable, so they are recorded as JSON instead, which escapes
+// every control character and keeps the value exact.
 func (a *API) auditReset(
 	c *fiber.Ctx,
 	subject Subject,
@@ -363,7 +368,17 @@ func (a *API) auditReset(
 	a.Log.InfoC(c.UserContext(),
 		"management mutation subject=%v idempotencyKey=%v domain=%v endpoint=%v ruleId=%v axes=%v dryRun=%v outcome=%v count=%v",
 		logSafe(subject.Name), idempotencyKey, domain, endpointCounters,
-		command.Selector.RuleIDs[0], command.AxesByName, command.DryRun, outcome, count)
+		command.Selector.RuleIDs[0], auditAxes(command.AxesByName), command.DryRun, outcome, count)
+}
+
+// auditAxes renders the addressed identity for the audit line as JSON: one
+// line whatever the values hold, with the keys in a stable order.
+func auditAxes(axes map[string]string) string {
+	buf, err := json.Marshal(axes)
+	if err != nil {
+		panic("management: the addressed axes failed to marshal: " + err.Error())
+	}
+	return string(buf)
 }
 
 // snapshot resolves the domain of the path to the set being enforced.

@@ -332,11 +332,18 @@ so the metrics kept telling the truth; with `enabled=0` the filter never called,
 `enforced`; `enabled` is for a service that itself is the problem. An empty value removes an override:
 `runtime_modify?ratelimit.public-gateway.enforced=`.
 
-The durable form is the value in the operator chart, through Helm or the operator's Argo CD application; the service
-release is not touched:
+The durable form is the value in the operator chart, and it lasts only as long as the values it lives in. Put it where
+the next upgrade reads it: the deployer's values file, or the parameters of the operator's Argo CD application. Set on
+the command line, the brake is part of the release's values until an upgrade that does not reuse them. The install
+command of the README passes `-f` and `--set` without `--reuse-values`, so such an upgrade renders
+`runtime.enforcedPercent` back to `100`, and istiod pushes the filter to the gateway at once: `429` returns to live
+traffic in the middle of the incident that turned it off, with no condition or metric to say so. The service release
+is not touched either way.
+
+For an emergency from the command line, carry the release's values into the upgrade:
 
 ```bash
-helm upgrade ratelimit-operator <operator chart> -n "$NS" --reuse-values --set runtime.enforcedPercent=0
+helm upgrade ratelimit-operator <operator chart> -n "$NS" --reset-then-reuse-values --set runtime.enforcedPercent=0
 kubectl get envoyfilter -n "$NS" ratelimit-public-gateway -o json \
   | jq -c '[.. | objects | select(has("runtime_key")) | {runtime_key, numerator: .default_value.numerator}]'
 # [{"runtime_key": "ratelimit.public-gateway.enabled", "numerator": 100},
@@ -347,6 +354,15 @@ Three requests from `bob` answered `200` a few seconds after the upgrade, and `4
 to `100`; the component pod was the same before and after (the operator pod, after the split), the change is an
 `EnvoyFilter` that istiod pushes to the gateway. A runtime override wins over the rendered value while it exists, so
 remove it before relying on the value.
+
+While a brake is on, every upgrade of the operator release has to carry it in its values. After each one, check that it
+survived:
+
+```bash
+helm get values ratelimit-operator -n "$NS" | grep -E 'enforcedPercent|enabledPercent'
+#   enforcedPercent: 0
+# no line, or 100: the brake is off and the gateway enforces again
+```
 
 **A dial change is a change of the operator release only.** The values edit above, or a rollback of that release to the
 revision before the edit, renders the EnvoyFilters again and touches no other object. The service release, its pods,

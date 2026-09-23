@@ -333,9 +333,10 @@ client ──HTTP──> gateway ──jwt_authn──> (token signature verifie
 6. **Response**: the verdict is an AND over the enforcing buckets; the `x-ratelimit-*` headers come from the strictest
    matched bucket (the minimal remaining when the request is allowed, the maximal retry-after on a refusal; on a tie, a
    deterministic tie-break by bucket key). A refusal is `OVER_LIMIT` with `retry-after`; a cost that can never fit gets
-   no retry headers. If the store does not answer within the budget, the service fails open, always and at the engine
-   level: the request is allowed, the error metric grows, and traffic does not stall; the gateway's `failClosed`
-   setting concerns the unavailability of the service itself, not of the store.
+   no retry headers. If the store does not answer within the budget, the service answers `UNAVAILABLE` and the gateway's
+   failure mode decides: with `failClosed: false`, the default, the request passes unlimited, and with `true` the
+   gateway answers 503. The error metric grows either way. A check some rule already refused answers `OVER_LIMIT`
+   regardless.
 
 ## Compilation model
 
