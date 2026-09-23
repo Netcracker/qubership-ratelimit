@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // The snapshot endpoint: what one replica enforces, rendered in full on its
@@ -70,13 +70,13 @@ var _ = Describe("the snapshot endpoint", Ordered, Label("snapshot"), func() {
 
 	BeforeAll(func() {
 		p := newPolicy(domain, prefixLimits(probePath, "everyone", nil, 100, 60))
-		p.Spec.Mappings = []v1alpha1.ClaimMapping{{Key: "tenant", Claim: "org_id"}}
-		p.Spec.Groups = []v1alpha1.ClientGroup{{Name: "partners", Clients: clients}}
-		p.Spec.Limits[0].Rules = append(p.Spec.Limits[0].Rules, v1alpha1.Rule{
+		p.Spec.Mappings = []v1.ClaimMapping{{Key: "tenant", Claim: "org_id"}}
+		p.Spec.Groups = []v1.ClientGroup{{Name: "partners", Clients: clients}}
+		p.Spec.Limits[0].Rules = append(p.Spec.Limits[0].Rules, v1.Rule{
 			Name:     "partners",
-			Matches:  []v1alpha1.Predicate{{Key: "client", Operator: v1alpha1.OperatorInGroup, Value: "partners"}},
+			Matches:  []v1.Predicate{{Key: "client", Operator: v1.OperatorInGroup, Value: "partners"}},
 			Counters: []string{"client"},
-			Rates:    []v1alpha1.Rate{{Requests: 10, PeriodSeconds: 60}},
+			Rates:    []v1.Rate{{Requests: 10, PeriodSeconds: 60}},
 		})
 		Expect(apply(p)).To(Succeed())
 		waitApplied(domain)

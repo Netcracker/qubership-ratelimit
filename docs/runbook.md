@@ -611,7 +611,7 @@ kubectl get deploy -n "$NS" ratelimit-operator ratelimit-service \
 # ratelimit-operator   ratelimit-operator:20b5501
 # ratelimit-service    ratelimit-service:20b5501
 kubectl get crd ratelimitpolicies.ratelimit.netcracker.com -o jsonpath='{.spec.versions[*].name}{"\n"}'
-# v1alpha1
+# v1
 kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq -c '{formatVersion, operatorVersion}'
 # {"formatVersion": 1, "operatorVersion": "20b5501"}
 curl -s http://127.0.0.1:8080/debug/applied | jq      # through the port-forward of section 4

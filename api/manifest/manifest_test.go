@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // update rewrites the goldens of the current format version: the manifest
@@ -113,7 +113,7 @@ func TestEncode_matchesTheGoldenOfTheCurrentVersion(t *testing.T) {
 // So a field added, removed, or renamed on RateLimitPolicySpec fails here
 // until FormatVersion moves.
 func TestPayloadFields_matchTheGoldenOfTheCurrentVersion(t *testing.T) {
-	got := strings.Join(FieldPaths(reflect.TypeFor[v1alpha1.RateLimitPolicySpec]()), "\n") + "\n"
+	got := strings.Join(FieldPaths(reflect.TypeFor[v1.RateLimitPolicySpec]()), "\n") + "\n"
 
 	path := fieldsGolden(FormatVersion)
 	if *update {
@@ -387,22 +387,22 @@ func TestPayloadKey(t *testing.T) {
 // decode has to accept every field the spec defines and refuse one it does
 // not, which is the skew case of a spec that grew on the operator's side.
 func TestPayload_carriesTheResourceSpec(t *testing.T) {
-	spec := v1alpha1.RateLimitPolicySpec{
+	spec := v1.RateLimitPolicySpec{
 		Domain: "gateway.public",
-		Limits: []v1alpha1.LimitBlock{{
+		Limits: []v1.LimitBlock{{
 			Name: "probe",
-			Rules: []v1alpha1.Rule{{
+			Rules: []v1.Rule{{
 				Name:     "per-path",
 				Counters: []string{"path"},
-				Rates: []v1alpha1.Rate{{
-					Requests: 2, PeriodSeconds: 3600, Algorithm: v1alpha1.AlgorithmGCRA}},
+				Rates: []v1.Rate{{
+					Requests: 2, PeriodSeconds: 3600, Algorithm: v1.AlgorithmGCRA}},
 			}},
 		}},
 	}
 	compressed, hash, err := EncodePayload(spec)
 	require.NoError(t, err)
 
-	var out v1alpha1.RateLimitPolicySpec
+	var out v1.RateLimitPolicySpec
 	got, err := DecodePayload(compressed, &out)
 	require.NoError(t, err)
 	assert.Equal(t, spec, out)

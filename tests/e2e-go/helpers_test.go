@@ -22,7 +22,7 @@ import (
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // apply is the kubectl-apply of the suite: server-side, forcing ownership so a
@@ -32,8 +32,8 @@ func apply(obj client.Object) error {
 }
 
 // getPolicy re-reads a policy; the Eventually closures below lean on it.
-func getPolicy(name string) (*v1alpha1.RateLimitPolicy, error) {
-	var p v1alpha1.RateLimitPolicy
+func getPolicy(name string) (*v1.RateLimitPolicy, error) {
+	var p v1.RateLimitPolicy
 	err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &p)
 	return &p, err
 }
@@ -99,7 +99,7 @@ func serviceLogsSince(since time.Time) func() string {
 func printedRow(resource, name string) string {
 	cfg, err := ctrlconfig.GetConfig()
 	Expect(err).NotTo(HaveOccurred())
-	cfg.GroupVersion = &schema.GroupVersion{Group: v1alpha1.GroupVersion.Group, Version: v1alpha1.GroupVersion.Version}
+	cfg.GroupVersion = &schema.GroupVersion{Group: v1.GroupVersion.Group, Version: v1.GroupVersion.Version}
 	cfg.APIPath = "/apis"
 	cfg.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 	rc, err := rest.RESTClientFor(cfg)
@@ -126,28 +126,28 @@ func printedRow(resource, name string) string {
 // --- Shared fixtures: the Go form of the bash apply_policy/apply_mapping. ---
 
 func typeMetaFor(kind string) metav1.TypeMeta {
-	return metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: kind}
+	return metav1.TypeMeta{APIVersion: v1.GroupVersion.String(), Kind: kind}
 }
 
 // newPolicy builds the one policy of a domain. Its name is its domain: object
 // names are unique within a namespace, so that is what makes a second policy
 // for the domain unrepresentable. Suites run serially, so each one owns the
 // policy of its domain for its duration.
-func newPolicy(domain string, limits []v1alpha1.LimitBlock) *v1alpha1.RateLimitPolicy {
-	return &v1alpha1.RateLimitPolicy{
+func newPolicy(domain string, limits []v1.LimitBlock) *v1.RateLimitPolicy {
+	return &v1.RateLimitPolicy{
 		TypeMeta:   typeMetaFor("RateLimitPolicy"),
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: domain},
-		Spec:       v1alpha1.RateLimitPolicySpec{Domain: domain, Limits: limits},
+		Spec:       v1.RateLimitPolicySpec{Domain: domain, Limits: limits},
 	}
 }
 
 // totalLimits is the bash apply_policy body: one block, one unconditional
 // rule, one fixed window.
-func totalLimits(requests, periodSeconds int32) []v1alpha1.LimitBlock {
-	return []v1alpha1.LimitBlock{{Name: "everything", Rules: []v1alpha1.Rule{{
+func totalLimits(requests, periodSeconds int32) []v1.LimitBlock {
+	return []v1.LimitBlock{{Name: "everything", Rules: []v1.Rule{{
 		Name: "total",
-		Rates: []v1alpha1.Rate{{
-			Requests: requests, PeriodSeconds: periodSeconds, Algorithm: v1alpha1.AlgorithmFixedWindow,
+		Rates: []v1.Rate{{
+			Requests: requests, PeriodSeconds: periodSeconds, Algorithm: v1.AlgorithmFixedWindow,
 		}},
 	}}}}
 }
@@ -156,17 +156,17 @@ func totalLimits(requests, periodSeconds int32) []v1alpha1.LimitBlock {
 // probe. Ginkgo shuffles the top-level containers, so a suite whose window
 // outlives its own run - the hour-long redis and metrics budgets - must not
 // see traffic the other suites send; a domain-wide block would.
-func prefixLimits(prefix, rule string, counters []string, requests, periodSeconds int32) []v1alpha1.LimitBlock {
-	return []v1alpha1.LimitBlock{{
+func prefixLimits(prefix, rule string, counters []string, requests, periodSeconds int32) []v1.LimitBlock {
+	return []v1.LimitBlock{{
 		Name: "probe",
-		Target: &v1alpha1.Target{Routes: []v1alpha1.Route{{
-			Path: v1alpha1.PathMatch{Type: v1alpha1.PathMatchPrefix, Value: prefix},
+		Target: &v1.Target{Routes: []v1.Route{{
+			Path: v1.PathMatch{Type: v1.PathMatchPrefix, Value: prefix},
 		}}},
-		Rules: []v1alpha1.Rule{{
+		Rules: []v1.Rule{{
 			Name:     rule,
 			Counters: counters,
-			Rates: []v1alpha1.Rate{{
-				Requests: requests, PeriodSeconds: periodSeconds, Algorithm: v1alpha1.AlgorithmFixedWindow,
+			Rates: []v1.Rate{{
+				Requests: requests, PeriodSeconds: periodSeconds, Algorithm: v1.AlgorithmFixedWindow,
 			}},
 		}},
 	}}

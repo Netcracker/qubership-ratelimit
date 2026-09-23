@@ -12,7 +12,7 @@ import (
 
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // Identity extraction end to end: a bearer token travels through the gateway
@@ -43,13 +43,13 @@ var _ = Describe("identity extraction through the gateway", Ordered, Label("jwt"
 		waitGatewayServes("public-gateway", probePath)
 
 		limits := prefixLimits(probePath, "per-tenant", []string{"tenant"}, limit, 3600)
-		limits[0].Rules[0].Matches = []v1alpha1.Predicate{{
-			Key: "tenant", Operator: v1alpha1.OperatorExists}}
+		limits[0].Rules[0].Matches = []v1.Predicate{{
+			Key: "tenant", Operator: v1.OperatorExists}}
 
 		// The claim mapping travels in the same object as the rules that
 		// reference it: one edit, one generation, applied atomically.
 		policy := newPolicy(domain, limits)
-		policy.Spec.Mappings = []v1alpha1.ClaimMapping{{Key: "tenant", Claim: "org_id"}}
+		policy.Spec.Mappings = []v1.ClaimMapping{{Key: "tenant", Claim: "org_id"}}
 
 		Expect(apply(policy)).To(Succeed())
 		waitApplied(domain)

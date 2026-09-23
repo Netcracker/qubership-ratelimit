@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
@@ -179,11 +179,11 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	judged := judge(outcome, view, probeErr, readyAge(&object, now), r.PropagationDeadline)
 	setReadyCondition(&object.Status.Conditions,
 		judged.ready, judged.readyReason, judged.readyMessage, object.Generation, now)
-	setCondition(&object.Status.Conditions, v1alpha1.ConditionStalled,
+	setCondition(&object.Status.Conditions, v1.ConditionStalled,
 		judged.stalled, judged.stalledReason, "", object.Generation)
 
 	if probeErr == nil {
-		object.Status.Replicas = v1alpha1.ReplicaStatus{
+		object.Status.Replicas = v1.ReplicaStatus{
 			Total:   view.Total,
 			Applied: view.Applied,
 			Summary: fmt.Sprintf("%d/%d", view.Applied, view.Total),
@@ -218,7 +218,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// After the write, not before: an event for a status that failed to
 		// land would report a refusal nobody can see on the object.
 		r.Events.Eventf(&object, nil, corev1.EventTypeWarning,
-			v1alpha1.ReasonNotCompiled, "Compile",
+			v1.ReasonNotCompiled, "Compile",
 			"generation %d does not compile: %s", object.Generation, outcome.Err)
 	}
 	if written {
@@ -264,7 +264,7 @@ func staleCheckTime(last *metav1.Time, now time.Time) bool {
 // observe asks the fleet which generation of this domain it enforces.
 func (r *RateLimitPolicyReconciler) observe(
 	ctx context.Context,
-	object *v1alpha1.RateLimitPolicy,
+	object *v1.RateLimitPolicy,
 	outcome policy.Outcome,
 	fresh bool,
 ) (FleetView, error) {
@@ -328,14 +328,14 @@ func (r *RateLimitPolicyReconciler) policiesBehind(
 // the fleet's judgement, with the reason of the negative condition, and the
 // facts of the compile. The operator is the only place that judges a policy,
 // so it is the only place that publishes them.
-func policyView(object *v1alpha1.RateLimitPolicy, outcome policy.Outcome, judged fleetStatus) metrics.PolicyView {
+func policyView(object *v1.RateLimitPolicy, outcome policy.Outcome, judged fleetStatus) metrics.PolicyView {
 	lag := object.Generation
 	if outcome.ActiveGeneration > 0 {
 		lag = object.Generation - outcome.ActiveGeneration
 	}
 	var blocking, info int
 	for _, problem := range outcome.Problems {
-		if v1alpha1.BlockingProblem(problem.Reason) {
+		if v1.BlockingProblem(problem.Reason) {
 			blocking++
 		} else {
 			info++

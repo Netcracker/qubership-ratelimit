@@ -19,7 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // The composite model, end to end. A composite is one baseline namespace plus
@@ -67,9 +67,9 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 
 	// hourlyGCRA is prefixLimits with GCRA in place of the fixed window, for
 	// the reason on limit above.
-	hourlyGCRA := func(prefix, rule string, requests int32) []v1alpha1.LimitBlock {
+	hourlyGCRA := func(prefix, rule string, requests int32) []v1.LimitBlock {
 		blocks := prefixLimits(prefix, rule, []string{"path"}, requests, 3600)
-		blocks[0].Rules[0].Rates[0].Algorithm = v1alpha1.AlgorithmGCRA
+		blocks[0].Rules[0].Rates[0].Algorithm = v1.AlgorithmGCRA
 		return blocks
 	}
 
@@ -199,7 +199,7 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		// The error is returned, not swallowed: BeEmpty accepts nil, so a
 		// Get that failed would otherwise read as "no status".
 		Consistently(func() ([]metav1.Condition, error) {
-			var got v1alpha1.RateLimitPolicy
+			var got v1.RateLimitPolicy
 			if err := k8s.Get(ctx, client.ObjectKeyFromObject(stray), &got); err != nil {
 				return nil, err
 			}

@@ -5,7 +5,7 @@
 #
 # Windows are the rates[] list inside a rule: every entry is an independent bucket with its own periodSeconds
 # (1..86400, periods unique, number of windows unbounded); the algorithm is a property of the window, GCRA by default.
-apiVersion: ratelimit.netcracker.com/v1alpha1
+apiVersion: ratelimit.netcracker.com/v1
 kind: RateLimitPolicy
 metadata:
   name: gateway.public              # name == spec.domain (CEL); a second object for the domain is unrepresentable
@@ -143,7 +143,7 @@ spec:
 #   - { type: Stalled,  status: "False", reason: Progressing }
 ---
 # A minimal policy for the private gateway: binding through a different domain, built-in keys only.
-apiVersion: ratelimit.netcracker.com/v1alpha1
+apiVersion: ratelimit.netcracker.com/v1
 kind: RateLimitPolicy
 metadata:
   name: gateway.private

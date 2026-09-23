@@ -14,7 +14,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // The CR contract: what the API server accepts, what the reconciler writes
@@ -25,11 +25,11 @@ import (
 var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	const domain = "gateway.e2e"
 
-	tenantRule := func() []v1alpha1.LimitBlock {
-		return []v1alpha1.LimitBlock{{Name: "api", Rules: []v1alpha1.Rule{{
+	tenantRule := func() []v1.LimitBlock {
+		return []v1.LimitBlock{{Name: "api", Rules: []v1.Rule{{
 			Name:    "per-tenant",
-			Matches: []v1alpha1.Predicate{{Key: "tenant", Operator: v1alpha1.OperatorExists}},
-			Rates:   []v1alpha1.Rate{{Requests: 10, PeriodSeconds: 60}},
+			Matches: []v1.Predicate{{Key: "tenant", Operator: v1.OperatorExists}},
+			Rates:   []v1.Rate{{Requests: 10, PeriodSeconds: 60}},
 		}}}}
 	}
 
@@ -39,21 +39,21 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	// CRD carrying them is the one installed here. A cluster with an older CRD
 	// would accept every spec below and the operator would compile nonsense.
 	DescribeTable("the installed CRD rejects",
-		func(mutate func(*v1alpha1.RateLimitPolicy)) {
+		func(mutate func(*v1.RateLimitPolicy)) {
 			p := newPolicy(domain, totalLimits(1, 1))
 			mutate(p)
 			err := k8s.Create(ctx, p, client.DryRunAll)
 			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid rejection, got: %v", err)
 		},
-		Entry("a name that is not the domain", func(p *v1alpha1.RateLimitPolicy) {
+		Entry("a name that is not the domain", func(p *v1.RateLimitPolicy) {
 			p.Name = "something-else"
 		}),
-		Entry("a policy with no blocks", func(p *v1alpha1.RateLimitPolicy) { p.Spec.Limits = nil }),
-		Entry("a period above one day", func(p *v1alpha1.RateLimitPolicy) {
+		Entry("a policy with no blocks", func(p *v1.RateLimitPolicy) { p.Spec.Limits = nil }),
+		Entry("a period above one day", func(p *v1.RateLimitPolicy) {
 			p.Spec.Limits[0].Rules[0].Rates[0].PeriodSeconds = 86401
 		}),
-		Entry("two windows of one period", func(p *v1alpha1.RateLimitPolicy) {
-			p.Spec.Limits[0].Rules[0].Rates = []v1alpha1.Rate{
+		Entry("two windows of one period", func(p *v1.RateLimitPolicy) {
+			p.Spec.Limits[0].Rules[0].Rates = []v1.Rate{
 				{Requests: 10, PeriodSeconds: 60},
 				{Requests: 20, PeriodSeconds: 60},
 			}
@@ -62,7 +62,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 
 	It("accepts a valid policy and tracks its generation", func() {
 		Expect(apply(newPolicy(domain, totalLimits(1, 1)))).To(Succeed())
-		Eventually(policyCondition(domain, v1alpha1.ConditionAccepted)).Should(Equal("True"),
+		Eventually(policyCondition(domain, v1.ConditionAccepted)).Should(Equal("True"),
 			"policy not accepted; is the operator running?")
 
 		// observedGeneration proves the status was written for the spec that
@@ -79,9 +79,9 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 	// reaching /debug/applied on the service pods through the Service.
 	// Everything below reads the status that probe writes.
 	It("reports every ready replica enforcing the generation", func() {
-		Eventually(policyCondition(domain, v1alpha1.ConditionReady)).Should(Equal("True"),
+		Eventually(policyCondition(domain, v1.ConditionReady)).Should(Equal("True"),
 			"Ready never went true; can the operator reach /debug/applied on the service replicas?")
-		Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("False"),
+		Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("False"),
 			"a fleet that agrees is not stalled")
 
 		p, err := getPolicy(domain)
@@ -121,15 +121,15 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 				return ""
 			}
 			return p.Status.RuleProblems[0].Reason
-		}).Should(Equal(v1alpha1.ProblemUnresolvedKeyReference))
+		}).Should(Equal(v1.ProblemUnresolvedKeyReference))
 
 		// Enforced as written or not at all: the conditions have to say so, and
 		// the generation must not be the active one.
-		Expect(policyCondition(domain, v1alpha1.ConditionAccepted)()).To(Equal("False"),
+		Expect(policyCondition(domain, v1.ConditionAccepted)()).To(Equal("False"),
 			"a blocking problem left Accepted true")
-		Expect(policyCondition(domain, v1alpha1.ConditionReady)()).To(Equal("False"),
+		Expect(policyCondition(domain, v1.ConditionReady)()).To(Equal("False"),
 			"a blocking problem left Ready true; the generation must not be enforced")
-		Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("True"),
+		Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("True"),
 			"a generation that does not compile is stuck, not merely in progress")
 
 		// The base asserted activeGeneration == 0 here, which a separate
@@ -148,11 +148,11 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		// generation: a request never sees new rules over old extraction.
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
-		p.Spec.Mappings = []v1alpha1.ClaimMapping{{
+		p.Spec.Mappings = []v1.ClaimMapping{{
 			Key: "tenant", Claim: "org_id", Fallbacks: []string{"sub"}}}
 		Expect(k8s.Update(ctx, p)).To(Succeed())
 
-		Eventually(policyCondition(domain, v1alpha1.ConditionAccepted)).Should(Equal("True"),
+		Eventually(policyCondition(domain, v1.ConditionAccepted)).Should(Equal("True"),
 			"the generation stayed invalid after its own mapping declared the key")
 		Eventually(func() []string {
 			current, err := getPolicy(domain)
@@ -179,10 +179,10 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		// while the earlier generation keeps running.
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
-		p.Spec.Limits = []v1alpha1.LimitBlock{{Name: "api", Rules: []v1alpha1.Rule{{
+		p.Spec.Limits = []v1.LimitBlock{{Name: "api", Rules: []v1.Rule{{
 			Name:    "per-plan",
-			Matches: []v1alpha1.Predicate{{Key: "plan", Operator: v1alpha1.OperatorExists}},
-			Rates:   []v1alpha1.Rate{{Requests: 10, PeriodSeconds: 60}},
+			Matches: []v1.Predicate{{Key: "plan", Operator: v1.OperatorExists}},
+			Rates:   []v1.Rate{{Requests: 10, PeriodSeconds: 60}},
 		}}}}
 		Expect(k8s.Update(ctx, p)).To(Succeed())
 
@@ -194,9 +194,9 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 
 		// Enforcing an earlier generation is not being ready, and it is a
 		// breakage rather than a rollout: last-good converges on nothing.
-		Expect(policyCondition(domain, v1alpha1.ConditionReady)()).To(Equal("False"),
+		Expect(policyCondition(domain, v1.ConditionReady)()).To(Equal("False"),
 			"a policy running last-good reported itself ready")
-		Expect(policyCondition(domain, v1alpha1.ConditionStalled)()).To(Equal("True"),
+		Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("True"),
 			"a generation that does not compile is stuck, not in progress")
 	})
 

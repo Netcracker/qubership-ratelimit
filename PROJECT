@@ -17,6 +17,6 @@ resources:
   domain: netcracker.com
   group: ratelimit
   kind: RateLimitPolicy
-  path: github.com/netcracker/qubership-ratelimit/api/v1alpha1
-  version: v1alpha1
+  path: github.com/netcracker/qubership-ratelimit/api/v1
+  version: v1
 version: "3"

@@ -20,7 +20,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	ratelimitv1alpha1 "github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	ratelimitv1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
@@ -40,28 +40,28 @@ const envtestNamespace = "ratelimit-envtest"
 
 // policyWith builds a policy for a domain. The name is the domain: the CEL rule
 // admits nothing else.
-func policyWith(domain string, blocks ...ratelimitv1alpha1.LimitBlock) *ratelimitv1alpha1.RateLimitPolicy {
-	return &ratelimitv1alpha1.RateLimitPolicy{
+func policyWith(domain string, blocks ...ratelimitv1.LimitBlock) *ratelimitv1.RateLimitPolicy {
+	return &ratelimitv1.RateLimitPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: envtestNamespace, Name: domain},
-		Spec: ratelimitv1alpha1.RateLimitPolicySpec{
+		Spec: ratelimitv1.RateLimitPolicySpec{
 			Domain: domain,
 			Limits: blocks,
 		},
 	}
 }
 
-func blockWith(name string, rules ...ratelimitv1alpha1.Rule) ratelimitv1alpha1.LimitBlock {
-	return ratelimitv1alpha1.LimitBlock{Name: name, Rules: rules}
+func blockWith(name string, rules ...ratelimitv1.Rule) ratelimitv1.LimitBlock {
+	return ratelimitv1.LimitBlock{Name: name, Rules: rules}
 }
 
-func ruleWith(name string, rates ...ratelimitv1alpha1.Rate) ratelimitv1alpha1.Rule {
+func ruleWith(name string, rates ...ratelimitv1.Rate) ratelimitv1.Rule {
 	if len(rates) == 0 {
-		rates = []ratelimitv1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}}
+		rates = []ratelimitv1.Rate{{Requests: 100, PeriodSeconds: 60}}
 	}
-	return ratelimitv1alpha1.Rule{Name: name, Rates: rates}
+	return ratelimitv1.Rule{Name: name, Rates: rates}
 }
 
-func predicateRule(name string, predicates ...ratelimitv1alpha1.Predicate) ratelimitv1alpha1.Rule {
+func predicateRule(name string, predicates ...ratelimitv1.Predicate) ratelimitv1.Rule {
 	rule := ruleWith(name)
 	rule.Matches = predicates
 	return rule
@@ -91,7 +91,7 @@ var _ = Describe("RateLimitPolicy", func() {
 		}
 	})
 
-	create := func(policy *ratelimitv1alpha1.RateLimitPolicy) error {
+	create := func(policy *ratelimitv1.RateLimitPolicy) error {
 		DeferCleanup(func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, policy))).To(Succeed())
 		})
@@ -161,8 +161,8 @@ var _ = Describe("RateLimitPolicy", func() {
 
 		It("rejects two windows of one period in a rule", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total",
-				ratelimitv1alpha1.Rate{Requests: 10, PeriodSeconds: 60},
-				ratelimitv1alpha1.Rate{Requests: 20, PeriodSeconds: 60},
+				ratelimitv1.Rate{Requests: 10, PeriodSeconds: 60},
+				ratelimitv1.Rate{Requests: 20, PeriodSeconds: 60},
 			)))
 
 			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
@@ -171,7 +171,7 @@ var _ = Describe("RateLimitPolicy", func() {
 		It("holds a period between one second and one day", func() {
 			for _, seconds := range []int32{0, 86401} {
 				policy := policyWith("gateway.public", blockWith("api", ruleWith("total",
-					ratelimitv1alpha1.Rate{Requests: 10, PeriodSeconds: seconds})))
+					ratelimitv1.Rate{Requests: 10, PeriodSeconds: seconds})))
 
 				Expect(create(policy)).To(HaveOccurred(), "periodSeconds %d", seconds)
 			}
@@ -179,17 +179,17 @@ var _ = Describe("RateLimitPolicy", func() {
 
 		It("accepts a day, the longest window a rate limit has", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total",
-				ratelimitv1alpha1.Rate{Requests: 10, PeriodSeconds: 86400})))
+				ratelimitv1.Rate{Requests: 10, PeriodSeconds: 86400})))
 
 			Expect(create(policy)).To(Succeed())
 		})
 
 		It("rejects a method outside the HTTP set", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
-			policy.Spec.Limits[0].Target = &ratelimitv1alpha1.Target{
-				Routes: []ratelimitv1alpha1.Route{{
-					Path:    ratelimitv1alpha1.PathMatch{Type: ratelimitv1alpha1.PathMatchPrefix, Value: "/api/"},
-					Methods: []ratelimitv1alpha1.HTTPMethod{"FETCH"},
+			policy.Spec.Limits[0].Target = &ratelimitv1.Target{
+				Routes: []ratelimitv1.Route{{
+					Path:    ratelimitv1.PathMatch{Type: ratelimitv1.PathMatchPrefix, Value: "/api/"},
+					Methods: []ratelimitv1.HTTPMethod{"FETCH"},
 				}},
 			}
 
@@ -198,10 +198,10 @@ var _ = Describe("RateLimitPolicy", func() {
 
 		It("rejects a duplicated method on a route", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
-			policy.Spec.Limits[0].Target = &ratelimitv1alpha1.Target{
-				Routes: []ratelimitv1alpha1.Route{{
-					Path:    ratelimitv1alpha1.PathMatch{Type: ratelimitv1alpha1.PathMatchPrefix, Value: "/api/"},
-					Methods: []ratelimitv1alpha1.HTTPMethod{"GET", "GET"},
+			policy.Spec.Limits[0].Target = &ratelimitv1.Target{
+				Routes: []ratelimitv1.Route{{
+					Path:    ratelimitv1.PathMatch{Type: ratelimitv1.PathMatchPrefix, Value: "/api/"},
+					Methods: []ratelimitv1.HTTPMethod{"GET", "GET"},
 				}},
 			}
 
@@ -210,9 +210,9 @@ var _ = Describe("RateLimitPolicy", func() {
 
 		It("requires a path to start with a slash", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
-			policy.Spec.Limits[0].Target = &ratelimitv1alpha1.Target{
-				Routes: []ratelimitv1alpha1.Route{{
-					Path: ratelimitv1alpha1.PathMatch{Type: ratelimitv1alpha1.PathMatchPrefix, Value: "api/"},
+			policy.Spec.Limits[0].Target = &ratelimitv1.Target{
+				Routes: []ratelimitv1.Route{{
+					Path: ratelimitv1.PathMatch{Type: ratelimitv1.PathMatchPrefix, Value: "api/"},
 				}},
 			}
 
@@ -223,17 +223,17 @@ var _ = Describe("RateLimitPolicy", func() {
 			// One pattern covers every place a key is named, and it admits the
 			// camelCase the reference examples use.
 			policy := policyWith("gateway.public", blockWith("api",
-				predicateRule("per-tenant", ratelimitv1alpha1.Predicate{
-					Key: "tenantId", Operator: ratelimitv1alpha1.OperatorExists,
+				predicateRule("per-tenant", ratelimitv1.Predicate{
+					Key: "tenantId", Operator: ratelimitv1.OperatorExists,
 				})))
-			policy.Spec.Mappings = []ratelimitv1alpha1.ClaimMapping{
+			policy.Spec.Mappings = []ratelimitv1.ClaimMapping{
 				{Key: "tenantId", Claim: "org_id"},
 			}
 			policy.Spec.Limits[0].Rules[0].Counters = []string{"tenantId"}
-			policy.Spec.Limits[0].Target = &ratelimitv1alpha1.Target{
-				Routes: []ratelimitv1alpha1.Route{{
-					Path: ratelimitv1alpha1.PathMatch{
-						Type: ratelimitv1alpha1.PathMatchTemplate, Value: "/api/orders/{orderId}",
+			policy.Spec.Limits[0].Target = &ratelimitv1.Target{
+				Routes: []ratelimitv1.Route{{
+					Path: ratelimitv1.PathMatch{
+						Type: ratelimitv1.PathMatchTemplate, Value: "/api/orders/{orderId}",
 					},
 				}},
 			}
@@ -257,27 +257,27 @@ var _ = Describe("RateLimitPolicy", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
 			Expect(create(policy)).To(Succeed())
 
-			stored := &ratelimitv1alpha1.RateLimitPolicy{}
+			stored := &ratelimitv1.RateLimitPolicy{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
 
-			Expect(stored.Spec.Limits[0].Mode).To(Equal(ratelimitv1alpha1.BlockModeAll))
-			Expect(stored.Spec.Limits[0].Rules[0].Behavior).To(Equal(ratelimitv1alpha1.RuleBehaviorEnforce))
-			Expect(stored.Spec.Limits[0].Rules[0].Rates[0].Algorithm).To(Equal(ratelimitv1alpha1.AlgorithmGCRA))
+			Expect(stored.Spec.Limits[0].Mode).To(Equal(ratelimitv1.BlockModeAll))
+			Expect(stored.Spec.Limits[0].Rules[0].Behavior).To(Equal(ratelimitv1.RuleBehaviorEnforce))
+			Expect(stored.Spec.Limits[0].Rules[0].Rates[0].Algorithm).To(Equal(ratelimitv1.AlgorithmGCRA))
 		})
 
 		It("accepts the mappings and groups of the one object", func() {
 			policy := policyWith("gateway.public", blockWith("api",
-				predicateRule("partners", ratelimitv1alpha1.Predicate{
-					Key: "client", Operator: ratelimitv1alpha1.OperatorInGroup, Value: "partners",
+				predicateRule("partners", ratelimitv1.Predicate{
+					Key: "client", Operator: ratelimitv1.OperatorInGroup, Value: "partners",
 				})))
-			policy.Spec.Mappings = []ratelimitv1alpha1.ClaimMapping{{
+			policy.Spec.Mappings = []ratelimitv1.ClaimMapping{{
 				Key:           "roles",
 				Claim:         "realm_access.roles",
-				Type:          ratelimitv1alpha1.ClaimTypeStringArray,
-				Normalization: ratelimitv1alpha1.NormalizeLowercase,
+				Type:          ratelimitv1.ClaimTypeStringArray,
+				Normalization: ratelimitv1.NormalizeLowercase,
 				Fallbacks:     []string{"sub"},
 			}}
-			policy.Spec.Groups = []ratelimitv1alpha1.ClientGroup{
+			policy.Spec.Groups = []ratelimitv1.ClientGroup{
 				{Name: "partners", Clients: []string{"p1", "p2"}},
 			}
 
@@ -286,7 +286,7 @@ var _ = Describe("RateLimitPolicy", func() {
 
 		It("rejects two mappings of one key", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
-			policy.Spec.Mappings = []ratelimitv1alpha1.ClaimMapping{
+			policy.Spec.Mappings = []ratelimitv1.ClaimMapping{
 				{Key: "roles", Claim: "a"},
 				{Key: "roles", Claim: "b"},
 			}
@@ -305,25 +305,25 @@ var _ = Describe("RateLimitPolicy", func() {
 			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			reconciled := &ratelimitv1alpha1.RateLimitPolicy{}
+			reconciled := &ratelimitv1.RateLimitPolicy{}
 			Expect(k8sClient.Get(ctx, name, reconciled)).To(Succeed())
 			Expect(reconciled.Status.ObservedGeneration).To(Equal(reconciled.Generation))
 			Expect(reconciled.Status.ActiveGeneration).To(Equal(reconciled.Generation))
 			Expect(reconciled.Status.Rules).To(Equal(int32(1)))
 			Expect(reconciled.Status.EffectiveKeys).To(ContainElement("client"))
 
-			accepted := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
+			accepted := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1.ConditionAccepted)
 			Expect(accepted).NotTo(BeNil())
 			Expect(accepted.Status).To(Equal(metav1.ConditionTrue))
-			Expect(accepted.Reason).To(Equal(ratelimitv1alpha1.ReasonRulesCompiled))
+			Expect(accepted.Reason).To(Equal(ratelimitv1.ReasonRulesCompiled))
 			Expect(accepted.ObservedGeneration).To(Equal(reconciled.Generation))
 
-			ready := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionReady)
+			ready := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1.ConditionReady)
 			Expect(ready).NotTo(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			Expect(ready.Reason).To(Equal(ratelimitv1alpha1.ReasonAllReplicas))
+			Expect(ready.Reason).To(Equal(ratelimitv1.ReasonAllReplicas))
 
-			stalled := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+			stalled := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1.ConditionStalled)
 			Expect(stalled).NotTo(BeNil())
 			Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
 
@@ -348,7 +348,7 @@ var _ = Describe("RateLimitPolicy", func() {
 		It("raises one Warning per generation that does not compile", func() {
 			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.events"}
 			broken := policyWith(name.Name, blockWith("api", predicateRule("per-plan",
-				ratelimitv1alpha1.Predicate{Key: "plan", Operator: ratelimitv1alpha1.OperatorExists})))
+				ratelimitv1.Predicate{Key: "plan", Operator: ratelimitv1.OperatorExists})))
 			Expect(create(broken)).To(Succeed())
 
 			drain(recorder)
@@ -358,8 +358,8 @@ var _ = Describe("RateLimitPolicy", func() {
 			var raised string
 			Eventually(recorder.Events).Should(Receive(&raised))
 			Expect(raised).To(ContainSubstring("Warning"))
-			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ReasonNotCompiled))
-			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ProblemUnresolvedKeyReference))
+			Expect(raised).To(ContainSubstring(ratelimitv1.ReasonNotCompiled))
+			Expect(raised).To(ContainSubstring(ratelimitv1.ProblemUnresolvedKeyReference))
 
 			By("staying quiet while the same generation keeps failing")
 			// A reconcile runs on its interval whether or not anything moved, so
@@ -377,7 +377,7 @@ var _ = Describe("RateLimitPolicy", func() {
 			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 			Eventually(recorder.Events).Should(Receive(&raised))
-			Expect(raised).To(ContainSubstring(ratelimitv1alpha1.ReasonNotCompiled))
+			Expect(raised).To(ContainSubstring(ratelimitv1.ReasonNotCompiled))
 		})
 
 		It("stays quiet on a generation that compiles", func() {
@@ -409,30 +409,30 @@ var _ = Describe("RateLimitPolicy", func() {
 		It("writes the rule problems the API server accepts", func() {
 			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.private"}
 			Expect(create(policyWith(name.Name, blockWith("api", predicateRule("per-plan",
-				ratelimitv1alpha1.Predicate{
+				ratelimitv1.Predicate{
 					Key:      "plan",
-					Operator: ratelimitv1alpha1.OperatorExists,
+					Operator: ratelimitv1.OperatorExists,
 				}))))).To(Succeed())
 
 			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			reconciled := &ratelimitv1alpha1.RateLimitPolicy{}
+			reconciled := &ratelimitv1.RateLimitPolicy{}
 			Expect(k8sClient.Get(ctx, name, reconciled)).To(Succeed())
 			Expect(reconciled.Status.RuleProblems).To(HaveLen(1))
 			Expect(reconciled.Status.RuleProblems[0].Reason).
-				To(Equal(ratelimitv1alpha1.ProblemUnresolvedKeyReference))
+				To(Equal(ratelimitv1.ProblemUnresolvedKeyReference))
 			Expect(reconciled.Status.Problems).To(Equal(int32(1)))
 			Expect(reconciled.Status.ActiveGeneration).To(BeZero(),
 				"a generation with a blocking problem enforces nothing")
 
-			accepted := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionAccepted)
+			accepted := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1.ConditionAccepted)
 			Expect(accepted.Status).To(Equal(metav1.ConditionFalse))
-			Expect(accepted.Reason).To(Equal(ratelimitv1alpha1.ReasonCompilationFailed))
+			Expect(accepted.Reason).To(Equal(ratelimitv1.ReasonCompilationFailed))
 
-			stalled := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1alpha1.ConditionStalled)
+			stalled := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1.ConditionStalled)
 			Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
-			Expect(stalled.Reason).To(Equal(ratelimitv1alpha1.ReasonNotCompiled))
+			Expect(stalled.Reason).To(Equal(ratelimitv1.ReasonNotCompiled))
 		})
 
 		It("ignores a policy that is already gone", func() {

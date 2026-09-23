@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
@@ -16,14 +16,14 @@ import (
 
 // policySpec is the spec of one domain, as the service reads it off its
 // volume.
-func policySpec(domain string) v1alpha1.RateLimitPolicySpec {
-	return v1alpha1.RateLimitPolicySpec{
+func policySpec(domain string) v1.RateLimitPolicySpec {
+	return v1.RateLimitPolicySpec{
 		Domain: domain,
-		Limits: []v1alpha1.LimitBlock{{
+		Limits: []v1.LimitBlock{{
 			Name: "api",
-			Rules: []v1alpha1.Rule{{
+			Rules: []v1.Rule{{
 				Name:  "total",
-				Rates: []v1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}},
+				Rates: []v1.Rate{{Requests: 100, PeriodSeconds: 60}},
 			}},
 		}},
 	}
@@ -31,7 +31,7 @@ func policySpec(domain string) v1alpha1.RateLimitPolicySpec {
 
 // ruleSetOf compiles the specs and binds each domain to a counter store,
 // which is what the service's applier does on every apply.
-func ruleSetOf(t *testing.T, specs ...v1alpha1.RateLimitPolicySpec) *RuleSet {
+func ruleSetOf(t *testing.T, specs ...v1.RateLimitPolicySpec) *RuleSet {
 	t.Helper()
 	counters := memory.New()
 	domains := map[string]Domain{}

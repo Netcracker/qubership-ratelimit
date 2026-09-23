@@ -10,7 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	kjson "sigs.k8s.io/json"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // Object and ObjectList name the kind in the form every reader of it uses.
@@ -22,13 +22,13 @@ import (
 // the mistake reads, so the shape lives here rather than at each call site.
 func Object() *unstructured.Unstructured {
 	object := &unstructured.Unstructured{}
-	object.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicy"))
+	object.SetGroupVersionKind(v1.GroupVersion.WithKind("RateLimitPolicy"))
 	return object
 }
 
 func ObjectList() *unstructured.UnstructuredList {
 	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(v1alpha1.GroupVersion.WithKind("RateLimitPolicyList"))
+	list.SetGroupVersionKind(v1.GroupVersion.WithKind("RateLimitPolicyList"))
 	return list
 }
 
@@ -52,8 +52,8 @@ func Load(ctx context.Context, reader client.Reader, namespace string) (Input, e
 
 	input := Input{
 		Namespace: namespace,
-		Policies:  make([]v1alpha1.RateLimitPolicy, 0, len(list.Items)),
-		Skew:      map[client.ObjectKey][]v1alpha1.RuleProblem{},
+		Policies:  make([]v1.RateLimitPolicy, 0, len(list.Items)),
+		Skew:      map[client.ObjectKey][]v1.RuleProblem{},
 	}
 	for i := range list.Items {
 		object, skew, err := Decode(&list.Items[i])
@@ -79,8 +79,8 @@ func Load(ctx context.Context, reader client.Reader, namespace string) (Input, e
 //
 // A hard error is different in kind - the object is not a RateLimitPolicy at
 // all, which the API server does not store - and is returned as an error.
-func Decode(object *unstructured.Unstructured) (*v1alpha1.RateLimitPolicy, []v1alpha1.RuleProblem, error) {
-	var typed v1alpha1.RateLimitPolicy
+func Decode(object *unstructured.Unstructured) (*v1.RateLimitPolicy, []v1.RuleProblem, error) {
+	var typed v1.RateLimitPolicy
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &typed); err != nil {
 		return nil, nil, fmt.Errorf("decode RateLimitPolicy %s: %w", client.ObjectKeyFromObject(object), err)
 	}
@@ -106,7 +106,7 @@ func Decode(object *unstructured.Unstructured) (*v1alpha1.RateLimitPolicy, []v1a
 //
 // The strict pass therefore runs over an object that carries the spec alone,
 // which is also what keeps the reported paths spec-relative.
-func specSkew(object *unstructured.Unstructured) ([]v1alpha1.RuleProblem, error) {
+func specSkew(object *unstructured.Unstructured) ([]v1.RuleProblem, error) {
 	spec, found, err := unstructured.NestedFieldNoCopy(object.Object, "spec")
 	if err != nil {
 		return nil, err
@@ -123,17 +123,17 @@ func specSkew(object *unstructured.Unstructured) ([]v1alpha1.RuleProblem, error)
 	// Decoded into a holder of the spec alone rather than the whole policy, so
 	// that "unknown field" can only ever mean a field of the spec.
 	var holder struct {
-		Spec v1alpha1.RateLimitPolicySpec `json:"spec"`
+		Spec v1.RateLimitPolicySpec `json:"spec"`
 	}
 	strict, err := kjson.UnmarshalStrict(raw, &holder)
 	if err != nil {
 		return nil, err
 	}
 
-	var problems []v1alpha1.RuleProblem
+	var problems []v1.RuleProblem
 	for _, e := range strict {
-		problems = append(problems, v1alpha1.RuleProblem{
-			Reason:  v1alpha1.ProblemInvalidSpec,
+		problems = append(problems, v1.RuleProblem{
+			Reason:  v1.ProblemInvalidSpec,
 			Message: e.Error(),
 		})
 	}

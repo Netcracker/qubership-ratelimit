@@ -11,7 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // Ready is a statement about every replica, which makes a rollout the case it
@@ -94,7 +94,7 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 					continue
 				}
 				for _, condition := range policy.Status.Conditions {
-					if condition.Type == v1alpha1.ConditionReady &&
+					if condition.Type == v1.ConditionReady &&
 						condition.Status != metav1.ConditionTrue {
 						mu.Lock()
 						seen = append(seen, string(condition.Status)+"/"+condition.Reason)
@@ -145,14 +145,14 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 		var seen []string
 		Eventually(func() []string {
 			reason := readyReason(domain)()
-			if reason == v1alpha1.ReasonReconciling || reason == v1alpha1.ReasonPropagating {
+			if reason == v1.ReasonReconciling || reason == v1.ReasonPropagating {
 				seen = append(seen, reason)
 			}
 			return seen
 		}).WithTimeout(time.Minute).WithPolling(200*time.Millisecond).ShouldNot(BeEmpty(),
 			"the change reached every replica without Ready ever reading as in flight")
 		Eventually(readyReason(domain)).WithTimeout(2*time.Minute).WithPolling(time.Second).
-			Should(Equal(v1alpha1.ReasonAllReplicas), "Ready did not come back once the change propagated")
+			Should(Equal(v1.ReasonAllReplicas), "Ready did not come back once the change propagated")
 		Expect(policyCondition(domain, "Stalled")()).To(Equal("False"),
 			"a rollout that completed was reported as stalled")
 	})

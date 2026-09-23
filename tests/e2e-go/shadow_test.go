@@ -8,7 +8,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // A shadow rule is how a tighter limit is tried out over live traffic: it
@@ -32,7 +32,7 @@ var _ = Describe("shadow rules", Ordered, Label("shadow"), func() {
 
 			waitGatewayServes("public-gateway", probePath)
 			limits := prefixLimits(probePath, "dry-run", nil, 1, 3600)
-			limits[0].Rules[0].Behavior = v1alpha1.RuleBehaviorShadow
+			limits[0].Rules[0].Behavior = v1.RuleBehaviorShadow
 			Expect(apply(newPolicy(domain, limits))).To(Succeed())
 			waitApplied(domain)
 		}

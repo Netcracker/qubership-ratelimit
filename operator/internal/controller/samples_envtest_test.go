@@ -71,8 +71,8 @@ var _ = Describe("the samples in config/samples", func() {
 		// is one object. A sample that left a problem behind would be documenting
 		// a policy nobody should copy.
 		for _, name := range []string{
-			"ratelimit_v1alpha1_ratelimitpolicy_public.yaml",
-			"ratelimit_v1alpha1_ratelimitpolicy_tiered.yaml",
+			"ratelimit_v1_ratelimitpolicy_public.yaml",
+			"ratelimit_v1_ratelimitpolicy_tiered.yaml",
 		} {
 			raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "samples", name))
 			Expect(err).NotTo(HaveOccurred())
@@ -97,7 +97,7 @@ var _ = Describe("the samples in config/samples", func() {
 			reconciled := &unstructured.Unstructured{}
 			reconciled.SetGroupVersionKind(schema.GroupVersionKind{
 				Group:   "ratelimit.netcracker.com",
-				Version: "v1alpha1",
+				Version: "v1",
 				Kind:    "RateLimitPolicy",
 			})
 			Expect(k8sClient.Get(ctx, request.NamespacedName, reconciled)).To(Succeed())

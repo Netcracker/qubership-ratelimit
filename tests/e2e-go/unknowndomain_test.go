@@ -10,7 +10,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // A domain the filter sends and no policy claims: the filter config and the
@@ -27,7 +27,7 @@ var _ = Describe("an unknown domain", Ordered, Label("unknown-domain"), func() {
 	BeforeAll(func() {
 		// Sequential containers make the window; this check makes it a
 		// diagnosis instead of a silent false green when that ever changes.
-		var policies v1alpha1.RateLimitPolicyList
+		var policies v1.RateLimitPolicyList
 		Expect(k8s.List(ctx, &policies, client.InNamespace(namespace))).To(Succeed())
 		for _, p := range policies.Items {
 			Expect(p.Spec.Domain).NotTo(Equal(domain),

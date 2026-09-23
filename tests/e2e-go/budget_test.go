@@ -10,7 +10,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/meta"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // The decision budget: a generation whose worst-case request would collect
@@ -24,20 +24,20 @@ var _ = Describe("the decision budget", Ordered, Label("budget"), func() {
 
 	// rules builds n unconditional rules of four windows each, so the
 	// worst-case decision is 4n buckets.
-	rules := func(n int) []v1alpha1.LimitBlock {
-		out := make([]v1alpha1.Rule, 0, n)
+	rules := func(n int) []v1.LimitBlock {
+		out := make([]v1.Rule, 0, n)
 		for i := 0; i < n; i++ {
-			out = append(out, v1alpha1.Rule{
+			out = append(out, v1.Rule{
 				Name: fmt.Sprintf("r%02d", i),
-				Rates: []v1alpha1.Rate{
-					{Requests: 100, PeriodSeconds: 10, Algorithm: v1alpha1.AlgorithmFixedWindow},
-					{Requests: 100, PeriodSeconds: 60, Algorithm: v1alpha1.AlgorithmFixedWindow},
-					{Requests: 100, PeriodSeconds: 3600, Algorithm: v1alpha1.AlgorithmFixedWindow},
-					{Requests: 100, PeriodSeconds: 86400, Algorithm: v1alpha1.AlgorithmFixedWindow},
+				Rates: []v1.Rate{
+					{Requests: 100, PeriodSeconds: 10, Algorithm: v1.AlgorithmFixedWindow},
+					{Requests: 100, PeriodSeconds: 60, Algorithm: v1.AlgorithmFixedWindow},
+					{Requests: 100, PeriodSeconds: 3600, Algorithm: v1.AlgorithmFixedWindow},
+					{Requests: 100, PeriodSeconds: 86400, Algorithm: v1.AlgorithmFixedWindow},
 				},
 			})
 		}
-		return []v1alpha1.LimitBlock{{Name: "heavy", Rules: out}}
+		return []v1.LimitBlock{{Name: "heavy", Rules: out}}
 	}
 
 	AfterAll(func() { deletePolicies(domain) })
@@ -46,7 +46,7 @@ var _ = Describe("the decision budget", Ordered, Label("budget"), func() {
 		// 32 rules of 4 windows is exactly 128, the budget itself.
 		Expect(apply(newPolicy(domain, rules(32)))).To(Succeed())
 
-		Eventually(policyCondition(domain, v1alpha1.ConditionAccepted)).Should(Equal("True"),
+		Eventually(policyCondition(domain, v1.ConditionAccepted)).Should(Equal("True"),
 			"a generation at the budget must compile")
 	})
 
@@ -58,12 +58,12 @@ var _ = Describe("the decision budget", Ordered, Label("budget"), func() {
 			if err != nil {
 				return ""
 			}
-			c := meta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionAccepted)
+			c := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionAccepted)
 			if c == nil || c.Status != "False" {
 				return ""
 			}
 			return c.Reason
-		}).Should(Equal(v1alpha1.ReasonCompilationFailed),
+		}).Should(Equal(v1.ReasonCompilationFailed),
 			"a generation over the budget must not compile")
 
 		p, err := getPolicy(domain)
@@ -74,17 +74,17 @@ var _ = Describe("the decision budget", Ordered, Label("budget"), func() {
 			"the two generations must diverge while the latest one is refused")
 
 		Expect(p.Status.RuleProblems).NotTo(BeEmpty())
-		Expect(p.Status.RuleProblems[0].Reason).To(Equal(v1alpha1.ProblemDomainBudgetExceeded))
+		Expect(p.Status.RuleProblems[0].Reason).To(Equal(v1.ProblemDomainBudgetExceeded))
 
-		Eventually(policyCondition(domain, v1alpha1.ConditionStalled)).Should(Equal("True"),
+		Eventually(policyCondition(domain, v1.ConditionStalled)).Should(Equal("True"),
 			"a generation stuck on last-good is what Stalled is for")
 	})
 
 	It("takes the generation back once it fits again", func() {
 		Expect(apply(newPolicy(domain, rules(16)))).To(Succeed())
 
-		Eventually(policyCondition(domain, v1alpha1.ConditionAccepted)).Should(Equal("True"))
-		Eventually(policyCondition(domain, v1alpha1.ConditionStalled)).Should(Equal("False"),
+		Eventually(policyCondition(domain, v1.ConditionAccepted)).Should(Equal("True"))
+		Eventually(policyCondition(domain, v1.ConditionStalled)).Should(Equal("False"),
 			"a generation that compiles again is no longer stuck")
 
 		p, err := getPolicy(domain)

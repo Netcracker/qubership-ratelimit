@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/netcracker/qubership-ratelimit/api/v1alpha1"
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	enginecompile "github.com/netcracker/qubership-ratelimit/engine/compile"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 )
@@ -20,81 +20,81 @@ const testDomain = "gateway.public"
 // side would otherwise turn into a silently unmatched rule.
 
 func TestModelVocabulary_matchesTheAPI(t *testing.T) {
-	assert.Equal(t, string(model.PathExact), string(v1alpha1.PathMatchExact))
-	assert.Equal(t, string(model.PathPrefix), string(v1alpha1.PathMatchPrefix))
-	assert.Equal(t, string(model.PathTemplate), string(v1alpha1.PathMatchTemplate))
+	assert.Equal(t, string(model.PathExact), string(v1.PathMatchExact))
+	assert.Equal(t, string(model.PathPrefix), string(v1.PathMatchPrefix))
+	assert.Equal(t, string(model.PathTemplate), string(v1.PathMatchTemplate))
 
-	assert.Equal(t, string(model.ModeAll), string(v1alpha1.BlockModeAll))
-	assert.Equal(t, string(model.ModeFirstMatch), string(v1alpha1.BlockModeFirstMatch))
+	assert.Equal(t, string(model.ModeAll), string(v1.BlockModeAll))
+	assert.Equal(t, string(model.ModeFirstMatch), string(v1.BlockModeFirstMatch))
 
-	assert.Equal(t, string(model.BehaviorEnforce), string(v1alpha1.RuleBehaviorEnforce))
-	assert.Equal(t, string(model.BehaviorShadow), string(v1alpha1.RuleBehaviorShadow))
-	assert.Equal(t, string(model.BehaviorBypass), string(v1alpha1.RuleBehaviorBypass))
+	assert.Equal(t, string(model.BehaviorEnforce), string(v1.RuleBehaviorEnforce))
+	assert.Equal(t, string(model.BehaviorShadow), string(v1.RuleBehaviorShadow))
+	assert.Equal(t, string(model.BehaviorBypass), string(v1.RuleBehaviorBypass))
 
-	assert.Equal(t, string(model.OperatorEquals), string(v1alpha1.OperatorEquals))
-	assert.Equal(t, string(model.OperatorIn), string(v1alpha1.OperatorIn))
-	assert.Equal(t, string(model.OperatorInGroup), string(v1alpha1.OperatorInGroup))
-	assert.Equal(t, string(model.OperatorContains), string(v1alpha1.OperatorContains))
-	assert.Equal(t, string(model.OperatorExists), string(v1alpha1.OperatorExists))
-	assert.Equal(t, string(model.OperatorDoesNotExist), string(v1alpha1.OperatorDoesNotExist))
+	assert.Equal(t, string(model.OperatorEquals), string(v1.OperatorEquals))
+	assert.Equal(t, string(model.OperatorIn), string(v1.OperatorIn))
+	assert.Equal(t, string(model.OperatorInGroup), string(v1.OperatorInGroup))
+	assert.Equal(t, string(model.OperatorContains), string(v1.OperatorContains))
+	assert.Equal(t, string(model.OperatorExists), string(v1.OperatorExists))
+	assert.Equal(t, string(model.OperatorDoesNotExist), string(v1.OperatorDoesNotExist))
 
-	assert.Equal(t, string(model.ValueString), string(v1alpha1.ClaimTypeString))
-	assert.Equal(t, string(model.ValueStringArray), string(v1alpha1.ClaimTypeStringArray))
+	assert.Equal(t, string(model.ValueString), string(v1.ClaimTypeString))
+	assert.Equal(t, string(model.ValueStringArray), string(v1.ClaimTypeStringArray))
 
-	assert.Equal(t, string(model.NormalizeNone), string(v1alpha1.NormalizeNone))
-	assert.Equal(t, string(model.NormalizeLowercase), string(v1alpha1.NormalizeLowercase))
+	assert.Equal(t, string(model.NormalizeNone), string(v1.NormalizeNone))
+	assert.Equal(t, string(model.NormalizeLowercase), string(v1.NormalizeLowercase))
 
-	assert.Equal(t, model.KeyPath, v1alpha1.KeyPath)
-	assert.Equal(t, model.KeyMethod, v1alpha1.KeyMethod)
-	assert.Equal(t, model.KeyClient, v1alpha1.KeyClient)
-	assert.Equal(t, model.KeyToken, v1alpha1.KeyToken)
+	assert.Equal(t, model.KeyPath, v1.KeyPath)
+	assert.Equal(t, model.KeyMethod, v1.KeyMethod)
+	assert.Equal(t, model.KeyClient, v1.KeyClient)
+	assert.Equal(t, model.KeyToken, v1.KeyToken)
 }
 
 func TestProblemVocabulary_matchesTheAPI(t *testing.T) {
 	// The reasons reach the status as the engine spells them, and alerts are
 	// written against those strings.
-	assert.Equal(t, string(enginecompile.ReasonUnresolvedKeyReference), v1alpha1.ProblemUnresolvedKeyReference)
-	assert.Equal(t, string(enginecompile.ReasonUnresolvedGroupReference), v1alpha1.ProblemUnresolvedGroupReference)
-	assert.Equal(t, string(enginecompile.ReasonIncompatibleOperator), v1alpha1.ProblemIncompatibleOperator)
-	assert.Equal(t, string(enginecompile.ReasonInvalidCounterAxis), v1alpha1.ProblemInvalidCounterAxis)
-	assert.Equal(t, string(enginecompile.ReasonCaptureShadowsMappedKey), v1alpha1.ProblemCaptureShadowsMappedKey)
-	assert.Equal(t, string(enginecompile.ReasonInvalidSpec), v1alpha1.ProblemInvalidSpec)
-	assert.Equal(t, string(enginecompile.ReasonInvalidWindow), v1alpha1.ProblemInvalidWindow)
-	assert.Equal(t, string(enginecompile.ReasonUnresolvedReplacedRules), v1alpha1.ProblemUnresolvedReplacedRules)
-	assert.Equal(t, string(enginecompile.ReasonDomainBudgetExceeded), v1alpha1.ProblemDomainBudgetExceeded)
+	assert.Equal(t, string(enginecompile.ReasonUnresolvedKeyReference), v1.ProblemUnresolvedKeyReference)
+	assert.Equal(t, string(enginecompile.ReasonUnresolvedGroupReference), v1.ProblemUnresolvedGroupReference)
+	assert.Equal(t, string(enginecompile.ReasonIncompatibleOperator), v1.ProblemIncompatibleOperator)
+	assert.Equal(t, string(enginecompile.ReasonInvalidCounterAxis), v1.ProblemInvalidCounterAxis)
+	assert.Equal(t, string(enginecompile.ReasonCaptureShadowsMappedKey), v1.ProblemCaptureShadowsMappedKey)
+	assert.Equal(t, string(enginecompile.ReasonInvalidSpec), v1.ProblemInvalidSpec)
+	assert.Equal(t, string(enginecompile.ReasonInvalidWindow), v1.ProblemInvalidWindow)
+	assert.Equal(t, string(enginecompile.ReasonUnresolvedReplacedRules), v1.ProblemUnresolvedReplacedRules)
+	assert.Equal(t, string(enginecompile.ReasonDomainBudgetExceeded), v1.ProblemDomainBudgetExceeded)
 }
 
 func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 	burst := int32(10)
-	spec := &v1alpha1.RateLimitPolicySpec{
+	spec := &v1.RateLimitPolicySpec{
 		Domain: testDomain,
-		Mappings: []v1alpha1.ClaimMapping{{
+		Mappings: []v1.ClaimMapping{{
 			Key:           "tenant",
 			Claim:         "org_id",
-			Type:          v1alpha1.ClaimTypeString,
-			Normalization: v1alpha1.NormalizeLowercase,
+			Type:          v1.ClaimTypeString,
+			Normalization: v1.NormalizeLowercase,
 			Fallbacks:     []string{"sub"},
 		}, {
 			Key:       "entitlements",
 			ClaimPath: []string{"https://acme.com/entitlements"},
-			Type:      v1alpha1.ClaimTypeStringArray,
+			Type:      v1.ClaimTypeStringArray,
 		}},
-		Groups: []v1alpha1.ClientGroup{{Name: "partners", Clients: []string{"p1", "p2"}}},
-		Limits: []v1alpha1.LimitBlock{{
+		Groups: []v1.ClientGroup{{Name: "partners", Clients: []string{"p1", "p2"}}},
+		Limits: []v1.LimitBlock{{
 			Name: "api",
-			Mode: v1alpha1.BlockModeFirstMatch,
-			Target: &v1alpha1.Target{Routes: []v1alpha1.Route{{
-				Path:    v1alpha1.PathMatch{Type: v1alpha1.PathMatchTemplate, Value: "/api/{id}"},
-				Methods: []v1alpha1.HTTPMethod{"GET", "POST"},
+			Mode: v1.BlockModeFirstMatch,
+			Target: &v1.Target{Routes: []v1.Route{{
+				Path:    v1.PathMatch{Type: v1.PathMatchTemplate, Value: "/api/{id}"},
+				Methods: []v1.HTTPMethod{"GET", "POST"},
 			}}},
-			Rules: []v1alpha1.Rule{{
+			Rules: []v1.Rule{{
 				Name:          "per-user",
-				Matches:       []v1alpha1.Predicate{{Key: "client", Operator: v1alpha1.OperatorIn, Values: []string{"a"}}},
+				Matches:       []v1.Predicate{{Key: "client", Operator: v1.OperatorIn, Values: []string{"a"}}},
 				Counters:      []string{"client"},
-				Behavior:      v1alpha1.RuleBehaviorShadow,
+				Behavior:      v1.RuleBehaviorShadow,
 				ReplacedRules: []string{"other"},
-				Rates: []v1alpha1.Rate{{
-					Requests: 100, PeriodSeconds: 60, Burst: &burst, Algorithm: v1alpha1.AlgorithmGCRA,
+				Rates: []v1.Rate{{
+					Requests: 100, PeriodSeconds: 60, Burst: &burst, Algorithm: v1.AlgorithmGCRA,
 				}},
 			}},
 		}},
@@ -139,9 +139,9 @@ func TestModelRule_anUnsetBurstStaysZero(t *testing.T) {
 	// Zero is how the engine is told "unset", and it applies the documented
 	// default of a full bucket. Spelling that out here would put one rule in two
 	// places, and the two would drift.
-	rule := modelRule(&v1alpha1.Rule{
+	rule := modelRule(&v1.Rule{
 		Name:  "r",
-		Rates: []v1alpha1.Rate{{Requests: 100, PeriodSeconds: 60}},
+		Rates: []v1.Rate{{Requests: 100, PeriodSeconds: 60}},
 	})
 
 	assert.Zero(t, rule.Rates[0].Burst)
@@ -166,9 +166,9 @@ func TestModelPeriod_isPlainSeconds(t *testing.T) {
 		86400: 24 * time.Hour,
 	}
 	for seconds, want := range cases {
-		rule := modelRule(&v1alpha1.Rule{
+		rule := modelRule(&v1.Rule{
 			Name:  "r",
-			Rates: []v1alpha1.Rate{{Requests: 100, PeriodSeconds: seconds}},
+			Rates: []v1.Rate{{Requests: 100, PeriodSeconds: seconds}},
 		})
 		assert.Equal(t, want, rule.Rates[0].Period)
 	}
