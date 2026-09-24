@@ -112,9 +112,9 @@ effort.
 ## Implementations
 
 **In-memory** (`store/memory`) is the reference client of the suite and a dev-only backend, for the local stand and
-tests: counters live in the replica's memory, N replicas give an N-fold limit, so the chart accepts an empty
-`redis.addresses` only with `REPLICAS == 1`. Its math mirrors the server-side script formula for formula; expiry is
-lazy (stale state is discarded on touch and in `Scan`).
+tests: counters live in the replica's memory, N replicas give an N-fold limit, so the chart never renders it; a
+service started without `--redis-dbaas-microservice` counts there. Its math mirrors the server-side script formula for
+formula; expiry is lazy (stale state is discarded on touch and in `Scan`).
 
 **Redis** (`store/redis`) is one Lua script per decision: evaluate all buckets, commit only if no enforcing bucket
 refused. GCRA is ported from go-redis/redis_rate (BSD-2-Clause), and that library remains the

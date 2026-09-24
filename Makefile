@@ -188,7 +188,7 @@ helm-lint: ## Lint every chart against every resource profile, in every mode.
 				baseline) extra="--set ORIGIN_NAMESPACE=lint-ns" ;; \
 				satellite) extra="--set BASELINE_ORIGIN=lint-baseline" ;; \
 			esac; \
-			helm lint $$chart -f "$$profile" --set redis.addresses=lint-redis:6379 $$extra || exit 1; \
+			helm lint $$chart -f "$$profile" $$extra || exit 1; \
 		done; \
 	done; \
 	done

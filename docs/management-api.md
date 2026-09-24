@@ -313,10 +313,11 @@ property of the access model. Axis values and the Idempotency-Key land in the lo
 - **Sharding by domain.** The record scope (subject, domain, endpoint) contains the domain, and there are no
   cross-domain commands, so records and tokens carry the same `{ns/domain}` hash tag as the counters: one slot,
   single-slot Lua legal on a cluster, and the independence of records between domains is the physical layout.
-- **The in-memory store is single-replica by definition** (tests and the local stand): the Helm values schema rejects an
-  empty `redis.addresses` with more than one replica, and the service refuses to start the management API on an
-  in-memory store with more than one replica, so the "the store is shared" assumption is never silent. Bulk still works
-  fully there, since preview and execution are one pod.
+- **The in-memory store is single-replica by definition** (tests and the developer loop, a service started without
+  `--redis-dbaas-microservice`): the chart never renders it, since every replica it installs reads its DBaaS database,
+  and the service warns when it serves the management API over it, so the "the store is shared" assumption is never
+  silent.
+  Bulk still works fully there, since preview and execution are one pod.
 - **The applicability evaluator** statically evaluates a rule against a partial identity: conditions over the supplied
   values (groups are resolved by compilation), availability of the counting axes (a block's captures are present for any
   request that reached a `Template` route), FirstMatch preemption (shadow does not decide, bypass cuts off), and

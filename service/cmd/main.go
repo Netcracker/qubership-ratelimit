@@ -16,6 +16,8 @@ import (
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/xrequestid"
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/ctxmanager"
 	"github.com/netcracker/qubership-core-lib-go/v3/logging"
+	"github.com/netcracker/qubership-core-lib-go/v3/security"
+	"github.com/netcracker/qubership-core-lib-go/v3/serviceloader"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/internal/process"
@@ -48,6 +50,10 @@ func main() {
 			"from the data path: these endpoints lift limits.")
 	flag.StringVar(&options.ConfigDir, "config-dir", contract.MountPath,
 		"The directory the configuration ConfigMap is mounted at.")
+	flag.StringVar(&options.RedisMicroservice, "redis-dbaas-microservice", "",
+		"The microserviceName of the counter store's DBaaS classifier; the database is resolved through the "+
+			"platform DBaaS client from the Secret mounted under /etc/secrets/dbaas-secrets. "+
+			"Empty counts in process, per replica: for the developer loop and tests, never a pod.")
 	flag.DurationVar(&options.Resync, "config-resync", config.DefaultResync,
 		"How often the configuration directory is re-read without a file event.")
 	flag.DurationVar(&options.DrainTimeout, "rls-drain-timeout", rls.DefaultDrainTimeout,
@@ -58,6 +64,12 @@ func main() {
 	// through configloader, and logging.GetLogger reads its level from it.
 	configloader.InitWithSourcesArray(configloader.BasePropertySources())
 	ctxmanager.Register([]ctxmanager.ContextProvider{xrequestid.XRequestIdProvider{}})
+
+	// The DBaaS client resolves the counter store from the mounted Secret and
+	// falls back to REST only on a miss. The pod holds no token, so the
+	// provider is the platform's dummy: a miss fails at DBaaS rather than
+	// authenticating as anything.
+	serviceloader.Register(2, &security.DummyToken{})
 
 	setupLog := logging.GetLogger(loggerName)
 	options.Log = process.NewLogrLogger(loggerName)

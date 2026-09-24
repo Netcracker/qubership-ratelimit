@@ -1,0 +1,56 @@
+{{- /*
+The counter store, from DBaaS. The InternalDatabase asks dbaas-aggregator to
+provision a Redis database for the release through the DBaaS Redis adapter;
+the DatabaseSecretClaim asks dbaas-operator to look that database up and write
+its connection properties into the Secret the Deployment mounts, and to keep
+the Secret current when the password rotates. Both carry the same classifier,
+the service's own: microserviceName is the chart's name, which is also the
+app.kubernetes.io/name label dbaas-operator sends as the originService of the
+claim, so the database's owner is the service that reads it.
+
+Both are assigned to one dbaas-operator by spec.operatorNamespace, the
+namespace the operator and its aggregator run in, read off API_DBAAS_ADDRESS;
+an operator reconciles only the CRs that name its own namespace.
+
+A satellite renders neither: it has no service and counts in the baseline's
+store. redis.dbaas.enabled=false renders neither too, for a cluster without
+DBaaS where something else writes the Secret in the same format.
+*/ -}}
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+{{- if .Values.redis.dbaas.enabled }}
+apiVersion: dbaas.netcracker.com/v1
+kind: InternalDatabase
+metadata:
+  name: {{ include "ratelimit.redisSecretName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+spec:
+  operatorNamespace: {{ include "ratelimit.dbaasNamespace" . | quote }}
+  classifier:
+    microserviceName: {{ include "ratelimit.name" . }}
+    scope: service
+    namespace: {{ .Release.Namespace }}
+  type: redis
+  {{- with .Values.redis.dbaas.settings }}
+  settings:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+---
+apiVersion: dbaas.netcracker.com/v1
+kind: DatabaseSecretClaim
+metadata:
+  name: {{ include "ratelimit.redisSecretName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+spec:
+  operatorNamespace: {{ include "ratelimit.dbaasNamespace" . | quote }}
+  classifier:
+    microserviceName: {{ include "ratelimit.name" . }}
+    scope: service
+    namespace: {{ .Release.Namespace }}
+  type: redis
+  secretName: {{ include "ratelimit.redisSecretName" . }}
+{{- end }}
+{{- end }}

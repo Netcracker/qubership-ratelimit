@@ -3,13 +3,13 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -20,8 +20,8 @@ import (
 // the documented key shape, and - the one that matters - that a budget
 // already spent survives the process that spent it.
 //
-// The release decides whether this runs. An install without redis.addresses
-// is a perfectly good install, so this suite skips rather than fails on one.
+// The release decides whether this runs: without the counter store's Secret
+// in the namespace there is no store this suite can reach, and it skips.
 var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 	const (
 		domain    = "gateway.public"
@@ -31,14 +31,14 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 	// A counter outlives the object that declared it - that is the property
 	// this suite exists to prove.
 	var (
-		applied   bool
-		addresses string
+		applied bool
+		store   counterStore
 	)
 
 	BeforeAll(func() {
-		addresses = redisAddresses()
-		if addresses == "" {
-			Skip("the release carries no redis.addresses, so it counts in process")
+		var ok bool
+		if store, ok = releaseCounterStore(); !ok {
+			Skip("the namespace carries no " + redisSecretName + " Secret to reach the store through")
 		}
 		// The fixture half runs once even across flake retries: the budget is
 		// an hour long, so a retry that minted a fresh policy would leave the
@@ -100,9 +100,9 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 		// sharing a store cannot collide. Scanning by that tag proves the
 		// grouping; the exact key below proves the rest of the layout.
 		tag := "{" + namespace + "/" + domain + "}"
-		out, err := redisCli(addresses, "--scan", "--pattern", "rl:*"+tag+"*")
+		out, err := store.cli("--scan", "--pattern", "rl:*"+tag+"*")
 		if err != nil {
-			Skip("no redis-cli reachable through " + addresses)
+			Skip("no redis-cli reachable through " + store.addr)
 		}
 		var keys []string
 		for _, line := range strings.Split(out, "\n") {
@@ -142,42 +142,74 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 	})
 })
 
-// redisAddresses reads what the release pointed the service at; empty means
-// the install counts in process and this suite has nothing to prove.
-func redisAddresses() string {
-	var dep appsv1.Deployment
-	if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: serviceDeployment()}, &dep); err != nil {
-		return ""
-	}
-	for _, env := range dep.Spec.Template.Spec.Containers[0].Env {
-		if env.Name == "REDIS_ADDRESSES" {
-			return env.Value
-		}
-	}
-	return ""
+// counterStore is the Redis the release counts in, as the service reads it:
+// the connection properties of the Secret its DatabaseSecretClaim
+// materializes, or that the e2e workflow writes in the same format where the
+// cluster has no DBaaS. The host is <service>.<namespace> for a DBaaS
+// database, which lives in the Redis adapter's namespace; a bare name is a
+// Service of the release's own namespace.
+type counterStore struct {
+	addr      string
+	service   string
+	namespace string
+	password  string
 }
 
-// redisCli runs one redis-cli command against the store the service was
-// pointed at. The pod is resolved through the Service the service dials, so
-// the suite works against any Redis the release names rather than one it
-// hardcodes.
-func redisCli(addresses string, args ...string) (string, error) {
-	host := strings.SplitN(addresses, ",", 2)[0]
-	host = strings.SplitN(host, ":", 2)[0]
+// redisSecretName is the Secret the service chart mounts: <fullname>-redis,
+// and the suites install the chart without a fullnameOverride.
+const redisSecretName = "ratelimit-service-redis"
+
+// releaseCounterStore reads where the release counts. false means the release
+// carries no connection this suite can reach.
+func releaseCounterStore() (counterStore, bool) {
+	var secret corev1.Secret
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: redisSecretName}, &secret); err != nil {
+		return counterStore{}, false
+	}
+	var properties struct {
+		Host     string          `json:"host"`
+		Port     json.RawMessage `json:"port"`
+		Password string          `json:"password"`
+	}
+	if err := json.Unmarshal(secret.Data["connectionProperties.json"], &properties); err != nil || properties.Host == "" {
+		return counterStore{}, false
+	}
+	port := strings.Trim(string(properties.Port), `"`)
+	store := counterStore{
+		addr:      properties.Host + ":" + port,
+		service:   properties.Host,
+		namespace: namespace,
+		password:  properties.Password,
+	}
+	if name, rest, ok := strings.Cut(properties.Host, "."); ok {
+		store.service = name
+		store.namespace, _, _ = strings.Cut(rest, ".")
+	}
+	return store, true
+}
+
+// cli runs one redis-cli command against the store, through a pod behind the
+// Service the service dials, so the suite works against any Redis the release
+// names rather than one it hardcodes.
+func (s counterStore) cli(args ...string) (string, error) {
 	var svc corev1.Service
-	if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: host}, &svc); err != nil {
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: s.service}, &svc); err != nil {
 		return "", err
 	}
 	if len(svc.Spec.Selector) == 0 {
-		return "", fmt.Errorf("the Service %s carries no selector", host)
+		return "", fmt.Errorf("the Service %s/%s carries no selector", s.namespace, s.service)
 	}
 	var pods corev1.PodList
-	if err := k8s.List(ctx, &pods, client.InNamespace(namespace),
+	if err := k8s.List(ctx, &pods, client.InNamespace(s.namespace),
 		client.MatchingLabels(svc.Spec.Selector)); err != nil {
 		return "", err
 	}
 	if len(pods.Items) == 0 {
-		return "", fmt.Errorf("no pod behind the Service %s", host)
+		return "", fmt.Errorf("no pod behind the Service %s/%s", s.namespace, s.service)
 	}
-	return execPod(pods.Items[0].Name, "", append([]string{"redis-cli"}, args...)...)
+	command := []string{"redis-cli"}
+	if s.password != "" {
+		command = append(command, "--no-auth-warning", "-a", s.password)
+	}
+	return execPodIn(s.namespace, pods.Items[0].Name, "", append(command, args...)...)
 }

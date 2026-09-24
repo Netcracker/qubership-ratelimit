@@ -13,8 +13,9 @@ limit service (RLS) protocol; the rules arrive as `RateLimitPolicy` custom resou
 
 **What is built today**: the resource and its validation, the lifecycle around it — atomic generations, last-good
 fallback, and the fleet view behind the `Ready` condition — and the decision engine that enforces the compiled rules.
-Counters live in Redis when `redis.addresses` is set, which is what makes a limit a limit of the domain rather than of
-each replica; without it each replica counts in its own memory and a limit of 100 admits 100 per replica.
+Counters live in Redis, which is what makes a limit a limit of the domain rather than of each replica. The database
+is provisioned by DBaaS: the service chart declares it and every replica reads its connection from the Secret
+dbaas-operator writes (see "Install").
 
 **What is not built**: the gateways do not verify the tokens they forward. The identity-keyed rules below extract claims
 from the `authorization` header without checking a signature, so a limit keyed on `client` or `tenant` is only as
@@ -224,9 +225,16 @@ dedicated `Service` would add a name without adding a boundary; the gateway's `H
 `Service`. The identity the API reads is configured under `management.claims` (the claim names, dotted for a nested
 claim such as `realm_access.roles`) and `management.roles` (the IdP's role names mapped onto `viewer` and `operator`).
 
-An empty `redis.addresses` selects the in-process counter store, which counts per replica. The service chart accepts
-it only with `REPLICAS: 1`; any other count fails the render with `in-process store needs exactly one replica; set
-redis.addresses`, because a limit of 100 across three replicas would admit 300.
+The counter store is a Redis database from DBaaS. The service chart renders an `InternalDatabase` of type `redis`
+and a `DatabaseSecretClaim` for the release; dbaas-operator provisions the database through the DBaaS Redis adapter
+and writes its connection properties into the Secret `ratelimit-service-redis`, which every replica mounts. A replica
+does not start until the Secret exists, and a rotated password reaches it without a restart. Both objects name the
+dbaas-operator beside the aggregator in `API_DBAAS_ADDRESS` as their `spec.operatorNamespace`; that operator needs a
+`Role` in the namespace to write Secrets, and DBaaS needs the Redis adapter. On a cluster without DBaaS,
+`redis.dbaas.enabled=false` renders neither object and something else writes the Secret in the same format,
+`connectionProperties.json` and `metadata.json`, as the e2e workflow does. The service reads the Secret through the
+platform's Go DBaaS client, `qubership-core-lib-go-dbaas-base-client`, from `/etc/secrets/dbaas-secrets`. `redis.dbaas.settings` passes the database's
+settings to the adapter (`redisDbSettings`, `redisDbResources`, `redisDbNodeSelector`).
 
 A fresh installation needs no order: the service waits `NotReady` until the operator writes. An upgrade installs the
 service before the operator and a rollback reverses the order, because the service reads the current and the previous
@@ -331,8 +339,8 @@ make test-e2e-go E2E_NAMESPACE=core E2E_SATELLITE_NAMESPACE=core-sat
 The `redis` suite is the exception to "run everything": it asserts what only a
 shared counter store can do — that the operator selected Redis rather than
 falling back, that the counters carry the documented key, and that a spent budget
-survives the process that spent it. An install without `redis.addresses` is a
-valid install, so that suite skips rather than fails on one.
+survives the process that spent it. It reaches the store through the Secret
+`ratelimit-service-redis`, and skips in a namespace without one.
 
 It covers what no unit test can: that the installed CRD is the one carrying the current validation, that a policy
 change reaches every service replica through the ConfigMap, that an earlier generation keeps running while an edit is

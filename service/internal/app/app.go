@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"time"
 
+	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
+
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -27,6 +29,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/service/internal/config"
 	"github.com/netcracker/qubership-ratelimit/service/internal/debug"
 	"github.com/netcracker/qubership-ratelimit/service/internal/management"
+	"github.com/netcracker/qubership-ratelimit/service/internal/redisconn"
 	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
 	"github.com/netcracker/qubership-ratelimit/service/internal/settings"
 	"github.com/netcracker/qubership-ratelimit/service/internal/store"
@@ -50,6 +53,16 @@ type Options struct {
 
 	// ConfigDir is the mounted ConfigMap, contract.MountPath in a pod.
 	ConfigDir string
+
+	// RedisMicroservice is the microserviceName of the counter store's DBaaS
+	// classifier, the one the chart's claim carries; the database is resolved
+	// through the platform's DBaaS client, which reads the mounted Secret.
+	// Empty is the in-process store, for the developer loop and tests; the
+	// chart always sets it.
+	RedisMicroservice string
+
+	// RedisResolver replaces the platform's DBaaS pool, for a test.
+	RedisResolver redisconn.Resolver
 
 	// Resync is how often the watcher re-reads the directory on its own;
 	// zero is config.DefaultResync.
@@ -80,6 +93,7 @@ type Service struct {
 	metrics    *http.Server
 	probes     *http.Server
 	closer     io.Closer
+	connection *redisconn.Source
 	log        logr.Logger
 
 	// Registry is the metrics registry the metrics listener serves; it is
@@ -98,7 +112,20 @@ func Build(namespace string, options Options) (*Service, error) {
 	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	metrics.RegisterService(registry, options.Version)
 
-	backend := settings.CounterStore(platform.Errorf)
+	var connection *redisconn.Source
+	if options.RedisMicroservice != "" {
+		resolver := options.RedisResolver
+		if resolver == nil {
+			resolver = dbaasbase.NewDbaaSPool()
+		}
+		var err error
+		connection, err = redisconn.Open(context.Background(), resolver,
+			redisconn.Classifier(options.RedisMicroservice, namespace), options.Log.WithName("redis"))
+		if err != nil {
+			return nil, err
+		}
+	}
+	backend := settings.CounterStore(connection)
 	platform.Infof("counter store selected backend=%v", backend.Description)
 
 	cacheStats := &engine.CacheStats{}
@@ -127,9 +154,10 @@ func Build(namespace string, options Options) (*Service, error) {
 			DrainTimeout: options.DrainTimeout,
 			Log:          options.Log.WithName("rls"),
 		},
-		closer:   backend.Closer,
-		log:      options.Log,
-		Registry: registry,
+		closer:     backend.Closer,
+		connection: connection,
+		log:        options.Log,
+		Registry:   registry,
 	}
 
 	if enabled(options.ManagementAddr) {
@@ -138,9 +166,9 @@ func Build(namespace string, options Options) (*Service, error) {
 			// by definition, and the management API assumes a shared one:
 			// records, confirmation tokens, and operations live beside the
 			// counters, so with several replicas a retry that lands elsewhere
-			// finds nothing. The chart keeps replicas at one in this
-			// configuration; this line is what a deployment that got it wrong
-			// will find in its log.
+			// finds nothing. The chart never renders it: a pod always reads
+			// its DBaaS database. This line is for the developer loop, and
+			// for a deployment put together without the chart.
 			platform.Warnf("management API is serving over the in-process counter store; " +
 				"it is correct at one replica only, like the limits themselves")
 		}
@@ -224,6 +252,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	group.Go(func() error { return s.watcher.Run(ctx) })
 	group.Go(func() error { return s.rls.Start(ctx) })
+	if s.connection != nil {
+		group.Go(func() error { return s.connection.Run(ctx) })
+	}
 	if s.management != nil {
 		group.Go(func() error { return s.management.Start(ctx) })
 	}

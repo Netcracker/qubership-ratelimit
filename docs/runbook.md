@@ -165,7 +165,8 @@ because the bridge in `internal/process/logr_adapter.go` caps the verbosity at 4
 
 ## 1. Store degradation
 
-The counter store is Redis. Without it the service cannot count, and what it does then is decided by the gateway
+The counter store is a Redis database from DBaaS, a single Redis instance the DBaaS Redis adapter runs in its own
+namespace. Without it the service cannot count, and what it does then is decided by the gateway
 filter: with `filter.failClosed: false` of the operator chart, the default, requests pass without limits; with `true`,
 the gateway refuses them. Either way the service keeps answering, and the window of unlimited traffic is measurable.
 
@@ -189,7 +190,10 @@ all while `failClosed` is off.
 **Diagnose.**
 
 ```bash
-kubectl get pods -n "$NS" -l app.kubernetes.io/name=redis     # or wherever the store lives
+# where the store lives: the host of the Secret the service mounts, <database>.<adapter namespace>
+kubectl get secret -n "$NS" ratelimit-service-redis -o jsonpath='{.data.connectionProperties\.json}' \
+  | base64 -d | jq -r '.host'
+kubectl get pods -n <adapter namespace> -l app=<database>
 api "$BASE/domains/$DOMAIN/counters?limited=true" | jq -c '{code, message}'
 # {"code": "RLS-0503", "message": "the counter store did not answer the scan"}
 kubectl logs -n "$NS" deploy/ratelimit-service --since=10m | grep -E 'store error|failed to scan' | tail
@@ -201,6 +205,22 @@ kubectl logs -n "$NS" deploy/ratelimit-service --since=10m | grep -E 'store erro
 The `reason` label tells the class: `timeout` is latency or a partition, `server` is Redis refusing, `other` is the
 client giving up. The `ratelimit_store_roundtrip_seconds` histogram shows whether the store was slow before it failed.
 The policy status does not move during the outage: it describes rules, not counters, and `Ready` stays `True`.
+
+A replica that does not start at all, stuck in `ContainerCreating` with `secret "ratelimit-service-redis" not found`,
+is waiting for DBaaS rather than for Redis: the Secret is written by dbaas-operator once the database exists. The
+claim's status says why it is not there yet:
+
+```bash
+kubectl get databasesecretclaim,internaldatabase -n "$NS"
+kubectl get databasesecretclaim -n "$NS" ratelimit-service-redis \
+  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
+```
+
+`DatabaseNotFound` is the database still being provisioned, or the `InternalDatabase` failing (read its conditions);
+`Unauthorized` and `AggregatorRejected` are dbaas-operator's own access to DBaaS; a claim with no status at all means no
+dbaas-operator runs in the namespace its `spec.operatorNamespace` names, so compare it with the `API_DBAAS_ADDRESS` the
+release was installed with. A claim stuck with a Secret write refused lacks the `Role` that lets the operator write
+Secrets in the namespace.
 
 **Act.** Restore the store; the service reconnects on its own, there is nothing to restart. If an unlimited window
 is not acceptable for a domain, `filter.failClosed: true` in the operator chart's values turns the window into refusals

@@ -1,9 +1,10 @@
 // Package settings reads the properties of the data plane: where the
 // counters live, the near-limit margin of the metrics, and the claims and
-// roles the management API authorizes against. Each function reads
-// configloader and returns a value the wiring uses; a bad value is logged
-// and replaced by the default, never fatal, because none of these is worth a
-// pod that does not start.
+// roles the management API authorizes against. The counter store comes from
+// the connection the DBaaS Secret carries; the rest read configloader and
+// return a value the wiring uses, where a bad value is logged and replaced by
+// the default, never fatal, because none of these is worth a pod that does
+// not start.
 package settings
 
 import (
@@ -19,6 +20,7 @@ import (
 	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
 	"github.com/netcracker/qubership-ratelimit/service/internal/management"
 	"github.com/netcracker/qubership-ratelimit/service/internal/records"
+	"github.com/netcracker/qubership-ratelimit/service/internal/redisconn"
 	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
 )
 
@@ -46,17 +48,19 @@ type CounterBackend struct {
 //
 // Redis is what makes a limit a limit of the domain rather than of each
 // replica: with N replicas counting in their own memory, a limit of 100
-// admits 100*N. The in-process store is correct at one replica and for tests,
-// and is what an empty address list selects.
+// admits 100*N. In a pod the database is the one DBaaS provisioned for the
+// release, resolved through the platform's DBaaS client from the mounted
+// Secret of its DatabaseSecretClaim; the chart always sets it up, so a
+// replica never falls back to counting on its own. A nil source is the
+// in-process store, correct at one replica and for tests and the local
+// developer loop, and nothing a chart renders.
 //
-// The topology is the caller's business, which is why the engine takes a
-// UniversalClient: one address is a standalone server, several are a cluster,
-// and a master name selects Sentinel. The domain hash tag in the counter keys
-// keeps each decision on one Cluster slot, so the script is valid on all
-// three.
-func CounterStore(warn Warn) CounterBackend {
-	addresses := configloader.GetOrDefaultString("redis.addresses", "")
-	if addresses == "" {
+// The client is a UniversalClient because that is what the engine takes; the
+// DBaaS Redis adapter provisions a standalone server, one address. The
+// password is asked of the source on every new connection, so a rotation the
+// source picks up reaches the pool without a restart.
+func CounterStore(source *redisconn.Source) CounterBackend {
+	if source == nil {
 		// The records live where the counters do. Leaving them nil would start
 		// the management API with a nil store, and every mutation would panic
 		// into an RLS-0500 while the reads kept working. In-process counting is
@@ -69,31 +73,18 @@ func CounterStore(warn Warn) CounterBackend {
 		}
 	}
 
+	addr := source.Connection().Addr()
 	shared := goredis.NewUniversalClient(&goredis.UniversalOptions{
-		Addrs:      strings.Split(addresses, ","),
-		Username:   configloader.GetOrDefaultString("redis.username", ""),
-		Password:   configloader.GetOrDefaultString("redis.password", ""),
-		DB:         redisDatabase(warn),
-		MasterName: configloader.GetOrDefaultString("redis.masterName", ""),
+		Addrs:               []string{addr},
+		CredentialsProvider: source.Credentials,
 	})
 	return CounterBackend{
 		Store:       redisstore.New(shared),
 		Records:     records.NewRedis(shared),
 		Closer:      shared,
-		Description: "redis at " + addresses,
+		Description: "redis at " + addr + ", provisioned by DBaaS",
 		Shared:      true,
 	}
-}
-
-// redisDatabase reads the database index.
-func redisDatabase(warn Warn) int {
-	raw := configloader.GetOrDefaultString("redis.db", "0")
-	database, err := strconv.Atoi(raw)
-	if err != nil {
-		warn("REDIS_DB=%q is not a number, using database 0", raw)
-		return 0
-	}
-	return database
 }
 
 // NearLimitRatio reads the near-limit margin for the metrics. The property

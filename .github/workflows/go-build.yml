@@ -381,27 +381,6 @@ jobs:
             done
           done
 
-      # An in-process store above one replica is a limit that admits N per
-      # replica, and the management API's records live in that same memory.
-      # The chart refuses to render it, with the message the runbook names.
-      - name: Check that the in-process store is refused above one replica
-        run: |
-          for chart in ratelimit-service; do
-            set +e
-            out=$(helm template t helm-templates/$chart \
-              -f helm-templates/$chart/resource-profiles/prod.yaml 2>&1)
-            rc=$?
-            set -e
-            if [ "$rc" -eq 0 ]; then
-              echo "::error::two replicas without redis.addresses rendered in $chart"; exit 1
-            fi
-            echo "$out" | grep -q 'in-process store needs exactly one replica; set redis.addresses' || {
-              echo "::error::the render of $chart failed for a reason other than validateStore:"; echo "$out"; exit 1; }
-            # And the same profile renders once the store is shared.
-            helm template t helm-templates/$chart \
-              -f helm-templates/$chart/resource-profiles/prod.yaml \
-              --set redis.addresses=redis:6379 >/dev/null
-          done
       - name: Regenerate the manifests and the chart CRDs
         run: make sync-helm-crds
       - name: Fail on drift between the generated files and the commit
