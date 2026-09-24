@@ -898,7 +898,7 @@ controller and probe metrics from the operator pod.
 
 | Metric | On | Read it for |
 | --- | --- | --- |
-| `ratelimit_checks_total{domain, verdict}` | service pods | `unavailable` is the fail-open window (section 1) |
+| `ratelimit_checks_total{domain, verdict}` | service pods | `unavailable` counts the checks the gateway's failure mode decided (section 1) |
 | `ratelimit_decisions_total{domain, rule, outcome}` | service pods | `shadow_over_limit` while introducing a limit (section 6) |
 | `ratelimit_near_limit_total{domain, rule}` | service pods | clients close to a limit before it fires; the margin is a share of the window's capacity, `burst` for GCRA |
 | `ratelimit_unknown_domain_checks_total` | service pods | a domain typo between the gateway and the policy (section 2) |

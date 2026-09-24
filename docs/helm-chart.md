@@ -467,7 +467,7 @@ exclude.
 
 | Metric | Labels | What it counts |
 | --- | --- | --- |
-| `ratelimit_checks_total` | `domain`, `verdict: ok\|over_limit\|unavailable` | checks; unavailable = store unavailable, the size of the fail-open window |
+| `ratelimit_checks_total` | `domain`, `verdict: ok\|over_limit\|unavailable` | checks; unavailable = store unavailable, the checks the gateway's failure mode decided |
 | `ratelimit_check_duration_seconds` | `domain` | decision histogram; the bucket bounds are laid on the 10ms budget and the filter timeout |
 | `ratelimit_decisions_total` | `domain`, `rule` (limit block/rule), `outcome: ok\|over_limit\|shadow_over_limit` | per-rule outcomes |
 | `ratelimit_near_limit_total` | `domain`, `rule` | allowed requests within the margin of the window's capacity, the burst of a GCRA window or the requests of a fixed one (the threshold is `metrics.nearLimitRatio`); shadow is excluded |
@@ -629,10 +629,10 @@ what one replica enforces, for a human with a port-forward. The management role 
 
 - **A `DestinationRule` for the Service `ratelimit`.** A dead replica leaves Endpoints through its readiness probe and
   EDS updates the Envoy cluster; a replica that hangs while still passing the probe is cut off by the filter's 50 ms
-  timeout and the request goes through fail-open. Outlier detection would only shrink that second share, and Istio's
-  defaults make a naive configuration inert anyway: `maxEjectionPercent: 10%` never ejects one of two or three
-  replicas, and `consecutive5xxErrors` counts upstream 5xx, while the failure here is a local-origin timeout. TLS is
-  not configured in a traffic policy either way; ambient provides mTLS.
+  timeout and the request is decided by the gateway's failure mode. Outlier detection would only shrink that second
+  share, and Istio's defaults make a naive configuration inert anyway: `maxEjectionPercent: 10%` never ejects one of
+  two or three replicas, and `consecutive5xxErrors` counts upstream 5xx, while the failure here is a local-origin
+  timeout. TLS is not configured in a traffic policy either way; ambient provides mTLS.
 - **A redirect when a limit fires.** The filter's local reply is the plain `rateLimitedStatus` (429 by default) with
   `retry-after`, which is what an API client can act on. No `local_reply_config` mapper turns it into a 302.
 - **Alert rules**, as above.

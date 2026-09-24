@@ -334,9 +334,9 @@ diagnostics with no mutations and no authentication.
 
 ## Operational envelope
 
-- **Latency.** The gateway filter runs with a ~50 ms timeout and fail-open. The engine's budget within it is p99 ≤ 10 ms
-  per decision with the store in the same availability zone, and p99 ≤ 1 ms for decisions that need no store round trip
-  (no matching rules, `behavior: Bypass`).
+- **Latency.** The gateway filter runs with a ~50 ms timeout and its failure mode, fail-open by default. The engine's
+  budget within it is p99 ≤ 10 ms per decision with the store in the same availability zone, and p99 ≤ 1 ms for
+  decisions that need no store round trip (no matching rules, `behavior: Bypass`).
 - **Horizontal scaling** by replica count, with no coordination on the decision path and no sticky routing; the store is
   the only shared state. The service has no leader: the operator writes the status and the ConfigMap, and its Lease
   covers its own rollout and has no effect on traffic serving.

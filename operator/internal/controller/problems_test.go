@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,11 +33,32 @@ func TestBoundedProblems_cutsAMessageToTheCRDBound(t *testing.T) {
 }
 
 // The cut counts characters, as the API server does, and never splits one.
+// The euro sign takes three bytes, so a byte count and a character count
+// part ways at once.
 func TestBoundedProblems_cutsOnACharacterBoundary(t *testing.T) {
-	long := strings.Repeat("я", ratelimitv1.MaxRuleProblemMessage+10)
+	long := strings.Repeat("\u20ac", ratelimitv1.MaxRuleProblemMessage+10)
 	got := boundedProblems([]ratelimitv1.RuleProblem{{Reason: ratelimitv1.ProblemInvalidSpec, Message: long}})
 	assert.True(t, utf8.ValidString(got[0].Message))
 	assert.Equal(t, ratelimitv1.MaxRuleProblemMessage, utf8.RuneCountInString(got[0].Message))
+}
+
+// At the bounds exactly, nothing changes: a message of MaxRuleProblemMessage
+// characters comes back whole, and a list of MaxRuleProblems entries keeps
+// the compiler's order.
+func TestBoundedProblems_leavesWhatSitsExactlyAtTheBounds(t *testing.T) {
+	exact := strings.Repeat("\u20ac", ratelimitv1.MaxRuleProblemMessage)
+	got := boundedProblems([]ratelimitv1.RuleProblem{{Reason: ratelimitv1.ProblemInvalidSpec, Message: exact}})
+	assert.Equal(t, exact, got[0].Message, "a message at the bound was cut")
+
+	full := make([]ratelimitv1.RuleProblem, 0, ratelimitv1.MaxRuleProblems)
+	for i := range ratelimitv1.MaxRuleProblems {
+		reason := ratelimitv1.ProblemCaptureShadowsMappedKey
+		if i == ratelimitv1.MaxRuleProblems-1 {
+			reason = ratelimitv1.ProblemInvalidSpec
+		}
+		full = append(full, ratelimitv1.RuleProblem{Reason: reason, Rule: fmt.Sprintf("r%d", i)})
+	}
+	assert.Equal(t, full, boundedProblems(full), "a list at the bound was reordered")
 }
 
 // Past the list bound the blocking entries come first: they are why the
