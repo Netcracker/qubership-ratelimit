@@ -15,11 +15,11 @@
 // A password that changes in the Secret reaches the replica through the same
 // mount: the kubelet swaps the projection, and the next resolution here reads
 // the new value. DBaaS itself does not rotate it, since the Redis adapter
-// manages no users; the path serves a Secret rewritten by other means. Connections the pool opens
-// afterwards authenticate with it, and those already open stay
-// authenticated. An address that moves is a different database, and the
-// replica does not follow it in place: Run returns an error, the process
-// ends, and the container restarts onto the new address.
+// manages no users; the path serves a Secret rewritten by other means.
+// Connections the pool opens afterwards authenticate with it, and those
+// already open stay authenticated. An address that moves is a different
+// database, and the replica does not follow it in place: Run returns an
+// error, the process ends, and the container restarts onto the new address.
 package redisconn
 
 import (
