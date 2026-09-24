@@ -62,9 +62,19 @@ func TestLogrAdapter_carriesNamesAndValues(t *testing.T) {
 // client-go logs at verbosity 8 out of a debug log. A new case goes in the
 // table, named by its verbosity and platform level.
 func TestLogrAdapter_boundsVerbosityByThePlatformLevel(t *testing.T) {
-	// One logger per platform level; the registry returns the same instance
-	// to the adapter, so the level the test sets is the one Enabled reads.
-	const atError, atInfo, atDebug = "test/verbosity/error", "test/verbosity/info", "test/verbosity/debug"
+	// One logger per platform level, each configured the way a deployment
+	// configures it, LOGGING_LEVEL_<name>. Setting the level on the logger
+	// alone would race: configloader delivers its Inited events on a
+	// goroutine, and the logging package answers each one by resetting every
+	// registered logger to its configured level, so an Init from another test
+	// could land after SetLevel and undo it. Configured, any reset lands on
+	// the same level. The registry returns the same instance to the adapter,
+	// so the level configured here is the one Enabled reads.
+	const atError, atInfo, atDebug = "test.verbosity.error", "test.verbosity.info", "test.verbosity.debug"
+	t.Setenv("LOGGING_LEVEL_TEST_VERBOSITY_ERROR", "error")
+	t.Setenv("LOGGING_LEVEL_TEST_VERBOSITY_INFO", "info")
+	t.Setenv("LOGGING_LEVEL_TEST_VERBOSITY_DEBUG", "debug")
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
 	logging.GetLogger(atError).SetLevel(logging.LvlError)
 	logging.GetLogger(atInfo).SetLevel(logging.LvlInfo)
 	logging.GetLogger(atDebug).SetLevel(logging.LvlDebug)
