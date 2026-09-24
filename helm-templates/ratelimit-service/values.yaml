@@ -32,9 +32,11 @@ logLevel: info
 # for the release and a DatabaseSecretClaim for it; dbaas-operator provisions
 # the database through the DBaaS Redis adapter and writes its connection
 # properties into the Secret <fullname>-redis, and every replica mounts that
-# Secret. A replica does not start until the Secret exists, and a rotated
-# password reaches it without a restart. dbaas-operator needs a Role in the
-# namespace that lets it write Secrets, and DBaaS needs its Redis adapter.
+# Secret. A replica does not start until the Secret exists. dbaas-operator
+# needs a Role in the namespace that lets it write Secrets, and DBaaS needs its
+# Redis adapter, installed with redis.conf maxmemory-policy: noeviction: the
+# adapter sets every database's redis.conf from its own installation, and its
+# default, allkeys-lru, evicts counters and management records.
 redis:
   dbaas:
     # Render the InternalDatabase and the DatabaseSecretClaim. false leaves
@@ -42,12 +44,6 @@ redis:
     # with the key connectionProperties.json in DBaaS's format: a test cluster
     # without DBaaS, as the e2e workflow's is.
     enabled: true
-
-    # Passed to the Redis adapter as the settings of the database:
-    # redisDbSettings (redis.conf overrides such as maxmemory),
-    # redisDbResources (requests and limits of the Redis pod), and
-    # redisDbNodeSelector. Empty takes the adapter's defaults.
-    settings: {}
 
 # The address of dbaas-aggregator, a platform parameter shared by every chart
 # that talks to DBaaS. The chart reads the namespace out of its host and

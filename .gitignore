@@ -35,3 +35,6 @@ apm_modules/
 
 # e2e reports
 artifacts/
+
+# Grafana skills read the address and the token from here; never committed.
+.env

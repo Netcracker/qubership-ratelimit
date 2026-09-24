@@ -12,6 +12,7 @@ targets:
 dependencies:
   apm:
     - Netcracker/qubership-ai-packages/agent-packages/qubership-repo-essentials#v1.2.0  # marketplace release
+    - Netcracker/qubership-ai-packages/agent-packages/grafana#feat/add-grafana-dashboard-skill
   mcp: []
 includes: auto
 scripts: {}

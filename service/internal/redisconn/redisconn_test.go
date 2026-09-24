@@ -36,6 +36,16 @@ type resolver struct {
 	asked      []map[string]any
 }
 
+// blockingResolver answers only when its context ends, the way the client's
+// REST fallback retries until it is canceled.
+type blockingResolver struct{}
+
+func (blockingResolver) GetConnection(ctx context.Context, _ string, _ map[string]any,
+	_ rest.BaseDbParams) (map[string]any, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func (r *resolver) set(properties map[string]any, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -90,6 +100,27 @@ func TestParse_refusals(t *testing.T) {
 			assert.Error(t, err)
 		})
 	}
+}
+
+// The adapter installed with TLS returns its usual host and port and adds
+// "tls": true, and the database listens on TLS alone: the flag is refused
+// by name rather than dialed in plain text.
+func TestParse_refusesADatabaseThatServesTLS(t *testing.T) {
+	for name, flag := range map[string]any{"bool": true, "text": "true"} {
+		t.Run(name, func(t *testing.T) {
+			properties := adapterProperties("first")
+			properties["tls"] = flag
+			_, err := Parse(properties)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "tls: true")
+		})
+	}
+
+	properties := adapterProperties("first")
+	properties["tls"] = false
+	connection, err := Parse(properties)
+	require.NoError(t, err)
+	assert.Equal(t, "ratelimit-redis.core:6379", connection.Addr())
 }
 
 // The service asks for its own database: the classifier the chart's claim
@@ -170,6 +201,29 @@ func TestSource_keepsTheLastGoodConnectionThroughAFailedResolution(t *testing.T)
 	r.set(nil, errors.New("mid-swap"))
 	require.NoError(t, source.reload(context.Background()))
 	assert.Equal(t, "ratelimit-redis.core:6379", source.Connection().Addr())
+	_, password := source.Credentials()
+	assert.Equal(t, "first", password)
+}
+
+// A lookup that does not answer, such as the client's REST fallback after a
+// Secret that does not match, fails within the timeout with the classifier,
+// and mid-run it leaves the last good connection in place.
+func TestSource_boundsAResolutionThatDoesNotAnswer(t *testing.T) {
+	r := &resolver{properties: adapterProperties("first")}
+	source, err := Open(context.Background(), r, Classifier("ratelimit-service", "core"), logr.Discard())
+	require.NoError(t, err)
+	source.Timeout = 20 * time.Millisecond
+
+	blocking := blockingResolver{}
+	source.Resolver = blocking
+	start := time.Now()
+	_, err = source.resolve(context.Background())
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+	assert.Contains(t, err.Error(), "ratelimit-service")
+	assert.Contains(t, err.Error(), "no mounted Secret matched it")
+
+	require.NoError(t, source.reload(context.Background()))
 	_, password := source.Credentials()
 	assert.Equal(t, "first", password)
 }

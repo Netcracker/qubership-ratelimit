@@ -211,8 +211,6 @@ redis:                               # DatabaseClaim.yaml; see "The counter stor
   dbaas:
     enabled: true                    # render the InternalDatabase and the DatabaseSecretClaim; false = the Secret
                                      #   <fullname>-redis is written by someone else in DBaaS's format (CI)
-    settings: {}                     # the database's settings for the DBaaS Redis adapter: redisDbSettings,
-                                     #   redisDbResources, redisDbNodeSelector
 
 healthProbe: { port: 8081 }          # Deployment.yaml: the probes port
 metrics:
@@ -454,13 +452,13 @@ The counters live in a Redis database that DBaaS provisions for the release. `Da
 objects of dbaas-operator with the same classifier, `{microserviceName: ratelimit-service, scope: service, namespace:
 <release namespace>}` and type `redis`:
 
-- the `InternalDatabase` asks dbaas-aggregator to provision the database through the DBaaS Redis adapter, with
-  `redis.dbaas.settings` as its settings (`redisDbSettings` for `redis.conf` overrides such as `maxmemory`,
-  `redisDbResources`, `redisDbNodeSelector`). The adapter runs each database as a single Redis instance: a Deployment
-  and a Service `<database>.<adapter namespace>`, no Cluster and no Sentinel;
+- the `InternalDatabase` asks dbaas-aggregator to provision the database through the DBaaS Redis adapter. The adapter
+  runs each database as a single Redis instance: a Deployment and a Service `<database>.<adapter namespace>`, no
+  Cluster and no Sentinel. It builds the database's `redis.conf` from its own installation and accepts no settings per
+  database, so the chart passes none;
 - the `DatabaseSecretClaim` asks dbaas-operator to look the database up and write its connection properties into the
   Secret `<fullname>-redis` as `connectionProperties.json` (`host`, `port`, `password`, `url`, `role`) beside a
-  `metadata.json` that names the classifier, and to rewrite it when the password rotates. Its
+  `metadata.json` that names the classifier, and to rewrite it when they change. Its
   `app.kubernetes.io/name` label is the `originService` of the lookup, and it equals the classifier's
   `microserviceName`, so the service is the owner of the database it reads.
 
@@ -470,18 +468,38 @@ the pod's namespace. The service resolves its database through the platform's Go
 (`qubership-core-lib-go-dbaas-base-client`), which matches the mounted `metadata.json` to that classifier and type
 `redis`. Until dbaas-operator has written the Secret, the pod waits in `ContainerCreating`; a replica never starts
 counting on its own. The client falls back to REST only on a miss, and the pod holds no token for it, so a Secret that
-does not match fails the start with the classifier in the error. The service reads host and port once: an address
-that changes in the Secret ends the process and the container restarts onto the new database. It resolves the
-connection again every 30 s, so a rotated password reaches new connections within that and the kubelet's sync
-period, without a restart.
+does not match fails the start within 5 s with the classifier in the error, before the liveness probe fires. The
+service reads host and port once: an address that changes in the Secret ends the process and the container restarts
+onto the new database. It resolves the connection again every 30 s and uses the password the Secret holds from the
+next connection on, without a restart. DBaaS itself never changes this password: the Redis adapter does not manage
+users, and the aggregator refuses a password change for such adapters. Connection properties with `tls: true`, which
+the aggregator adds when the adapter is installed with TLS, fail the start: the service connects in plain text.
 
 Both objects carry `spec.operatorNamespace`, the namespace in the host of `API_DBAAS_ADDRESS` (the platform parameter,
 `http://dbaas-aggregator.dbaas:8080` by default, so `dbaas`): a dbaas-operator reconciles only the objects that name
 its own namespace, and it runs beside its aggregator. An address whose host carries no namespace fails the render.
 
-The chart needs, and does not install: the `Role` and `RoleBinding` that let dbaas-operator's service account write
-Secrets in the namespace, since the operator holds no cluster-wide Secret access (dbaas-operator documents the
-bundle); the DBaaS Redis adapter registered with dbaas-aggregator. `redis.dbaas.enabled=false` renders neither object
+The chart needs, and does not install:
+
+- dbaas-operator, installed and enabled: its chart ships with `DBAAS_OPERATOR_ENABLED: false`, and it needs
+  Kubernetes 1.32 or later for its CEL rules. Without its CRDs, `helm install` of this chart fails on the
+  `InternalDatabase` kind;
+- a `Role` and a `RoleBinding` in the namespace that grant dbaas-operator's service account `get`, `create`,
+  `update`, and `patch` on `secrets`, since the operator holds no cluster-wide Secret access (dbaas-operator documents
+  the bundle);
+- the DBaaS Redis adapter registered with dbaas-aggregator, installed with `redis.conf.maxmemory-policy: noeviction`
+  and without `redis.tls.enabled`. The adapter's default policy, `allkeys-lru`, lets Redis drop counters and
+  management records under memory pressure without an error, which the
+  [management API's store requirements](management-api.md) forbid. The policy applies to the databases the adapter
+  creates afterwards; a database that already exists keeps the one it was created with. The service reads the policy
+  at startup and logs a warning when it is not `noeviction`.
+
+`spec.operatorNamespace` is immutable on both objects, so a corrected `API_DBAAS_ADDRESS` fails the next
+`helm upgrade` until both are deleted. `helm uninstall` leaves the database: the `InternalDatabase` carries no
+finalizer, so its deletion drops nothing, and the adapter's Redis Deployment stays in its namespace for a reinstall to
+attach to.
+
+`redis.dbaas.enabled=false` renders neither object
 for a cluster without DBaaS: the Deployment still mounts `<fullname>-redis`, and whoever sets up the cluster writes it
 in the same format, `connectionProperties.json` and a `metadata.json` naming the classifier and type `redis`. The e2e
 workflow does exactly that for its own Redis.

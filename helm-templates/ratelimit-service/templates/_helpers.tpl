@@ -73,10 +73,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-The Secret the counter store's connection lives in: written by dbaas-operator
-for the chart's DatabaseSecretClaim, mounted by the Deployment.
-*/}}
-{{/*
 The namespace of the dbaas-operator that reconciles the chart's DBaaS objects:
 the host of API_DBAAS_ADDRESS is <aggregator>.<namespace>, and the operator
 runs beside its aggregator. http://dbaas-aggregator.dbaas:8080 gives dbaas.
@@ -90,6 +86,10 @@ runs beside its aggregator. http://dbaas-aggregator.dbaas:8080 gives dbaas.
 {{- index $parts 1 -}}
 {{- end -}}
 
+{{/*
+The Secret the counter store's connection lives in: written by dbaas-operator
+for the chart's DatabaseSecretClaim, mounted by the Deployment.
+*/}}
 {{- define "ratelimit.redisSecretName" -}}
 {{- printf "%s-redis" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

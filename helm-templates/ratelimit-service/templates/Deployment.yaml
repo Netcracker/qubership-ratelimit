@@ -204,8 +204,8 @@ spec:
         # for the chart's DatabaseSecretClaim once DBaaS has provisioned the
         # database. Not optional: a replica without its database would count
         # alone, so the pod waits in ContainerCreating until the Secret exists.
-        # The kubelet swaps the projection on a rotation, and the DBaaS client
-        # reads the new password from it.
+        # The kubelet swaps the projection when the Secret changes, and the
+        # DBaaS client reads the new password from it.
         - name: redis
           secret:
             secretName: {{ include "ratelimit.redisSecretName" . }}

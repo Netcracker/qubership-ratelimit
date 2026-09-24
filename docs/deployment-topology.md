@@ -55,15 +55,16 @@ team ── kubectl apply ──► RateLimitPolicy <domain>                    
                                    ▼
                           ratelimit-service ◄── /debug/applied probe ── ratelimit-operator (every 10 s)
                           (REPLICAS replicas: decode → compile → swap; no API access)
-                                   ▲            └── atomic Lua ──► Redis Cluster (dedicated, same ns)
+                                   ▲            └── atomic Lua ──► Redis from DBaaS (one instance, adapter ns)
                                    │  gRPC ShouldRateLimit
                                    │
 gateways (baseline and satellites) with EnvoyFilter ◄── operator chart at install of each ns
 ```
 
-Two flows cross the picture. On the request path a gateway calls `ShouldRateLimit` on the Service `ratelimit`, and
-every service replica decides against the dedicated Redis Cluster. The configuration path runs through the
-ConfigMap: the operator validates and writes, the kubelet projects, and the service replicas decode, compile, and swap.
+Two flows cross the picture. On the request path a gateway calls `ShouldRateLimit` on the Service `ratelimit`, and every
+service replica decides against the Redis database DBaaS provisions for the release. The configuration path runs through
+the ConfigMap: the operator validates and writes, the kubelet projects, and the service replicas decode, compile, and
+swap.
 
 For a visual picture with the composite, the satellites, and the request path, see the
 [interaction diagram](topology-diagram.md).
@@ -91,13 +92,14 @@ plane:
   chart ships the CRD, its ServiceAccount with the only Role of the delivery, the EnvoyFilters in every mode, and its
   own PodMonitor.
 - **Service** `ratelimit-service`: a Deployment with `REPLICAS` replicas. gRPC `ShouldRateLimit` on all replicas, with
-  no coordination; the Redis Cluster is dedicated to the service. Every replica mounts the ConfigMap as a whole
+  no coordination; the counter store is a single Redis instance that the DBaaS Redis adapter provisions for the
+  release and runs in its own namespace. Every replica mounts the ConfigMap as a whole
   directory at `/etc/ratelimit/config` (`optional: true`), watches the `..data` symlink swap, decodes the manifest
   strictly, compiles every domain with the engine module, and swaps the in-memory snapshot atomically. All replicas
   compile independently and deterministically; there is no shared state between them. Pod name and namespace come
   from the Downward API. Its chart ships the Service `ratelimit`, a ServiceAccount without a mounted token
-  (`automountServiceAccountToken: false`), the AuthorizationPolicy of the management port, its own PodMonitor, and
-  the Grafana dashboard.
+  (`automountServiceAccountToken: false`), the AuthorizationPolicy of the management port, the `InternalDatabase` and
+  the `DatabaseSecretClaim` of its counter store, its own PodMonitor, and the Grafana dashboard.
 - **Ready of a replica.** A replica that has never applied a manifest is NotReady and out of Endpoints, without a
   timeout. An explicitly empty manifest is a configuration: the replica is Ready, and every request is an unknown
   domain. After the first apply the replica keeps its snapshot in memory and stays Ready if the files vanish or a

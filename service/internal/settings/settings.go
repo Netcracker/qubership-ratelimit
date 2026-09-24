@@ -8,6 +8,8 @@
 package settings
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -41,6 +43,42 @@ type CounterBackend struct {
 	// admits N per replica, and the management API's records are per replica
 	// too.
 	Shared bool
+
+	// CheckEviction reads whether the store may evict keys; nil for the
+	// in-process store, which never does.
+	CheckEviction func(ctx context.Context) error
+}
+
+// RequiredEvictionPolicy is the maxmemory-policy the counter store must run
+// with. Counters and management records are correctness state: an evicted
+// record lets a retry repeat a destructive sweep, so memory pressure has to
+// surface as a failed write rather than as a key that quietly disappears.
+const RequiredEvictionPolicy = "noeviction"
+
+// configReader is the one command CheckEviction sends.
+type configReader interface {
+	ConfigGet(ctx context.Context, parameter string) *goredis.MapStringStringCmd
+}
+
+// CheckEviction returns an error that names the store's maxmemory-policy
+// when it is not RequiredEvictionPolicy, or when it cannot be read. The
+// DBaaS Redis adapter sets the policy of every database it creates from its
+// own installation, and nothing in the service chart can change it, so the
+// service says so in its log rather than refusing to start.
+func CheckEviction(ctx context.Context, client configReader) error {
+	values, err := client.ConfigGet(ctx, "maxmemory-policy").Result()
+	if err != nil {
+		return fmt.Errorf("read the counter store's maxmemory-policy, which must be %s: %w",
+			RequiredEvictionPolicy, err)
+	}
+	policy := values["maxmemory-policy"]
+	if policy != RequiredEvictionPolicy {
+		return fmt.Errorf("the counter store runs with maxmemory-policy %q, not %s: under memory pressure "+
+			"it drops counters and management records without an error; install the DBaaS Redis adapter "+
+			"with redis.conf maxmemory-policy: %s and recreate the database",
+			policy, RequiredEvictionPolicy, RequiredEvictionPolicy)
+	}
+	return nil
 }
 
 // CounterStore picks where the counters live, and returns the client whose
@@ -57,8 +95,8 @@ type CounterBackend struct {
 //
 // The client is a UniversalClient because that is what the engine takes; the
 // DBaaS Redis adapter provisions a standalone server, one address. The
-// password is asked of the source on every new connection, so a rotation the
-// source picks up reaches the pool without a restart.
+// password is asked of the source on every new connection, so a changed
+// password the source picks up reaches the pool without a restart.
 func CounterStore(source *redisconn.Source) CounterBackend {
 	if source == nil {
 		// The records live where the counters do. Leaving them nil would start
@@ -84,6 +122,9 @@ func CounterStore(source *redisconn.Source) CounterBackend {
 		Closer:      shared,
 		Description: "redis at " + addr + ", provisioned by DBaaS",
 		Shared:      true,
+		CheckEviction: func(ctx context.Context) error {
+			return CheckEviction(ctx, shared)
+		},
 	}
 }
 

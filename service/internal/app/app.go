@@ -94,7 +94,9 @@ type Service struct {
 	probes     *http.Server
 	closer     io.Closer
 	connection *redisconn.Source
+	checkStore func(ctx context.Context) error
 	log        logr.Logger
+	platform   Logger
 
 	// Registry is the metrics registry the metrics listener serves; it is
 	// exported for a test that scrapes it in-process.
@@ -156,7 +158,9 @@ func Build(namespace string, options Options) (*Service, error) {
 		},
 		closer:     backend.Closer,
 		connection: connection,
+		checkStore: backend.CheckEviction,
 		log:        options.Log,
+		platform:   platform,
 		Registry:   registry,
 	}
 
@@ -255,6 +259,12 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.connection != nil {
 		group.Go(func() error { return s.connection.Run(ctx) })
 	}
+	if s.checkStore != nil {
+		group.Go(func() error {
+			s.warnOnEviction(ctx)
+			return nil
+		})
+	}
 	if s.management != nil {
 		group.Go(func() error { return s.management.Start(ctx) })
 	}
@@ -265,6 +275,22 @@ func (s *Service) Run(ctx context.Context) error {
 		group.Go(func() error { return serve(ctx, name, server) })
 	}
 	return group.Wait()
+}
+
+// storeCheckTimeout bounds the startup read of the store's eviction policy.
+const storeCheckTimeout = 10 * time.Second
+
+// warnOnEviction reads the store's eviction policy once and logs a store
+// that may evict keys. It never stops the replica: the policy belongs to
+// the Redis adapter's installation, and a replica that refused to start over
+// it would turn a risk under memory pressure into an outage now.
+func (s *Service) warnOnEviction(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, storeCheckTimeout)
+	defer cancel()
+	// A replica shutting down before the answer has nothing to report.
+	if err := s.checkStore(ctx); err != nil && !errors.Is(ctx.Err(), context.Canceled) {
+		s.platform.Warnf("%v", err)
+	}
 }
 
 // serve runs one HTTP listener until ctx ends, then shuts it down.

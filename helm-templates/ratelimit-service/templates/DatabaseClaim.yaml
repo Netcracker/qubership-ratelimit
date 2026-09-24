@@ -2,11 +2,15 @@
 The counter store, from DBaaS. The InternalDatabase asks dbaas-aggregator to
 provision a Redis database for the release through the DBaaS Redis adapter;
 the DatabaseSecretClaim asks dbaas-operator to look that database up and write
-its connection properties into the Secret the Deployment mounts, and to keep
-the Secret current when the password rotates. Both carry the same classifier,
+its connection properties into the Secret the Deployment mounts. Both carry the
+same classifier,
 the service's own: microserviceName is the chart's name, which is also the
 app.kubernetes.io/name label dbaas-operator sends as the originService of the
 claim, so the database's owner is the service that reads it.
+
+The InternalDatabase carries no settings: the Redis adapter builds each
+database's redis.conf from its own installation, maxmemory-policy included,
+and accepts no settings per database.
 
 Both are assigned to one dbaas-operator by spec.operatorNamespace, the
 namespace the operator and its aggregator run in, read off API_DBAAS_ADDRESS;
@@ -32,10 +36,6 @@ spec:
     scope: service
     namespace: {{ .Release.Namespace }}
   type: redis
-  {{- with .Values.redis.dbaas.settings }}
-  settings:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
 ---
 apiVersion: dbaas.netcracker.com/v1
 kind: DatabaseSecretClaim

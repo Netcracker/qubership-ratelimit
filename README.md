@@ -228,13 +228,15 @@ claim such as `realm_access.roles`) and `management.roles` (the IdP's role names
 The counter store is a Redis database from DBaaS. The service chart renders an `InternalDatabase` of type `redis`
 and a `DatabaseSecretClaim` for the release; dbaas-operator provisions the database through the DBaaS Redis adapter
 and writes its connection properties into the Secret `ratelimit-service-redis`, which every replica mounts. A replica
-does not start until the Secret exists, and a rotated password reaches it without a restart. Both objects name the
-dbaas-operator beside the aggregator in `API_DBAAS_ADDRESS` as their `spec.operatorNamespace`; that operator needs a
-`Role` in the namespace to write Secrets, and DBaaS needs the Redis adapter. On a cluster without DBaaS,
+does not start until the Secret exists, and a password changed in the Secret reaches it without a restart. Both
+objects name the dbaas-operator beside the aggregator in `API_DBAAS_ADDRESS` as their `spec.operatorNamespace`. The
+prerequisites: dbaas-operator installed and enabled, a `Role` in the namespace that lets it write Secrets, and the
+DBaaS Redis adapter installed with `redis.conf.maxmemory-policy: noeviction` and without TLS; the adapter's default
+policy evicts counters and management records under memory pressure. On a cluster without DBaaS,
 `redis.dbaas.enabled=false` renders neither object and something else writes the Secret in the same format,
 `connectionProperties.json` and `metadata.json`, as the e2e workflow does. The service reads the Secret through the
-platform's Go DBaaS client, `qubership-core-lib-go-dbaas-base-client`, from `/etc/secrets/dbaas-secrets`. `redis.dbaas.settings` passes the database's
-settings to the adapter (`redisDbSettings`, `redisDbResources`, `redisDbNodeSelector`).
+platform's Go DBaaS client, `qubership-core-lib-go-dbaas-base-client`, from `/etc/secrets/dbaas-secrets`. The
+[Helm chart reference](docs/helm-chart.md#the-counter-store-from-dbaas) has the details.
 
 A fresh installation needs no order: the service waits `NotReady` until the operator writes. An upgrade installs the
 service before the operator and a rollback reverses the order, because the service reads the current and the previous

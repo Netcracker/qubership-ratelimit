@@ -12,9 +12,10 @@
 // cannot do; a miss is therefore an error that names the classifier, never a
 // database guessed from elsewhere.
 //
-// A rotated password reaches the replica through the same mount: the
-// operator rewrites the Secret, the kubelet swaps the projection, and the
-// next resolution here reads the new value. Connections the pool opens
+// A password that changes in the Secret reaches the replica through the same
+// mount: the kubelet swaps the projection, and the next resolution here reads
+// the new value. DBaaS itself does not rotate it, since the Redis adapter
+// manages no users; the path serves a Secret rewritten by other means. Connections the pool opens
 // afterwards authenticate with it, and those already open stay
 // authenticated. An address that moves is a different database, and the
 // replica does not follow it in place: Run returns an error, the process
@@ -39,9 +40,17 @@ import (
 const Type = "redis"
 
 // DefaultResync is how often Run resolves the connection again, which is
-// how a rotated password is picked up; the kubelet's own sync period comes on
+// how a changed password is picked up; the kubelet's own sync period comes on
 // top of it.
 const DefaultResync = 30 * time.Second
+
+// DefaultResolveTimeout bounds one resolution. The mounted Secret answers at
+// once; what takes longer is the client's fallback to DBaaS's REST API, which
+// retries for a minute by default and cannot succeed from a pod that holds no
+// token. Without the bound a Secret that does not match keeps the replica
+// starting past its liveness probe, and the error naming the classifier never
+// reaches the log.
+const DefaultResolveTimeout = 5 * time.Second
 
 // Resolver is the part of the platform's DbaaSPool this package uses: the
 // connection properties of a database, looked up by classifier.
@@ -84,7 +93,17 @@ func (c Connection) Addr() string {
 // host, port, password, a redis:// url, and a role. Every failure is an
 // error: a replica that started on a guessed address would count somewhere
 // else than its peers, or nowhere.
+//
+// A database that serves TLS is refused: the aggregator marks it with
+// "tls": true when the Redis adapter is installed with TLS, and such a
+// database listens on TLS alone. Dialed in plain text, every decision would
+// fail at the store while the replica stayed Ready.
 func Parse(properties map[string]any) (Connection, error) {
+	if tls, _ := properties["tls"].(bool); tls || text(properties["tls"]) == "true" {
+		return Connection{}, errors.New("the database serves TLS only (tls: true), " +
+			"and the counter store connects in plain text; " +
+			"install the DBaaS Redis adapter without TLS")
+	}
 	connection := Connection{
 		Host:     text(properties["host"]),
 		URL:      text(properties["url"]),
@@ -179,6 +198,9 @@ type Source struct {
 	// DefaultResync.
 	Resync time.Duration
 
+	// Timeout bounds one resolution; zero is DefaultResolveTimeout.
+	Timeout time.Duration
+
 	Log logr.Logger
 
 	current atomic.Pointer[Connection]
@@ -195,9 +217,20 @@ func Open(ctx context.Context, resolver Resolver, classifier map[string]any, log
 	return source, nil
 }
 
-// resolve asks the DBaaS client for the connection once.
+// resolve asks the DBaaS client for the connection once, within Timeout.
 func (s *Source) resolve(ctx context.Context) (Connection, error) {
+	timeout := s.Timeout
+	if timeout <= 0 {
+		timeout = DefaultResolveTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	properties, err := s.Resolver.GetConnection(ctx, Type, s.Classifier, rest.BaseDbParams{})
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return Connection{}, fmt.Errorf("resolve the counter store's %s database %v through DBaaS: "+
+			"no mounted Secret matched it within %s; check the Secret of the release's DatabaseSecretClaim",
+			Type, s.Classifier, timeout)
+	}
 	if err != nil {
 		return Connection{}, fmt.Errorf("resolve the counter store's %s database %v through DBaaS: %w",
 			Type, s.Classifier, err)
@@ -213,7 +246,7 @@ func (s *Source) resolve(ctx context.Context) (Connection, error) {
 func (s *Source) Connection() Connection { return *s.current.Load() }
 
 // Credentials is the client's credentials provider: it is asked on every new
-// connection, so a rotated password is used from the next dial on.
+// connection, so a changed password is used from the next dial on.
 func (s *Source) Credentials() (username, password string) {
 	current := s.current.Load()
 	return current.Username, current.Password
@@ -259,7 +292,7 @@ func (s *Source) reload(ctx context.Context) error {
 	}
 	if next.Username != current.Username || next.Password != current.Password {
 		s.current.Store(&next)
-		s.Log.Info("the counter store's credentials rotated; new connections use them", "addr", next.Addr())
+		s.Log.Info("the counter store's credentials changed; new connections use them", "addr", next.Addr())
 	}
 	return nil
 }

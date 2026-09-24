@@ -2,11 +2,13 @@ package settings
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/model/rest"
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -28,6 +30,7 @@ func TestCounterStore_theInProcessBackendCarriesARecordsStore(t *testing.T) {
 		"a nil records store panics on the first DELETE /counters")
 	require.False(t, backend.Shared, "in-process counting is per replica, and says so")
 	require.Nil(t, backend.Closer, "nothing was dialed, so there is nothing to close")
+	require.Nil(t, backend.CheckEviction, "the in-process store never evicts")
 }
 
 // With a DBaaS connection the store is Redis at the address the Secret
@@ -43,6 +46,32 @@ func TestCounterStore_countsInTheDatabaseTheSecretNames(t *testing.T) {
 	assert.True(t, backend.Shared)
 	assert.NotNil(t, backend.Records)
 	assert.Contains(t, backend.Description, "ratelimit-redis.core:6379")
+	assert.NotNil(t, backend.CheckEviction)
+}
+
+// The store's eviction policy is read at startup: noeviction passes, any
+// other policy and a policy that cannot be read are errors that name it.
+func TestCheckEviction_namesAPolicyThatEvicts(t *testing.T) {
+	require.NoError(t, CheckEviction(context.Background(), policyReader{"maxmemory-policy": "noeviction"}))
+
+	err := CheckEviction(context.Background(), policyReader{"maxmemory-policy": "allkeys-lru"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"allkeys-lru"`)
+	assert.Contains(t, err.Error(), "maxmemory-policy: noeviction")
+
+	err = CheckEviction(context.Background(), policyReader(nil))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ERR unknown command")
+}
+
+// policyReader answers CONFIG GET with its map, or with an error when nil.
+type policyReader map[string]string
+
+func (p policyReader) ConfigGet(ctx context.Context, _ string) *goredis.MapStringStringCmd {
+	if p == nil {
+		return goredis.NewMapStringStringResult(nil, errors.New("ERR unknown command 'CONFIG'"))
+	}
+	return goredis.NewMapStringStringResult(p, nil)
 }
 
 // The values a property can carry wrong, and what each one is replaced by.

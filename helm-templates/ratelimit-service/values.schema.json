@@ -80,11 +80,6 @@
               "type": "boolean",
               "default": true,
               "description": "Render the InternalDatabase and the DatabaseSecretClaim. false expects the Secret <fullname>-redis, with connectionProperties.json in DBaaS's format, to be provided otherwise, as on a test cluster without DBaaS."
-            },
-            "settings": {
-              "type": "object",
-              "default": {},
-              "description": "Settings of the database passed to the DBaaS Redis adapter: redisDbSettings, redisDbResources, redisDbNodeSelector. Empty takes the adapter's defaults."
             }
           },
           "additionalProperties": false

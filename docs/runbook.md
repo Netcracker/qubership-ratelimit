@@ -217,10 +217,23 @@ kubectl get databasesecretclaim -n "$NS" ratelimit-service-redis \
 ```
 
 `DatabaseNotFound` is the database still being provisioned, or the `InternalDatabase` failing (read its conditions);
-`Unauthorized` and `AggregatorRejected` are dbaas-operator's own access to DBaaS; a claim with no status at all means no
-dbaas-operator runs in the namespace its `spec.operatorNamespace` names, so compare it with the `API_DBAAS_ADDRESS` the
-release was installed with. A claim stuck with a Secret write refused lacks the `Role` that lets the operator write
-Secrets in the namespace.
+after ten minutes the reason turns to `DatabaseNotFoundTimeout`, and the claim keeps polling. `Unauthorized` is the
+aggregator refusing dbaas-operator's own credentials (401). `AggregatorRejected` is any other 4xx: a request the
+aggregator finds invalid (400), a service it refuses (403), or dbaas-operator's access.
+
+The jsonpath prints nothing in two cases that look the same from here: no dbaas-operator watches the namespace that
+`spec.operatorNamespace` names, or the operator cannot write the Secret. A refused Secret write sets no condition and
+records no event. The next step for both is the dbaas-operator log: `forbidden` there is the missing `Role` that lets
+the operator write Secrets in the namespace, and silence is an `operatorNamespace` that no operator watches, so compare
+it with the `API_DBAAS_ADDRESS` the release was installed with.
+
+```bash
+kubectl logs -n <dbaas namespace> deploy/dbaas-operator --since=10m | grep -E 'ratelimit-service-redis|forbidden'
+```
+
+An `InternalDatabase` whose provisioning failed, for example with no Redis adapter registered, stays in
+`AggregatorRejected` with `Stalled`, and dbaas-operator does not retry it until its spec changes. Once the cause is
+fixed, delete the `InternalDatabase` and run the release's `helm upgrade` again, which renders it anew.
 
 **Act.** Restore the store; the service reconnects on its own, there is nothing to restart. If an unlimited window
 is not acceptable for a domain, `filter.failClosed: true` in the operator chart's values turns the window into refusals

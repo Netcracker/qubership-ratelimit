@@ -121,5 +121,6 @@ refused. GCRA is ported from go-redis/redis_rate (BSD-2-Clause), and that librar
 single-bucket oracle; differential tests stitch the Lua to the in-memory reference. `Scan` is one `SCAN` per step: on
 a Cluster it reads the master that owns the prefix's hash tag, where every key of a domain lives, and every master in
 address order for a prefix without one; the cursor names its node, so a cursor from before a slot moved is refused
-rather than resumed on the wrong node. The suite runs against standalone and Cluster; Sentinel (`masterName` in the
-chart) is best effort and is not covered by the suite.
+rather than resumed on the wrong node. The suite runs against standalone and Cluster; Sentinel is best effort and is not
+covered by the suite. The chart deploys neither Cluster nor Sentinel: its store is the standalone database the DBaaS
+Redis adapter provisions.

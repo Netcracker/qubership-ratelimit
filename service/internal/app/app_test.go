@@ -71,7 +71,6 @@ func get(t *testing.T, url string) (int, string) {
 // The service, built and run against a directory: the whole of the ticket's
 // definition of done, in one process.
 func TestService_isNotReadyWithoutAConfigurationAndReadyOnAnEmptyOne(t *testing.T) {
-	t.Setenv("REDIS_ADDRESSES", "")
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
 	dir := t.TempDir()
 
