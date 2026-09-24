@@ -112,14 +112,15 @@ effort.
 ## Implementations
 
 **In-memory** (`store/memory`) is the reference client of the suite and a dev-only backend, for the local stand and
-tests: counters live in the replica's memory, N replicas give an N-fold limit, so the chart accepts an empty
-`redis.addresses` only with `REPLICAS == 1`. Its math mirrors the server-side script formula for formula; expiry is
-lazy (stale state is discarded on touch and in `Scan`).
+tests: counters live in the replica's memory, N replicas give an N-fold limit, so the chart never renders it; a
+service started without `--redis-dbaas-microservice` counts there. Its math mirrors the server-side script formula for
+formula; expiry is lazy (stale state is discarded on touch and in `Scan`).
 
 **Redis** (`store/redis`) is one Lua script per decision: evaluate all buckets, commit only if no enforcing bucket
 refused. GCRA is ported from go-redis/redis_rate (BSD-2-Clause), and that library remains the
 single-bucket oracle; differential tests stitch the Lua to the in-memory reference. `Scan` is one `SCAN` per step: on
 a Cluster it reads the master that owns the prefix's hash tag, where every key of a domain lives, and every master in
 address order for a prefix without one; the cursor names its node, so a cursor from before a slot moved is refused
-rather than resumed on the wrong node. The suite runs against standalone and Cluster; Sentinel (`masterName` in the
-chart) is best effort and is not covered by the suite.
+rather than resumed on the wrong node. The suite runs against standalone and Cluster; Sentinel is best effort and is not
+covered by the suite. The chart deploys neither Cluster nor Sentinel: its store is the standalone database the DBaaS
+Redis adapter provisions.

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/model/rest"
 
 	envoycommon "github.com/envoyproxy/go-control-plane/envoy/extensions/common/ratelimit/v3"
 	envoyratelimit "github.com/envoyproxy/go-control-plane/envoy/service/ratelimit/v3"
@@ -68,7 +71,6 @@ func get(t *testing.T, url string) (int, string) {
 // The service, built and run against a directory: the whole of the ticket's
 // definition of done, in one process.
 func TestService_isNotReadyWithoutAConfigurationAndReadyOnAnEmptyOne(t *testing.T) {
-	t.Setenv("REDIS_ADDRESSES", "")
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
 	dir := t.TempDir()
 
@@ -158,6 +160,31 @@ func TestService_isNotReadyWithoutAConfigurationAndReadyOnAnEmptyOne(t *testing.
 	code, body = get(t, "http://"+options.MetricsAddr+contract.SnapshotPath+"/gateway.public")
 	require.Equal(t, http.StatusOK, code, body)
 	assert.Contains(t, body, `"id": "api/total"`)
+}
+
+// A replica told to count in a DBaaS database it cannot resolve does not
+// start: counting in memory instead would give each replica its own limit,
+// silently. The error names the classifier it looked for.
+func TestService_refusesToStartWithoutItsCounterStoreConnection(t *testing.T) {
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	_, err := Build("biz", Options{
+		ProbeAddr: "0", MetricsAddr: "0", ManagementAddr: "0", RLSAddr: freeAddr(t),
+		ConfigDir: t.TempDir(), RedisMicroservice: "ratelimit-service",
+		RedisResolver: failingResolver{},
+		Log:           logr.Discard(), Platform: logging.GetLogger("test"),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ratelimit-service")
+	assert.Contains(t, err.Error(), "biz")
+}
+
+// failingResolver is a DBaaS client that finds nothing: no mounted Secret,
+// and no token for the REST fallback.
+type failingResolver struct{}
+
+func (failingResolver) GetConnection(context.Context, string, map[string]any,
+	rest.BaseDbParams) (map[string]any, error) {
+	return nil, errors.New("no mounted Secret matches, and dbaas-agent answered 401")
 }
 
 func TestService_buildsWithEveryListenerOff(t *testing.T) {

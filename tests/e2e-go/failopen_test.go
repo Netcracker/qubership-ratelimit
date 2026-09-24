@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -24,19 +23,19 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 		probePath = "/e2e-redis"
 	)
 	var (
-		applied         bool
-		redisDeployment string
+		applied bool
+		store   counterStore
 	)
 
 	scaleRedis := func(replicas int32) {
 		var dep appsv1.Deployment
-		Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: redisDeployment}, &dep)).
+		Expect(k8s.Get(ctx, client.ObjectKey{Namespace: store.namespace, Name: store.service}, &dep)).
 			To(Succeed())
 		dep.Spec.Replicas = &replicas
 		Expect(k8s.Update(ctx, &dep)).To(Succeed())
 		Eventually(func() int32 {
 			var d appsv1.Deployment
-			if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: redisDeployment}, &d); err != nil {
+			if err := k8s.Get(ctx, client.ObjectKey{Namespace: store.namespace, Name: store.service}, &d); err != nil {
 				return -1
 			}
 			return d.Status.ReadyReplicas
@@ -45,14 +44,15 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 	}
 
 	BeforeAll(func() {
-		addresses := redisAddresses()
-		if addresses == "" {
-			Skip("the release carries no redis.addresses, so it counts in process")
+		var ok bool
+		if store, ok = releaseCounterStore(); !ok {
+			Skip("the namespace carries no " + redisSecretName + " Secret to reach the store through")
 		}
-		redisDeployment = strings.SplitN(strings.SplitN(addresses, ",", 2)[0], ":", 2)[0]
 		var dep appsv1.Deployment
-		if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: redisDeployment}, &dep); err != nil {
-			Skip("the store at " + addresses + " is not a Deployment in this namespace")
+		if err := k8s.Get(ctx, client.ObjectKey{Namespace: store.namespace, Name: store.service}, &dep); err != nil {
+			addr := store.addr
+			store = counterStore{}
+			Skip("the store at " + addr + " is not a Deployment this suite can scale")
 		}
 
 		if !applied {
@@ -70,7 +70,7 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 		// Redis at zero would fail everything after it. It comes back first:
 		// the cleanup wait below can fail, and nothing after a failed step in
 		// this closure runs.
-		if redisDeployment != "" {
+		if store.service != "" {
 			scaleRedis(1)
 		}
 		if applied {

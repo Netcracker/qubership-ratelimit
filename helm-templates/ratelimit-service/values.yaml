@@ -26,21 +26,29 @@ logLevel: info
 # ============== COUNTER STORE ============================
 # Redis holds the counters, and that is what makes a limit a limit of the domain
 # rather than of each replica: with N replicas counting in their own memory, a
-# limit of 100 admits 100*N. An empty address list selects the in-process store,
-# which is correct at one replica and for a developer install.
+# limit of 100 admits 100*N.
 #
-# addresses is a comma-separated host:port list: one entry is a standalone server,
-# several are a cluster. Setting masterName selects Sentinel.
+# The database is DBaaS's. The chart declares an InternalDatabase of type redis
+# for the release and a DatabaseSecretClaim for it; dbaas-operator provisions
+# the database through the DBaaS Redis adapter and writes its connection
+# properties into the Secret <fullname>-redis, and every replica mounts that
+# Secret. A replica does not start until the Secret exists. dbaas-operator
+# needs a Role in the namespace that lets it write Secrets, and DBaaS needs its
+# Redis adapter, installed with redis.conf maxmemory-policy: noeviction: the
+# adapter sets every database's redis.conf from its own installation, and its
+# default, allkeys-lru, evicts counters and management records.
 redis:
-  addresses: ""
-  db: 0
-  username: ""
-  masterName: ""
-  # The password comes from a Secret rather than from values: values end up in
-  # the release, and the release is readable by anyone with get on Secrets in the
-  # namespace.
-  existingSecret: ""
-  passwordKey: password
+  dbaas:
+    # Render the InternalDatabase and the DatabaseSecretClaim. false leaves
+    # both to someone else, who still has to produce the Secret <fullname>-redis
+    # with the key connectionProperties.json in DBaaS's format: a test cluster
+    # without DBaaS, as the e2e workflow's is.
+    enabled: true
+
+# The address of dbaas-aggregator, a platform parameter shared by every chart
+# that talks to DBaaS. The chart reads the namespace out of its host and
+# assigns its DBaaS objects to the dbaas-operator running there.
+API_DBAAS_ADDRESS: http://dbaas-aggregator.dbaas:8080
 
 healthProbe:
   port: 8081

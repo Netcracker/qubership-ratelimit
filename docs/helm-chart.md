@@ -43,10 +43,12 @@ The service chart:
 helm-templates/ratelimit-service/templates/
 ├── _helpers.tpl                   # name, labels, mode (satellite iff BASELINE_ORIGIN; every template is wrapped
 │                                  #   in it, so a satellite release is empty), serviceName (the constant
-│                                  #   ratelimit), validateStore (fails the render on the in-process store with
-│                                  #   REPLICAS != 1)
+│                                  #   ratelimit), redisSecretName (<fullname>-redis)
 ├── Deployment.yaml                # the Deployment ratelimit-service, REPLICAS replicas; mounts ratelimit-config
-│                                  #   at /etc/ratelimit/config with optional: true; no token mounted
+│                                  #   at /etc/ratelimit/config with optional: true and the counter store's
+│                                  #   Secret under /etc/secrets/dbaas-secrets without it; no token mounted
+├── DatabaseClaim.yaml             # the InternalDatabase and the DatabaseSecretClaim of the counter store,
+│                                  #   behind redis.dbaas.enabled
 ├── Service.yaml                   # FIXED name ratelimit; grpc 9000 (appProtocol: grpc is mandatory), metrics (the
 │                                  #   operator's probe port), management behind management.enabled
 ├── ServiceAccount.yaml            # automountServiceAccountToken: false; no Role
@@ -205,19 +207,10 @@ image:                               # Deployment.yaml
 logLevel: info                       # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
                                      # NOT --zap-log-level: LOG_LEVEL only applies until configloader initializes
 
-redis:                               # Deployment.yaml (the REDIS_* env) and validateStore: empty addresses =
-  addresses: ""                      # in-process store, dev only (the local stand and tests): accepted only with
-                                     #   REPLICAS == 1, otherwise install/upgrade fails with
-                                     #   "in-process store needs exactly one replica; set redis.addresses"
-                                     #   (the validateStore helper); comma-separated host:port: one address =
-                                     #   standalone, several = Cluster
-  db: 0                              # a value that does not parse is not rejected: the service logs
-                                     #   `REDIS_DB="x" is not a number, using database 0` and uses 0
-  username: ""
-  masterName: ""                     # non-empty selects Sentinel, best effort: the store contract suite runs
-                                     #   against standalone and Cluster
-  existingSecret: ""                 # the password comes from a Secret, not from values
-  passwordKey: password
+redis:                               # DatabaseClaim.yaml; see "The counter store from DBaaS"
+  dbaas:
+    enabled: true                    # render the InternalDatabase and the DatabaseSecretClaim; false = the Secret
+                                     #   <fullname>-redis is written by someone else in DBaaS's format (CI)
 
 healthProbe: { port: 8081 }          # Deployment.yaml: the probes port
 metrics:
@@ -311,10 +304,9 @@ the cluster. Key points:
 The schema cannot express domain uniqueness; the `validateDomains` helper of the operator chart holds it (see the
 templates): a duplicate domain among the enabled gateways of one release, or an enabled gateway without a domain,
 fails the render with a clear error. Matching domains **across the releases of a composite** are the model itself
-rather than an error: one domain per role, a shared budget. The in-process store guard is held the same way in the
-service chart: the `validateStore` helper accepts an empty `redis.addresses` only with `REPLICAS == 1`; otherwise
-`helm install`/`upgrade` fails with the error "in-process store needs exactly one replica; set redis.addresses". The
-in-process store is dev only (the local stand and tests), not a first-phase backend.
+rather than an error: one domain per role, a shared budget. The service chart has no in-process store to guard: every
+replica it renders reads its DBaaS database, and the in-process store is only what a service started without
+`--redis-dbaas-microservice` counts in, for the developer loop and tests.
 
 ## Templates
 
@@ -331,7 +323,8 @@ Deployment, `ratelimit-operator` and `ratelimit-service`. The operator chart als
 release namespace, or in a satellite `BASELINE_CONTROLLER` when set and `BASELINE_ORIGIN` otherwise; `rlsAuthority`:
 `<serviceName>.<serviceNamespace>.svc.cluster.local`; `rlsCluster`: `outbound|9000||<fqdn>`; `statPrefix`: the
 gateway name with `-` replaced by `_`; and `validateDomains`, described above. The service chart holds
-`validateStore`, described above.
+`redisSecretName`, the Secret of the counter store, `<fullname>-redis`, which the `DatabaseSecretClaim` names and the
+Deployment mounts.
 
 ### EnvoyFilter.yaml (operator chart): the core of the filter part
 
@@ -429,9 +422,8 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 - env: `LOGGING_LEVEL_ROOT` (not `--zap-log-level`), `CLOUD_NAMESPACE` and `POD_NAME` from fieldRefs (the Downward API;
   the namespace is the installation scope and the namespace segment in counter keys), `SERVICE_VERSION` (the image tag,
   reported as `ratelimit_build_info`; the pipeline passes no build argument to the image, so without it every scrape
-  would say `dev`), `METRICS_NEAR_LIMIT_RATIO`,
-  `REDIS_ADDRESSES`/`REDIS_DB` always, `REDIS_USERNAME`/`REDIS_MASTERNAME`/`REDIS_PASSWORD` (from a Secret)
-  conditionally, plus `MANAGEMENT_CLAIMS_*` and `MANAGEMENT_ROLES_*` behind `management.enabled`;
+  would say `dev`), `METRICS_NEAR_LIMIT_RATIO`, plus `MANAGEMENT_CLAIMS_*` and `MANAGEMENT_ROLES_*` behind
+  `management.enabled`;
 - the `maxSurge: 1 / maxUnavailable: 0` strategy: the gateways must not lose all RLS endpoints at once;
 - `lifecycle.preStop.sleep: 7s` (the native handler, needs k8s >= 1.30): on deletion the pod leaves Endpoints
   immediately, but xDS takes seconds to reach the gateways; the pause keeps the process serving through that window, so
@@ -453,6 +445,64 @@ and carry the label `app.kubernetes.io/processed-by-operator: victoriametrics-op
 `GrafanaDashboard` CR (grafana-operator); its uid is the namespace with a hash suffix (uniqueness under truncation,
 the Grafana limit is 40 characters); auto-refresh is deliberately off, since a dashboard that redraws itself during an
 incident tampers with the evidence.
+
+### The counter store from DBaaS
+
+The counters live in a Redis database that DBaaS provisions for the release. `DatabaseClaim.yaml` renders two
+objects of dbaas-operator with the same classifier, `{microserviceName: ratelimit-service, scope: service, namespace:
+<release namespace>}` and type `redis`:
+
+- the `InternalDatabase` asks dbaas-aggregator to provision the database through the DBaaS Redis adapter. The adapter
+  runs each database as a single Redis instance: a Deployment and a Service `<database>.<adapter namespace>`, no
+  Cluster and no Sentinel. It builds the database's `redis.conf` from its own installation and accepts no settings per
+  database, so the chart passes none;
+- the `DatabaseSecretClaim` asks dbaas-operator to look the database up and write its connection properties into the
+  Secret `<fullname>-redis` as `connectionProperties.json` (`host`, `port`, `password`, `url`, `role`) beside a
+  `metadata.json` that names the classifier, and to rewrite it when they change. Its
+  `app.kubernetes.io/name` label is the `originService` of the lookup, and it equals the classifier's
+  `microserviceName`, so the service is the owner of the database it reads.
+
+The Deployment mounts the Secret at `/etc/secrets/dbaas-secrets/<fullname>-redis` without `optional`, the platform's
+path for DBaaS Secrets, and passes `--redis-dbaas-microservice=ratelimit-service` with `MICROSERVICE_NAMESPACE` from
+the pod's namespace. The service resolves its database through the platform's Go DBaaS client
+(`qubership-core-lib-go-dbaas-base-client`), which matches the mounted `metadata.json` to that classifier and type
+`redis`. Until dbaas-operator has written the Secret, the pod waits in `ContainerCreating`; a replica never starts
+counting on its own. The client falls back to REST only on a miss, and the pod holds no token for it, so a Secret that
+does not match fails the start within 5 s with the classifier in the error, before the liveness probe fires. The
+service reads host and port once: an address that changes in the Secret ends the process and the container restarts
+onto the new database. It resolves the connection again every 30 s and uses the password the Secret holds from the
+next connection on, without a restart. DBaaS itself never changes this password: the Redis adapter does not manage
+users, and the aggregator refuses a password change for such adapters. Connection properties with `tls: true`, which
+the aggregator adds when the adapter is installed with TLS, fail the start: the service connects in plain text.
+
+Both objects carry `spec.operatorNamespace`, the namespace in the host of `API_DBAAS_ADDRESS` (the platform parameter,
+`http://dbaas-aggregator.dbaas:8080` by default, so `dbaas`): a dbaas-operator reconciles only the objects that name
+its own namespace, and it runs beside its aggregator. An address whose host carries no namespace fails the render.
+
+The chart needs, and does not install:
+
+- dbaas-operator, installed and enabled: its chart ships with `DBAAS_OPERATOR_ENABLED: false`, and it needs
+  Kubernetes 1.32 or later for its CEL rules. Without its CRDs, `helm install` of this chart fails on the
+  `InternalDatabase` kind;
+- a `Role` and a `RoleBinding` in the namespace that grant dbaas-operator's service account `get`, `create`,
+  `update`, and `patch` on `secrets`, since the operator holds no cluster-wide Secret access (dbaas-operator documents
+  the bundle);
+- the DBaaS Redis adapter registered with dbaas-aggregator, installed with `redis.conf.maxmemory-policy: noeviction`
+  and without `redis.tls.enabled`. The adapter's default policy, `allkeys-lru`, lets Redis drop counters and
+  management records under memory pressure without an error, which the
+  [management API's store requirements](management-api.md) forbid. The policy applies to the databases the adapter
+  creates afterwards; a database that already exists keeps the one it was created with. The service reads the policy
+  at startup and logs a warning when it is not `noeviction`.
+
+`spec.operatorNamespace` is immutable on both objects, so a corrected `API_DBAAS_ADDRESS` fails the next
+`helm upgrade` until both are deleted. `helm uninstall` leaves the database: the `InternalDatabase` carries no
+finalizer, so its deletion drops nothing, and the adapter's Redis Deployment stays in its namespace for a reinstall to
+attach to.
+
+`redis.dbaas.enabled=false` renders neither object
+for a cluster without DBaaS: the Deployment still mounts `<fullname>-redis`, and whoever sets up the cluster writes it
+in the same format, `connectionProperties.json` and a `metadata.json` naming the classifier and type `redis`. The e2e
+workflow does exactly that for its own Redis.
 
 ## Metrics: the naming contract
 
@@ -539,7 +589,7 @@ re-applies what the release set.
 variable the charts do not read, so that the pass exists by name; satellite, with `BASELINE_ORIGIN`). CI renders the
 satellite case of each chart on its own: from the operator chart the filters alone, the authority
 `ratelimit.<BASELINE_ORIGIN>.svc.cluster.local`, and `BASELINE_CONTROLLER` taking precedence when set; from the
-service chart an empty render. The service chart is also rendered for the `validateStore` refusal, for the management
+service chart an empty render. The service chart is also rendered for the management
 port never rendered without its AuthorizationPolicy, for the principal that policy allows, and for the identity values
 in every mode (see "Management API port"). The CRD copy of the operator chart is checked for drift against
 `config/crd/bases`. Beyond the lint, a render test in Go renders both charts and compares the rendered names and ports

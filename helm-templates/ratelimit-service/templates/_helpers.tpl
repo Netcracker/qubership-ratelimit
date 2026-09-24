@@ -73,17 +73,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-Refuse an in-process counter store on more than one replica.
-
-Without redis.addresses every replica counts in its own memory, so a limit of
-N admits N per replica: the rendered limit is not the enforced one, and nothing
-in the status says so. The management API makes it worse: its idempotency
-records, sweep lease, and confirmation tokens live in that same memory, so a
-preview lands on one pod and its confirmation on another that has never heard
-of the token. Both are the same mistake, and this is where it is refused.
+The namespace of the dbaas-operator that reconciles the chart's DBaaS objects:
+the host of API_DBAAS_ADDRESS is <aggregator>.<namespace>, and the operator
+runs beside its aggregator. http://dbaas-aggregator.dbaas:8080 gives dbaas.
 */}}
-{{- define "ratelimit.validateStore" -}}
-{{- if and (not .Values.redis.addresses) (ne (int .Values.REPLICAS) 1) -}}
-{{- fail (printf "in-process store needs exactly one replica; set redis.addresses (REPLICAS is %v and redis.addresses is empty)" .Values.REPLICAS) -}}
+{{- define "ratelimit.dbaasNamespace" -}}
+{{- $host := first (splitList ":" (last (splitList "://" .Values.API_DBAAS_ADDRESS))) -}}
+{{- $parts := splitList "." $host -}}
+{{- if lt (len $parts) 2 -}}
+{{- fail (printf "API_DBAAS_ADDRESS %q names no namespace; expected http://<aggregator>.<namespace>:<port>" .Values.API_DBAAS_ADDRESS) -}}
 {{- end -}}
+{{- index $parts 1 -}}
+{{- end -}}
+
+{{/*
+The Secret the counter store's connection lives in: written by dbaas-operator
+for the chart's DatabaseSecretClaim, mounted by the Deployment.
+*/}}
+{{- define "ratelimit.redisSecretName" -}}
+{{- printf "%s-redis" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}

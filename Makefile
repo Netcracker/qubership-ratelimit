@@ -165,11 +165,6 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes, the engin
 # values.schema.json requires them. Linting values.yaml alone would fail, and a
 # schema loose enough to pass would let a missing profile through to a
 # Deployment with empty resources.
-# A store address is passed because the multi-replica profiles refuse to
-# render without one: an in-process store above one replica is a limit that
-# admits N per replica, and validateStore fails the render rather than ship it.
-# The address is not a value of any profile - it is environment configuration -
-# so lint supplies a placeholder. The refusal itself is checked in CI.
 #
 # Every profile is linted in each of the composite's modes. The ticket names
 # three; the chart renders two. Standalone and baseline are the same render:
@@ -188,7 +183,7 @@ helm-lint: ## Lint every chart against every resource profile, in every mode.
 				baseline) extra="--set ORIGIN_NAMESPACE=lint-ns" ;; \
 				satellite) extra="--set BASELINE_ORIGIN=lint-baseline" ;; \
 			esac; \
-			helm lint $$chart -f "$$profile" --set redis.addresses=lint-redis:6379 $$extra || exit 1; \
+			helm lint $$chart -f "$$profile" $$extra || exit 1; \
 		done; \
 	done; \
 	done

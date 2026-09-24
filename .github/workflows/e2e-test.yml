@@ -151,10 +151,21 @@ jobs:
             kubectl rollout status "deployment/${gw}-istio" -n "${E2E_NAMESPACE}" --timeout=300s
           done
 
+      # The kind cluster has no DBaaS, so the workflow does what dbaas-operator
+      # does for the chart's DatabaseSecretClaim: it writes the Secret
+      # ratelimit-service-redis in DBaaS's format, pointing at a Redis of its
+      # own. connectionProperties.json is the connection; metadata.json names
+      # the classifier and type the platform's DBaaS client matches it by. The
+      # chart is installed with redis.dbaas.enabled=false and mounts that
+      # Secret exactly as it mounts the claim's; the service cannot tell the
+      # two apart.
       - name: Deploy the counter store
         run: |
           kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/redis.yaml
           kubectl rollout status deployment/e2e-redis -n "${E2E_NAMESPACE}" --timeout=120s
+          kubectl create secret generic ratelimit-service-redis -n "${E2E_NAMESPACE}" \
+            --from-literal=connectionProperties.json='{"host":"e2e-redis","port":6379,"url":"redis://e2e-redis:6379","role":"admin"}' \
+            --from-literal=metadata.json="{\"classifier\":{\"microserviceName\":\"ratelimit-service\",\"namespace\":\"${E2E_NAMESPACE}\",\"scope\":\"service\"},\"type\":\"redis\"}"
 
       - name: Install the charts
         run: |
@@ -188,7 +199,7 @@ jobs:
             --set logLevel=debug \
             --set image.repository=ratelimit-service \
             --set image.tag=e2e \
-            --set redis.addresses=e2e-redis:6379 \
+            --set redis.dbaas.enabled=false \
             --set management.enabled=true \
             --set management.claims.roles=realm_access.roles \
             --set 'management.roles.viewer={rl-viewer}' \

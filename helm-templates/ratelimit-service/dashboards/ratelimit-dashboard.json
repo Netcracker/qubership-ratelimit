@@ -715,7 +715,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "Store roundtrip",
-      "description": "The counter store's share of the check, per domain. A domain is pinned to one Redis Cluster slot, so a rising p99 here is that shard saturating.",
+      "description": "The counter store's share of the check, per domain. The store is a single Redis instance, so a p99 rising in every domain at once is that instance saturating.",
       "gridPos": {
         "h": 8,
         "w": 12,

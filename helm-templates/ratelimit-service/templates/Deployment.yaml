@@ -1,5 +1,4 @@
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
-{{- include "ratelimit.validateStore" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -61,6 +60,10 @@ spec:
             # it is spelled out so the volume mount below and the flag are
             # read side by side.
             - --config-dir=/etc/ratelimit/config
+            # The counter store: the service's own DBaaS database, resolved by
+            # the platform's DBaaS client from the claim's Secret mounted
+            # under /etc/secrets/dbaas-secrets.
+            - --redis-dbaas-microservice={{ include "ratelimit.name" . }}
           env:
             # The name the status conditions use for the replicas that lag,
             # and the name the management API reports for this replica.
@@ -77,6 +80,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # The same namespace under the name the platform's DBaaS client
+            # reads: it completes the classifier with it, and refuses to start
+            # without it.
+            - name: MICROSERVICE_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             # Reported as ratelimit_build_info: the image tag, which is the
             # release. The pipeline passes no build arguments to the image,
             # so without this every scrape would say "dev".
@@ -84,21 +94,6 @@ spec:
               value: '{{ .Values.image.tag | default .Chart.AppVersion }}'
             - name: METRICS_NEAR_LIMIT_RATIO
               value: '{{ .Values.metrics.nearLimitRatio }}'
-            # Where the counters live. Empty falls back to an in-process store,
-            # which counts per replica and is therefore correct at one replica
-            # only.
-            - name: REDIS_ADDRESSES
-              value: '{{ .Values.redis.addresses }}'
-            - name: REDIS_DB
-              value: '{{ .Values.redis.db }}'
-            {{- with .Values.redis.username }}
-            - name: REDIS_USERNAME
-              value: '{{ . }}'
-            {{- end }}
-            {{- with .Values.redis.masterName }}
-            - name: REDIS_MASTERNAME
-              value: '{{ . }}'
-            {{- end }}
             {{- if .Values.management.enabled }}
             # The identity configuration of the management API. Read through
             # the configloader, which maps MANAGEMENT_CLAIMS_SUBJECT onto
@@ -111,13 +106,6 @@ spec:
               value: '{{ join "," .Values.management.roles.viewer }}'
             - name: MANAGEMENT_ROLES_OPERATOR
               value: '{{ join "," .Values.management.roles.operator }}'
-            {{- end }}
-            {{- if .Values.redis.existingSecret }}
-            - name: REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.redis.existingSecret }}
-                  key: {{ .Values.redis.passwordKey }}
             {{- end }}
           ports:
             - name: grpc
@@ -165,6 +153,11 @@ spec:
             - name: config
               mountPath: /etc/ratelimit/config
               readOnly: true
+            # The platform's path for DBaaS Secrets: the client scans every
+            # directory under /etc/secrets/dbaas-secrets for metadata.json.
+            - name: redis
+              mountPath: /etc/secrets/dbaas-secrets/{{ include "ratelimit.redisSecretName" . }}
+              readOnly: true
           securityContext:
             runAsNonRoot: true
             readOnlyRootFilesystem: true
@@ -207,6 +200,15 @@ spec:
           configMap:
             name: ratelimit-config
             optional: true
+        # The counter store's connection properties, written by dbaas-operator
+        # for the chart's DatabaseSecretClaim once DBaaS has provisioned the
+        # database. Not optional: a replica without its database would count
+        # alone, so the pod waits in ContainerCreating until the Secret exists.
+        # The kubelet swaps the projection when the Secret changes, and the
+        # DBaaS client reads the new password from it.
+        - name: redis
+          secret:
+            secretName: {{ include "ratelimit.redisSecretName" . }}
       # Long enough for the gRPC drain (--rls-drain-timeout, 10s by default) to
       # finish before the kubelet sends SIGKILL.
       terminationGracePeriodSeconds: 30
