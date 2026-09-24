@@ -207,8 +207,9 @@ client giving up. The `ratelimit_store_roundtrip_seconds` histogram shows whethe
 The policy status does not move during the outage: it describes rules, not counters, and `Ready` stays `True`.
 
 A replica that does not start at all, stuck in `ContainerCreating` with `secret "ratelimit-service-redis" not found`,
-is waiting for DBaaS rather than for Redis: the Secret is written by dbaas-operator once the database exists. The
-claim's status says why it is not there yet:
+is waiting for DBaaS rather than for Redis: the Secret is written by dbaas-operator once the database exists. For a
+Secret that was never written, the claim's status says why; for one that was written and then lost, it reads
+`Ready=True`, as described below:
 
 ```bash
 kubectl get databasesecretclaim,internaldatabase -n "$NS"
@@ -234,6 +235,22 @@ kubectl logs -n <dbaas namespace> deploy/dbaas-operator --since=10m | grep -E 'r
 An `InternalDatabase` whose provisioning failed, for example with no Redis adapter registered, stays in
 `AggregatorRejected` with `Stalled`, and dbaas-operator does not retry it until its spec changes. Once the cause is
 fixed, delete the `InternalDatabase` and run the release's `helm upgrade` again, which renders it anew.
+
+A claim that reads `Ready=True` while the Secret is missing has lost a Secret it already wrote, for example one deleted
+by hand. dbaas-operator does not watch Secrets, so it does not notice: the claim is reconciled again only when its
+spec or its `dbaas.netcracker.com/rotation-trigger` annotation changes, or by the hourly safety net. Restoring a `Role`
+does not bring the Secret back either. A new value of the annotation makes the operator write the Secret at once, with
+the same content; the pods waiting in `ContainerCreating` start on the kubelet's next mount attempt:
+
+```bash
+kubectl annotate databasesecretclaim -n "$NS" ratelimit-service-redis --overwrite \
+  dbaas.netcracker.com/rotation-trigger="manual-$(date -u +%Y%m%dT%H%M%SZ)"
+kubectl get secret -n "$NS" ratelimit-service-redis
+```
+
+The annotation is the one dbaas-operator's rotation poller stamps when credentials change, and a value written by
+hand only triggers the reconcile. Restarting dbaas-operator also restores the Secret, within about 25 s, but it
+reconciles every claim the operator serves.
 
 **Act.** Restore the store; the service reconnects on its own, there is nothing to restart. If an unlimited window
 is not acceptable for a domain, `filter.failClosed: true` in the operator chart's values turns the window into refusals
