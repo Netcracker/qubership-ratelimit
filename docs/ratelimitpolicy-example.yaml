@@ -1,0 +1,159 @@
+# Example RateLimitPolicy, one object per domain: claim mapping, groups, rule blocks.
+#
+# Schema: ratelimitpolicy-cr-spec.md; bounds and their origin: limits.md.
+# The keys client (the sub claim, lowercased), path, and method are built in; roles and plan are declared in mappings.
+#
+# Windows are the rates[] list inside a rule: every entry is an independent bucket with its own periodSeconds
+# (1..86400, periods unique, number of windows unbounded); the algorithm is a property of the window, GCRA by default.
+apiVersion: ratelimit.netcracker.com/v1
+kind: RateLimitPolicy
+metadata:
+  name: gateway.public              # name == spec.domain (CEL); a second object for the domain is unrepresentable
+  # Business namespace: the single namespace or a composite's baseline, next to the component.
+  namespace: core-1-core
+spec:
+  # Binding to the gateway: the string must match domain in this gateway's EnvoyFilter (installed by the Helm chart).
+  domain: gateway.public
+
+  # Which token claims become descriptor keys. client <- sub is built in, no need to declare it.
+  mappings:
+  - { key: roles, claim: realm_access.roles, type: StringArray }   # array: the Contains/In/InGroup operators
+  - { key: plan, claim: plan, normalization: Lowercase }         # scalar: Equals/In, usable in counters
+
+  # Named client groups. The client value = the sub claim, lowercased.
+  groups:
+  - name: bulk-clients
+    clients:
+    - 00000000-0000-4000-8000-00000000c001
+    - 00000000-0000-4000-8000-00000000c002
+    - 00000000-0000-4000-8000-00000000c003
+  - name: trial-clients
+    clients:
+    - 00000000-0000-4000-8000-00000000d001
+
+  limits:
+
+  # ── Block 1: basic counting axes over the whole API (mode: All: the rules add up) ─────────
+  - name: api
+    target:
+      routes:
+      - path: { type: Prefix, value: /api/v1/ }
+    rules:
+    # A counter per path, all clients together: endpoint protection.
+    - name: per-path
+      counters: [path]
+      rates:
+      - { requests: 1000, periodSeconds: 60, burst: 100 }
+    # A counter per client, all paths together; a minute rate and a daily quota are two buckets.
+    - name: per-client
+      counters: [client]
+      rates:
+      - { requests: 100, periodSeconds: 60, burst: 20 }
+      - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
+    # The Enterprise plan instead of per-client: replacedRules suppresses the replaced rule entirely.
+    - name: enterprise-per-client
+      matches:
+      - { key: plan, operator: Equals, value: enterprise }
+      counters: [client]
+      replacedRules: [per-client]
+      rates:
+      - { requests: 10000, periodSeconds: 60 }
+    # An internal client past this block's limits and past Redis; in an All block, Bypass must name what it bypasses.
+    - name: internal-scraper
+      matches:
+      - { key: client, operator: Equals, value: prometheus }
+      behavior: Bypass
+      replacedRules: [per-path, per-client]
+    # A shared bucket for a named group: empty counters = one counter for everyone.
+    - name: any-bulk-client
+      matches:
+      - { key: client, operator: InGroup, value: bulk-clients }
+      counters: []
+      rates:
+      - { requests: 200, periodSeconds: 60 }
+      - { requests: 6000, periodSeconds: 3600 }
+    # A role from the array claim: all holders of the role share 150/min.
+    - name: role-crawler
+      matches:
+      - { key: roles, operator: Contains, value: ROLE_Crawler }
+      counters: []
+      rates:
+      - { requests: 150, periodSeconds: 60 }
+    # Trialing a new limit on live traffic: counts, writes the shadow_over_limit metric, does not refuse.
+    - name: exports-per-client-trial
+      matches:
+      - { key: roles, operator: Contains, value: ROLE_Exporter }
+      counters: [client]
+      behavior: Shadow
+      rates:
+      - { requests: 5, periodSeconds: 3600 }
+    # An unconditional total: empty matches + empty counters = one counter for the whole API.
+    - name: total
+      counters: []
+      rates:
+      - { requests: 600, periodSeconds: 60, algorithm: FixedWindow }
+
+  # ── Block 2: operations with identifiers: a target with a template, a counter per capture ───────
+  - name: orders
+    target:
+      routes:
+      - path: { type: Template, value: "/api/v1/orders/{orderId}/items" }   # {} in quotes (YAML)
+      - path: { type: Prefix, value: /api/v1/orders }
+        methods: [POST, PUT]
+    mode: FirstMatch                  # the first matched rule decides; the order is semantics
+    rules:
+    # A narrow group limit on the order operations of this block; the cascade ends here.
+    - name: create-bulk-client
+      matches:
+      - { key: client, operator: InGroup, value: bulk-clients }
+      counters: []
+      rates:
+      - { requests: 30, periodSeconds: 60 }
+    # The {orderId} capture is a counting axis: a counter per order;
+    # the path axis inside the block = the template itself.
+    - name: items-per-order
+      matches:
+      - { key: orderId, operator: Exists }
+      counters: [orderId]
+      rates:
+      - { requests: 10, periodSeconds: 60 }
+    # The rest: per client.
+    - name: orders-per-client
+      counters: [client]
+      rates:
+      - { requests: 50, periodSeconds: 60 }
+    # Anonymous callers: a separate shared bucket (they have no client axis, so the rule above does not match).
+    - name: anonymous
+      matches:
+      - { key: client, operator: DoesNotExist }
+      counters: []
+      rates:
+      - { requests: 20, periodSeconds: 60 }
+
+# The operator writes the status; approximate shape:
+#
+# status:
+#   observedGeneration: 3
+#   activeGeneration: 3
+#   effectiveKeys: [client, method, path, plan, roles]
+#   replicas: { total: 3, applied: 3, summary: "3/3", lastCheckTime: "2026-09-02T12:00:05Z" }
+#   conditions:
+#   - { type: Accepted, status: "True",  reason: RulesCompiled }
+#   - { type: Ready,    status: "True",  reason: AllReplicas, message: "3/3 replicas enforce generation 3" }
+#   - { type: Stalled,  status: "False", reason: Progressing }
+---
+# A minimal policy for the private gateway: binding through a different domain, built-in keys only.
+apiVersion: ratelimit.netcracker.com/v1
+kind: RateLimitPolicy
+metadata:
+  name: gateway.private
+  namespace: core-1-core
+spec:
+  domain: gateway.private
+  limits:
+  - name: all
+    rules:
+    - name: per-caller
+      counters: [client]
+      rates:
+      - { requests: 5000, periodSeconds: 60, burst: 500 }

@@ -1,0 +1,15 @@
+# The kind cluster of the e2e workflow.
+#
+# The service reads its configuration from a ConfigMap volume, and the kubelet
+# projects a ConfigMap update into the volume on its sync loop: once a minute
+# by default. Almost every spec that changes a policy waits for that
+# projection, so the default would turn a run of minutes into an hour and
+# collect flakes at every timeout. The sync period is lowered here to a few
+# seconds; production keeps the default, and the runbook documents the
+# minute.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+kubeadmConfigPatches:
+  - |
+    kind: KubeletConfiguration
+    syncFrequency: 5s

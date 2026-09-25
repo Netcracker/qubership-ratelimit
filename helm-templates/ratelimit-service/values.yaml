@@ -1,0 +1,211 @@
+# ============== IMAGE ============================
+image:
+  repository: ghcr.io/netcracker/qubership-ratelimit-service
+  # Empty takes the chart's appVersion, which is a fixed release. A floating tag
+  # such as "latest" moves under a running workload, so two pods of one rollout
+  # can end up on different builds.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# ============== SERVICE ============================
+# REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
+# the resource profile, not here: one source of truth, so the defaults cannot
+# drift away from the profiles. values.schema.json requires them, so installing
+# without `-f resource-profiles/<profile>.yaml` fails with a clear message
+# instead of rendering a Deployment with empty resources.
+#
+# Every replica answers rate limit checks from the configuration the operator
+# writes, so scaling REPLICAS out needs no other change. GOMEMLIMIT is derived
+# from MEMORY_LIMIT, so it governs the Go heap and not only the cgroup ceiling.
+
+# Passed as LOGGING_LEVEL_ROOT: the platform logger resolves its root level
+# from the logging.level.root property; LOG_LEVEL only applies before the
+# configloader is initialized.
+logLevel: info
+
+# ============== COUNTER STORE ============================
+# Redis holds the counters, and that is what makes a limit a limit of the domain
+# rather than of each replica: with N replicas counting in their own memory, a
+# limit of 100 admits 100*N.
+#
+# The database is DBaaS's. The chart declares an InternalDatabase of type redis
+# for the release and a DatabaseSecretClaim for it; dbaas-operator provisions
+# the database through the DBaaS Redis adapter and writes its connection
+# properties into the Secret <fullname>-redis, and every replica mounts that
+# Secret. A replica does not start until the Secret exists. dbaas-operator
+# needs a Role in the namespace that lets it write Secrets, and DBaaS needs its
+# Redis adapter, installed with redis.conf maxmemory-policy: noeviction: the
+# adapter sets every database's redis.conf from its own installation, and its
+# default, allkeys-lru, evicts counters and management records.
+redis:
+  dbaas:
+    # Render the InternalDatabase and the DatabaseSecretClaim. false leaves
+    # both to someone else, who still has to produce the Secret <fullname>-redis
+    # with the key connectionProperties.json in DBaaS's format: a test cluster
+    # without DBaaS, as the e2e workflow's is.
+    enabled: true
+
+# The address of dbaas-aggregator, a platform parameter shared by every chart
+# that talks to DBaaS. The chart reads the namespace out of its host and
+# assigns its DBaaS objects to the dbaas-operator running there.
+API_DBAAS_ADDRESS: http://dbaas-aggregator.dbaas:8080
+
+healthProbe:
+  port: 8081
+
+# ============== METRICS ============================
+# The Prometheus endpoint: decisions and their latencies, budget headroom,
+# extraction health, and the applied generation per domain. Plain HTTP,
+# cluster-internal. The Service publishes it under the name metrics, and the
+# operator reads /debug/applied on it to learn which generation each replica
+# enforces.
+metrics:
+  port: 8080
+  # An admission counts as near-limit once the rule has consumed this share of
+  # the capacity of its window: the burst of a GCRA window, the requests of a
+  # fixed one. Quoted so YAML cannot reshape the number before the service
+  # parses it.
+  nearLimitRatio: "0.9"
+
+# ============== MANAGEMENT API ============================
+# The operator interface: read the enforced rules, inspect live counters, and
+# reset them. Off by default, because turning it on opens a port that can lift a
+# rate limit.
+#
+# The service authenticates nobody. It reads the subject and the roles out of
+# the bearer token without verifying the signature, because the gateway's JWT
+# filter has already verified it. That holds only while nothing but the gateway
+# can reach this port, which is what authorizationPolicy is for. Enabling the
+# port without the policy leaves the endpoints open to every workload in the
+# mesh, so keep them together.
+#
+# The port is exposed on the component's own Service, ratelimit, not on a
+# Service of its own. What keeps the port safe is the AuthorizationPolicy,
+# and that is enforced by ztunnel at the pod: a second Service would change
+# nothing about who can reach the port, and would add a second name for the
+# deployer's HTTPRoute to get right. The gateway's route names the port on
+# the one Service, which is what backendRefs.port is for.
+management:
+  enabled: false
+  port: 8082
+
+  # Where the identity is read from in the bearer token. Both are claim
+  # names, and both accept a dotted path for a nested claim: Keycloak issues
+  # the roles under realm_access.roles.
+  claims:
+    subject: sub
+    roles: roles
+
+  # The role names the IdP issues, mapped onto the two this API authorizes
+  # against. Each is a list, and with at least one list set a role on neither
+  # grants nothing. Both lists empty is not "nobody has a role": it switches
+  # the mapping off and the token's roles are read as they are, which is the
+  # canonical names; the schema refuses that combination so it cannot happen
+  # by accident. A read-only deployment sets viewer and leaves operator
+  # empty. The defaults are the canonical names, so a deployment whose IdP
+  # already issues viewer and operator configures nothing here.
+  roles:
+    viewer: [viewer]
+    operator: [operator]
+
+  # Restrict the port to the gateways that front it. The policy denies every
+  # other source, and it is the half of this feature that makes the other half
+  # safe: turn it off only where something outside the mesh already does the
+  # same job, and say so in a review.
+  authorizationPolicy:
+    enabled: true
+
+    # Service accounts allowed to reach the port, in the release namespace.
+    # Empty means the private gateway alone: the management endpoints belong
+    # behind an internal gateway, never on the path public traffic takes.
+    #
+    # Istio's automated deployment names a Gateway API gateway's generated
+    # ServiceAccount after the gateway and its class, so the default is
+    # <ISTIO_PRIVATE_GATEWAY_NAME>-istio. Check it before overriding:
+    #
+    #   kubectl get pod -l gateway.networking.k8s.io/gateway-name=<gateway> \
+    #     -o jsonpath='{.items[0].spec.serviceAccountName}'
+    allowedServiceAccounts: []
+
+# ============== MONITORING DELIVERY ============================
+# The scrape target, the alert rules, and the Grafana dashboard, delivered as
+# custom resources: a PodMonitor and a PrometheusRule for the platform's
+# Prometheus and a GrafanaDashboard for grafana-operator v4. The deployer
+# sets this platform parameter; off by default because all three need their
+# operators' CRDs, and installing them into a cluster without monitoring
+# fails the release.
+MONITORING_ENABLED: false
+
+# The alert rules of the data plane, one PrometheusRule scoped to the release
+# namespace. Every rule reads the service's own series; the operator chart
+# ships the rules over the policy status. The thresholds below are the ones a
+# deployer may need to move; the expressions stay in the template.
+alerts:
+  enabled: true
+
+  # RatelimitDecisionLatencyHigh: the p99 of a whole check, in seconds, above
+  # which the alert fires. The decision budget is 10 ms: the gateway's filter
+  # timeout sits above it, and a p99 past the budget is the store, the token
+  # cache, or the node saturating, before the timeout turns checks into the
+  # gateway's failure mode. Held for latencyFor so a burst does not page.
+  latencyBudgetSeconds: 0.01
+  latencyFor: 10m
+
+  # RatelimitUnknownDomain: checks for a domain no policy claims pass
+  # unlimited, so the alert fires on any increase over the window, held for
+  # unknownDomainFor. A typo in a filter's domain or a deleted policy is
+  # steady traffic, not a spike; one stray check is not.
+  unknownDomainFor: 5m
+
+  # RatelimitStoreErrors: a failed counter store decision is a check the
+  # gateway's failure mode decided, whichever way it is set. Any increase over
+  # the 5m window fires. The hold is the window's own length, so a single
+  # error ages out of the window before the hold ends and one retried timeout
+  # never pages; a shorter hold would fire inside the window the lone error
+  # still fills. Lower it only where every store error must page at once.
+  storeErrorsFor: 5m
+
+  # RatelimitKeyDeclaredNotExtracted: a declared identity key whose
+  # extraction series stays at zero while the domain's own requests carry
+  # tokens is a claim path the tokens do not carry, and every client of that
+  # rule shares one bucket. Both halves are per domain, so an idle domain has
+  # no tokens to be judged against and never pages on another's traffic. The
+  # window is long because the series are rates of low-volume counters.
+  keyNotExtractedWindow: 15m
+  keyNotExtractedFor: 30m
+
+  # RatelimitDomainBudgetNearLimit: the worst-case buckets one decision can
+  # collect across a domain, against the budget of 128 the compiler enforces.
+  # Past the budget an edit stops compiling and the domain stays on its
+  # last-good generation; the warning fires at this many so the author has
+  # room left when it does. 104 is 80 percent of the budget.
+  domainBudgetWarnAt: 104
+
+# The gateway whose identity the management AuthorizationPolicy allows by
+# default. The filters on the gateways are the operator chart's; this chart
+# reads the private gateway's name and nothing of the public one.
+ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
+
+# ============== COMPOSITE ============================
+# The deployer's composite variables, the same ones core-operator and the
+# operator chart render by. BASELINE_ORIGIN empty is a standalone installation
+# or the baseline of a composite: the whole chart renders. BASELINE_ORIGIN set
+# is a satellite: this chart renders nothing, because a satellite runs no
+# service and its gateway filters send checks to the baseline's. The deployer
+# installs the same pair of charts in every namespace, and the empty render is
+# what keeps a satellite from waiting NotReady for an operator that never
+# comes. BASELINE_CONTROLLER is read for parity with control-plane and the
+# operator chart; it changes no object of this chart.
+BASELINE_ORIGIN: ""
+BASELINE_CONTROLLER: ""
+
+# ============== KUBERNETES ============================
+serviceAccount:
+  create: true
+  # Defaults to the chart's fullname when empty.
+  name: ""
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

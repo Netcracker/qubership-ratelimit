@@ -1,0 +1,4 @@
+resources:
+  - ratelimit_v1_ratelimitpolicy_public.yaml
+  - ratelimit_v1_ratelimitpolicy_private.yaml
+  - ratelimit_v1_ratelimitpolicy_tiered.yaml

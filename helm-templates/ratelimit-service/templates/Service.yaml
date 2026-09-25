@@ -1,0 +1,36 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ratelimit.serviceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    # appProtocol is not decoration: without it Istio decides the port is
+    # HTTP/1.1, and the gateways' gRPC checks fail.
+    - name: grpc
+      appProtocol: grpc
+      port: {{ include "ratelimit.grpcPort" . }}
+      targetPort: grpc
+      protocol: TCP
+    # The operator takes this port from the EndpointSlice by its name and
+    # reads /debug/applied on it, which is how Ready on a policy becomes a
+    # statement about every ready replica.
+    - name: metrics
+      appProtocol: http
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+    {{- if .Values.management.enabled }}
+    - name: management
+      appProtocol: http
+      port: {{ .Values.management.port }}
+      targetPort: management
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "ratelimit.selectorLabels" . | nindent 4 }}
+{{- end }}
