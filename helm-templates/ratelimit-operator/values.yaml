@@ -4,7 +4,7 @@ image:
   # Empty takes the chart's appVersion, which is a fixed release. A floating tag
   # such as "latest" moves under a running workload, so two pods of one rollout
   # can end up on different builds.
-  tag: ""
+  tag: "@sha256:ea08ecdb79030603d634e15e7ab28966f7181d432369fe0b4fdab6aaf16d3b57"
   pullPolicy: IfNotPresent
 
 # ============== OPERATOR ============================
