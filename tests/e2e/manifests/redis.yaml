@@ -3,7 +3,11 @@
 # It holds counters and nothing else: every key expires with the window that
 # created it, so there is nothing here worth persisting and persistence is turned
 # off. A restart of this pod would be a restart of the limits, which is why the
-# redis suite restarts the operator rather than the store.
+# redis suite restarts the service rather than the store.
+#
+# It runs in a namespace of its own and requires a password, the way a
+# database of the DBaaS Redis adapter does. The password is the key `password`
+# of the Secret e2e-redis-auth, which the workflow creates beside it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,7 +31,19 @@ spec:
           image: redis:8-alpine
           # No snapshots and no append-only file: the data is counters with a TTL,
           # and writing them to disk buys nothing while costing IO on every window.
-          args: ["--save", "", "--appendonly", "no"]
+          args: ["--save", "", "--appendonly", "no", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: e2e-redis-auth
+                  key: password
+            # redis-cli reads it, so the probe below authenticates.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: e2e-redis-auth
+                  key: password
           ports:
             - containerPort: 6379
               name: redis

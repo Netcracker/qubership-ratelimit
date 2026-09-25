@@ -32,6 +32,10 @@ env:
   # as a satellite of the first. The satellite suite reads it and skips when
   # it is unset, so a stand without one still runs the rest.
   E2E_SATELLITE_NAMESPACE: ratelimit-e2e-sat
+  # The counter store's namespace. The DBaaS Redis adapter runs its databases
+  # in the adapter's namespace, not in the release's, so the release reaches
+  # its store at <service>.<namespace>, and so does the suite.
+  E2E_REDIS_NAMESPACE: ratelimit-e2e-redis
   OPERATOR_IMAGE: ratelimit-operator:e2e
   SERVICE_IMAGE: ratelimit-service:e2e
 
@@ -151,21 +155,19 @@ jobs:
             kubectl rollout status "deployment/${gw}-istio" -n "${E2E_NAMESPACE}" --timeout=300s
           done
 
-      # The kind cluster has no DBaaS, so the workflow does what dbaas-operator
-      # does for the chart's DatabaseSecretClaim: it writes the Secret
-      # ratelimit-service-redis in DBaaS's format, pointing at a Redis of its
-      # own. connectionProperties.json is the connection; metadata.json names
-      # the classifier and type the platform's DBaaS client matches it by. The
-      # chart is installed with redis.dbaas.enabled=false and mounts that
-      # Secret exactly as it mounts the claim's; the service cannot tell the
-      # two apart.
+      # The kind cluster has no DBaaS. The workflow stands in for the Redis
+      # adapter here, with a Redis in a namespace of its own that requires a
+      # 16-character password, as the adapter's databases do; the password is
+      # masked in the log.
       - name: Deploy the counter store
         run: |
-          kubectl apply -n "${E2E_NAMESPACE}" -f tests/e2e/manifests/redis.yaml
-          kubectl rollout status deployment/e2e-redis -n "${E2E_NAMESPACE}" --timeout=120s
-          kubectl create secret generic ratelimit-service-redis -n "${E2E_NAMESPACE}" \
-            --from-literal=connectionProperties.json='{"host":"e2e-redis","port":6379,"url":"redis://e2e-redis:6379","role":"admin"}' \
-            --from-literal=metadata.json="{\"classifier\":{\"microserviceName\":\"ratelimit-service\",\"namespace\":\"${E2E_NAMESPACE}\",\"scope\":\"service\"},\"type\":\"redis\"}"
+          kubectl create namespace "${E2E_REDIS_NAMESPACE}"
+          password="$(openssl rand -hex 8)"
+          echo "::add-mask::${password}"
+          kubectl create secret generic e2e-redis-auth -n "${E2E_REDIS_NAMESPACE}" \
+            --from-file=password=<(printf '%s' "${password}")
+          kubectl apply -n "${E2E_REDIS_NAMESPACE}" -f tests/e2e/manifests/redis.yaml
+          kubectl rollout status deployment/e2e-redis -n "${E2E_REDIS_NAMESPACE}" --timeout=120s
 
       - name: Install the charts
         run: |
@@ -203,9 +205,47 @@ jobs:
             --set management.enabled=true \
             --set management.claims.roles=realm_access.roles \
             --set 'management.roles.viewer={rl-viewer}' \
-            --set 'management.roles.operator={rl-operator}' \
-            --wait --timeout 5m
+            --set 'management.roles.operator={rl-operator}'
           kubectl get service ratelimit -n "${E2E_NAMESPACE}" >/dev/null
+
+      # The workflow then does what dbaas-operator does for the chart's
+      # DatabaseSecretClaim, and in the same order: the release is installed
+      # first, and its pods wait in ContainerCreating until the Secret
+      # ratelimit-service-redis exists. ContainerCreating alone proves nothing,
+      # since it is the first status of every container; the kubelet's
+      # FailedMount event for the Secret is what marks the wait, so the step
+      # writes the Secret only after one. The Secret has the format
+      # dbaas-operator writes: connectionProperties.json as the adapter
+      # returns it, and metadata.json with the classifier and type the
+      # platform's DBaaS client matches it by. The chart is installed with
+      # redis.dbaas.enabled=false and mounts the Secret exactly as it mounts
+      # the claim's; the service cannot tell the two apart.
+      - name: Write the counter store's Secret
+        run: |
+          waited=""
+          for _ in $(seq 1 30); do
+            if kubectl get events -n "${E2E_NAMESPACE}" --field-selector reason=FailedMount \
+                -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
+                | grep -F 'secret "ratelimit-service-redis" not found'; then
+              waited=yes
+              break
+            fi
+            sleep 2
+          done
+          [ -n "${waited}" ] || { echo "no service pod failed to mount the Secret within 60 s" >&2; exit 1; }
+
+          password="$(kubectl get secret e2e-redis-auth -n "${E2E_REDIS_NAMESPACE}" \
+            -o jsonpath='{.data.password}' | base64 -d)"
+          connection="$(jq -cn --arg host "e2e-redis.${E2E_REDIS_NAMESPACE}" --arg password "${password}" \
+            '{host: $host, port: 6379, url: ("redis://" + $host + ":6379"), password: $password,
+              role: "admin", service: "e2e-redis"}')"
+          metadata="$(jq -cn --arg namespace "${E2E_NAMESPACE}" \
+            '{classifier: {microserviceName: "ratelimit-service", namespace: $namespace, scope: "service"},
+              type: "redis", name: "e2e-redis", namespace: $namespace}')"
+          kubectl create secret generic ratelimit-service-redis -n "${E2E_NAMESPACE}" \
+            --from-file=connectionProperties.json=<(printf '%s' "${connection}") \
+            --from-file=metadata.json=<(printf '%s' "${metadata}")
+          kubectl rollout status deployment/ratelimit-service -n "${E2E_NAMESPACE}" --timeout=5m
 
       - name: Deploy the probe backend
         run: |
@@ -322,5 +362,6 @@ jobs:
           kubectl logs -n "${E2E_NAMESPACE}" -l app.kubernetes.io/name=ratelimit-service --tail=200 || true
           kubectl get all,envoyfilters,gateways.gateway.networking.k8s.io,httproutes \
             -n "${E2E_SATELLITE_NAMESPACE}" -o wide || true
+          kubectl get pods -n "${E2E_REDIS_NAMESPACE}" -o wide || true
           kubectl get pods -n istio-system -o wide || true
           kubectl logs -n istio-system -l app=istiod --tail=100 || true
