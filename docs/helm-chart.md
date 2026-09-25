@@ -489,7 +489,7 @@ exclude.
 | `ratelimit_policy_stalled` | `domain`, `reason: Progressing\|ReplicaStale\|NotCompiled\|ConfigMapTooLarge\|ReplicaFormatUnsupported` | 0/1 of the `Stalled` condition; `Progressing` is the reason while it reads 0, so a domain keeps one label set |
 | `ratelimit_policy_replicas` | `domain`, `state: total\|applied` | the denominator and the numerator of `Ready` |
 | `ratelimit_policy_generation_lag` | `domain` | how far activeGeneration lags behind the latest |
-| `ratelimit_policy_rule_problems` | `domain`, `severity: blocking\|info` | the `ruleProblems` entries of the latest generation by weight; alert on `blocking` |
+| `ratelimit_policy_rule_problems` | `domain`, `severity: blocking\|info` | every problem of the latest generation by weight, past the 64 that `ruleProblems` lists too; alert on `blocking` |
 | `ratelimit_domain_blocks` / `ratelimit_domain_rules` / `ratelimit_domain_decision_buckets` | `domain` | domain facts: `decision_buckets` against 128, the headroom before `DomainBudgetExceeded`; `blocks` and `rules` are observed, with no bounds |
 | `ratelimit_config_write_errors_total` | `reason: size\|api\|other` | failed writes of `ratelimit-config` by the operator: `size` is a state the object cannot hold even after the fit, `api` an answer of the API server, `other` the rest; the replicas keep the configuration they mounted and the last-good fallback is not saved; the status reports `ReplicaStale` 90 s later |
 | `ratelimit_leader` | none | 1 on the operator pod that holds the Lease, 0 on the other one while two overlap during a rollout; the fleet series exist only on the pod reporting 1 |

@@ -459,8 +459,8 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(accepted).NotTo(BeNil(), "no condition reached the object")
 			Expect(accepted.Status).To(Equal(metav1.ConditionFalse))
 			Expect(reconciled.Status.RuleProblems).NotTo(BeEmpty())
-			Expect(len([]rune(reconciled.Status.RuleProblems[0].Message))).
-				To(BeNumerically("<=", ratelimitv1.MaxRuleProblemMessage))
+			Expect([]rune(reconciled.Status.RuleProblems[0].Message)).
+				To(HaveLen(ratelimitv1.MaxRuleProblemMessage), "the message was not cut at the bound")
 		})
 
 		It("ignores a policy that is already gone", func() {

@@ -63,9 +63,9 @@ gateway.public    True    1/1        12                 75m
 ```
 
 `READY` is strict: `True` only when every ready service replica enforces the latest generation. `REPLICAS` is
-`applied/total`: how many of the ready replicas do. `PROBLEMS` counts the `ruleProblems` entries of the latest
-generation, blocking and informational alike, and stays blank while there are none. Anything other than `True`, `n/n`,
-and a blank `PROBLEMS` has a section below:
+`applied/total`: how many of the ready replicas do. `PROBLEMS` counts every problem of the latest generation, blocking
+and informational alike, and stays blank while there are none; `ruleProblems` lists 64 of them at most, blocking ones
+first. Anything other than `True`, `n/n`, and a blank `PROBLEMS` has a section below:
 
 | What you see | Meaning | Section |
 | --- | --- | --- |

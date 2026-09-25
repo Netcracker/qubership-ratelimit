@@ -411,8 +411,8 @@ type RateLimitPolicyStatus struct {
 	Rules int32 `json:"rules,omitempty"`
 
 	// Problems is how many problems the latest generation has, for the same
-	// reason. It counts every one, including those past the MaxRuleProblems
-	// entries RuleProblems holds.
+	// reason. It counts every one, including those past the 64 entries
+	// RuleProblems holds.
 	// +optional
 	Problems int32 `json:"problems,omitempty"`
 
@@ -421,8 +421,8 @@ type RateLimitPolicyStatus struct {
 	// false with reason NotCompiled, and the last-good generation keeps running
 	// where there is one. An informational entry, such as
 	// CaptureShadowsMappedKey, leaves both alone — a fact to alert on rather
-	// than a failure of the object. Past MaxRuleProblems entries the list is
-	// cut, the blocking entries kept first; Problems holds the full count.
+	// than a failure of the object. Past 64 entries the list is cut, the
+	// blocking entries kept first; Problems holds the full count.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=64
