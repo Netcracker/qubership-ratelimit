@@ -250,7 +250,11 @@ kubectl get secret -n "$NS" ratelimit-service-redis
 
 The annotation is the one dbaas-operator's rotation poller stamps when credentials change, and a value written by
 hand only triggers the reconcile. Restarting dbaas-operator also restores the Secret, within about 25 s, but it
-reconciles every claim the operator serves.
+reconciles every claim the operator serves. Do not write the Secret back by hand, even in the format the e2e workflow
+uses: a Secret without the claim's owner reference moves the claim to `SecretConflict` at its next reconcile, and it
+stays there until that Secret is deleted and the claim is reconciled again. dbaas-operator not noticing a lost Secret
+is tracked as [Netcracker/qubership-dbaas#778](https://github.com/Netcracker/qubership-dbaas/issues/778); once it
+watches Secrets, this paragraph no longer applies.
 
 **Act.** Restore the store; the service reconnects on its own, there is nothing to restart. If an unlimited window
 is not acceptable for a domain, `filter.failClosed: true` in the operator chart's values turns the window into refusals
