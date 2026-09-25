@@ -66,13 +66,13 @@ jobs:
           go-version-file: go.mod
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # The layer cache carries the base images and the module-download
       # layer between runs; only the build of changed sources remains.
       # load: true keeps the images in the local daemon for kind to side-load.
       - name: Build the operator image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: operator/Dockerfile
@@ -82,7 +82,7 @@ jobs:
           cache-to: type=gha,scope=e2e-operator-image,mode=max
 
       - name: Build the service image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: service/Dockerfile
@@ -95,7 +95,7 @@ jobs:
       # a ConfigMap update reaches the service's volume in seconds rather
       # than in the minute production takes.
       - name: Create kind cluster
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           cluster_name: ratelimit-e2e
           config: tests/e2e/kind-config.yaml
@@ -321,7 +321,7 @@ jobs:
       - name: Email the e2e report
         if: always() && vars.EMAIL_TO != ''
         continue-on-error: true
-        uses: netcracker/qubership-workflow-hub/actions/email-action@27fd7674286e5f561a6fd8277f2f389ff96ddb9e # v2.6.0
+        uses: netcracker/qubership-workflow-hub/actions/email-action@288a6a0d9a78e80dfdefccab1be6497a39deb746 # v2.8.0
         env:
           EMAIL_SMTP_HOST: ${{ vars.EMAIL_SMTP_HOST }}
           EMAIL_SMTP_PORT: ${{ vars.EMAIL_SMTP_PORT }}
