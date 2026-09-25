@@ -165,7 +165,7 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	object.Status.ObservedGeneration = object.Generation
 	object.Status.ActiveGeneration = outcome.ActiveGeneration
 	object.Status.EffectiveKeys = outcome.EffectiveKeys
-	object.Status.RuleProblems = outcome.Problems
+	object.Status.RuleProblems = boundedProblems(outcome.Problems)
 	object.Status.Problems = int32(len(outcome.Problems))
 	object.Status.Rules = int32(outcome.Rules)
 

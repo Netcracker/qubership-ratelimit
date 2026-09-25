@@ -79,7 +79,7 @@
         "failClosed": {
           "type": "boolean",
           "title": "Fail closed",
-          "description": "true rejects traffic when the rate limit service is unreachable or times out (failure_mode_deny); false lets it flow unlimited.",
+          "description": "true rejects traffic with a 503 when the rate limit service is unreachable, times out, or answers UNAVAILABLE because its counter store failed (failure_mode_deny); false lets it flow unlimited.",
           "default": false
         },
         "rateLimitedStatus": {

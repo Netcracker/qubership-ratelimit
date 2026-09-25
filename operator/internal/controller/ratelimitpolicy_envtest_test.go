@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -433,6 +434,33 @@ var _ = Describe("RateLimitPolicy", func() {
 			stalled := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1.ConditionStalled)
 			Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
 			Expect(stalled.Reason).To(Equal(ratelimitv1.ReasonNotCompiled))
+		})
+
+		// A structural mistake in a long Template route quotes the whole
+		// template in its message, past the 1024 characters the CRD allows a
+		// rule problem. Written as compiled, the status write is refused, on
+		// every retry, and the author sees no condition and no problem at all.
+		It("writes a rule problem whose message the CRD would refuse whole", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.long"}
+			template := "/" + strings.Repeat("segment/", 130) + "/{id}"
+			Expect(len(template)).To(BeNumerically(">", ratelimitv1.MaxRuleProblemMessage))
+			block := blockWith("api", ruleWith("total"))
+			block.Target = &ratelimitv1.Target{Routes: []ratelimitv1.Route{{
+				Path: ratelimitv1.PathMatch{Type: ratelimitv1.PathMatchTemplate, Value: template},
+			}}}
+			Expect(create(policyWith(name.Name, block))).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred(), "the status write was refused")
+
+			reconciled := &ratelimitv1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, name, reconciled)).To(Succeed())
+			accepted := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1.ConditionAccepted)
+			Expect(accepted).NotTo(BeNil(), "no condition reached the object")
+			Expect(accepted.Status).To(Equal(metav1.ConditionFalse))
+			Expect(reconciled.Status.RuleProblems).NotTo(BeEmpty())
+			Expect([]rune(reconciled.Status.RuleProblems[0].Message)).
+				To(HaveLen(ratelimitv1.MaxRuleProblemMessage), "the message was not cut at the bound")
 		})
 
 		It("ignores a policy that is already gone", func() {

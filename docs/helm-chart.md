@@ -150,8 +150,8 @@ filter:                              # EnvoyFilter.yaml: installation defaults; 
                                      # (there is no rls.port value: 9000 is a contract constant)
   timeout: 0.05s                     # protobuf duration (seconds with a fraction); Envoy rejects Go forms like 50ms
   failClosed: false                  # limiter unavailable: false = traffic flows without limits, true = 503;
-                                     # only when the RLS itself is unreachable or times out (the filter's
-                                     # failure_mode_deny); a store failure inside the engine always fails open
+                                     # the filter's failure_mode_deny, applied when the RLS is unreachable or
+                                     # times out and when its counter store fails (the service answers UNAVAILABLE)
   rateLimitedStatus: 429             # refusal status for the client; Envoy ignores values < 400
   grpcAsResourceExhausted: false     # RESOURCE_EXHAUSTED instead of UNAVAILABLE for gRPC calls behind the gateway
   xRateLimitHeaders: "OFF"           # the filter always gets OFF: the response carries no per-descriptor statuses
@@ -355,8 +355,10 @@ typed_config:
       envoy_grpc: { cluster_name: <rlsCluster>, authority: <rlsAuthority> }
 ```
 
-`failure_mode_deny` covers exactly the unavailability and the timeout of the RLS itself, and that is the only fail
-closed there is: the engine handles a store failure on its own and always fails open; the filter sees a regular `OK`.
+`failure_mode_deny` is the one failure-mode switch, and it covers two cases: the RLS itself is unreachable or times out,
+and the RLS answers `UNAVAILABLE` because its counter store failed. Either way the check is counted as
+`verdict="unavailable"` on the service's scrape when the service answered, and `failClosed` decides whether the traffic
+flows unlimited or gets a 503.
 
 There are four descriptor actions (VIRTUAL_HOST, MERGE), and they are a contract with the service:
 
@@ -515,7 +517,7 @@ exclude.
 
 | Metric | Labels | What it counts |
 | --- | --- | --- |
-| `ratelimit_checks_total` | `domain`, `verdict: ok\|over_limit\|unavailable` | checks; unavailable = store unavailable, the size of the fail-open window |
+| `ratelimit_checks_total` | `domain`, `verdict: ok\|over_limit\|unavailable` | checks; unavailable = store unavailable, the checks the gateway's failure mode decided |
 | `ratelimit_check_duration_seconds` | `domain` | decision histogram; the bucket bounds are laid on the 10ms budget and the filter timeout |
 | `ratelimit_decisions_total` | `domain`, `rule` (limit block/rule), `outcome: ok\|over_limit\|shadow_over_limit` | per-rule outcomes |
 | `ratelimit_near_limit_total` | `domain`, `rule` | allowed requests within the margin of the window's capacity, the burst of a GCRA window or the requests of a fixed one (the threshold is `metrics.nearLimitRatio`); shadow is excluded |
@@ -537,7 +539,7 @@ exclude.
 | `ratelimit_policy_stalled` | `domain`, `reason: Progressing\|ReplicaStale\|NotCompiled\|ConfigMapTooLarge\|ReplicaFormatUnsupported` | 0/1 of the `Stalled` condition; `Progressing` is the reason while it reads 0, so a domain keeps one label set |
 | `ratelimit_policy_replicas` | `domain`, `state: total\|applied` | the denominator and the numerator of `Ready` |
 | `ratelimit_policy_generation_lag` | `domain` | how far activeGeneration lags behind the latest |
-| `ratelimit_policy_rule_problems` | `domain`, `severity: blocking\|info` | the `ruleProblems` entries of the latest generation by weight; alert on `blocking` |
+| `ratelimit_policy_rule_problems` | `domain`, `severity: blocking\|info` | every problem of the latest generation by weight, past the 64 that `ruleProblems` lists too; alert on `blocking` |
 | `ratelimit_domain_blocks` / `ratelimit_domain_rules` / `ratelimit_domain_decision_buckets` | `domain` | domain facts: `decision_buckets` against 128, the headroom before `DomainBudgetExceeded`; `blocks` and `rules` are observed, with no bounds |
 | `ratelimit_config_write_errors_total` | `reason: size\|api\|other` | failed writes of `ratelimit-config` by the operator: `size` is a state the object cannot hold even after the fit, `api` an answer of the API server, `other` the rest; the replicas keep the configuration they mounted and the last-good fallback is not saved; the status reports `ReplicaStale` 90 s later |
 | `ratelimit_leader` | none | 1 on the operator pod that holds the Lease, 0 on the other one while two overlap during a rollout; the fleet series exist only on the pod reporting 1 |
@@ -677,10 +679,10 @@ what one replica enforces, for a human with a port-forward. The management role 
 
 - **A `DestinationRule` for the Service `ratelimit`.** A dead replica leaves Endpoints through its readiness probe and
   EDS updates the Envoy cluster; a replica that hangs while still passing the probe is cut off by the filter's 50 ms
-  timeout and the request goes through fail-open. Outlier detection would only shrink that second share, and Istio's
-  defaults make a naive configuration inert anyway: `maxEjectionPercent: 10%` never ejects one of two or three
-  replicas, and `consecutive5xxErrors` counts upstream 5xx, while the failure here is a local-origin timeout. TLS is
-  not configured in a traffic policy either way; ambient provides mTLS.
+  timeout and the request is decided by the gateway's failure mode. Outlier detection would only shrink that second
+  share, and Istio's defaults make a naive configuration inert anyway: `maxEjectionPercent: 10%` never ejects one of
+  two or three replicas, and `consecutive5xxErrors` counts upstream 5xx, while the failure here is a local-origin
+  timeout. TLS is not configured in a traffic policy either way; ambient provides mTLS.
 - **A redirect when a limit fires.** The filter's local reply is the plain `rateLimitedStatus` (429 by default) with
   `retry-after`, which is what an API client can act on. No `local_reply_config` mapper turns it into a 302.
 - **Alert rules**, as above.

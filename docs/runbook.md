@@ -63,9 +63,9 @@ gateway.public    True    1/1        12                 75m
 ```
 
 `READY` is strict: `True` only when every ready service replica enforces the latest generation. `REPLICAS` is
-`applied/total`: how many of the ready replicas do. `PROBLEMS` counts the `ruleProblems` entries of the latest
-generation, blocking and informational alike, and stays blank while there are none. Anything other than `True`, `n/n`,
-and a blank `PROBLEMS` has a section below:
+`applied/total`: how many of the ready replicas do. `PROBLEMS` counts every problem of the latest generation, blocking
+and informational alike, and stays blank while there are none; `ruleProblems` lists 64 of them at most, the blocking
+ones kept first when the list is cut. Anything other than `True`, `n/n`, and a blank `PROBLEMS` has a section below:
 
 | What you see | Meaning | Section |
 | --- | --- | --- |
@@ -741,7 +741,10 @@ intent, switch `behavior` to `Enforce`; the counters carry over, the keys do not
 **The emergency brakes on the gateway.** Two values of the operator chart on the filter, independent of any policy:
 `runtime.enforcedPercent` at `0` turns every limit of the gateway into a dry run, `runtime.enabledPercent` at `0` takes
 the filter out of the request path. They are Envoy runtime fractions `ratelimit.<gateway>.enabled` and `.enforced`, so
-a runtime override flips them without a redeploy; a values change on the operator release is the durable form.
+a runtime override flips them without a redeploy; a values change on the operator release is the durable form, and it
+lasts only while the release's values carry it. An upgrade with `-f` and `--set` and no `--reuse-values` drops it and
+restores enforcement at once; keep the brake in the deployer's values file or the Argo CD application, and check it
+after every upgrade ([rollout procedure](rollout-procedure.md), section 4).
 
 **Switching an algorithm or a window.** The counter key carries the algorithm and the period:
 
@@ -949,7 +952,7 @@ controller and probe metrics from the operator pod.
 
 | Metric | On | Read it for |
 | --- | --- | --- |
-| `ratelimit_checks_total{domain, verdict}` | service pods | `unavailable` is the fail-open window (section 1) |
+| `ratelimit_checks_total{domain, verdict}` | service pods | `unavailable` counts the checks the gateway's failure mode decided (section 1) |
 | `ratelimit_decisions_total{domain, rule, outcome}` | service pods | `shadow_over_limit` while introducing a limit (section 6) |
 | `ratelimit_near_limit_total{domain, rule}` | service pods | clients close to a limit before it fires; the margin is a share of the window's capacity, `burst` for GCRA |
 | `ratelimit_unknown_domain_checks_total` | service pods | a domain typo between the gateway and the policy (section 2) |

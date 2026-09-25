@@ -174,10 +174,8 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		// that - if anything read the object, the third request would be
 		// refused.
 		//
-		// The path shares no prefix with probePath. The engine's Prefix is a
-		// string prefix, not the segment prefix of a Gateway API route, so a
-		// path under the positive spec's rule would be counted by that rule
-		// and refused for the wrong reason.
+		// The path lies outside probePrefix: a path under it would be counted
+		// by the positive spec's rule and refused for the wrong reason.
 		const strayPath = "/e2e-stray"
 		stray := newPolicy(domain, hourlyGCRA(strayPath, "stray", 1))
 		stray.Namespace = satellite

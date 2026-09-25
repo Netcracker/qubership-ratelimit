@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -81,6 +82,28 @@ func TestAudit_recordsWhatTheMutationDid(t *testing.T) {
 	} {
 		require.Contains(t, line.message, part)
 	}
+}
+
+// An axis value is a counter identity a data-plane client chose through its
+// own token, and the operator pastes it into the reset from the listing. A
+// newline in it must not forge a second audit record with a subject of the
+// client's choosing: the axes are recorded as JSON, one line, value intact.
+func TestAudit_cannotBeForgedThroughAnAxisValue(t *testing.T) {
+	h := newTestAPI(t)
+	log := &recordingLogger{}
+	h.api.Log = log
+
+	planted := "crawler\nmanagement mutation subject=someone-else idempotencyKey=k domain=" + testDomain +
+		" endpoint=counters ruleId=orders/per-client axes=map[] dryRun=false outcome=reset count=9"
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {planted}}, 3)
+	require.Equal(t, http.StatusOK, h.reset(t,
+		"ruleId=orders/per-client&axis.client="+url.QueryEscape(planted), "key-1", operatorRoles()).Code)
+
+	line := log.find(t, "management mutation ")
+	require.NotContains(t, line.message, "\n", "a control character from the axis reached the journal")
+	require.Contains(t, line.message, `axes={"client":"crawler\nmanagement mutation subject=someone-else`,
+		"the axis value is not recorded as escaped JSON: %s", line.message)
+	require.Contains(t, line.message, "subject=alice@example.com")
 }
 
 // The bulk journal entry is written at acceptance, because acceptance is the

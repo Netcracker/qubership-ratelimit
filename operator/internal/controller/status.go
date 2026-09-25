@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -372,6 +373,52 @@ func writeStatus(
 // equal, which is what the API server does on the way back out.
 func equalStatus(before, after any) bool {
 	return apiequality.Semantic.DeepEqual(before, after)
+}
+
+// boundedProblems fits the rule problems of a generation into the bounds the
+// CRD puts on status.ruleProblems. Past them the API server refuses the whole
+// status write, every retry fails the same way because the spec has not
+// moved, and the author is left with no condition and no problem to read:
+// the diagnostics fail exactly when they are needed. A message is cut to
+// MaxRuleProblemMessage characters; a list past MaxRuleProblems keeps the
+// blocking entries first, since those are why the generation is not
+// enforced, and the caller counts the full list in status.problems.
+func boundedProblems(problems []v1.RuleProblem) []v1.RuleProblem {
+	if len(problems) == 0 {
+		return problems
+	}
+	out := make([]v1.RuleProblem, 0, min(len(problems), v1.MaxRuleProblems))
+	if len(problems) > v1.MaxRuleProblems {
+		for _, problem := range problems {
+			if v1.BlockingProblem(problem.Reason) {
+				out = append(out, problem)
+			}
+		}
+		for _, problem := range problems {
+			if !v1.BlockingProblem(problem.Reason) {
+				out = append(out, problem)
+			}
+		}
+		out = out[:v1.MaxRuleProblems]
+	} else {
+		out = append(out, problems...)
+	}
+	for i := range out {
+		out[i].Message = truncateRunes(out[i].Message, v1.MaxRuleProblemMessage)
+	}
+	return out
+}
+
+// truncateRunes cuts a message to at most limit characters, ending it with an
+// ellipsis when it was cut. It counts runes because a string's maxLength is a
+// count of characters, and cutting inside a multi-byte one would leave the
+// server an invalid string.
+func truncateRunes(message string, limit int) string {
+	if utf8.RuneCountInString(message) <= limit {
+		return message
+	}
+	runes := []rune(message)
+	return string(runes[:limit-3]) + "..."
 }
 
 // maxMessageLength is the limit the API server puts on a condition message.

@@ -333,9 +333,10 @@ client ──HTTP──> gateway ──jwt_authn──> (token signature verifie
 6. **Response**: the verdict is an AND over the enforcing buckets; the `x-ratelimit-*` headers come from the strictest
    matched bucket (the minimal remaining when the request is allowed, the maximal retry-after on a refusal; on a tie, a
    deterministic tie-break by bucket key). A refusal is `OVER_LIMIT` with `retry-after`; a cost that can never fit gets
-   no retry headers. If the store does not answer within the budget, the service fails open, always and at the engine
-   level: the request is allowed, the error metric grows, and traffic does not stall; the gateway's `failClosed`
-   setting concerns the unavailability of the service itself, not of the store.
+   no retry headers. If the store does not answer within the budget, the service answers `UNAVAILABLE` and the gateway's
+   failure mode decides: with `failClosed: false`, the default, the request passes unlimited, and with `true` the
+   gateway answers 503. The error metric grows either way. A check some rule already refused answers `OVER_LIMIT`
+   regardless.
 
 ## Compilation model
 
@@ -625,10 +626,12 @@ Schema (OpenAPI):
   `rates` a `map` by `periodSeconds`, `methods` a `set`; `conditions` a `map` by `type`; the remaining lists are
   atomic;
 - enums for `mode`, `behavior`, `algorithm`, `type`, `normalization`, `operator`, `methods`; `periodSeconds` is
-  1..86400; `requests` and `burst` are 1..2 147 483 647; `ruleProblems[].message` ≤ 1024; required fields are marked
-  `+required`, optional ones `+optional`;
-- there is no `maxItems` on the lists: the only CEL rule walks no lists, and the bounds that mean something to the
-  engine are held by the compiler.
+  1..86400; `requests` and `burst` are 1..2 147 483 647; `ruleProblems[].message` ≤ 1024 characters and
+  `ruleProblems` ≤ 64 entries, both cut by the operator before the write; `status.problems` counts every problem,
+  past 64 too, so a `PROBLEMS` column of 70 beside 64 entries is expected; required fields are marked `+required`,
+  optional ones `+optional`;
+- apart from the status's `ruleProblems`, there is no `maxItems` on the lists: the only CEL rule walks no lists, and
+  the bounds that mean something to the engine are held by the compiler.
 
 The operator's compiler, on every generation, with the result in `status.ruleProblems`, `Accepted`/`Ready`, and
 last-good:

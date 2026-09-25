@@ -87,6 +87,48 @@ func TestRouteMatching(t *testing.T) {
 	}
 }
 
+// Prefix is a prefix on a segment boundary, the contract the CRD and the spec
+// state: a value without a trailing slash covers itself and its sub-paths, and
+// never a neighboring resource that happens to share its first characters.
+func TestPrefixMatchesOnASegmentBoundary(t *testing.T) {
+	cases := []struct {
+		value, path string
+		want        bool
+	}{
+		{"/api/v1/orders", "/api/v1/orders", true},
+		{"/api/v1/orders", "/api/v1/orders/42", true},
+		{"/api/v1/orders", "/api/v1/orders/", true},
+		{"/api/v1/orders", "/api/v1/orders-archive", false},
+		{"/api/v1/orders", "/api/v1/ordersXYZ", false},
+		{"/api/v1/orders", "/api/v1/orders.json", false},
+		{"/api/v1/orders", "/api/v1/order", false},
+		{"/api/v1/orders/", "/api/v1/orders/42", true},
+		{"/api/v1/orders/", "/api/v1/orders", false},
+		{"/", "/anything/at/all", true},
+		{"/", "/", true},
+	}
+	for _, tc := range cases {
+		if got := matchPrefix(tc.value, tc.path); got != tc.want {
+			t.Errorf("Prefix %q on %q = %v, want %v", tc.value, tc.path, got, tc.want)
+		}
+	}
+
+	// And through the matcher, so the block of the neighboring resource is
+	// the only one the request reaches.
+	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{
+		{Name: "orders", Target: model.Target{Routes: []model.Route{
+			{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/v1/orders"}}}},
+			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}}},
+		{Name: "archive", Target: model.Target{Routes: []model.Route{
+			{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/v1/orders-archive"}}}},
+			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}}},
+	}})
+	got := evaluate(snap, request{Path: "/api/v1/orders-archive/7", Method: "GET"})
+	if len(got.Rules) != 1 || got.Rules[0].Block != "archive" {
+		t.Fatalf("/api/v1/orders-archive/7 reached %v, want the archive block alone", got.Rules)
+	}
+}
+
 func TestOperators(t *testing.T) {
 	mappings := []model.KeyMapping{
 		{Key: "roles", Claim: "roles", Type: model.ValueStringArray},
