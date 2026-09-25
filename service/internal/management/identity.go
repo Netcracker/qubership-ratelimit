@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 )
 
 // Roles this API knows. They are canonical names: which IdP role maps onto
