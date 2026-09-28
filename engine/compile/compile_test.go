@@ -371,12 +371,13 @@ func TestInvalidSpecFamily(t *testing.T) {
 	}
 }
 
-// TestNoListIsBounded pins that what binds a generation is the bucket budget
-// and the object size, never a count of blocks, rules, axes, or windows.
+// TestNoListIsBounded pins that no list of the policy is capped: 100 blocks
+// and a group of 4096 clients compile, because what binds a generation is the
+// bucket budget and the object size, not a count of blocks or clients.
 func TestNoListIsBounded(t *testing.T) {
 	p := model.Policy{Domain: domain}
-	// 300 blocks of one bucket each: a long list, and well inside the bucket
-	// budget.
+	// 100 blocks without a target and with one bucket each: every decision
+	// collects all 100, inside the budget of 128.
 	for i := range 100 {
 		p.Blocks = append(p.Blocks, model.Block{
 			Name:  fmt.Sprintf("b%d", i),

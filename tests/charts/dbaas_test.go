@@ -99,8 +99,8 @@ func TestServiceChart_assignsItsDBaaSObjectsToTheAggregatorsNamespace(t *testing
 }
 
 // Every profile renders without store values: the counter store does not
-// depend on the replica count, so the prod profiles with two replicas need
-// nothing more.
+// depend on the replica count, so dev-ha and prod, which run two replicas,
+// need nothing more.
 func TestServiceChart_rendersEveryProfileWithoutStoreValues(t *testing.T) {
 	for _, profile := range []string{"dev", "dev-ha", "prod", "prod-nonha"} {
 		_, err := renderErr(serviceChart, "biz", "-f",

@@ -28,9 +28,9 @@ import (
 // chart's roles say. The prefix is a security boundary, not a matter of taste.
 const BasePath = "/ratelimit/v1"
 
-// endpointCounters is the endpoint name an Idempotency-Key of a counter reset
-// is scoped to, so one key used against two endpoints is two bindings rather
-// than a false conflict.
+// endpointCounters scopes an Idempotency-Key used against the addressed DELETE
+// of /domains/{domain}/counters, so one key used against two endpoints is two
+// bindings rather than a false conflict.
 const endpointCounters = "counters"
 
 // specification is the API's own OpenAPI document, embedded at build time: what

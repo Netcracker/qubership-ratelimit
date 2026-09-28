@@ -359,7 +359,7 @@ type ReplicaStatus struct {
 	// +optional
 	Total int32 `json:"total"`
 
-	// applied is how many of them enforce status.activeGeneration.
+	// applied is how many ready replicas enforce status.activeGeneration.
 	// +optional
 	Applied int32 `json:"applied"`
 
@@ -465,7 +465,13 @@ type RateLimitPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   RateLimitPolicySpec   `json:"spec,omitempty"`
+	// spec is the rate limit configuration of the domain the policy is named
+	// after.
+	Spec RateLimitPolicySpec `json:"spec,omitempty"`
+
+	// status is what the operator observed: whether the latest generation
+	// compiles, which generation the service replicas enforce, and the
+	// problems of the latest generation.
 	Status RateLimitPolicyStatus `json:"status,omitempty"`
 }
 

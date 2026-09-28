@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -114,33 +115,21 @@ func TestRuleProblemBounds_matchTheGeneratedCRD(t *testing.T) {
 }
 
 // The description kubectl explain prints for ruleProblems[].reason lists every
-// reason, because its reader cannot look the constants up. A Problem constant
-// added to the API without a regenerated description fails here: add the
-// value to the comment on RuleProblem.Reason and run make manifests
-// sync-helm-crds.
+// reason the operator can write, because its reader cannot look the constants
+// up. The operator writes the compiler's reason as it is, so the set is the
+// compiler's Reason constants, and api/v1 carries a Problem constant for each.
+// A reason missing from the description fails here: add the value to the
+// comment on RuleProblem.Reason and run make manifests sync-helm-crds. A
+// compiler reason without a Problem constant fails too: add the constant to
+// api/v1.
 func TestRuleProblemReasons_areListedInTheCRDDescription(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join("..", "..", "..", "api", "v1", "common_types.go"), nil, 0)
-	require.NoError(t, err)
-	var reasons []string
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
-			continue
-		}
-		for _, spec := range gen.Specs {
-			value := spec.(*ast.ValueSpec)
-			for i, name := range value.Names {
-				if strings.HasPrefix(name.Name, "Problem") && i < len(value.Values) {
-					literal := value.Values[i].(*ast.BasicLit)
-					reasons = append(reasons, strings.Trim(literal.Value, `"`))
-				}
-			}
-		}
+	root := filepath.Join("..", "..", "..")
+	reasons := stringConstants(t, filepath.Join(root, "api", "v1"), "Problem")
+	for _, reason := range stringConstants(t, filepath.Join(root, "engine", "compile"), "Reason") {
+		assert.Contains(t, reasons, reason, "compile reason %s has no Problem constant in api/v1", reason)
 	}
-	require.NotEmpty(t, reasons, "no Problem constant found in api/v1/common_types.go")
 
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "bases",
+	raw, err := os.ReadFile(filepath.Join(root, "config", "crd", "bases",
 		"ratelimit.netcracker.com_ratelimitpolicies.yaml"))
 	require.NoError(t, err)
 	var crd struct {
@@ -175,4 +164,44 @@ func TestRuleProblemReasons_areListedInTheCRDDescription(t *testing.T) {
 	for _, reason := range reasons {
 		assert.Contains(t, description, reason, "the ruleProblems[].reason description does not list %s", reason)
 	}
+}
+
+// stringConstants returns the values of the string constants whose names
+// start with prefix, declared in the non-test files of dir.
+func stringConstants(t *testing.T, dir, prefix string) []string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	var values []string
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		require.NoError(t, err)
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				value := spec.(*ast.ValueSpec)
+				for i, name := range value.Names {
+					if !strings.HasPrefix(name.Name, prefix) || i >= len(value.Values) {
+						continue
+					}
+					literal, ok := value.Values[i].(*ast.BasicLit)
+					if !ok || literal.Kind != token.STRING {
+						continue
+					}
+					unquoted, err := strconv.Unquote(literal.Value)
+					require.NoError(t, err)
+					values = append(values, unquoted)
+				}
+			}
+		}
+	}
+	require.NotEmpty(t, values, "no %s constant in %s", prefix, dir)
+	return values
 }

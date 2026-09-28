@@ -83,9 +83,8 @@ spec:
             type: object
           spec:
             description: |-
-              RateLimitPolicySpec is the whole rate limit configuration of one domain:
-              how identity is read out of a token, which client groups exist, and which
-              rules count the traffic.
+              spec is the rate limit configuration of the domain the policy is named
+              after.
             properties:
               domain:
                 description: |-
@@ -462,7 +461,10 @@ spec:
             - limits
             type: object
           status:
-            description: RateLimitPolicyStatus is the observed state of a RateLimitPolicy.
+            description: |-
+              status is what the operator observed: whether the latest generation
+              compiles, which generation the service replicas enforce, and the
+              problems of the latest generation.
             properties:
               activeGeneration:
                 description: |-
@@ -559,7 +561,7 @@ spec:
                 description: replicas is what the leader observed about the fleet.
                 properties:
                   applied:
-                    description: applied is how many of them enforce status.activeGeneration.
+                    description: applied is how many ready replicas enforce status.activeGeneration.
                     format: int32
                     type: integer
                   lastCheckTime:

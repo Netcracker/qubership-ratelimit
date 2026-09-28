@@ -58,7 +58,7 @@ type Refusal struct {
 	raw []byte
 }
 
-// Error implements [error].
+// Error implements the error interface.
 func (r *Refusal) Error() string { return "configuration refused: " + r.Err.Error() }
 
 // Unwrap returns Err, the reason the manifest was refused.
