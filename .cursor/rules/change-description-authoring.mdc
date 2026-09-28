@@ -1,5 +1,5 @@
 ---
-description: Trigger for the change-description-authoring skill: load it before writing the commit message, the pull request title or description, or the changelog entry for a change.
+description: "Trigger for the change-description-authoring skill: load it before writing the commit message, the pull request title or description, or the changelog entry for a change."
 globs: "**"
 ---
 
