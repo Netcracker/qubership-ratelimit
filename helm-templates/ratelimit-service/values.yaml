@@ -39,8 +39,8 @@ logLevel: info
 # default, allkeys-lru, evicts counters and management records.
 redis:
   dbaas:
-    # Render the InternalDatabase and the DatabaseSecretClaim. false leaves
-    # both to someone else, who still has to produce the Secret <fullname>-redis
+    # Render the InternalDatabase and the DatabaseSecretClaim, each where the
+    # cluster serves its kind. false leaves both to someone else, who still has to produce the Secret <fullname>-redis
     # with the key connectionProperties.json in DBaaS's format: a test cluster
     # without DBaaS, as the e2e workflow's is.
     enabled: true

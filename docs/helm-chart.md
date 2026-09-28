@@ -43,12 +43,14 @@ The service chart:
 helm-templates/ratelimit-service/templates/
 ├── _helpers.tpl                   # name, labels, mode (satellite iff BASELINE_ORIGIN; every template is wrapped
 │                                  #   in it, so a satellite release is empty), serviceName (the constant
-│                                  #   ratelimit), redisSecretName (<fullname>-redis)
+│                                  #   ratelimit), redisSecretName (<fullname>-redis), dbaasDeclared,
+│                                  #   dbaasClassifier (what both DBaaS objects share)
 ├── Deployment.yaml                # the Deployment ratelimit-service, REPLICAS replicas; mounts ratelimit-config
 │                                  #   at /etc/ratelimit/config with optional: true and the counter store's
 │                                  #   Secret under /etc/secrets/dbaas-secrets without it; no token mounted
-├── DatabaseClaim.yaml             # the InternalDatabase and the DatabaseSecretClaim of the counter store,
-│                                  #   behind redis.dbaas.enabled
+├── InternalDatabase.yaml          # the counter store's database, behind redis.dbaas.enabled and the cluster
+│                                  #   serving the kind
+├── DatabaseSecretClaim.yaml       # the claim that writes the counter store's Secret, behind the same two
 ├── Service.yaml                   # FIXED name ratelimit; grpc 9000 (appProtocol: grpc is mandatory), metrics (the
 │                                  #   operator's probe port), management behind management.enabled
 ├── ServiceAccount.yaml            # automountServiceAccountToken: false; no Role
@@ -207,7 +209,8 @@ image:                               # Deployment.yaml
 logLevel: info                       # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
                                      # NOT --zap-log-level: LOG_LEVEL only applies until configloader initializes
 
-redis:                               # DatabaseClaim.yaml; see "The counter store from DBaaS"
+redis:                               # InternalDatabase.yaml and DatabaseSecretClaim.yaml; see "The counter store
+                                     #   from DBaaS"
   dbaas:
     enabled: true                    # render the InternalDatabase and the DatabaseSecretClaim; false = the Secret
                                      #   <fullname>-redis is written by someone else in DBaaS's format (CI)
@@ -450,9 +453,9 @@ incident tampers with the evidence.
 
 ### The counter store from DBaaS
 
-The counters live in a Redis database that DBaaS provisions for the release. `DatabaseClaim.yaml` renders two
-objects of dbaas-operator with the same classifier, `{microserviceName: ratelimit-service, scope: service, namespace:
-<release namespace>}` and type `redis`:
+The counters live in a Redis database that DBaaS provisions for the release. The chart renders two objects of
+dbaas-operator, `InternalDatabase.yaml` and `DatabaseSecretClaim.yaml`, with the same classifier, `{microserviceName:
+ratelimit-service, scope: service, namespace: <release namespace>}` and type `redis`:
 
 - the `InternalDatabase` asks dbaas-aggregator to provision the database through the DBaaS Redis adapter. The adapter
   runs each database as a single Redis instance: a Deployment and a Service `<database>.<adapter namespace>`, no
@@ -484,8 +487,12 @@ its own namespace, and it runs beside its aggregator. An address whose host carr
 The chart needs, and does not install:
 
 - dbaas-operator, installed and enabled: its chart ships with `DBAAS_OPERATOR_ENABLED: false`, and it needs
-  Kubernetes 1.32 or later for its CEL rules. Without its CRDs, `helm install` of this chart fails on the
-  `InternalDatabase` kind;
+  Kubernetes 1.32 or later for its CEL rules. Each object renders only where the cluster serves its kind
+  (`.Capabilities.APIVersions`), so without dbaas-operator's CRDs the install succeeds, renders neither object, and
+  the pods wait in `ContainerCreating` for a Secret nobody writes. Helm decides at install and upgrade time: a
+  release installed before the CRDs gets the objects on its next `helm upgrade`, and `helm template` renders them
+  only with `--api-versions dbaas.netcracker.com/v1/InternalDatabase` and
+  `--api-versions dbaas.netcracker.com/v1/DatabaseSecretClaim`;
 - a `Role` and a `RoleBinding` in the namespace that grant dbaas-operator's service account `get`, `create`,
   `update`, and `patch` on `secrets`, since the operator holds no cluster-wide Secret access (dbaas-operator documents
   the bundle);

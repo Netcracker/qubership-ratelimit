@@ -217,6 +217,10 @@ kubectl get databasesecretclaim -n "$NS" ratelimit-service-redis \
   -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}'
 ```
 
+No claim and no `InternalDatabase` at all, with `redis.dbaas.enabled` on, means the release was installed or upgraded
+while the cluster did not serve dbaas-operator's kinds: the chart renders each object only where its kind exists.
+Once dbaas-operator's CRDs are installed, run the release's `helm upgrade` again, which renders both.
+
 `DatabaseNotFound` is the database still being provisioned, or the `InternalDatabase` failing (read its conditions);
 after ten minutes the reason turns to `DatabaseNotFoundTimeout`, and the claim keeps polling. `Unauthorized` is the
 aggregator refusing dbaas-operator's own credentials (401). `AggregatorRejected` is any other 4xx: a request the

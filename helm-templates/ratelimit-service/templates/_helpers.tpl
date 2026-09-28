@@ -87,6 +87,34 @@ runs beside its aggregator. http://dbaas-aggregator.dbaas:8080 gives dbaas.
 {{- end -}}
 
 {{/*
+Whether the release declares its counter store in DBaaS: every mode but a
+satellite, which has no service and counts in the baseline's store, and only
+while redis.dbaas.enabled holds; false leaves the Secret to whoever sets up a
+cluster without DBaaS. Empty for false, so it reads as a condition.
+
+Both objects are assigned to one dbaas-operator by spec.operatorNamespace,
+the namespace the operator and its aggregator run in, read off
+API_DBAAS_ADDRESS; an operator reconciles only the objects that name its own
+namespace.
+*/}}
+{{- define "ratelimit.dbaasDeclared" -}}
+{{- if and (ne (include "ratelimit.mode" .) "satellite") .Values.redis.dbaas.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+The classifier of the service's own database, which the InternalDatabase and
+the DatabaseSecretClaim both carry: the claim finds the database by it, and
+the platform's DBaaS client matches the Secret by it. microserviceName is the
+chart's name, the one the service passes as --redis-dbaas-microservice.
+*/}}
+{{- define "ratelimit.dbaasClassifier" -}}
+classifier:
+  microserviceName: {{ include "ratelimit.name" . }}
+  scope: service
+  namespace: {{ .Release.Namespace }}
+{{- end -}}
+
+{{/*
 The Secret the counter store's connection lives in: written by dbaas-operator
 for the chart's DatabaseSecretClaim, mounted by the Deployment.
 */}}

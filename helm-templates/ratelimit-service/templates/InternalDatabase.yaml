@@ -1,0 +1,27 @@
+{{- /*
+The counter store's database. The InternalDatabase asks dbaas-aggregator to
+provision a Redis database for the release through the DBaaS Redis adapter,
+under the service's own classifier (ratelimit.dbaasClassifier), the one the
+DatabaseSecretClaim looks up.
+
+It carries no settings: the Redis adapter builds each database's redis.conf
+from its own installation, maxmemory-policy included, and accepts no settings
+per database.
+
+It renders only where the cluster serves the kind, so an install on a cluster
+without dbaas-operator's CRDs does not fail on it; see
+ratelimit.dbaasDeclared for the other conditions.
+*/ -}}
+{{- if and (include "ratelimit.dbaasDeclared" .) (.Capabilities.APIVersions.Has "dbaas.netcracker.com/v1/InternalDatabase") }}
+apiVersion: dbaas.netcracker.com/v1
+kind: InternalDatabase
+metadata:
+  name: {{ include "ratelimit.redisSecretName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ratelimit.labels" . | nindent 4 }}
+spec:
+  operatorNamespace: {{ include "ratelimit.dbaasNamespace" . | quote }}
+  {{- include "ratelimit.dbaasClassifier" . | nindent 2 }}
+  type: redis
+{{- end }}

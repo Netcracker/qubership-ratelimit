@@ -79,7 +79,7 @@
             "enabled": {
               "type": "boolean",
               "default": true,
-              "description": "Render the InternalDatabase and the DatabaseSecretClaim. false expects the Secret <fullname>-redis, with connectionProperties.json in DBaaS's format, to be provided otherwise, as on a test cluster without DBaaS."
+              "description": "Render the InternalDatabase and the DatabaseSecretClaim, each where the cluster serves its kind. false expects the Secret <fullname>-redis, with connectionProperties.json in DBaaS's format, to be provided otherwise, as on a test cluster without DBaaS."
             }
           },
           "additionalProperties": false

@@ -286,8 +286,8 @@ func TestOperatorChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
 
 // The service chart renders nothing in a satellite, whatever the values say.
 func TestServiceChart_rendersNothingInASatellite(t *testing.T) {
-	objects := render(t, serviceChart, "sat", "--set", "BASELINE_ORIGIN=base",
-		"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true")
+	objects := render(t, serviceChart, "sat", append([]string{"--set", "BASELINE_ORIGIN=base",
+		"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true"}, dbaasAPIs...)...)
 	assert.Empty(t, objects)
 }
 

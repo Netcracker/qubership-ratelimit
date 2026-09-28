@@ -8,12 +8,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// dbaasAPIs is what helm template needs to render as it does against a cluster
+// that serves dbaas-operator's kinds: without them the chart renders neither
+// object.
+var dbaasAPIs = []string{
+	"--api-versions", "dbaas.netcracker.com/v1/InternalDatabase",
+	"--api-versions", "dbaas.netcracker.com/v1/DatabaseSecretClaim",
+}
+
 // The counter store comes from DBaaS: the service chart declares the database
 // and the claim, and the Deployment mounts the Secret the claim names. The
 // three have to agree, or dbaas-operator writes a Secret nobody mounts and the
 // pod waits forever for one that never comes.
 func TestServiceChart_declaresItsCounterStoreInDBaaS(t *testing.T) {
-	objects := render(t, serviceChart, "biz")
+	objects := render(t, serviceChart, "biz", dbaasAPIs...)
 
 	database := only(t, objects, "InternalDatabase")
 	claim := only(t, objects, "DatabaseSecretClaim")
@@ -75,7 +83,7 @@ func TestServiceChart_declaresItsCounterStoreInDBaaS(t *testing.T) {
 // Without DBaaS the chart declares nothing and still mounts the Secret, which
 // something else provides in the same format; a satellite renders neither.
 func TestServiceChart_leavesTheSecretToSomeoneElseWithDBaaSOff(t *testing.T) {
-	objects := render(t, serviceChart, "biz", "--set", "redis.dbaas.enabled=false")
+	objects := render(t, serviceChart, "biz", append([]string{"--set", "redis.dbaas.enabled=false"}, dbaasAPIs...)...)
 	assert.False(t, slices.Contains(kinds(objects), "InternalDatabase"))
 	assert.False(t, slices.Contains(kinds(objects), "DatabaseSecretClaim"))
 
@@ -91,11 +99,28 @@ func TestServiceChart_leavesTheSecretToSomeoneElseWithDBaaSOff(t *testing.T) {
 // platform parameter; an address without a namespace is refused rather than
 // rendered into CRs no operator ever reconciles.
 func TestServiceChart_assignsItsDBaaSObjectsToTheAggregatorsNamespace(t *testing.T) {
-	objects := render(t, serviceChart, "biz", "--set", "API_DBAAS_ADDRESS=http://dbaas-aggregator.team-a:8080")
+	objects := render(t, serviceChart, "biz",
+		append([]string{"--set", "API_DBAAS_ADDRESS=http://dbaas-aggregator.team-a:8080"}, dbaasAPIs...)...)
 	assert.Equal(t, "team-a", only(t, objects, "DatabaseSecretClaim").at("spec", "operatorNamespace").str2())
 
-	_, err := renderErr(serviceChart, "biz", "--set", "API_DBAAS_ADDRESS=http://dbaas-aggregator:8080")
+	_, err := renderErr(serviceChart, "biz",
+		append([]string{"--set", "API_DBAAS_ADDRESS=http://dbaas-aggregator:8080"}, dbaasAPIs...)...)
 	assert.Error(t, err, "an address without a namespace rendered")
+}
+
+// Each object renders only where the cluster serves its kind, so an install
+// on a cluster without dbaas-operator's CRDs does not fail on them. The
+// Deployment mounts the Secret all the same, and the pods wait for it.
+func TestServiceChart_rendersEachDBaaSObjectOnlyWhereItsKindIsServed(t *testing.T) {
+	objects := render(t, serviceChart, "biz")
+	assert.False(t, slices.Contains(kinds(objects), "InternalDatabase"))
+	assert.False(t, slices.Contains(kinds(objects), "DatabaseSecretClaim"))
+	only(t, objects, "Deployment")
+
+	objects = render(t, serviceChart, "biz", dbaasAPIs[:2]...)
+	assert.True(t, slices.Contains(kinds(objects), "InternalDatabase"))
+	assert.False(t, slices.Contains(kinds(objects), "DatabaseSecretClaim"),
+		"the claim rendered on a cluster that serves only the InternalDatabase kind")
 }
 
 // Every profile renders: the counter store no longer depends on a replica
