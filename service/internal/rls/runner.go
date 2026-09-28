@@ -31,8 +31,12 @@ type Runner struct {
 	serving atomic.Bool
 }
 
+// Serving reports whether the gRPC server is accepting checks: true from the
+// moment it serves until it stops.
 func (r *Runner) Serving() bool { return r.serving.Load() }
 
+// Healthz returns an error while the gRPC server is not serving. It ignores
+// the request, so a caller may pass nil.
 func (r *Runner) Healthz(_ *http.Request) error {
 	if !r.Serving() {
 		return errors.New("rls gRPC server is not serving")

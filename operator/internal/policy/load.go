@@ -26,6 +26,7 @@ func Object() *unstructured.Unstructured {
 	return object
 }
 
+// ObjectList is the list form of [Object].
 func ObjectList() *unstructured.UnstructuredList {
 	list := &unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(v1.GroupVersion.WithKind("RateLimitPolicyList"))

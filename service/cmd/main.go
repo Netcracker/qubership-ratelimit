@@ -1,8 +1,8 @@
-// The service: the data-plane half of the split. It answers ShouldRateLimit
-// from the configuration the operator wrote and the kubelet mounted, serves
-// the management API over the same counters, and holds no Kubernetes client:
-// its pod carries no Role and no token, and what it knows of the cluster is
-// a directory and the Downward API.
+// Ratelimit-service is the data-plane half of the split. It answers
+// ShouldRateLimit from the configuration the operator wrote and the kubelet
+// mounted, serves the management API over the same counters, and holds no
+// Kubernetes client: its pod carries no Role and no token, and what it knows
+// of the cluster is a directory and the Downward API.
 package main
 
 import (

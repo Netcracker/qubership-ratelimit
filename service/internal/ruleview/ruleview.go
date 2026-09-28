@@ -349,9 +349,9 @@ func Version(snapshot *compile.Snapshot) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-// ID joins the pair that identifies a rule within a domain. The policy segment
-// the layout used to carry is gone: a domain has exactly one policy, and its
-// name is the domain itself.
+// ID joins the pair that identifies a rule within a domain. It carries no
+// policy segment: a domain has exactly one policy, and its name is the domain
+// itself.
 func ID(block, rule string) string {
 	return block + "/" + rule
 }

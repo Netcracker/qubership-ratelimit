@@ -13,8 +13,9 @@ import (
 // meet its empty-hash-tag panic on the data path.
 var domainName = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
 
-// Reason names why a generation cannot take effect. All but the last are
-// blocking, and one blocking entry invalidates the generation whole.
+// Reason names why a generation cannot take effect. Every reason but
+// [ReasonCaptureShadowsMappedKey] is blocking, and one blocking entry
+// invalidates the generation whole.
 type Reason string
 
 const (

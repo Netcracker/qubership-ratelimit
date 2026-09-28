@@ -343,9 +343,8 @@ func findRule(snapshot *compile.Snapshot, block, rule string) (*compile.Block, *
 	return nil, nil
 }
 
-// splitFullID accepts only the whole block/rule form. The policy segment the
-// layout used to carry is gone: a domain has one policy, and its name is the
-// domain.
+// splitFullID accepts only the whole block/rule form: a domain has one policy,
+// and its name is the domain, so no policy segment is part of a rule's ID.
 func splitFullID(id string) (block, rule string, ok bool) {
 	parts := strings.Split(id, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

@@ -2,6 +2,9 @@ package controller
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,4 +111,68 @@ func TestRuleProblemBounds_matchTheGeneratedCRD(t *testing.T) {
 	list := at(versions[0], "schema", "openAPIV3Schema", "properties", "status", "properties", "ruleProblems")
 	assert.EqualValues(t, ratelimitv1.MaxRuleProblems, at(list, "maxItems"))
 	assert.EqualValues(t, ratelimitv1.MaxRuleProblemMessage, at(list, "items", "properties", "message", "maxLength"))
+}
+
+// The description kubectl explain prints for ruleProblems[].reason lists every
+// reason, because its reader cannot look the constants up. A Problem constant
+// added to the API without a regenerated description fails here: add the
+// value to the comment on RuleProblem.Reason and run make manifests
+// sync-helm-crds.
+func TestRuleProblemReasons_areListedInTheCRDDescription(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, filepath.Join("..", "..", "..", "api", "v1", "common_types.go"), nil, 0)
+	require.NoError(t, err)
+	var reasons []string
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value := spec.(*ast.ValueSpec)
+			for i, name := range value.Names {
+				if strings.HasPrefix(name.Name, "Problem") && i < len(value.Values) {
+					literal := value.Values[i].(*ast.BasicLit)
+					reasons = append(reasons, strings.Trim(literal.Value, `"`))
+				}
+			}
+		}
+	}
+	require.NotEmpty(t, reasons, "no Problem constant found in api/v1/common_types.go")
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "crd", "bases",
+		"ratelimit.netcracker.com_ratelimitpolicies.yaml"))
+	require.NoError(t, err)
+	var crd struct {
+		Spec struct {
+			Versions []struct {
+				Schema struct {
+					OpenAPIV3Schema struct {
+						Properties struct {
+							Status struct {
+								Properties struct {
+									RuleProblems struct {
+										Items struct {
+											Properties struct {
+												Reason struct {
+													Description string `json:"description"`
+												} `json:"reason"`
+											} `json:"properties"`
+										} `json:"items"`
+									} `json:"ruleProblems"`
+								} `json:"properties"`
+							} `json:"status"`
+						} `json:"properties"`
+					} `json:"openAPIV3Schema"`
+				} `json:"schema"`
+			} `json:"versions"`
+		} `json:"spec"`
+	}
+	require.NoError(t, yaml.Unmarshal(raw, &crd))
+	require.Len(t, crd.Spec.Versions, 1)
+	description := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties.Status.Properties.
+		RuleProblems.Items.Properties.Reason.Description
+	for _, reason := range reasons {
+		assert.Contains(t, description, reason, "the ruleProblems[].reason description does not list %s", reason)
+	}
 }

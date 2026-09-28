@@ -121,9 +121,8 @@ func TestSplitID_acceptsOnlyTheWholePair(t *testing.T) {
 	require.Equal(t, "cascade", block)
 	require.Equal(t, "everyone", rule)
 
-	// The three-part form is what the layout used to carry; it addresses
-	// nothing now, and accepting it would resolve to a block named after a
-	// policy that no longer exists.
+	// A form with a policy segment addresses nothing, because a domain has one
+	// policy; accepting it would resolve to a block named after the policy.
 	for _, id := range []string{"cascade", "invoices-api/cascade/everyone", "/everyone", "cascade/", ""} {
 		_, _, ok := ruleview.SplitID(id)
 		require.False(t, ok, "id %q", id)

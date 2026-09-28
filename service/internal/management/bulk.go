@@ -362,12 +362,11 @@ func randomID() string {
 	return hex.EncodeToString(buf[:])
 }
 
-// Storage keys. They carry the counter keys' own hash tag, namespace and domain
-// together, for the same reason those keys carry it: one slot per domain is what
-// lets an acceptance, and every batch after it, be one atomic write over the
-// record, the lease, and the counters together. Tagging these by domain alone
-// would put them in another slot, and every batch would fail CROSSSLOT the
-// moment the store is a Cluster.
+// recordTag is the prefix of every storage key of a domain's records. It
+// carries the counter keys' own hash tag, namespace and domain together, for
+// the same reason those keys carry it: one slot per domain is what lets an
+// acceptance, and every batch after it, be one atomic write over the record,
+// the lease, and the counters together.
 func recordTag(namespace, domain string) string {
 	return "rlm:v1:" + key.DomainTag(namespace, domain) + ":"
 }
@@ -390,7 +389,7 @@ func commandKeys(namespace, domain, record string, command bulkCommand) records.
 	return keys
 }
 
-// progressOf renders a sweep's committed progress as the disclosure a failed
+// partialOf renders a sweep's committed progress as the disclosure a failed
 // command owes.
 func partialOf(progress records.Progress, dryRun bool) *PartialReset {
 	partial := &PartialReset{
