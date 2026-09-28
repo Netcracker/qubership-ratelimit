@@ -1,5 +1,5 @@
 ---
-description: Repository-wide commit-message conventions.
+description: "Repository-wide commit-message conventions."
 globs: "**"
 ---
 
