@@ -28,13 +28,13 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
   capacity, produces a deterministic `OVER_LIMIT`, never a wait or a loop.
 - The verdict is aggregated: `OVER_LIMIT` if any matched rule is exceeded, `OK` otherwise. `statuses` stays empty: the
   response carries `overall_code` and headers, and per-descriptor detail is not returned, so a caller that needs
-  separate verdicts sends separate checks. Per-rule detail (which rule fired, remaining, retry-after) comes back in the
-  response headers `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` or `retry-after`, taken from the
-  strictest matched rule. "Strictest" is deterministic: minimal remaining on an admission; longest retry-after on a
-  refusal (every refusing bucket has about zero remaining, and a short hint would steer the client's retry into the
-  next refusal, whereas after the longest wait every window is open); ties break lexicographically by the bucket key.
-  Key order differs from pair order for names carrying `-` or `.`; that only decides whose name the headers carry on an
-  exact tie, and it is the same on every replica, so headers do not jitter.
+  separate verdicts sends separate checks. Per-rule detail comes back in the response headers `x-ratelimit-limit`,
+  `x-ratelimit-remaining`, `x-ratelimit-reset` or `retry-after`, taken from the strictest matched rule; a refusal also
+  carries `x-ratelimit-rule`, that rule's `<block>/<rule>` pair. "Strictest" is deterministic: minimal remaining on an
+  admission; longest retry-after on a refusal (every refusing bucket has about zero remaining, and a short hint would
+  steer the client's retry into the next refusal, whereas after the longest wait every window is open); ties break
+  lexicographically by the bucket key. Key order differs from pair order for names carrying `-` or `.`; that only
+  decides whose name the headers carry on an exact tie, and it is the same on every replica, so headers do not jitter.
 - Direct gRPC consumers get the same contract. They may send pre-extracted descriptor entries and no token; the engine
   matches on whatever keys are present.
 - The standard gRPC health service is exposed for direct gRPC consumers. Deployment readiness and liveness use HTTP

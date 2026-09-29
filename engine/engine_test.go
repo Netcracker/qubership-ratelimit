@@ -18,6 +18,12 @@ import (
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
+// The block and rule of the fixture policy that counts every client.
+const (
+	blockCascade = "cascade"
+	ruleEveryone = "everyone"
+)
+
 const domain = "gateway.public"
 
 // newEngine compiles the specification's cascade example — a FirstMatch
@@ -30,7 +36,7 @@ func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 		Groups: []model.Group{{Name: "trial", Clients: []string{"t1"}}},
 		Blocks: []model.Block{
 			{
-				Name: "cascade",
+				Name: blockCascade,
 				Mode: model.ModeFirstMatch,
 				Target: model.Target{Routes: []model.Route{
 					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/invoices/"}}}},
@@ -42,7 +48,7 @@ func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 						Matches: []model.Predicate{
 							{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "trial"}},
 						Rates: []model.Rate{{Requests: 10, Period: time.Minute}}},
-					{Name: "everyone", Counters: []string{model.KeyClient},
+					{Name: ruleEveryone, Counters: []string{model.KeyClient},
 						Rates: []model.Rate{
 							{Requests: 100, Period: time.Minute},
 							{Requests: 10000, Period: 24 * time.Hour, Algorithm: "FixedWindow"}}},
@@ -92,7 +98,7 @@ func TestBypassLiftsItsBlockOnly(t *testing.T) {
 		t.Fatalf("decision = %+v", d)
 	}
 	for _, r := range d.Rules {
-		if r.Block == "cascade" {
+		if r.Block == blockCascade {
 			t.Errorf("rules = %+v: bypass must leave its own block uncounted", d.Rules)
 		}
 	}
@@ -115,11 +121,15 @@ func TestHeadersComeFromTheStrictestRule(t *testing.T) {
 	if first.Headers.Limit != 100 || first.Headers.Remaining != 99 {
 		t.Errorf("headers = %+v: want the per-client minute window, the tightest of three", first.Headers)
 	}
+	if first.Headers.Block != blockCascade || first.Headers.Rule != ruleEveryone {
+		t.Errorf("headers name %s/%s, want cascade/everyone, the rule whose window they report",
+			first.Headers.Block, first.Headers.Rule)
+	}
 	if len(first.ExtractedKeys) != 1 || first.ExtractedKeys[0] != model.KeyClient {
 		t.Errorf("extracted keys = %v: the success counters need the key names", first.ExtractedKeys)
 	}
 	everyone := first.Rules[0]
-	if everyone.Rule != "everyone" || everyone.Limit != 100 || everyone.Remaining != 99 {
+	if everyone.Rule != ruleEveryone || everyone.Limit != 100 || everyone.Remaining != 99 {
 		t.Errorf("rule outcome = %+v: per-rule numbers must come from its own strictest bucket", everyone)
 	}
 
@@ -153,6 +163,10 @@ func TestShadowReportsWithoutVetoing(t *testing.T) {
 	if !last.Rules[1].Allowed {
 		t.Errorf("everyone outcome = %+v: the enforcing rule is far from its limit", last.Rules[1])
 	}
+	if last.Headers == nil || last.Headers.Rule != ruleEveryone {
+		t.Errorf("headers = %+v: want the enforcing everyone rule, not the shadow trial matched before it",
+			last.Headers)
+	}
 }
 
 func TestDenialHeaders(t *testing.T) {
@@ -168,7 +182,11 @@ func TestDenialHeaders(t *testing.T) {
 		t.Fatal("request 101 admitted past a 100-per-minute window")
 	}
 	if d.Headers == nil || d.Headers.Limit != 100 || d.Headers.RetryAfter <= 0 {
-		t.Errorf("headers = %+v: want the denying window with a positive retry hint", d.Headers)
+		t.Fatalf("headers = %+v: want the denying window with a positive retry hint", d.Headers)
+	}
+	if d.Headers.Block != blockCascade || d.Headers.Rule != ruleEveryone {
+		t.Errorf("headers name %s/%s, want cascade/everyone, the rule that refused",
+			d.Headers.Block, d.Headers.Rule)
 	}
 }
 
