@@ -98,6 +98,21 @@ alerts:
   # author fixing a typo within minutes does not page.
   ruleProblemsFor: 5m
 
+  # RatelimitNoReplicas: no ready service replica, so every check of the
+  # domain is decided by the gateway's failure mode, unlimited under
+  # fail-open. Held for noReplicasFor, long enough for a rollout's surge pod
+  # to become ready, and far shorter than notReadyFor, which also fires then.
+  noReplicasFor: 5m
+
+  # RatelimitChecksStopped: ready replicas enforce a domain, and no check of
+  # it has arrived over checksStoppedWindow: the gateway's filter is off or
+  # gone, its domain does not match, or the path to the Service is broken,
+  # and the traffic passes unlimited with every status Ready. A domain whose
+  # gateway carries no traffic fires too, so raise the window for a domain
+  # that is idle for long stretches.
+  checksStoppedWindow: 10m
+  checksStoppedFor: 15m
+
   # RatelimitConfigWriteErrors: the operator could not save the namespace's
   # configuration. The replicas keep the previous one and the last-good
   # fallback a restart would need is not being saved; any increase over the

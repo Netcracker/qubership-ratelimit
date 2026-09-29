@@ -200,7 +200,7 @@ compared as written, and the exact case is the author's responsibility. The comp
 | `counters` | list of keys | bucket axes: `client`, `path`, `method`, a scalar `mappings` key, or a capture; empty = one shared bucket |
 | `rates` | list of entries | counting windows; absent in a rule with `behavior: Bypass` |
 | `behavior` | `Enforce` (default) \| `Shadow` \| `Bypass` | Shadow: count and write metrics, never refuse; Bypass: skip without going to the store |
-| `replacedRules` | list of names | suppresses rules of its own block (only with `mode: All`) |
+| `replacedRules` | list of names | suppresses rules of its own block (only with `mode: All`); inert while the rule is `Shadow` |
 
 ### The rates[] entry
 

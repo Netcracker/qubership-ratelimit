@@ -165,3 +165,62 @@ tests:
                 No ratelimit operator pod in biz reports holding the Lease, so no policy is compiled, no
                 status is written, and the ConfigMap is not maintained; the service replicas keep enforcing
                 what they applied last. Check the operator Deployment and its scrape.
+
+  # A fleet that is gone fires within minutes; one that is only replaced by a
+  # rollout comes back inside the hold and does not.
+  - interval: 1m
+    name: a domain without a ready replica beside one whose rollout recovers
+    input_series:
+      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.private", state="total"}'
+        values: "0x10"
+      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", state="total"}'
+        values: "0x3 1x10"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RatelimitNoReplicas
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RatelimitNoReplicas
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              domain: gateway.private
+              severity: critical
+            exp_annotations:
+              summary: No ready rate limit service replica; the domain is not limited
+              description: >-
+                Domain gateway.private in biz has no ready service replica, so every check of it is decided by
+                the gateway's failure mode: unlimited under fail-open, refused under fail-closed. Read the
+                ratelimit-service Deployment and its pods.
+
+  # Checks that stop reaching an enforced domain fire once the window has seen
+  # none for the hold; a domain whose checks keep arriving never does.
+  - interval: 1m
+    name: a domain whose checks stop beside one whose checks keep arriving
+    input_series:
+      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", state="applied"}'
+        values: "1x40"
+      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.private", state="applied"}'
+        values: "1x40"
+      - series: 'ratelimit_checks_total{namespace="biz", pod="ratelimit-service-0", domain="gateway.public", verdict="ok"}'
+        values: "0+10x10 100x30"
+      - series: 'ratelimit_checks_total{namespace="biz", pod="ratelimit-service-0", domain="gateway.private", verdict="ok"}'
+        values: "0+10x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: RatelimitChecksStopped
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: RatelimitChecksStopped
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              domain: gateway.public
+              severity: warning
+            exp_annotations:
+              summary: Service replicas enforce a policy, but no checks reach them
+              description: >-
+                Domain gateway.public in biz is enforced by ready replicas, but no check has reached them for
+                10m: the gateway's traffic passes unlimited. The gateway filter is off (the
+                ratelimit.<gateway>.enabled runtime key), removed, or its domain does not match; or the path
+                to the Service is broken. A domain whose gateway carries no traffic at all fires as well.

@@ -279,3 +279,65 @@ func TestReset_versionConflictNamesItsRecovery(t *testing.T) {
 		"key-1", operatorRoles()), http.StatusConflict, CodeConflict)
 	require.Equal(t, ConflictStaleRuleSet, body.Meta.ConflictType)
 }
+
+// contextBoundRecords refuses a write under a done context, the way the Redis
+// client refuses to send one; the in-memory store ignores the context.
+type contextBoundRecords struct {
+	records.Store
+}
+
+func (c contextBoundRecords) Commit(ctx context.Context, commit records.Commit) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Store.Commit(ctx, commit)
+}
+
+func (c contextBoundRecords) Put(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Store.Put(ctx, key, value, ttl)
+}
+
+// shutDown gives the sweeps a background context that is already cancelled,
+// as a service shutting down does, over records that refuse a done context.
+func (h *testAPI) shutDown(t *testing.T) {
+	t.Helper()
+	h.api.Records = contextBoundRecords{Store: h.records}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	h.api.StartBackground(ctx)
+}
+
+// A sweep that shutdown interrupts still records its outcome and answers it.
+// The outcome used to be written under the walk's cancelled context, which
+// the store refused, so the client got RLS-0503 and the command stayed
+// accepted until its lease expired.
+func TestBulk_recordsItsOutcomeWhenShutdownEndsTheWalk(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.shutDown(t)
+
+	var preview BulkResult
+	decode(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", operatorRoles()), http.StatusOK, &preview)
+	require.NotEmpty(t, preview.ConfirmationToken, "the preview's token was not stored")
+}
+
+// The failure of such a sweep is recorded as well, with its own code rather
+// than RLS-0503.
+func TestBulk_recordsAFailureWhenShutdownEndsTheWalk(t *testing.T) {
+	h := newTestAPI(t)
+	for _, client := range []string{"alice", "bob", "carol"} {
+		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+	}
+	h.shutDown(t)
+	h.deadlineAfter(t, 3)
+
+	body := requireError(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	require.NotNil(t, body.Meta.PartialReset)
+}

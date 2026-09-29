@@ -208,8 +208,9 @@ The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and th
 `MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the
 way the series are: the service chart alerts on the data plane (`RatelimitUnknownDomain`, `RatelimitStoreErrors`,
 `RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`) and the
-operator chart on the policy status (`RatelimitStalled`, `RatelimitNotReadyLong`, `RatelimitRuleProblems`,
-`RatelimitConfigWriteErrors`, `RatelimitNoOperatorLeader`). Every expression is scoped to the release namespace. The
+operator chart on the policy status and the fleet (`RatelimitStalled`, `RatelimitNotReadyLong`,
+`RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`, `RatelimitConfigWriteErrors`,
+`RatelimitNoOperatorLeader`). Every expression is scoped to the release namespace. The
 thresholds and hold durations are under `alerts.*` of each chart, each with its rationale beside it in `values.yaml`;
 `alerts.enabled=false` keeps the scrape and drops the rules. `tests/charts` renders both rule sets and runs
 `promtool check rules` over them (`make promtool` fetches the binary from the Prometheus release the Makefile pins).

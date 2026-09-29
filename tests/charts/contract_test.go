@@ -284,6 +284,18 @@ func TestOperatorChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
 	})
 }
 
+// A BASELINE_ORIGIN naming the release's own namespace is refused by both
+// charts. Rendered as a satellite of itself, the namespace used to lose its
+// operator and its service in one upgrade, with filters left pointing at the
+// Service that upgrade removed.
+func TestCharts_refuseABaselineOriginOfTheirOwnNamespace(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		out, err := renderErr(chart, "team-a", "--set", "BASELINE_ORIGIN=team-a")
+		require.Error(t, err, "%s rendered a namespace as a satellite of itself", chart)
+		assert.Contains(t, string(out), "is this release's own namespace", chart)
+	}
+}
+
 // The service chart renders nothing in a satellite, whatever the values say.
 func TestServiceChart_rendersNothingInASatellite(t *testing.T) {
 	objects := render(t, serviceChart, "sat", "--set", "BASELINE_ORIGIN=base",

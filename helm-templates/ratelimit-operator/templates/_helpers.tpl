@@ -39,7 +39,9 @@ itself renders by: a namespace with BASELINE_ORIGIN set is a satellite, and
 the value is the baseline's namespace. A namespace without it is the baseline,
 or a standalone installation, and those two render the same objects, which
 is why there is no third value here. The service chart reads the variable the
-same way.
+same way. A BASELINE_ORIGIN naming the release's own namespace fails the
+render: a namespace cannot be a satellite of itself, and rendering it as one
+leaves it without an operator and a service.
 
 BASELINE_CONTROLLER is a hedge, not a supported topology. On this platform
 the baseline is never blue-green'd, so the deployer never sets it for this
@@ -49,6 +51,9 @@ disagree about where the baseline is, should the variable ever appear, is a
 worse outcome than one line here.
 */}}
 {{- define "ratelimit.mode" -}}
+{{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN .Release.Namespace) -}}
+{{- fail (printf "BASELINE_ORIGIN %q is this release's own namespace. Leave it unset in the baseline namespace; in a satellite, set it to the baseline's namespace." .Values.BASELINE_ORIGIN) -}}
+{{- end -}}
 {{- if .Values.BASELINE_ORIGIN -}}satellite{{- else -}}baseline{{- end -}}
 {{- end -}}
 

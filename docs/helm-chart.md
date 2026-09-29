@@ -171,6 +171,9 @@ alerts:                              # PrometheusRule.yaml: the rules over the p
   stalledFor: 5m                     # RatelimitStalled: above the propagation deadline, so a late rollout is quiet
   notReadyFor: 30m                   # RatelimitNotReadyLong: longer than any rollout, shorter than a shift
   ruleProblemsFor: 5m                # RatelimitRuleProblems: room for an author to fix a typo
+  noReplicasFor: 5m                  # RatelimitNoReplicas: past a rollout's surge pod, far below notReadyFor
+  checksStoppedWindow: 10m           # RatelimitChecksStopped: the window that has to see no check of the domain;
+  checksStoppedFor: 15m              #   raise it for a domain idle for long stretches
   configWriteErrorsWindow: 15m       # RatelimitConfigWriteErrors: any write error in the window fires
   noLeaderFor: 5m                    # RatelimitNoOperatorLeader: past the Lease's own handover
 
@@ -625,6 +628,8 @@ The operator chart, group `ratelimit-operator`:
 | --- | --- | --- |
 | `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1` for `stalledFor`, with the reason in the label: `ReplicaStale`, `ReplicaFormatUnsupported`, or `ConfigMapTooLarge` |
 | `RatelimitNotReadyLong` | warning | `ratelimit_policy_ready == 0` for `notReadyFor`: the latest generation is not the one enforced |
+| `RatelimitNoReplicas` | critical | `ratelimit_policy_replicas{state="total"} == 0` for `noReplicasFor`: no ready service replica, so the gateway's failure mode decides every check of the domain |
+| `RatelimitChecksStopped` | warning | `ratelimit_policy_replicas{state="applied"} > 0` while the domain's `ratelimit_checks_total` has no rate over `checksStoppedWindow`, for `checksStoppedFor`: the filter is off, removed, or on another domain, and the traffic passes unlimited with every status Ready; an idle gateway fires too |
 | `RatelimitRuleProblems` | warning | `ratelimit_policy_rule_problems{severity="blocking"} > 0` for `ruleProblemsFor`: the latest generation is not enforced and last-good runs instead |
 | `RatelimitConfigWriteErrors` | critical | `increase(ratelimit_config_write_errors_total[configWriteErrorsWindow]) > 0` by `reason`, with no hold: policy changes stop reaching the service |
 | `RatelimitNoOperatorLeader` | critical | `absent(ratelimit_leader == 1)` for `noLeaderFor`: no operator pod holds the Lease, so nothing compiles policies or writes `ratelimit-config` |

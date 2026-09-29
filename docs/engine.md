@@ -141,7 +141,8 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   no-op.
 - **`replacedRules`** lets a matched rule suppress named other rules, expressing overrides (an enterprise tier replacing
   the default per-client limit) without mutually exclusive `matches` clauses. References resolve within the rule's own
-  block only, and only under `mode: All`.
+  block only, and only under `mode: All`. A `Shadow` rule suppresses nothing, since it never changes the verdict: an
+  override tried in `Shadow` counts beside the rules it names, which keep enforcing until it is switched to `Enforce`.
 - **Multiple windows per selector** are a `rates[]` list inside one rule: each entry is an independent bucket with its
   own period, and a burst for GCRA; periods are unique within a rule. The algorithm is a property of the entry, the
   window: optional in the entry, GCRA by default, so one rule may carry windows of different algorithms, such as a

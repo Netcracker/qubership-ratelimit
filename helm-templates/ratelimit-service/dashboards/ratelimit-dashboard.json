@@ -87,7 +87,7 @@
       "id": 1,
       "type": "stat",
       "title": "Check rate",
-      "description": "Rate limit checks per second across the service, every verdict included.",
+      "description": "Rate limit checks per second across the service, every verdict included. Zero is red: a scraped service that receives no checks is traffic that bypasses the limiter. No data means the service is not scraped.",
       "gridPos": {
         "h": 5,
         "w": 4,
@@ -106,12 +106,15 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "red",
                 "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.001
               }
             ]
-          },
-          "noValue": "0"
+          }
         }
       },
       "options": {
@@ -129,7 +132,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ratelimit_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
+          "expr": "sum(rate(ratelimit_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval])) or 0 * max(ratelimit_build_info{cluster=~\"$cluster\", namespace=~\"$namespace\", component=\"service\"})",
           "legendFormat": ""
         }
       ]
@@ -165,8 +168,7 @@
                 "value": 0.5
               }
             ]
-          },
-          "noValue": "0"
+          }
         }
       },
       "options": {
@@ -184,7 +186,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ratelimit_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\", verdict=\"over_limit\"}[$__rate_interval])) / sum(rate(ratelimit_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval]))",
+          "expr": "sum(rate(ratelimit_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\", verdict=\"over_limit\"}[$__rate_interval])) / sum(rate(ratelimit_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval])) or 0 * max(ratelimit_build_info{cluster=~\"$cluster\", namespace=~\"$namespace\", component=\"service\"})",
           "legendFormat": ""
         }
       ]
@@ -220,8 +222,7 @@
                 "value": 0.001
               }
             ]
-          },
-          "noValue": "0"
+          }
         }
       },
       "options": {
@@ -239,7 +240,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ratelimit_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\", verdict=\"unavailable\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum(rate(ratelimit_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\", verdict=\"unavailable\"}[$__rate_interval])) or 0 * max(ratelimit_build_info{cluster=~\"$cluster\", namespace=~\"$namespace\", component=\"service\"})",
           "legendFormat": ""
         }
       ]
@@ -275,8 +276,7 @@
                 "value": 0.001
               }
             ]
-          },
-          "noValue": "0"
+          }
         }
       },
       "options": {
@@ -294,7 +294,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ratelimit_unknown_domain_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum(rate(ratelimit_unknown_domain_checks_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval])) or 0 * max(ratelimit_build_info{cluster=~\"$cluster\", namespace=~\"$namespace\", component=\"service\"})",
           "legendFormat": ""
         }
       ]
@@ -330,8 +330,7 @@
                 "value": 0.001
               }
             ]
-          },
-          "noValue": "0"
+          }
         }
       },
       "options": {
@@ -349,7 +348,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(min by (domain) (ratelimit_policy_ready{cluster=~\"$cluster\", namespace=~\"$namespace\"}) == 0) or vector(0)",
+          "expr": "count(min by (domain) (ratelimit_policy_ready{cluster=~\"$cluster\", namespace=~\"$namespace\"}) == 0) or 0 * max(ratelimit_leader{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
           "legendFormat": ""
         }
       ]
@@ -385,8 +384,7 @@
                 "value": 0.001
               }
             ]
-          },
-          "noValue": "0"
+          }
         }
       },
       "options": {
@@ -404,7 +402,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(ratelimit_store_errors_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval])) or vector(0)",
+          "expr": "sum(rate(ratelimit_store_errors_total{cluster=~\"$cluster\", namespace=~\"$namespace\"}[$__rate_interval])) or 0 * max(ratelimit_build_info{cluster=~\"$cluster\", namespace=~\"$namespace\", component=\"service\"})",
           "legendFormat": ""
         }
       ]

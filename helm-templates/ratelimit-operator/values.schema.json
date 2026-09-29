@@ -168,6 +168,24 @@
           "default": "5m",
           "description": "How long a blocking problem stays on the latest generation before RatelimitRuleProblems fires."
         },
+        "noReplicasFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long a domain has no ready service replica before RatelimitNoReplicas fires."
+        },
+        "checksStoppedWindow": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "10m",
+          "description": "The window over which a domain enforced by ready replicas receiving no check fires RatelimitChecksStopped."
+        },
+        "checksStoppedFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "15m",
+          "description": "How long a domain receives no check before RatelimitChecksStopped fires."
+        },
         "configWriteErrorsWindow": {
           "type": "string",
           "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",

@@ -12,6 +12,7 @@ and the client groups ([specification](ratelimitpolicy-cr-spec.md)).
 
 Business applications are installed in one of two schemes. The deployer marks the role with one variable:
 `BASELINE_ORIGIN` is set, and non-empty, only in a satellite; a baseline and a single namespace do not receive it.
+Both charts refuse to render a `BASELINE_ORIGIN` that names the release's own namespace.
 
 1. **Single namespace.** Everything in one place: both components, the gateway filters, and the policy.
 2. **Composite.** A set of related namespaces: one **baseline** and one or more **satellites**. Every namespace has a

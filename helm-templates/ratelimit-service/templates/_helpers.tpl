@@ -27,7 +27,9 @@ Service has a fixed name of its own, below.
 Which of the composite's namespaces this release lands in, read the same
 way as the operator chart reads it: a namespace with the deployer's
 BASELINE_ORIGIN set is a satellite, and a namespace without it is the
-baseline or a standalone installation, which render the same objects.
+baseline or a standalone installation, which render the same objects. A
+BASELINE_ORIGIN naming the release's own namespace fails the render, as it
+does in the operator chart.
 
 A satellite runs no service. Its gateway filters, rendered by the operator
 chart, send checks to the baseline's Service; a service installed there
@@ -37,6 +39,9 @@ this check, so a satellite release is empty, and the deployer installs the
 same pair of charts in every namespace without a rule of its own.
 */}}
 {{- define "ratelimit.mode" -}}
+{{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN .Release.Namespace) -}}
+{{- fail (printf "BASELINE_ORIGIN %q is this release's own namespace. Leave it unset in the baseline namespace; in a satellite, set it to the baseline's namespace." .Values.BASELINE_ORIGIN) -}}
+{{- end -}}
 {{- if .Values.BASELINE_ORIGIN -}}satellite{{- else -}}baseline{{- end -}}
 {{- end -}}
 
