@@ -230,8 +230,8 @@ func TestBlockingReasons(t *testing.T) {
 	}
 }
 
-// TestInvalidSpecFamily walks the structural guards the schema no longer
-// carries: with CEL reduced to the name rule, the compiler is the only judge of
+// TestInvalidSpecFamily walks the structural guards the schema does not
+// carry: with CEL limited to the name rule, the compiler is the only judge of
 // how the fields relate, and it answers with problems rather than with garbage.
 func TestInvalidSpecFamily(t *testing.T) {
 	cases := []struct {
@@ -371,13 +371,13 @@ func TestInvalidSpecFamily(t *testing.T) {
 	}
 }
 
-// TestNoListIsBounded pins the removal of the schema's list caps: what binds a
-// generation is the bucket budget and the object size, never a count of blocks,
-// rules, axes, or windows.
+// TestNoListIsBounded pins that no list of the policy is capped: 100 blocks
+// and a group of 4096 clients compile, because what binds a generation is the
+// bucket budget and the object size, not a count of blocks or clients.
 func TestNoListIsBounded(t *testing.T) {
 	p := model.Policy{Domain: domain}
-	// 300 blocks of one bucket each: far past every bound the schema used to
-	// carry, and well inside the one that remains.
+	// 100 blocks without a target and with one bucket each: every decision
+	// collects all 100, inside the budget of 128.
 	for i := range 100 {
 		p.Blocks = append(p.Blocks, model.Block{
 			Name:  fmt.Sprintf("b%d", i),

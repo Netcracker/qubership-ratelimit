@@ -105,10 +105,10 @@ type HTTPMethod string
 
 // PathMatch selects request paths.
 type PathMatch struct {
-	// Type selects how Value is compared.
+	// type selects how value is compared.
 	Type PathMatchType `json:"type"`
 
-	// Value is the path, the prefix, or the template. It starts with a slash;
+	// value is the path, the prefix, or the template. It starts with a slash;
 	// the query string of a request is cut before matching, so it never appears
 	// here.
 	// +kubebuilder:validation:Pattern=`^/`
@@ -120,10 +120,10 @@ type PathMatch struct {
 // Route selects request traffic for a block. The fields of one route combine
 // with AND; the routes of a target combine with OR.
 type Route struct {
-	// Path selects request paths.
+	// path selects request paths.
 	Path PathMatch `json:"path"`
 
-	// Methods accepts a request whose method is one of the listed values. An
+	// methods accepts a request whose method is one of the listed values. An
 	// absent list accepts any method.
 	// +optional
 	// +listType=set
@@ -132,7 +132,7 @@ type Route struct {
 
 // Target restricts a block to part of the traffic of its domain.
 type Target struct {
-	// Routes is an OR-list. A block without a target sees the whole domain.
+	// routes is an OR-list. A block without a target sees the whole domain.
 	// +kubebuilder:validation:MinItems=1
 	// +listType=atomic
 	Routes []Route `json:"routes"`
@@ -147,24 +147,24 @@ type Target struct {
 // to it, so keeping these checks at admission would mean bounding every list
 // for the estimator's sake and maintaining a second copy of the compiler.
 type Predicate struct {
-	// Key names the descriptor key the predicate reads: client, a mappings
+	// key names the descriptor key the predicate reads: client, a mappings
 	// key, or a capture of the block's own Template routes.
 	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Key string `json:"key"`
 
-	// Operator is the predicate applied to the value set of the key.
+	// operator is the predicate applied to the value set of the key.
 	Operator PredicateOperator `json:"operator"`
 
-	// Value is the operand of Equals, Contains, and InGroup. For InGroup it is
+	// value is the operand of Equals, Contains, and InGroup. For InGroup it is
 	// the name of a group.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	Value string `json:"value,omitempty"`
 
-	// Values is the operand of In.
+	// values is the operand of In.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:MaxLength=256
@@ -175,18 +175,18 @@ type Predicate struct {
 // Rate is one counting window of a rule. Windows of a rule are independent
 // buckets, so a rate limit and a quota live side by side.
 type Rate struct {
-	// Requests is the quota of the window.
+	// requests is the quota of the window.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=2147483647
 	Requests int32 `json:"requests"`
 
-	// PeriodSeconds is the length of the window. A day is the ceiling: beyond
+	// periodSeconds is the length of the window. A day is the ceiling: beyond
 	// it a counter stops being a rate limit and becomes an accounting record.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=86400
 	PeriodSeconds int32 `json:"periodSeconds"`
 
-	// Burst is the bucket depth of a GCRA window. It defaults to Requests,
+	// burst is the bucket depth of a GCRA window. It defaults to requests,
 	// which is a full bucket, and a FixedWindow entry that sets it is rejected
 	// by the compiler.
 	// +optional
@@ -194,26 +194,26 @@ type Rate struct {
 	// +kubebuilder:validation:Maximum=2147483647
 	Burst *int32 `json:"burst,omitempty"`
 
-	// Algorithm is a property of the window rather than of the rule.
+	// algorithm is a property of the window rather than of the rule.
 	// +kubebuilder:default=GCRA
 	Algorithm Algorithm `json:"algorithm,omitempty"`
 }
 
 // Rule is one counter of a block.
 type Rule struct {
-	// Name is unique within its block and is part of the counter key.
+	// name is unique within its block and is part of the counter key.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
-	// Matches is a conjunction of predicates. An empty list matches every
+	// matches is a conjunction of predicates. An empty list matches every
 	// request the block sees.
 	// +optional
 	// +listType=atomic
 	Matches []Predicate `json:"matches,omitempty"`
 
-	// Counters are the axes of the bucket. An empty list gives the rule a
+	// counters are the axes of the bucket. An empty list gives the rule a
 	// single shared bucket. A rule whose axis the request does not carry, such
 	// as client for an anonymous caller, does not match: there is nothing to
 	// key the bucket by.
@@ -223,18 +223,18 @@ type Rule struct {
 	// +listType=atomic
 	Counters []string `json:"counters,omitempty"`
 
-	// Rates are the counting windows of the rule, keyed by period. A rule with
+	// rates are the counting windows of the rule, keyed by period. A rule with
 	// behavior Bypass carries none; every other rule carries at least one.
 	// +optional
 	// +listType=map
 	// +listMapKey=periodSeconds
 	Rates []Rate `json:"rates,omitempty"`
 
-	// Behavior selects what the rule does with the verdict.
+	// behavior selects what the rule does with the verdict.
 	// +kubebuilder:default=Enforce
 	Behavior RuleBehavior `json:"behavior,omitempty"`
 
-	// ReplacedRules silences rules of the same block, which is how a narrow
+	// replacedRules silences rules of the same block, which is how a narrow
 	// rule overrides a broad one. It is available only in an All block, where
 	// the order of the list carries no meaning of its own.
 	// +optional
@@ -247,23 +247,23 @@ type Rule struct {
 // Blocks always add up: a request that lands in several blocks has to fit the
 // verdict of each.
 type LimitBlock struct {
-	// Name is unique within its policy and is part of the counter key.
+	// name is unique within its policy and is part of the counter key.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
-	// Target restricts the block. An absent target lets the block see the whole
+	// target restricts the block. An absent target lets the block see the whole
 	// domain.
 	// +optional
 	Target *Target `json:"target,omitempty"`
 
-	// Mode selects how the rules of the block combine. It has no effect across
+	// mode selects how the rules of the block combine. It has no effect across
 	// blocks.
 	// +kubebuilder:default=All
 	Mode BlockMode `json:"mode,omitempty"`
 
-	// Rules are the counters of the block.
+	// rules are the counters of the block.
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map
 	// +listMapKey=name
@@ -274,7 +274,7 @@ type LimitBlock struct {
 // how identity is read out of a token, which client groups exist, and which
 // rules count the traffic.
 type RateLimitPolicySpec struct {
-	// Domain binds this policy to a traffic source. It has to equal, byte for
+	// domain binds this policy to a traffic source. It has to equal, byte for
 	// byte, the domain the rate limit filter of that gateway sends, and it
 	// equals metadata.name. Comparison is case-sensitive.
 	//
@@ -288,20 +288,20 @@ type RateLimitPolicySpec struct {
 	// +kubebuilder:validation:MaxLength=63
 	Domain string `json:"domain"`
 
-	// Mappings declare which token claims become descriptor keys. An empty
+	// mappings declare which token claims become descriptor keys. An empty
 	// list leaves the domain with its built-in keys, client among them.
 	// +optional
 	// +listType=map
 	// +listMapKey=key
 	Mappings []ClaimMapping `json:"mappings,omitempty"`
 
-	// Groups are the named client lists the InGroup operator resolves against.
+	// groups are the named client lists the InGroup operator resolves against.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	Groups []ClientGroup `json:"groups,omitempty"`
 
-	// Limits are the blocks of the policy.
+	// limits are the blocks of the policy.
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map
 	// +listMapKey=name
@@ -326,19 +326,23 @@ const (
 // invalid generation: the author needs the reference that does not resolve, not
 // a restatement of the atomicity rule once per rule.
 type RuleProblem struct {
-	// Block names the block the rule belongs to. It is empty for a problem of
+	// block names the block the rule belongs to. It is empty for a problem of
 	// the policy as a whole, such as the decision budget.
 	// +optional
 	Block string `json:"block,omitempty"`
 
-	// Rule names the rule, empty for a block-level or policy-level problem.
+	// rule names the rule, empty for a block-level or policy-level problem.
 	// +optional
 	Rule string `json:"rule,omitempty"`
 
-	// Reason is one of the Problem constants of this package.
+	// reason is one of UnresolvedKeyReference, UnresolvedGroupReference,
+	// UnresolvedReplacedRules, IncompatibleOperator, InvalidCounterAxis,
+	// InvalidSpec, InvalidWindow, DomainBudgetExceeded, and
+	// CaptureShadowsMappedKey. CaptureShadowsMappedKey is informational; every
+	// other reason blocks the generation.
 	Reason string `json:"reason"`
 
-	// Message says what the rule references and what the domain offers.
+	// message says what the rule references and what the domain offers.
 	// +optional
 	// +kubebuilder:validation:MaxLength=1024
 	Message string `json:"message,omitempty"`
@@ -351,15 +355,15 @@ type RuleProblem struct {
 // Deployment's spec.replicas: a pod that is not ready receives no traffic and
 // does not belong in the denominator.
 type ReplicaStatus struct {
-	// Total is the number of ready replicas at the time of the probe.
+	// total is the number of ready replicas at the time of the probe.
 	// +optional
 	Total int32 `json:"total"`
 
-	// Applied is how many of them enforce ActiveGeneration.
+	// applied is how many ready replicas enforce status.activeGeneration.
 	// +optional
 	Applied int32 `json:"applied"`
 
-	// Summary is Applied and Total as "2/3", and exists because the REPLICAS
+	// summary is applied and total as "2/3", and exists because the REPLICAS
 	// printer column has to read one field: a column is a JSONPath expression,
 	// and JSONPath cannot join two numbers. It is written by the leader
 	// alongside the two numbers and carries nothing they do not.
@@ -367,7 +371,7 @@ type ReplicaStatus struct {
 	// +kubebuilder:validation:MaxLength=32
 	Summary string `json:"summary,omitempty"`
 
-	// LastCheckTime is the freshness of the probe. When no pod exists at all
+	// lastCheckTime is the freshness of the probe. When no pod exists at all
 	// there is nobody to write the status, and the age of this stamp is what
 	// shows it.
 	// +optional
@@ -376,18 +380,18 @@ type ReplicaStatus struct {
 
 // RateLimitPolicyStatus is the observed state of a RateLimitPolicy.
 type RateLimitPolicyStatus struct {
-	// ObservedGeneration is the latest spec generation the leader has seen.
+	// observedGeneration is the latest spec generation the leader has seen.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// ActiveGeneration is the generation actually being enforced. It falls
-	// behind ObservedGeneration when the latest edit does not compile and the
+	// activeGeneration is the generation actually being enforced. It falls
+	// behind observedGeneration when the latest edit does not compile and the
 	// last-good generation keeps running. Zero means the domain is unprotected:
 	// no generation is in effect at all.
 	// +optional
 	ActiveGeneration int64 `json:"activeGeneration,omitempty"`
 
-	// EffectiveKeys is the domain-wide key set of ActiveGeneration: the
+	// effectiveKeys is the domain-wide key set of activeGeneration: the
 	// built-in keys plus the mapped ones. Route captures are per block and do
 	// not appear here. It reports what is in effect rather than what was asked
 	// for, so a rule author reads the set their rules actually resolve against.
@@ -395,34 +399,34 @@ type RateLimitPolicyStatus struct {
 	// +listType=atomic
 	EffectiveKeys []string `json:"effectiveKeys,omitempty"`
 
-	// Replicas is what the leader observed about the fleet.
+	// replicas is what the leader observed about the fleet.
 	// +optional
 	Replicas ReplicaStatus `json:"replicas,omitempty"`
 
-	// Conditions holds the latest observations of the policy state.
+	// conditions holds the latest observations of the policy state.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Rules is how many rules the active generation contributes, which a
+	// rules is how many rules the active generation contributes, which a
 	// printer column can show and a JSONPath expression cannot compute.
 	// +optional
 	Rules int32 `json:"rules,omitempty"`
 
-	// Problems is how many problems the latest generation has, for the same
-	// reason. It counts every one, including those past the 64 entries
-	// RuleProblems holds.
+	// problems is how many problems the latest generation has, which a printer
+	// column can show and a JSONPath expression cannot compute. It counts every
+	// one, including those past the 64 entries ruleProblems holds.
 	// +optional
 	Problems int32 `json:"problems,omitempty"`
 
-	// RuleProblems lists the diagnostics of the latest generation. A blocking
+	// ruleProblems lists the diagnostics of the latest generation. A blocking
 	// entry invalidates that generation whole: Accepted goes false, Ready goes
 	// false with reason NotCompiled, and the last-good generation keeps running
 	// where there is one. An informational entry, such as
 	// CaptureShadowsMappedKey, leaves both alone — a fact to alert on rather
 	// than a failure of the object. Past 64 entries the list is cut, the
-	// blocking entries kept first; Problems holds the full count.
+	// blocking entries kept first; problems holds the full count.
 	// +optional
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=64
@@ -461,7 +465,13 @@ type RateLimitPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   RateLimitPolicySpec   `json:"spec,omitempty"`
+	// spec is the rate limit configuration of the domain the policy is named
+	// after.
+	Spec RateLimitPolicySpec `json:"spec,omitempty"`
+
+	// status is what the operator observed: whether the latest generation
+	// compiles, which generation the service replicas enforce, and the
+	// problems of the latest generation.
 	Status RateLimitPolicyStatus `json:"status,omitempty"`
 }
 

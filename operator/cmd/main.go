@@ -1,4 +1,4 @@
-// The operator: the control-plane half of the split. It reconciles the
+// Ratelimit-operator is the control-plane half of the split. It reconciles the
 // RateLimitPolicy objects of its namespace into one ConfigMap the service
 // mounts, writes the policy status, and reads the service replicas of the
 // other Deployment to judge Ready. It serves no traffic and holds no counter

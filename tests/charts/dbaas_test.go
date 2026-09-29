@@ -98,8 +98,9 @@ func TestServiceChart_assignsItsDBaaSObjectsToTheAggregatorsNamespace(t *testing
 	assert.Error(t, err, "an address without a namespace rendered")
 }
 
-// Every profile renders: the counter store no longer depends on a replica
-// count, so the prod profiles with two replicas need no extra values.
+// Every profile renders without store values: the counter store does not
+// depend on the replica count, so dev-ha and prod, which run two replicas,
+// need nothing more.
 func TestServiceChart_rendersEveryProfileWithoutStoreValues(t *testing.T) {
 	for _, profile := range []string{"dev", "dev-ha", "prod", "prod-nonha"} {
 		_, err := renderErr(serviceChart, "biz", "-f",

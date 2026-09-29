@@ -75,9 +75,9 @@ const (
 	ReasonReplicaFormatUnsupported = "ReplicaFormatUnsupported"
 )
 
-// Reason for the Stalled condition when it is false; the true cases reuse
-// ReasonReplicaStale, ReasonNotCompiled, ReasonConfigMapTooLarge, and
-// ReasonReplicaFormatUnsupported.
+// ReasonProgressing is the reason of the Stalled condition when it is false;
+// the true cases reuse ReasonReplicaStale, ReasonNotCompiled,
+// ReasonConfigMapTooLarge, and ReasonReplicaFormatUnsupported.
 const ReasonProgressing = "Progressing"
 
 // Reasons recorded in RateLimitPolicyStatus.RuleProblems.
@@ -195,7 +195,7 @@ const (
 
 // ClaimMapping turns one JWT claim into one descriptor key.
 type ClaimMapping struct {
-	// Key names the descriptor key the rules reference. It uses the one
+	// key names the descriptor key the rules reference. It uses the one
 	// descriptor key pattern of this API, camelCase included; path, method and
 	// token are produced by the engine and cannot be redefined, while client
 	// is an allowed override.
@@ -204,14 +204,14 @@ type ClaimMapping struct {
 	// +kubebuilder:validation:MaxLength=63
 	Key string `json:"key"`
 
-	// Claim is a dotted path into the payload, such as realm_access.roles.
-	// Exactly one of Claim and ClaimPath is set.
+	// claim is a dotted path into the payload, such as realm_access.roles.
+	// Exactly one of claim and claimPath is set.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
 	Claim string `json:"claim,omitempty"`
 
-	// ClaimPath is the same path given segment by segment, which is how a
+	// claimPath is the same path given segment by segment, which is how a
 	// claim name that itself contains a dot is addressed.
 	// +optional
 	// +kubebuilder:validation:MinItems=1
@@ -220,15 +220,15 @@ type ClaimMapping struct {
 	// +listType=atomic
 	ClaimPath []string `json:"claimPath,omitempty"`
 
-	// Type is the shape of the extracted value.
+	// type is the shape of the extracted value.
 	// +kubebuilder:default=String
 	Type ClaimType `json:"type,omitempty"`
 
-	// Normalization is applied to the extracted value.
+	// normalization is applied to the extracted value.
 	// +kubebuilder:default=None
 	Normalization NormalizeMode `json:"normalization,omitempty"`
 
-	// Fallbacks are dotted paths tried in order when the primary path yields
+	// fallbacks are dotted paths tried in order when the primary path yields
 	// nothing. The first non-empty result wins.
 	// +optional
 	// +kubebuilder:validation:items:MinLength=1
@@ -240,14 +240,14 @@ type ClaimMapping struct {
 // ClientGroup names a list of client identities that the InGroup operator
 // matches against.
 type ClientGroup struct {
-	// Name is how a predicate references the group. It is unique within the
+	// name is how a predicate references the group. It is unique within the
 	// policy.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
-	// Clients lists the members of the group. Values are compared with the
+	// clients lists the members of the group. Values are compared with the
 	// client key after its effective normalization, which is lower-case unless
 	// a mapping entry overrides client with normalization None — then they are
 	// compared as written, and the case is the author's responsibility.

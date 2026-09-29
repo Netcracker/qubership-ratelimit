@@ -10,10 +10,14 @@ import (
 )
 
 var (
-	// GroupVersion is group version used to register these objects.
-	GroupVersion  = schema.GroupVersion{Group: "ratelimit.netcracker.com", Version: "v1"}
+	// GroupVersion is the group version these objects are registered under.
+	GroupVersion = schema.GroupVersion{Group: "ratelimit.netcracker.com", Version: "v1"}
+
+	// SchemeBuilder registers the types of this group version with a scheme.
 	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
-	AddToScheme   = SchemeBuilder.AddToScheme
+
+	// AddToScheme adds the types of this group version to a scheme.
+	AddToScheme = SchemeBuilder.AddToScheme
 )
 
 func addKnownTypes(scheme *runtime.Scheme) error {
