@@ -453,7 +453,8 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 `GET /domains` showed `ruleSetVersion 5ff0f5a9e94d` with 12 rules throughout, and the manifest kept generation 1. If
 `activeGeneration` is `0`, the domain has no last-good and enforces nothing; the `Ready` message says
 `no generation is enforced: domain is unprotected`. That is the one case to treat as an incident rather than a review
-comment.
+comment. When the message goes on with `last-good generation N does not compile with this operator build`, the domain
+lost its last-good to an operator upgrade, and rolling the operator back restores it.
 
 **Act.** Fix the spec at the address and apply it. The compiler judges the whole generation, so fix every listed problem
 in one edit; a second `apply` that fixes one of two does nothing for traffic.
@@ -866,7 +867,7 @@ stand runs no Argo CD, so this table is the mapping the check implements, not an
 | `True` | any | Degraded | a breakage: `ReplicaStale` or `ReplicaFormatUnsupported` (section 4), `NotCompiled` (sections 3 and 5), or `ConfigMapTooLarge` (section 0) |
 | `False` | `True` | Healthy | every ready service replica enforces the latest generation |
 | `False` | `False` | Progressing | a rollout in flight, `NoReplicas`, or the operator still catching up |
-| `False` | `Unknown` | Progressing | `ProbeFailed`: the operator cannot read the replicas (section 4) |
+| `Unknown` | `Unknown` | Progressing | `ProbeFailed`: the operator cannot read the replicas (section 4); `ratelimit_policy_stalled` keeps its last observed value |
 
 A sync wave that waits on the policy closes only when every service replica enforces the rule; a Helm release closes on
 the Deployments, before a later generation reaches the replicas. A wave that stays Progressing longer than the rollout

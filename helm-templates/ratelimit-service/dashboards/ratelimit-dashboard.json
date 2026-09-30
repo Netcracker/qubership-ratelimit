@@ -43,7 +43,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "query": "label_values(ratelimit_snapshot_timestamp_seconds, cluster)",
+        "query": "label_values(ratelimit_build_info, cluster)",
         "refresh": 2,
         "allValue": ".*",
         "multi": false,
@@ -60,14 +60,14 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "query": "label_values(ratelimit_snapshot_timestamp_seconds{cluster=~\"$cluster\"}, namespace)",
+        "query": "label_values(ratelimit_build_info{cluster=~\"$cluster\"}, namespace)",
         "refresh": 2,
         "allValue": ".*",
         "multi": false,
         "includeAll": true,
         "current": {
-          "text": "All",
-          "value": "$__all"
+          "text": "namespace-default-placeholder",
+          "value": "namespace-default-placeholder"
         }
       },
       {
@@ -1102,7 +1102,7 @@
       "id": 23,
       "type": "stat",
       "title": "Last snapshot swap",
-      "description": "When a replica last swapped its rule set, latest across the fleet: the forensic answer to whether the rules moved right before an incident.",
+      "description": "When the enforced rules last changed on a running replica, latest across the fleet: the forensic answer to whether the rules moved right before an incident. A replica restart is not a change; with every replica restarted since the last change, the panel shows no data.",
       "gridPos": {
         "h": 8,
         "w": 6,
@@ -1143,7 +1143,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(ratelimit_snapshot_timestamp_seconds{cluster=~\"$cluster\", namespace=~\"$namespace\"}) * 1000",
+          "expr": "max(ratelimit_snapshot_timestamp_seconds{cluster=~\"$cluster\", namespace=~\"$namespace\"} > 0) * 1000",
           "legendFormat": ""
         }
       ]

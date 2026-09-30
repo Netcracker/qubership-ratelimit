@@ -284,8 +284,8 @@ component, enforces that a token is required.
    caller) does not match; there is nothing to key the bucket with.
 5. **The verdict**: `OVER_LIMIT` if at least one applied rule (of any block) is exceeded; the `x-ratelimit-*` headers
    come from the strictest matched rule.
-6. **Request cost**: the protocol field `hits_addend` (default 1); a cost above the burst capacity produces a
-   deterministic refusal, not a wait.
+6. **Request cost**: the protocol field `hits_addend` (default 1), a descriptor's own `hits_addend` taking precedence
+   for that descriptor; a cost above the burst capacity produces a deterministic refusal, not a wait.
 7. **A refusal does not spend quota**, a guarantee of every algorithm: a refused request does not advance the counter
    state. Shadow follows the same logic: a Shadow bucket is charged only when its own verdict is "allow", mirroring
    what enforcement would do; unconditional charging would accumulate unbounded debt and inflate the "would have
@@ -544,7 +544,7 @@ pair from the `/debug/applied` payload.
 | the latest generation does not compile, last-good is enforced | False | True | `NotCompiled` |
 | the latest generation compiles but does not fit into the ConfigMap with the other domains, last-good is enforced | False | True | `ConfigMapTooLarge` |
 | a replica refuses the manifest's format version and keeps its snapshot | False | True | `ReplicaFormatUnsupported` |
-| the operator could not probe the replicas (the EndpointSlice or the `metrics` port is unavailable) | Unknown | False | `ProbeFailed` |
+| the operator could not probe the replicas (the EndpointSlice or the `metrics` port is unavailable) | Unknown | Unknown | `ProbeFailed` |
 
 The threshold counts from the moment this generation started spreading, not from the previous status change:
 `lastTransitionTime` of `Ready` is rewound when the reason enters `Reconciling`, `Propagating`, or `ReplicaStale` from
@@ -582,7 +582,9 @@ UID):
 `observedGeneration: 8`, `activeGeneration: 7`, `replicas: {total: 3, applied: 3}`, everyone unanimously enforcing 7,
 but `Ready: False / NotCompiled`, `Stalled: True`, `Accepted: False / CompilationFailed` with a summary `message`, and
 `ruleProblems` with the root causes. If there is no last-good or the UID does not match: `activeGeneration: 0`, the
-domain is empty, `message: 'no generation is enforced: domain is unprotected'`.
+domain is empty, `message: 'no generation is enforced: domain is unprotected'`. When a saved last-good exists and is
+not in effect either, the message goes on to say why: this operator build does not compile it, or it was saved from a
+read that did not carry every field.
 
 For Argo CD: by default it does not assess the health of a CR; the platform's Lua check (given in the
 [Helm doc](helm-chart.md)) reads `Ready` and `Stalled`: `Stalled: True` is Degraded, `Ready: True` is Healthy,

@@ -115,6 +115,14 @@ func (w *Watcher) watch(notify *fsnotify.Watcher) bool {
 	return true
 }
 
+// present records that the directory holds a manifest again.
+func (w *Watcher) present() {
+	if w.absent {
+		w.Applier.SetAbsent(false)
+	}
+	w.absent = false
+}
+
 // read applies or refuses the directory's current contents, once per change
 // of the manifest.
 func (w *Watcher) read() {
@@ -125,6 +133,7 @@ func (w *Watcher) read() {
 			return
 		}
 		w.absent = true
+		w.Applier.SetAbsent(true)
 		if w.Applier.Ready() {
 			w.Log.Info("the configuration is gone from the mounted directory, keeping the applied snapshot", "dir", w.Dir)
 		} else {
@@ -132,7 +141,7 @@ func (w *Watcher) read() {
 		}
 		return
 	case err != nil:
-		w.absent = false
+		w.present()
 		var refusal *Refusal
 		if !errors.As(err, &refusal) {
 			w.Log.Error(err, "failed to read the configuration, keeping the applied snapshot", "dir", w.Dir)
@@ -145,7 +154,7 @@ func (w *Watcher) read() {
 		w.Applier.Refuse(refusal)
 		return
 	}
-	w.absent = false
+	w.present()
 	// The manifest already applied is applied again only to clear a refusal
 	// that came between: the engines are reused by hash, and the report
 	// loses the refusal.

@@ -37,10 +37,11 @@ import (
 // included, and write the goldens of the new version (see manifest_test.go);
 // the decoder then reads this version and the previous one.
 //
-// The reader's side of that promise: a field removed from the format stays in
-// the struct for one more version, tolerated and ignored, or the golden of
-// N-1 stops decoding and the service refuses the operator it was promised to
-// read.
+// The reader's side of that promise: a field removed from the format, or
+// renamed, stays in the struct under its old JSON name for one more version,
+// tolerated and ignored, or the payload golden of N-1 stops decoding and the
+// service refuses the operator it was promised to read. The tests of every
+// supported version's field set and payload golden enforce it.
 const FormatVersion = 1
 
 // SupportedVersions lists the format versions Decode accepts: the current one

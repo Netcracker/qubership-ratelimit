@@ -258,6 +258,7 @@ alerts:                              # PrometheusRule.yaml: the rules over the d
   keyNotExtractedWindow: 15m         # RatelimitKeyDeclaredNotExtracted: the rate window of both halves
   keyNotExtractedFor: 30m            # and the hold over it
   domainBudgetWarnAt: 104            # RatelimitDomainBudgetNearLimit: 80 percent of the budget of 128
+  configAbsentFor: 5m                # RatelimitConfigurationAbsent: past the projection of a recreated ConfigMap
 
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway   # AuthorizationPolicy.yaml: the default allowed principal
 BASELINE_ORIGIN: ""                  # _helpers.tpl (mode): the deployer's composite variables, see "Platform
@@ -539,7 +540,8 @@ exclude.
 | `ratelimit_store_roundtrip_seconds` | `domain` | store round-trip histogram (a domain = one shard) |
 | `ratelimit_store_errors_total` | `domain`, `reason: timeout\|server\|other` | store errors |
 | `ratelimit_snapshot_rebuilds_total` | `result: ok\|refused` | applies and swaps of the in-memory snapshot on a service replica; `refused` is a reading the replica would not apply (a format it does not read, an unknown field, a payload that fails the decoder or decompresses past 8 MiB), the snapshot stays and the reason is on `/debug/applied` |
-| `ratelimit_snapshot_timestamp_seconds` | none | the moment of the last swap ("did the rules change before the incident") |
+| `ratelimit_snapshot_timestamp_seconds` | none | when the enforced rules last changed while the replica ran ("did the rules change before the incident"); 0 until the first change after a start, since a restart is not one |
+| `ratelimit_config_absent` | none | 1 while the replica's mounted directory holds no manifest: the ConfigMap is gone, and nothing will change what the replica enforces |
 | `ratelimit_policy_applied_generation` | `domain` | the generation THIS replica executes, for Prometheus; the operator computes the strict `Ready` not from this gauge but from the replica's `/debug/applied` on the metrics port (the applied generation per domain, the format versions the replica reads, and a refusal with its reason) |
 | `ratelimit_token_cache_hits_total` / `_misses_total` | none | the token cache |
 | `ratelimit_build_info` | `component: operator\|service`, `version` | the version of the binary serving this scrape, a const gauge always at 1; the chart passes the image tag as `SERVICE_VERSION` / `OPERATOR_VERSION`, and the operator stamps the same value into the manifest as `operatorVersion` |
@@ -627,6 +629,7 @@ The service chart, group `ratelimit-service`:
 | `RatelimitDecisionLatencyHigh` | warning | the p99 of `ratelimit_check_duration_seconds` is above `latencyBudgetSeconds` for `latencyFor` |
 | `RatelimitKeyDeclaredNotExtracted` | warning | a declared key's `ratelimit_extractions_total` rate is zero over `keyNotExtractedWindow` while the same domain's `ratelimit_tokens_seen_total` grows, for `keyNotExtractedFor`: the mapping names a claim the tokens do not carry |
 | `RatelimitDomainBudgetNearLimit` | warning | `ratelimit_domain_decision_buckets` reaches `domainBudgetWarnAt` of the budget of 128, with no hold: the next edit may stop compiling |
+| `RatelimitConfigurationAbsent` | warning | `ratelimit_config_absent == 1` on a replica for `configAbsentFor`: the operator's ConfigMap is gone, and the replica keeps what it applied |
 
 The operator chart, group `ratelimit-operator`:
 

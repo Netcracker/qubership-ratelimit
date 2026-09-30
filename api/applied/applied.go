@@ -24,6 +24,11 @@ type Report struct {
 	// manifest it was last given could not be read. It stays until a
 	// manifest is applied again.
 	Refusal *Refusal `json:"refusal,omitempty"`
+
+	// ConfigAbsent is true while the mounted configuration directory holds no
+	// manifest. Domains then still lists what the replica enforces, and
+	// nothing will change it until a manifest returns.
+	ConfigAbsent bool `json:"configAbsent,omitempty"`
 }
 
 // Domain is one replica's answer for one domain: the generation it enforces,

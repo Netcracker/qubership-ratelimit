@@ -1,0 +1,85 @@
+{
+  "domain": "gateway.public",
+  "mappings": [
+    {
+      "key": "tenant",
+      "claim": "org_id",
+      "type": "String",
+      "normalization": "Lowercase",
+      "fallbacks": [
+        "tenant_id"
+      ]
+    },
+    {
+      "key": "roles",
+      "claimPath": [
+        "realm_access",
+        "roles"
+      ],
+      "type": "StringArray",
+      "normalization": "None"
+    }
+  ],
+  "groups": [
+    {
+      "name": "partners",
+      "clients": [
+        "partner-a"
+      ]
+    }
+  ],
+  "limits": [
+    {
+      "name": "orders",
+      "target": {
+        "routes": [
+          {
+            "path": {
+              "type": "Template",
+              "value": "/api/v1/orders/{id}"
+            },
+            "methods": [
+              "GET",
+              "POST"
+            ]
+          }
+        ]
+      },
+      "mode": "All",
+      "rules": [
+        {
+          "name": "per-tenant",
+          "matches": [
+            {
+              "key": "tenant",
+              "operator": "Equals",
+              "value": "acme"
+            },
+            {
+              "key": "roles",
+              "operator": "In",
+              "values": [
+                "admin"
+              ]
+            }
+          ],
+          "counters": [
+            "tenant"
+          ],
+          "rates": [
+            {
+              "requests": 100,
+              "periodSeconds": 60,
+              "burst": 20,
+              "algorithm": "GCRA"
+            }
+          ],
+          "behavior": "Enforce",
+          "replacedRules": [
+            "base"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -96,5 +96,19 @@ spec:
               {{ "{{" }} $value | printf "%.0f" {{ "}}" }} buckets in one decision, against the budget of 128.
               An edit past the budget is rejected as DomainBudgetExceeded and the domain stays on its
               last-good generation. Narrow the rules' routes or split the domain before it gets there.
+
+        - alert: RatelimitConfigurationAbsent
+          expr: max by (namespace, pod) (ratelimit_config_absent{ {{- $sel -}} }) == 1
+          for: {{ .Values.alerts.configAbsentFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: A replica's mounted configuration is gone; nothing will change what it enforces
+            description: >-
+              Service replica {{ "{{" }} $labels.pod {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} finds
+              no manifest in its mounted configuration. It keeps enforcing what it last applied, or stays
+              NotReady if it never applied anything, and no policy change reaches it. The ConfigMap
+              ratelimit-config is written by the operator: check that the operator release is installed
+              and holds the Lease.
 {{- end }}
 {{- end }}

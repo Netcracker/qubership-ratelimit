@@ -145,10 +145,15 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since, deadli
 		}
 
 	case probeErr != nil:
-		// The leader does not know, and a guess would be worse than saying so.
-		progressing.ready = metav1.ConditionUnknown
-		progressing.readyReason = v1.ReasonProbeFailed
-		progressing.readyMessage = fmt.Sprintf("the replicas could not be observed: %v", probeErr)
+		// The leader does not know, and a guess would be worse than saying so,
+		// on both conditions: a domain that was stuck may still be.
+		return fleetStatus{
+			ready:         metav1.ConditionUnknown,
+			readyReason:   v1.ReasonProbeFailed,
+			readyMessage:  fmt.Sprintf("the replicas could not be observed: %v", probeErr),
+			stalled:       metav1.ConditionUnknown,
+			stalledReason: v1.ReasonProbeFailed,
+		}
 
 	case view.Total == 0:
 		// A leader that is alive but is not itself a ready endpoint. With no
@@ -203,8 +208,9 @@ func judge(outcome policy.Outcome, view FleetView, probeErr error, since, deadli
 // fit, and by how much the namespace overflows.
 func tooLargeMessage(outcome policy.Outcome) string {
 	if outcome.ActiveGeneration == 0 {
-		return fmt.Sprintf("generation %d does not fit the namespace's ConfigMap and nothing is enforced: %s",
-			outcome.Generation, outcome.TooLargeReason)
+		return unprotectedMessage(fmt.Sprintf(
+			"generation %d does not fit the namespace's ConfigMap and nothing is enforced: %s",
+			outcome.Generation, outcome.TooLargeReason), outcome)
 	}
 	return fmt.Sprintf("generation %d does not fit the namespace's ConfigMap; generation %d keeps serving: %s",
 		outcome.Generation, outcome.ActiveGeneration, outcome.TooLargeReason)
@@ -221,10 +227,21 @@ func refusingMessage(outcome policy.Outcome, view FleetView) string {
 // The distinction that matters is whether anything is running at all.
 func notCompiledMessage(outcome policy.Outcome) string {
 	if outcome.ActiveGeneration == 0 {
-		return policy.ErrNoGeneration.Error()
+		return unprotectedMessage(policy.ErrNoGeneration.Error(), outcome)
 	}
 	return fmt.Sprintf("generation %d does not compile; generation %d remains enforced",
 		outcome.Generation, outcome.ActiveGeneration)
+}
+
+// unprotectedMessage adds to message, which reports an unprotected domain, why
+// its saved last-good generation is not in effect either, when there was one.
+// A last-good lost to this build is a reason to roll the operator back; one
+// that never existed is not.
+func unprotectedMessage(message string, outcome policy.Outcome) string {
+	if outcome.LastGoodLost == "" {
+		return message
+	}
+	return message + "; " + outcome.LastGoodLost
 }
 
 // behindMessage names the replicas that have not taken the generation up,

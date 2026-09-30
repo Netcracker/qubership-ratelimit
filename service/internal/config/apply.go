@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -54,6 +55,10 @@ type Applier struct {
 
 	// ready flips once and stays: the first apply.
 	ready atomic.Bool
+
+	// absent is whether the mounted directory holds no manifest; see
+	// SetAbsent.
+	absent atomic.Bool
 }
 
 // Ready reports whether this replica has applied a manifest.
@@ -65,7 +70,22 @@ func (a *Applier) Ready() bool { return a.ready.Load() }
 // configuration, and a report read during an apply or a refusal is the
 // whole of one state or the other.
 func (a *Applier) Report() applied.Report {
-	return ReportOf(a.Store.Load())
+	report := ReportOf(a.Store.Load())
+	report.ConfigAbsent = a.absent.Load()
+	return report
+}
+
+// SetAbsent records whether the mounted directory holds a manifest, for the
+// report and the ratelimit_config_absent gauge. A directory that loses its
+// manifest leaves the applied snapshot serving with nothing to rebuild it,
+// and this is what makes that visible.
+func (a *Applier) SetAbsent(absent bool) {
+	a.absent.Store(absent)
+	value := 0.0
+	if absent {
+		value = 1
+	}
+	metrics.ConfigAbsent.Set(value)
 }
 
 // ReportOf is the applied report of one rule set.
@@ -146,6 +166,10 @@ func (a *Applier) Apply(cfg Configuration) {
 		})
 	}
 
+	// The swap time is the time the rules changed while this process ran: a
+	// first apply after start, or a manifest whose payloads are the ones
+	// already enforced, changes nothing a reader of the gauge asks about.
+	changed := a.ready.Load() && !maps.Equal(hashes, a.hashes)
 	a.domains = domains
 	a.hashes = hashes
 	// One publication: the set carries the rules, the generations, the swap
@@ -156,7 +180,9 @@ func (a *Applier) Apply(cfg Configuration) {
 	a.ready.Store(true)
 
 	metrics.SnapshotRebuilds.WithLabelValues("ok").Inc()
-	metrics.SnapshotTimestamp.SetToCurrentTime()
+	if changed {
+		metrics.SnapshotTimestamp.SetToCurrentTime()
+	}
 	metrics.PublishState(&metrics.StateView{Domains: views})
 	metrics.PruneStale(metrics.ActiveSetOf(snapshots))
 	metrics.SeedExtractions(metrics.ExtractionKeysOf(snapshots))

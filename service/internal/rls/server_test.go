@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -373,6 +374,69 @@ func TestShouldRateLimit_chargesHitsAddend(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "95", headerMap(resp)["x-ratelimit-remaining"])
+}
+
+// A descriptor's own hits_addend is its cost, and it overrides the request's,
+// as the protocol defines it. The descriptor's value used to be ignored, and a
+// caller setting it was charged the request's cost, one by default.
+func TestShouldRateLimit_chargesTheDescriptorsHitsAddend(t *testing.T) {
+	const domain = "gateway.public"
+	for name, tc := range map[string]struct {
+		request    uint32
+		descriptor *wrapperspb.UInt64Value
+		remaining  string
+	}{
+		"the descriptor's cost":                    {descriptor: wrapperspb.UInt64(5), remaining: "95"},
+		"the descriptor's cost over the request's": {request: 2, descriptor: wrapperspb.UInt64(5), remaining: "95"},
+		"zero is the protocol default of one":      {request: 7, descriptor: wrapperspb.UInt64(0), remaining: "99"},
+		"no descriptor cost keeps the request's":   {request: 7, remaining: "93"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ruleStore := store.New()
+			ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
+				Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
+					Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
+			log, _ := recordingLogger()
+
+			req := request(domain, map[string]string{"path": "/api"})
+			req.HitsAddend = tc.request
+			req.Descriptors[0].HitsAddend = tc.descriptor
+			resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), req)
+			require.NoError(t, err)
+			assert.Equal(t, tc.remaining, headerMap(resp)["x-ratelimit-remaining"])
+		})
+	}
+}
+
+// A cost the engine cannot charge is refused as a protocol violation, and
+// charges nothing: a refill request, which would let a caller top up its own
+// counters, and a cost past what Envoy itself sends.
+func TestShouldRateLimit_refusesACostItCannotCharge(t *testing.T) {
+	const domain = "gateway.public"
+	for name, set := range map[string]func(*envoycommon.RateLimitDescriptor){
+		"is_negative_hits":        func(d *envoycommon.RateLimitDescriptor) { d.HitsAddend, d.IsNegativeHits = wrapperspb.UInt64(5), true },
+		"a cost over the maximum": func(d *envoycommon.RateLimitDescriptor) { d.HitsAddend = wrapperspb.UInt64(maxHitsAddend + 1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ruleStore := store.New()
+			ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
+				Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
+					Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
+			log, logged := recordingLogger()
+			server := NewServer(ruleStore, log)
+
+			req := request(domain, map[string]string{"path": "/api"})
+			set(req.Descriptors[0])
+			resp, err := server.ShouldRateLimit(context.Background(), req)
+			require.NoError(t, err, "a protocol violation is an answer, not an error")
+			assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+			assert.Contains(t, logged(), "descriptor 0")
+
+			plain, err := server.ShouldRateLimit(context.Background(), request(domain, map[string]string{"path": "/api"}))
+			require.NoError(t, err)
+			assert.Equal(t, "99", headerMap(plain)["x-ratelimit-remaining"], "the refused check charged the counter")
+		})
+	}
 }
 
 func TestShouldRateLimit_extractsTheClientFromTheToken(t *testing.T) {

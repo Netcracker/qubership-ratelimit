@@ -188,6 +188,12 @@
           "maximum": 128,
           "default": 104,
           "description": "The worst-case decision buckets of a domain at which RatelimitDomainBudgetNearLimit fires; the budget is 128."
+        },
+        "configAbsentFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long a replica finds no manifest in its mounted configuration before RatelimitConfigurationAbsent fires."
         }
       },
       "additionalProperties": false

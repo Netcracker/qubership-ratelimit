@@ -9,6 +9,7 @@ package charts
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -326,6 +327,62 @@ func TestCharts_spreadTheirPodsOverTheTopology(t *testing.T) {
 			"--set", "CLOUD_TOPOLOGIES[0].whenUnsatisfiable=Sometimes")
 		assert.Error(t, err, "%s accepts an unknown whenUnsatisfiable", chart)
 	}
+}
+
+// The management port is safe only behind its AuthorizationPolicy, and the
+// policy is only worth anything in the exact shape it has: DENY on the
+// management port for every principal except the private gateway's service
+// account, which Istio's automated deployment names after the gateway and its
+// class. The check reads the structure, so a policy that keeps the same
+// principal under principals, or turns into an ALLOW, fails here.
+func TestServiceChart_managementPolicyDeniesAllButThePrivateGateway(t *testing.T) {
+	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true")
+	policy := only(t, objects, "AuthorizationPolicy")
+	deployment := only(t, objects, "Deployment")
+
+	assert.Equal(t, "DENY", policy.at("spec", "action").str2())
+	assert.Equal(t, deployment.at("spec", "selector", "matchLabels").v,
+		policy.at("spec", "selector", "matchLabels").v, "the policy does not select the service's pods")
+
+	rules := policy.at("spec", "rules").list()
+	require.Len(t, rules, 1)
+	to := rules[0].at("to").list()
+	require.Len(t, to, 1)
+	assert.Equal(t, []string{"8082"}, strs(to[0].at("operation", "ports")), "the policy covers another port")
+
+	from := rules[0].at("from").list()
+	require.Len(t, from, 1)
+	assert.Equal(t, []string{"cluster.local/ns/biz/sa/private-gateway-istio"},
+		strs(from[0].at("source", "notPrincipals")), "the only exception is not the private gateway")
+	assert.Nil(t, from[0].at("source", "principals").v, "a principals list turns the exception into the target")
+}
+
+// The dashboard opens on its own release's namespace. Domain names repeat
+// across namespaces, so a default of All merged one installation's panels with
+// every other's; All stays available as a choice.
+func TestServiceChart_dashboardOpensOnItsOwnNamespace(t *testing.T) {
+	dashboard := only(t, render(t, serviceChart, "team-a", "--set", "MONITORING_ENABLED=true"), "GrafanaDashboard")
+	var model struct {
+		Templating struct {
+			List []struct {
+				Name    string `json:"name"`
+				Current struct {
+					Value any `json:"value"`
+				} `json:"current"`
+				IncludeAll bool `json:"includeAll"`
+			} `json:"list"`
+		} `json:"templating"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dashboard.at("spec", "json").str2()), &model))
+	for _, variable := range model.Templating.List {
+		if variable.Name != "namespace" {
+			continue
+		}
+		assert.Equal(t, "team-a", variable.Current.Value, "the dashboard does not open on its release's namespace")
+		assert.True(t, variable.IncludeAll, "All is no longer a choice")
+		return
+	}
+	t.Fatal("the dashboard has no namespace variable")
 }
 
 // The service chart renders nothing in a satellite, whatever the values say.

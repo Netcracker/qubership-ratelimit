@@ -60,6 +60,13 @@ type Outcome struct {
 	// zero means the domain is unprotected.
 	ActiveGeneration int64
 
+	// LastGoodLost says why a saved last-good generation is not in effect
+	// either, and is empty when there is none or when it runs: this build no
+	// longer compiles the saved spec, or the spec was saved from a read that
+	// did not carry every field of the object. Without it, a domain that lost
+	// its last-good generation reads the same as one that never had one.
+	LastGoodLost string
+
 	// Problems describes the latest generation. A single blocking entry keeps it
 	// out of the snapshot entirely.
 	Problems []v1.RuleProblem
@@ -219,13 +226,17 @@ func compileDomainFitting(
 		// remainder, and persists it as the last-good of this generation; the
 		// re-list then brings the field and the skew. That bundle is the guess
 		// this refusal exists to prevent, so it does not serve either.
+		outcome.LastGoodLost = fmt.Sprintf(
+			"last-good generation %d was saved from a read that did not carry every field", good.GoodGeneration)
 		return outcome, snapshot, Bundle{}
 	}
 
 	fallback, fallbackProblems := enginecompile.Compile(namespace, domain, convert.Policy(&good.GoodSpec))
-	if blockingError(fallbackProblems) != nil {
+	if err := blockingError(fallbackProblems); err != nil {
 		// A persisted spec that no longer compiles means the component's own
 		// rules changed under it. There is nothing left to fall back to.
+		outcome.LastGoodLost = fmt.Sprintf(
+			"last-good generation %d does not compile with this operator build: %v", good.GoodGeneration, err)
 		return outcome, snapshot, Bundle{}
 	}
 	outcome.ActiveGeneration = good.GoodGeneration

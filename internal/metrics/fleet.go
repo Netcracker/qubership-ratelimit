@@ -55,6 +55,15 @@ func PublishFleet(domain string, sample FleetSample) {
 	fleetSample[domain] = sample
 }
 
+// PublishedFleet is the sample last published for domain, and whether there
+// is one.
+func PublishedFleet(domain string) (FleetSample, bool) {
+	fleetMu.RLock()
+	defer fleetMu.RUnlock()
+	sample, ok := fleetSample[domain]
+	return sample, ok
+}
+
 // DropFleet forgets a domain. Without it the series of a deleted policy would
 // keep being scraped from this pod for as long as it held the Lease,
 // and an alert on a stalled domain would fire forever on an object nobody can

@@ -160,7 +160,7 @@ does:
 | the Service has no ready endpoint                            | False   | False     | `NoReplicas`   |
 | a replica lags past the threshold: broken informer, or skew  | False   | True      | `ReplicaStale` |
 | the latest generation does not compile, last-good is running | False   | True      | `NotCompiled`  |
-| the operator could not observe the replicas at all           | Unknown | False     | `ProbeFailed`  |
+| the operator could not observe the replicas at all           | Unknown | Unknown   | `ProbeFailed`  |
 
 For Argo CD: `Stalled: True` is Degraded, `Ready: True` is Healthy, everything else is Progressing. A sync wave closes
 only once every pod enforces the rules.
@@ -207,7 +207,8 @@ same pair in every namespace.
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
 `MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the
 way the series are: the service chart alerts on the data plane (`RatelimitUnknownDomain`, `RatelimitStoreErrors`,
-`RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`) and the
+`RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`,
+`RatelimitConfigurationAbsent`) and the
 operator chart on the policy status and the fleet (`RatelimitStalled`, `RatelimitNotReadyLong`,
 `RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`, `RatelimitConfigWriteErrors`,
 `RatelimitNoOperatorLeader`). Every expression is scoped to the release namespace. The

@@ -29,6 +29,7 @@ var alertsOf = map[string][]string{
 		"RatelimitDecisionLatencyHigh",
 		"RatelimitKeyDeclaredNotExtracted",
 		"RatelimitDomainBudgetNearLimit",
+		"RatelimitConfigurationAbsent",
 	},
 	operatorChart: {
 		"RatelimitStalled",
@@ -213,6 +214,7 @@ func TestCharts_refuseAlertValuesThatBreakTheRules(t *testing.T) {
 		{serviceChart, "alerts.latencyBudgetSeconds=abc"},
 		{serviceChart, "alerts.keyNotExtractedWindow=0m"},
 		{serviceChart, "alerts.storeErrorsFor=abc"},
+		{serviceChart, "alerts.configAbsentFor=5"},
 		{operatorChart, "alerts.stalledFor=0s"},
 		{operatorChart, "alerts.configWriteErrorsWindow=0m"},
 		{operatorChart, "alerts.checksStoppedWindow=10"},

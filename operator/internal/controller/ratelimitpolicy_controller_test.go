@@ -22,6 +22,7 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/applied"
 	ratelimitv1 "github.com/netcracker/qubership-ratelimit/api/v1"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
@@ -285,10 +286,33 @@ func TestReconcile_aFleetThatCannotBeObservedIsUnknown(t *testing.T) {
 	assert.Equal(t, ratelimitv1.ReasonProbeFailed, ready.Reason)
 
 	stalled := condition(t, stored.Status.Conditions, ratelimitv1.ConditionStalled)
-	assert.Equal(t, metav1.ConditionFalse, stalled.Status,
-		"a leader that cannot see the fleet has not established that anything is stuck")
+	assert.Equal(t, metav1.ConditionUnknown, stalled.Status,
+		"a leader that cannot see the fleet knows neither that the domain is stuck nor that it is not")
+	assert.Equal(t, ratelimitv1.ReasonProbeFailed, stalled.Reason)
 	assert.Nil(t, stored.Status.Replicas.LastCheckTime,
 		"a failed probe leaves the previous observation rather than inventing one")
+}
+
+// A domain that was stuck stays stuck in ratelimit_policy_stalled while the
+// fleet cannot be observed, across more than one failed probe, so the alert on
+// it does not clear. The condition used to turn False/Progressing on a failed
+// probe, and the series with it.
+func TestReconcile_anUnobservableFleetKeepsTheLastStalledSample(t *testing.T) {
+	probe := &stubProbe{err: errors.New("the EndpointSlice is unavailable")}
+	reconciler, _ := newReconciler(t, probe, testPolicy(1))
+	domain := testPolicy(1).Spec.Domain
+	metrics.PublishFleet(domain, metrics.FleetSample{Total: 3, Applied: 2, Stalled: true,
+		Reason: ratelimitv1.ReasonReplicaStale})
+	t.Cleanup(func() { metrics.DropFleet(domain) })
+
+	for range 2 {
+		_, err := reconciler.Reconcile(context.Background(), testRequest())
+		require.NoError(t, err)
+		sample, ok := metrics.PublishedFleet(domain)
+		require.True(t, ok)
+		assert.True(t, sample.Stalled, "an unobservable fleet cleared the stalled series")
+		assert.Equal(t, ratelimitv1.ReasonReplicaStale, sample.Reason)
+	}
 }
 
 // TestReconcile_withoutAProbeTheFleetIsUnobserved pins the default: a
@@ -388,6 +412,57 @@ func TestTruncateMessage_staysWithinWhatTheAPIServerAccepts(t *testing.T) {
 	assert.Equal(t, "short", truncateMessage("short"))
 }
 
+// An unprotected domain's message says why its last-good generation is gone
+// when it had one, and nothing more when it never had one.
+func TestNotCompiledMessage_namesALostLastGood(t *testing.T) {
+	lost := policy.Outcome{Generation: 3, Err: errors.New("1 blocking problem"),
+		LastGoodLost: "last-good generation 2 does not compile with this operator build: 1 blocking problem (InvalidWindow)"}
+	assert.Equal(t, policy.ErrNoGeneration.Error()+"; "+lost.LastGoodLost, notCompiledMessage(lost))
+
+	never := policy.Outcome{Generation: 1, Err: errors.New("1 blocking problem")}
+	assert.Equal(t, policy.ErrNoGeneration.Error(), notCompiledMessage(never))
+}
+
+// The view the policy series are published from splits the problems of the
+// latest generation by severity: CaptureShadowsMappedKey counts as
+// informational and every other reason as blocking. It also carries the
+// generation lag and the reason Ready is not true.
+func TestPolicyView_splitsTheProblemsBySeverity(t *testing.T) {
+	object := testPolicy(5)
+	outcome := policy.Outcome{Generation: 5, ActiveGeneration: 3, Err: errors.New("2 blocking problems"),
+		Problems: []ratelimitv1.RuleProblem{
+			{Reason: ratelimitv1.ProblemCaptureShadowsMappedKey},
+			{Reason: ratelimitv1.ProblemUnresolvedKeyReference},
+			{Reason: ratelimitv1.ProblemInvalidWindow},
+			{Reason: ratelimitv1.ProblemCaptureShadowsMappedKey},
+		}}
+	judged := fleetStatus{ready: metav1.ConditionFalse, readyReason: ratelimitv1.ReasonNotCompiled}
+
+	view := policyView(object, outcome, judged)
+	assert.Equal(t, 2, view.BlockingProblems)
+	assert.Equal(t, 2, view.InfoProblems)
+	assert.Equal(t, int64(2), view.GenerationLag)
+	assert.True(t, view.Enforced, "generation 3 keeps running")
+	assert.False(t, view.Ready)
+	assert.Equal(t, ratelimitv1.ReasonNotCompiled, view.Reason)
+
+	// Informational problems alone leave the generation enforced and Ready.
+	outcome = policy.Outcome{Generation: 5, ActiveGeneration: 5,
+		Problems: []ratelimitv1.RuleProblem{{Reason: ratelimitv1.ProblemCaptureShadowsMappedKey}}}
+	judged = fleetStatus{ready: metav1.ConditionTrue, readyReason: ratelimitv1.ReasonAllReplicas}
+	view = policyView(object, outcome, judged)
+	assert.Zero(t, view.BlockingProblems)
+	assert.Equal(t, 1, view.InfoProblems)
+	assert.Zero(t, view.GenerationLag)
+	assert.True(t, view.Ready)
+	assert.Empty(t, view.Reason, "a ready policy carries no reason")
+
+	// Nothing enforced: the lag is the whole generation.
+	view = policyView(object, policy.Outcome{Generation: 5, Err: errors.New("x")}, fleetStatus{})
+	assert.False(t, view.Enforced)
+	assert.Equal(t, int64(5), view.GenerationLag)
+}
+
 // TestJudge_walksTheReadyTable pins the whole condition table in one place: it
 // is the contract Argo CD and the alert rules read.
 func TestJudge_walksTheReadyTable(t *testing.T) {
@@ -447,7 +522,7 @@ func TestJudge_walksTheReadyTable(t *testing.T) {
 			name:    "the fleet could not be probed",
 			outcome: compiled, probeErr: errors.New("unavailable"),
 			ready: metav1.ConditionUnknown, readyReason: ratelimitv1.ReasonProbeFailed,
-			stalled: metav1.ConditionFalse, stalledReason: ratelimitv1.ReasonProgressing,
+			stalled: metav1.ConditionUnknown, stalledReason: ratelimitv1.ReasonProbeFailed,
 		},
 		{
 			name:    "a generation that does not compile outranks an unobservable fleet",

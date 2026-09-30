@@ -181,6 +181,13 @@ alerts:
   # room left when it does. 104 is 80 percent of the budget.
   domainBudgetWarnAt: 104
 
+  # RatelimitConfigurationAbsent: a replica's mounted directory holds no
+  # manifest, so the operator's ConfigMap is gone: uninstalled, pruned, or not
+  # yet written. The replica keeps what it applied and no policy change
+  # reaches it. Held for configAbsentFor, past the kubelet's projection of a
+  # recreated ConfigMap.
+  configAbsentFor: 5m
+
 # The gateway whose identity the management AuthorizationPolicy allows by
 # default. The filters on the gateways are the operator chart's; this chart
 # reads the private gateway's name and nothing of the public one.
