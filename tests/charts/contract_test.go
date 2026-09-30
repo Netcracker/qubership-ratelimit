@@ -296,6 +296,38 @@ func TestCharts_refuseABaselineOriginOfTheirOwnNamespace(t *testing.T) {
 	}
 }
 
+// Both Deployments spread their pods the way the platform's other services
+// do: one constraint on CLOUD_TOPOLOGY_KEY, the node by default, or one per
+// entry of CLOUD_TOPOLOGIES, each selecting the Deployment's own pods.
+func TestCharts_spreadTheirPodsOverTheTopology(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		deployment := only(t, render(t, chart, "biz"), "Deployment")
+		spread := deployment.at("spec", "template", "spec", "topologySpreadConstraints").list()
+		require.Len(t, spread, 1, chart)
+		assert.Equal(t, "kubernetes.io/hostname", spread[0].at("topologyKey").str2(), chart)
+		assert.EqualValues(t, 1, spread[0].at("maxSkew").v, chart)
+		assert.Equal(t, "ScheduleAnyway", spread[0].at("whenUnsatisfiable").str2(), chart)
+		assert.Equal(t, deployment.at("spec", "selector", "matchLabels").v,
+			spread[0].at("labelSelector", "matchLabels").v, "%s spreads over pods it does not own", chart)
+
+		deployment = only(t, render(t, chart, "biz",
+			"--set", "CLOUD_TOPOLOGIES[0].topologyKey=topology.kubernetes.io/zone",
+			"--set", "CLOUD_TOPOLOGIES[1].topologyKey=kubernetes.io/hostname",
+			"--set", "CLOUD_TOPOLOGIES[1].maxSkew=2",
+			"--set", "CLOUD_TOPOLOGIES[1].whenUnsatisfiable=DoNotSchedule"), "Deployment")
+		spread = deployment.at("spec", "template", "spec", "topologySpreadConstraints").list()
+		require.Len(t, spread, 2, chart)
+		assert.Equal(t, "topology.kubernetes.io/zone", spread[0].at("topologyKey").str2(), chart)
+		assert.Equal(t, "ScheduleAnyway", spread[0].at("whenUnsatisfiable").str2(), chart)
+		assert.EqualValues(t, 2, spread[1].at("maxSkew").v, chart)
+		assert.Equal(t, "DoNotSchedule", spread[1].at("whenUnsatisfiable").str2(), chart)
+
+		_, err := renderErr(chart, "biz", "--set", "CLOUD_TOPOLOGIES[0].topologyKey=x",
+			"--set", "CLOUD_TOPOLOGIES[0].whenUnsatisfiable=Sometimes")
+		assert.Error(t, err, "%s accepts an unknown whenUnsatisfiable", chart)
+	}
+}
+
 // The service chart renders nothing in a satellite, whatever the values say.
 func TestServiceChart_rendersNothingInASatellite(t *testing.T) {
 	objects := render(t, serviceChart, "sat", "--set", "BASELINE_ORIGIN=base",

@@ -229,6 +229,43 @@
       "type": "object",
       "title": "Affinity"
     },
+    "CLOUD_TOPOLOGY_KEY": {
+      "type": "string",
+      "title": "Topology key",
+      "minLength": 1,
+      "default": "kubernetes.io/hostname",
+      "description": "Platform parameter. The node label the pods spread over when CLOUD_TOPOLOGIES is not set."
+    },
+    "CLOUD_TOPOLOGIES": {
+      "type": "array",
+      "title": "Topologies",
+      "description": "Platform parameter. One topology spread constraint per entry; it replaces CLOUD_TOPOLOGY_KEY.",
+      "items": {
+        "type": "object",
+        "required": [
+          "topologyKey"
+        ],
+        "properties": {
+          "topologyKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxSkew": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "whenUnsatisfiable": {
+            "type": "string",
+            "enum": [
+              "ScheduleAnyway",
+              "DoNotSchedule"
+            ],
+            "default": "ScheduleAnyway"
+          }
+        }
+      }
+    },
     "REPLICAS": {
       "$id": "#/properties/REPLICAS",
       "$ref": "#/definitions/integerOrString",

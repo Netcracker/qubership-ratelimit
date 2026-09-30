@@ -122,6 +122,8 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      topologySpreadConstraints:
+        {{- include "ratelimit.topologySpreadConstraints" . | trim | nindent 8 }}
       # Long enough for the manager to hand the lease over on SIGTERM before
       # the kubelet sends SIGKILL.
       terminationGracePeriodSeconds: 30

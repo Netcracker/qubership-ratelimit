@@ -209,3 +209,5 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname

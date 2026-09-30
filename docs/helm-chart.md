@@ -197,6 +197,9 @@ gateways:                            # EnvoyFilter.yaml and validateDomains: two
 
 serviceAccount: { create: true, name: "" }   # ServiceAccount.yaml, RoleBinding.yaml, Deployment.yaml
 podAnnotations: {}                   # Deployment.yaml; plus nodeSelector / tolerations / affinity
+CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname   # Deployment.yaml: topologySpreadConstraints, maxSkew 1, ScheduleAnyway;
+                                     #   CLOUD_TOPOLOGIES, the platform parameter, replaces it with one constraint
+                                     #   per {topologyKey, maxSkew, whenUnsatisfiable} entry
 ```
 
 The service chart, `helm-templates/ratelimit-service/values.yaml`:
@@ -264,6 +267,9 @@ BASELINE_CONTROLLER: ""              #   parameters": BASELINE_ORIGIN empty = th
 
 serviceAccount: { create: true, name: "" }   # ServiceAccount.yaml, Deployment.yaml; no token is mounted
 podAnnotations: {}                   # Deployment.yaml; plus nodeSelector / tolerations / affinity
+CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname   # Deployment.yaml: topologySpreadConstraints, maxSkew 1, ScheduleAnyway;
+                                     #   CLOUD_TOPOLOGIES, the platform parameter, replaces it with one constraint
+                                     #   per {topologyKey, maxSkew, whenUnsatisfiable} entry
 ```
 
 The operator release creates the EnvoyFilters in its own namespace, the same one as the Gateway (`targetRefs` resolves

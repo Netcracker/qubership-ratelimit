@@ -98,3 +98,24 @@ for the chart's DatabaseSecretClaim, mounted by the Deployment.
 {{- define "ratelimit.redisSecretName" -}}
 {{- printf "%s-redis" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
+
+{{/*
+The pod's spread over the cluster, the way the platform's other services
+spread theirs: one constraint per entry of CLOUD_TOPOLOGIES, the platform
+parameter, and without it one on CLOUD_TOPOLOGY_KEY, the node by default. An
+entry's maxSkew defaults to 1 and its whenUnsatisfiable to ScheduleAnyway, so
+a cluster that cannot spread the replicas still runs them. The selector is
+the pod's own selector labels.
+*/}}
+{{- define "ratelimit.topologySpreadConstraints" -}}
+{{- $root := . -}}
+{{- $topologies := .Values.CLOUD_TOPOLOGIES | default (list (dict "topologyKey" .Values.CLOUD_TOPOLOGY_KEY)) -}}
+{{- range $topologies }}
+- topologyKey: {{ .topologyKey | quote }}
+  maxSkew: {{ .maxSkew | default 1 }}
+  whenUnsatisfiable: {{ .whenUnsatisfiable | default "ScheduleAnyway" }}
+  labelSelector:
+    matchLabels:
+      {{- include "ratelimit.selectorLabels" $root | nindent 6 }}
+{{- end }}
+{{- end -}}

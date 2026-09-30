@@ -189,6 +189,8 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      topologySpreadConstraints:
+        {{- include "ratelimit.topologySpreadConstraints" . | trim | nindent 8 }}
       volumes:
         # The configuration the operator writes: the manifest and one
         # compressed payload per domain, mounted as a whole directory and
