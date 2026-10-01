@@ -210,7 +210,7 @@ func (a *API) sweep(
 		a.Log.ErrorC(octx, "failed to record the outcome of a bulk reset error=%v", err)
 		// The record stays accepted, and recovery runs on the lease: a retry
 		// polls while it lives and finalizes once it expires.
-		return storeDown("the counter store did not answer while recording the outcome")
+		return storeDown(outcomeNotRecorded)
 	}
 	return writeJSON(c, result)
 }
@@ -219,6 +219,10 @@ func (a *API) sweep(
 // inside the management listener's drain, so a sweep that shutdown interrupts
 // still records what it did before the process exits.
 const outcomeTimeout = 5 * time.Second
+
+// outcomeNotRecorded is the detail of the answer to a sweep whose outcome the
+// store did not take.
+const outcomeNotRecorded = "the counter store did not answer while recording the outcome"
 
 // outcomeContext is the context a sweep records its outcome under: ctx's
 // values without its cancellation, bounded by outcomeTimeout. The walk runs
@@ -254,7 +258,7 @@ func (a *API) recordFailure(
 		record, err := a.Records.Lookup(ctx, keys)
 		if err != nil || !record.Found {
 			a.Log.ErrorC(ctx, "failed to read back the progress of a failed bulk reset error=%v", err)
-			return storeDown("the counter store did not answer while recording the outcome")
+			return storeDown(outcomeNotRecorded)
 		}
 		progress = record.Progress
 	}
@@ -285,7 +289,7 @@ func (a *API) recordFailure(
 		// The one error a walker cannot record is the store itself failing. The
 		// record stays accepted, and the lease carries the recovery.
 		a.Log.ErrorC(ctx, "failed to record a failed bulk reset error=%v", err)
-		return storeDown("the counter store did not answer while recording the outcome")
+		return storeDown(outcomeNotRecorded)
 	}
 	return failure
 }
