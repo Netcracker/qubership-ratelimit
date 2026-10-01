@@ -388,7 +388,6 @@ func TestShouldRateLimit_chargesTheDescriptorsHitsAddend(t *testing.T) {
 	}{
 		"the descriptor's cost":                    {descriptor: wrapperspb.UInt64(5), remaining: "95"},
 		"the descriptor's cost over the request's": {request: 2, descriptor: wrapperspb.UInt64(5), remaining: "95"},
-		"zero is the protocol default of one":      {request: 7, descriptor: wrapperspb.UInt64(0), remaining: "99"},
 		"no descriptor cost keeps the request's":   {request: 7, remaining: "93"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -406,6 +405,66 @@ func TestShouldRateLimit_chargesTheDescriptorsHitsAddend(t *testing.T) {
 			assert.Equal(t, tc.remaining, headerMap(resp)["x-ratelimit-remaining"])
 		})
 	}
+}
+
+// A descriptor whose hits_addend is an explicit zero is checked without
+// charging, as the protocol's override reads: the field can be unset, so a
+// zero is the caller's choice and not the default. It used to be charged as
+// one, under the name of the protocol default.
+func TestShouldRateLimit_anExplicitZeroDescriptorCostChargesNothing(t *testing.T) {
+	const domain = "gateway.public"
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
+		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
+			Rates: []model.Rate{{Requests: 2, Period: time.Minute}}}}}}}))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log)
+	zero := func() *envoyratelimit.RateLimitRequest {
+		req := request(domain, map[string]string{"path": "/api"})
+		req.HitsAddend = 7
+		req.Descriptors[0].HitsAddend = wrapperspb.UInt64(0)
+		return req
+	}
+
+	for range 3 {
+		resp, err := server.ShouldRateLimit(context.Background(), zero())
+		require.NoError(t, err)
+		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
+	}
+	for i := range 2 {
+		resp, err := server.ShouldRateLimit(context.Background(), request(domain, map[string]string{"path": "/api"}))
+		require.NoError(t, err)
+		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
+			"request %d was refused: a zero-cost check charged the bucket", i+1)
+	}
+	resp, err := server.ShouldRateLimit(context.Background(), zero())
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode(),
+		"a zero-cost check of a spent bucket still reports the refusal")
+}
+
+// The bound on a descriptor cost is the number docs/limits.md documents.
+func TestShouldRateLimit_theDescriptorCostBoundIsOneBillion(t *testing.T) {
+	const domain = "gateway.public"
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
+		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
+			Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
+	log, logged := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	req := request(domain, map[string]string{"path": "/api"})
+	req.Descriptors[0].HitsAddend = wrapperspb.UInt64(1_000_000_000)
+	_, err := server.ShouldRateLimit(context.Background(), req)
+	require.NoError(t, err)
+	assert.NotContains(t, logged(), "over the limit of", "a cost at the bound was refused as a violation")
+
+	req = request(domain, map[string]string{"path": "/api"})
+	req.Descriptors[0].HitsAddend = wrapperspb.UInt64(1_000_000_001)
+	resp, err := server.ShouldRateLimit(context.Background(), req)
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, logged(), "over the limit of 1000000000")
 }
 
 // A cost the engine cannot charge is refused as a protocol violation, and

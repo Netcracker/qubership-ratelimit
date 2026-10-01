@@ -1,7 +1,8 @@
 // Package applied is the shape of what a service replica publishes on
 // contract.AppliedPath and what the operator reads from every ready replica:
 // the generation it enforces per domain, the manifest format versions it
-// reads, and a refusal of the manifest it was last given, with its reason.
+// reads, a refusal of the manifest it was last given, with its reason, and
+// whether the mounted configuration has disappeared.
 //
 // It lives under api/ because the two sides land in different binaries after
 // the split, and the operator turns a refusal into a status reason of its

@@ -167,14 +167,21 @@ tests:
                 what they applied last. Check the operator Deployment and its scrape.
 
   # A fleet that is gone fires within minutes; one that is only replaced by a
-  # rollout comes back inside the hold and does not.
+  # rollout comes back inside the hold and does not, and neither does a fleet
+  # the operator never observed, which also counts 0 replicas.
   - interval: 1m
-    name: a domain without a ready replica beside one whose rollout recovers
+    name: a domain without a ready replica beside one whose rollout recovers and one never observed
     input_series:
-      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.private", state="total"}'
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.private", reason="NoReplicas"}'
         values: "0x10"
-      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", state="total"}'
-        values: "0x3 1x10"
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", reason="NoReplicas"}'
+        values: "0x3"
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", reason=""}'
+        values: "_x3 1x7"
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.internal", reason="ProbeFailed"}'
+        values: "0x10"
+      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.internal", state="total"}'
+        values: "0x10"
     alert_rule_test:
       - eval_time: 4m
         alertname: RatelimitNoReplicas

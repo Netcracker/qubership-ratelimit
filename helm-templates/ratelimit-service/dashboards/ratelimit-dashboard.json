@@ -348,7 +348,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "count(min by (domain) (ratelimit_policy_ready{cluster=~\"$cluster\", namespace=~\"$namespace\"}) == 0) or 0 * max(ratelimit_leader{cluster=~\"$cluster\", namespace=~\"$namespace\"})",
+          "expr": "count(min by (domain) (ratelimit_policy_ready{cluster=~\"$cluster\", namespace=~\"$namespace\"}) == 0) or 0 * max(ratelimit_leader{cluster=~\"$cluster\", namespace=~\"$namespace\"} == 1)",
           "legendFormat": ""
         }
       ]

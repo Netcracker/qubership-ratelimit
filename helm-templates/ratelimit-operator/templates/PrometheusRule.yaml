@@ -57,7 +57,9 @@ spec:
               policy's Ready condition and on the ratelimit_policy_ready series.
 
         - alert: RatelimitNoReplicas
-          expr: max by (namespace, domain) (ratelimit_policy_replicas{ {{- $sel -}} , state="total"}) == 0
+          # The verdict, not the count: a fleet the operator never observed
+          # also counts 0 replicas, and its reason is ProbeFailed.
+          expr: max by (namespace, domain) (ratelimit_policy_ready{ {{- $sel -}} , reason="NoReplicas"}) == 0
           for: {{ .Values.alerts.noReplicasFor }}
           labels:
             severity: critical

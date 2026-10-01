@@ -120,8 +120,10 @@ only the keys its templates read:
 | `MONITORING_ENABLED` | both | enables the PodMonitor and the PrometheusRule of each chart and the GrafanaDashboard of the service chart; false by default, since all three need the CRDs of their operators |
 | `ISTIO_PUBLIC_GATEWAY_NAME` | the operator chart | the name of the public Gateway object the filter targets; it must match the parameters of qubership-core-mesh-config, which creates the Gateways |
 | `ISTIO_PRIVATE_GATEWAY_NAME` | both | the name of the private Gateway object: the filter target in the operator chart, the default principal of the management AuthorizationPolicy in the service chart; it must match qubership-core-mesh-config the same way |
-| `BASELINE_ORIGIN` | both | the baseline namespace, set only in a satellite; absent or empty renders the whole stack of each chart, non-empty renders the filters only from the operator chart, targeting `ratelimit.<BASELINE_ORIGIN>.svc:9000`, and nothing from the service chart |
+| `BASELINE_ORIGIN` | both | the baseline namespace, set only in a satellite; absent or empty renders the whole stack of each chart, non-empty renders the filters only from the operator chart, targeting `ratelimit.<BASELINE_ORIGIN>.svc:9000`, and nothing from the service chart; a value equal to the release's own namespace fails the render of both charts with `BASELINE_ORIGIN "<ns>" is this release's own namespace` |
 | `BASELINE_CONTROLLER` | both | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the operator chart; the deployer leaves it empty on this platform |
+| `CLOUD_TOPOLOGY_KEY` | both | the node label each Deployment spreads its pods over, `kubernetes.io/hostname` by default: one topology spread constraint with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`, selecting the Deployment's own pods |
+| `CLOUD_TOPOLOGIES` | both | the platform's list of topologies; when set, it replaces `CLOUD_TOPOLOGY_KEY` with one constraint per entry, each with its `topologyKey` and optional `maxSkew` and `whenUnsatisfiable` |
 
 The resource parameters are required in the schema of each chart: the four sizes in the operator chart, the five with
 `REPLICAS` in the service chart. An installation without `-f resource-profiles/<profile>.yaml` fails with a clear error
@@ -531,7 +533,7 @@ exclude.
 | `ratelimit_check_duration_seconds` | `domain` | decision histogram; the bucket bounds are laid on the 10ms budget and the filter timeout |
 | `ratelimit_decisions_total` | `domain`, `rule` (limit block/rule), `outcome: ok\|over_limit\|shadow_over_limit` | per-rule outcomes |
 | `ratelimit_near_limit_total` | `domain`, `rule` | allowed requests within the margin of the window's capacity, the burst of a GCRA window or the requests of a fixed one (the threshold is `metrics.nearLimitRatio`); shadow is excluded |
-| `ratelimit_refusals_total` | `domain`, `cause: too_many_buckets` | hard refusals for violations, not limits |
+| `ratelimit_refusals_total` | `domain`, `cause: too_many_buckets\|too_many_descriptors\|invalid_cost` | hard refusals for configuration or protocol violations, not limits |
 | `ratelimit_unknown_domain_checks_total` | none | deliberately without a domain label: the caller controls the name; the name itself is in the sampled log |
 | `ratelimit_unmatched_checks_total` | `domain` | checks that applied no rule |
 | `ratelimit_extraction_skips_total` | `domain`, `key`, `reason: decode_failed\|bad_type\|too_long\|too_many_items` | extraction anomalies; `domain` because mappings live on the policy, and two domains of one namespace may declare the same key |
@@ -547,7 +549,7 @@ exclude.
 | `ratelimit_build_info` | `component: operator\|service`, `version` | the version of the binary serving this scrape, a const gauge always at 1; the chart passes the image tag as `SERVICE_VERSION` / `OPERATOR_VERSION`, and the operator stamps the same value into the manifest as `operatorVersion` |
 | `ratelimit_policy_ready` | `domain`, `reason` | 0/1 of the strict `Ready`; status gauges are const metrics from the operator's scrape, there are never stale series |
 | `ratelimit_policy_enforced` | `domain` | 1 while any generation of the policy is enforced, 0 while nothing is (`NotCompiled` on a first generation, `NoReplicas` aside); from the operator's judgement, like the series below |
-| `ratelimit_policy_stalled` | `domain`, `reason: Progressing\|ReplicaStale\|NotCompiled\|ConfigMapTooLarge\|ReplicaFormatUnsupported` | 0/1 of the `Stalled` condition; `Progressing` is the reason while it reads 0, so a domain keeps one label set |
+| `ratelimit_policy_stalled` | `domain`, `reason: Progressing\|ReplicaStale\|NotCompiled\|ConfigMapTooLarge\|ReplicaFormatUnsupported` | 0/1 of the `Stalled` condition; `Progressing` is the reason while it reads 0, so a domain keeps one label set; while `Stalled` is `Unknown` the series keeps its last value and reason |
 | `ratelimit_policy_replicas` | `domain`, `state: total\|applied` | the denominator and the numerator of `Ready` |
 | `ratelimit_policy_generation_lag` | `domain` | how far activeGeneration lags behind the latest |
 | `ratelimit_policy_rule_problems` | `domain`, `severity: blocking\|info` | every problem of the latest generation by weight, past the 64 that `ruleProblems` lists too; alert on `blocking` |
@@ -637,7 +639,7 @@ The operator chart, group `ratelimit-operator`:
 | --- | --- | --- |
 | `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1` for `stalledFor`, with the reason in the label: `ReplicaStale`, `ReplicaFormatUnsupported`, or `ConfigMapTooLarge` |
 | `RatelimitNotReadyLong` | warning | `ratelimit_policy_ready == 0` for `notReadyFor`: the latest generation is not the one enforced |
-| `RatelimitNoReplicas` | critical | `ratelimit_policy_replicas{state="total"} == 0` for `noReplicasFor`: no ready service replica, so the gateway's failure mode decides every check of the domain |
+| `RatelimitNoReplicas` | critical | `ratelimit_policy_ready{reason="NoReplicas"} == 0` for `noReplicasFor`: the operator observed no ready service replica, so the gateway's failure mode decides every check of the domain; a fleet it could not observe is `ProbeFailed` and does not fire |
 | `RatelimitChecksStopped` | warning | `ratelimit_policy_replicas{state="applied"} > 0` while the domain's `ratelimit_checks_total` has no rate over `checksStoppedWindow`, for `checksStoppedFor`: the filter is off, removed, or on another domain, and the traffic passes unlimited with every status Ready; an idle gateway fires too |
 | `RatelimitRuleProblems` | warning | `ratelimit_policy_rule_problems{severity="blocking"} > 0` for `ruleProblemsFor`: the latest generation is not enforced and last-good runs instead |
 | `RatelimitConfigWriteErrors` | critical | `increase(ratelimit_config_write_errors_total[configWriteErrorsWindow]) > 0` by `reason`, with no hold: policy changes stop reaching the service |

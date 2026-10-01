@@ -246,6 +246,18 @@ func (a *API) recordFailure(
 	cause error,
 ) error {
 	progress := walker.snapshotProgress()
+	if !errors.Is(cause, errDeadline) {
+		// The walk failed inside a store call, and the walker counts a batch
+		// before the store runs it, so its count can name deletions that never
+		// happened. The record holds the progress the last batch committed
+		// together with its deletions, which is what the store actually did.
+		record, err := a.Records.Lookup(ctx, keys)
+		if err != nil || !record.Found {
+			a.Log.ErrorC(ctx, "failed to read back the progress of a failed bulk reset error=%v", err)
+			return storeDown("the counter store did not answer while recording the outcome")
+		}
+		progress = record.Progress
+	}
 	partial := partialOf(progress, command.DryRun)
 
 	failure := interrupted("the command was interrupted after acceptance", partial)

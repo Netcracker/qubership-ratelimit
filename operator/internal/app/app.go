@@ -119,7 +119,8 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 	}
 	cancel()
 
-	writer := &config.Reconciler{Client: mgr.GetClient(), Namespace: namespace, Store: store}
+	writer := &config.Reconciler{Client: mgr.GetClient(), Namespace: namespace, Store: store,
+		Events: mgr.GetEventRecorder(ManagedBy)}
 	if err := writer.SetupWithManager(mgr); err != nil {
 		return nil, fmt.Errorf("set up the configuration writer: %w", err)
 	}

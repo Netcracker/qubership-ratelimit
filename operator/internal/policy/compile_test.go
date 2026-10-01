@@ -184,8 +184,7 @@ func TestCompile_theLastGoodGenerationKeepsServing(t *testing.T) {
 
 // A saved last-good spec this build no longer compiles leaves the domain
 // unprotected, and the outcome says so with the reason, so the status tells
-// it apart from a policy that never compiled. The reason used to be computed
-// and dropped.
+// it apart from a policy that never compiled.
 func TestCompile_aLastGoodThisBuildCannotCompileSaysSo(t *testing.T) {
 	good := policyObject(v1.LimitBlock{Name: "a", Rules: []v1.Rule{simpleRule("total")}})
 	saved := *good.Spec.DeepCopy()
@@ -481,6 +480,8 @@ func TestCompile_anUnknownFieldDoesNotFallBackToItsOwnGeneration(t *testing.T) {
 	outcome := result.Policies[key()]
 	assert.False(t, outcome.Compiled())
 	assert.Zero(t, outcome.ActiveGeneration, "a bundle of the skewed generation itself came from a pruned read")
+	assert.Equal(t, "last-good generation 2 was saved from a read that did not carry every field",
+		outcome.LastGoodLost, "the status says why the saved generation does not serve")
 	assert.Zero(t, outcome.Rules)
 	assert.Empty(t, result.Snapshots[testDomain].Blocks)
 	assert.Empty(t, result.State[testDomain].UID, "the pruned bundle is not carried forward")

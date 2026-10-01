@@ -295,8 +295,7 @@ func TestReconcile_aFleetThatCannotBeObservedIsUnknown(t *testing.T) {
 
 // A domain that was stuck stays stuck in ratelimit_policy_stalled while the
 // fleet cannot be observed, across more than one failed probe, so the alert on
-// it does not clear. The condition used to turn False/Progressing on a failed
-// probe, and the series with it.
+// it does not clear.
 func TestReconcile_anUnobservableFleetKeepsTheLastStalledSample(t *testing.T) {
 	probe := &stubProbe{err: errors.New("the EndpointSlice is unavailable")}
 	reconciler, _ := newReconciler(t, probe, testPolicy(1))
@@ -313,6 +312,24 @@ func TestReconcile_anUnobservableFleetKeepsTheLastStalledSample(t *testing.T) {
 		assert.True(t, sample.Stalled, "an unobservable fleet cleared the stalled series")
 		assert.Equal(t, ratelimitv1.ReasonReplicaStale, sample.Reason)
 	}
+}
+
+// A domain whose first probe fails has no sample to keep, and publishes
+// Progressing at 0: a fleet nobody has seen stuck does not raise the alert.
+func TestReconcile_aFirstFailedProbePublishesProgressing(t *testing.T) {
+	probe := &stubProbe{err: errors.New("the EndpointSlice is unavailable")}
+	reconciler, _ := newReconciler(t, probe, testPolicy(1))
+	domain := testPolicy(1).Spec.Domain
+	metrics.DropFleet(domain)
+	t.Cleanup(func() { metrics.DropFleet(domain) })
+
+	_, err := reconciler.Reconcile(context.Background(), testRequest())
+	require.NoError(t, err)
+
+	sample, ok := metrics.PublishedFleet(domain)
+	require.True(t, ok, "the domain's series exists from its first reconcile")
+	assert.False(t, sample.Stalled)
+	assert.Equal(t, ratelimitv1.ReasonProgressing, sample.Reason)
 }
 
 // TestReconcile_withoutAProbeTheFleetIsUnobserved pins the default: a
@@ -421,6 +438,20 @@ func TestNotCompiledMessage_namesALostLastGood(t *testing.T) {
 
 	never := policy.Outcome{Generation: 1, Err: errors.New("1 blocking problem")}
 	assert.Equal(t, policy.ErrNoGeneration.Error(), notCompiledMessage(never))
+}
+
+// A generation that does not fit leaves the domain unprotected the same way,
+// and its message names a lost last-good too.
+func TestTooLargeMessage_namesALostLastGood(t *testing.T) {
+	const tooLarge = "the namespace's configuration would be 1100000 bytes compressed, over the limit of 1048576"
+	const nothing = "generation 3 does not fit the namespace's ConfigMap and nothing is enforced: " + tooLarge
+
+	lost := policy.Outcome{Generation: 3, TooLarge: true, TooLargeReason: tooLarge,
+		LastGoodLost: "last-good generation 2 does not compile with this operator build: 1 blocking problem (InvalidWindow)"}
+	assert.Equal(t, nothing+"; "+lost.LastGoodLost, tooLargeMessage(lost))
+
+	never := policy.Outcome{Generation: 3, TooLarge: true, TooLargeReason: tooLarge}
+	assert.Equal(t, nothing, tooLargeMessage(never))
 }
 
 // The view the policy series are published from splits the problems of the

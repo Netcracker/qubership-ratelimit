@@ -285,7 +285,8 @@ component, enforces that a token is required.
 5. **The verdict**: `OVER_LIMIT` if at least one applied rule (of any block) is exceeded; the `x-ratelimit-*` headers
    come from the strictest matched rule.
 6. **Request cost**: the protocol field `hits_addend` (default 1), a descriptor's own `hits_addend` taking precedence
-   for that descriptor; a cost above the burst capacity produces a deterministic refusal, not a wait.
+   for that descriptor, where an explicit zero checks without charging; a cost above the burst capacity produces a
+   deterministic refusal, not a wait.
 7. **A refusal does not spend quota**, a guarantee of every algorithm: a refused request does not advance the counter
    state. Shadow follows the same logic: a Shadow bucket is charged only when its own verdict is "allow", mirroring
    what enforcement would do; unconditional charging would accumulate unbounded debt and inflate the "would have
@@ -583,8 +584,9 @@ UID):
 but `Ready: False / NotCompiled`, `Stalled: True`, `Accepted: False / CompilationFailed` with a summary `message`, and
 `ruleProblems` with the root causes. If there is no last-good or the UID does not match: `activeGeneration: 0`, the
 domain is empty, `message: 'no generation is enforced: domain is unprotected'`. When a saved last-good exists and is
-not in effect either, the message goes on to say why: this operator build does not compile it, or it was saved from a
-read that did not carry every field.
+not in effect either, because this operator build does not compile it or it was saved from a read that did not carry
+every field, the operator drops it and says why: in a `Warning` event with reason `LastGoodLost` on the policy and in
+its log, and in the `Ready` message until the drop is written.
 
 For Argo CD: by default it does not assess the health of a CR; the platform's Lua check (given in the
 [Helm doc](helm-chart.md)) reads `Ready` and `Stalled`: `Stalled: True` is Degraded, `Ready: True` is Healthy,

@@ -185,11 +185,16 @@ func (s *Server) ShouldRateLimit(
 	}
 	decisions := make([]engine.Decision, 0, len(requests))
 	allowed := true
-	for _, er := range requests {
+	for _, c := range requests {
+		er := c.Request
 		if er.Token != "" {
 			metrics.TokensSeen.WithLabelValues(domain).Inc()
 		}
-		decision, err := eng.Decide(ctx, er)
+		decide := eng.Decide
+		if c.free {
+			decide = eng.Peek
+		}
+		decision, err := decide(ctx, er)
 		if err != nil {
 			if errors.Is(err, engine.ErrTooManyBuckets) {
 				// The bucket-budget backstop reports a configuration
@@ -266,21 +271,27 @@ func (s *Server) ShouldRateLimit(
 // Within a descriptor, path, method, and token feed the built-in keys,
 // request_id stays a log correlation field, and any other entry arrives as a
 // pre-extracted identity key — the direct-consumer form of the protocol. An
-// empty value means absence, mirroring the identity layer. The request's
-// hits_addend is the cost of every decision, and a descriptor's own
-// hits_addend overrides it for that descriptor; zero means the protocol
-// default of one. The descriptor costs are checked by costViolation first.
-func engineRequests(req *envoyratelimit.RateLimitRequest) []engine.Request {
+// empty value means absence, mirroring the identity layer.
+//
+// The request's hits_addend is the cost of every decision, and an unset
+// value, which a uint32 cannot tell from zero, is the protocol default of
+// one. A descriptor's own hits_addend overrides it for that descriptor, and
+// because that field can be unset, a zero there is the caller's choice: the
+// descriptor is checked without charging anything. The descriptor costs are
+// checked by costViolation first.
+func engineRequests(req *envoyratelimit.RateLimitRequest) []check {
 	cost := int64(req.GetHitsAddend())
 	descriptors := req.GetDescriptors()
 	if len(descriptors) == 0 {
-		return []engine.Request{{Cost: cost}}
+		return []check{{Request: engine.Request{Cost: cost}}}
 	}
-	out := make([]engine.Request, 0, len(descriptors))
+	out := make([]check, 0, len(descriptors))
 	for _, descriptor := range descriptors {
 		er := engine.Request{Cost: cost}
+		free := false
 		if addend := descriptor.GetHitsAddend(); addend != nil {
 			er.Cost = int64(addend.GetValue())
+			free = er.Cost == 0
 		}
 		for _, entry := range descriptor.GetEntries() {
 			value := entry.GetValue()
@@ -302,9 +313,16 @@ func engineRequests(req *envoyratelimit.RateLimitRequest) []engine.Request {
 				er.Keys[entry.GetKey()] = append(er.Keys[entry.GetKey()], value)
 			}
 		}
-		out = append(out, er)
+		out = append(out, check{Request: er, free: free})
 	}
 	return out
+}
+
+// check is one descriptor's engine request, and whether it is decided without
+// charging: free is set for a descriptor whose hits_addend is an explicit zero.
+type check struct {
+	engine.Request
+	free bool
 }
 
 // costViolation describes a descriptor cost the engine does not charge, and is

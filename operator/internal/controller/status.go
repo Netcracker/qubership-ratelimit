@@ -235,8 +235,9 @@ func notCompiledMessage(outcome policy.Outcome) string {
 
 // unprotectedMessage adds to message, which reports an unprotected domain, why
 // its saved last-good generation is not in effect either, when there was one.
-// A last-good lost to this build is a reason to roll the operator back; one
-// that never existed is not.
+// The configuration writer drops that generation on its next pass, after
+// which no compile can tell it was there, so the reason shows here until then
+// and stays in the writer's LastGoodLost event and log line.
 func unprotectedMessage(message string, outcome policy.Outcome) string {
 	if outcome.LastGoodLost == "" {
 		return message

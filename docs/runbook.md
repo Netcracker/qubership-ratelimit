@@ -132,8 +132,9 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.metadata.ownerReferences
 ```
 
 `/debug/applied` on the metrics port of a service pod, 8080 by default, reports what the replica applied: the
-generation per domain, the manifest format versions the replica reads, and, after a refused manifest, the refusal with
-its reason. The operator reads the same endpoint once per probe cycle, and the `REPLICAS` column counts what it read.
+generation per domain, the manifest format versions the replica reads, after a refused manifest the refusal with its
+reason, and `"configAbsent": true` while the mounted directory holds no manifest (section 9). The operator reads the
+same endpoint once per probe cycle, and the `REPLICAS` column counts what it read.
 
 ```bash
 kubectl get pods -n "$NS" -l app.kubernetes.io/name=ratelimit-service -o name
@@ -453,8 +454,14 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 `GET /domains` showed `ruleSetVersion 5ff0f5a9e94d` with 12 rules throughout, and the manifest kept generation 1. If
 `activeGeneration` is `0`, the domain has no last-good and enforces nothing; the `Ready` message says
 `no generation is enforced: domain is unprotected`. That is the one case to treat as an incident rather than a review
-comment. When the message goes on with `last-good generation N does not compile with this operator build`, the domain
-lost its last-good to an operator upgrade, and rolling the operator back restores it.
+comment. A domain that lost its last-good to an operator upgrade has a `Warning` event with reason `LastGoodLost`,
+`last-good generation N does not compile with this operator build`, and the same line in the operator's log; the
+`Ready` message carries it only until the configuration writer drops the saved generation. The saved spec is gone
+then, and rolling the operator back does not bring it back: apply a generation that compiles.
+
+```bash
+kubectl get events -n "$NS" --field-selector reason=LastGoodLost
+```
 
 **Act.** Fix the spec at the address and apply it. The compiler judges the whole generation, so fix every listed problem
 in one edit; a second `apply` that fixes one of two does nothing for traffic.
@@ -946,6 +953,18 @@ operator back, it writes the object, the kubelet projects it into the empty volu
 turns Ready: 33 s on the stand with the kubelet at 5 s, a minute or so at the production default. Nothing else is
 needed; the empty volume is `optional: true` by design so that the pod exists before the operator does.
 
+**A replica without its manifest.** Every pod whose mounted directory holds no manifest reports
+`ratelimit_config_absent 1` and `"configAbsent": true` on `/debug/applied`: a fresh pod as above, or a serving one
+whose ConfigMap was deleted under it. A serving pod keeps enforcing the snapshot it applied, and nothing rebuilds it
+until the object returns. The operator writes the object again on its delete; when it does not, the operator is down
+or its writes fail (`ratelimit_config_write_errors_total`). The service chart's `RatelimitConfigurationAbsent` fires
+after `alerts.configAbsentFor`, 5 minutes by default, past the kubelet's projection of a recreated object.
+
+```bash
+curl -s http://127.0.0.1:8080/debug/applied | jq '.configAbsent'   # through the port-forward of section 0
+kubectl get cm -n "$NS" ratelimit-config -o name
+```
+
 ## Appendix: the metrics an operator reads
 
 Each chart ships its own PodMonitor. The RLS, store, and management metrics are scraped from the service pods; the
@@ -966,4 +985,5 @@ controller and probe metrics from the operator pod.
 | `ratelimit_policy_rule_problems{domain, severity}` | operator pod | `blocking` above zero is a rejected edit (sections 3 and 5) |
 | `ratelimit_policy_applied_generation{domain}` | service pods | per pod: the generation each replica enforces (section 4) |
 | `ratelimit_domain_decision_buckets{domain}` | service pods | headroom before `DomainBudgetExceeded`, against 128 |
+| `ratelimit_config_absent` | service pods | `1` while the pod's mounted directory holds no manifest: a pod that has not received one yet, or one that lost it (section 9) |
 | `ratelimit_config_write_errors_total{reason}` | operator pod | the write of `ratelimit-config` failed (`size`, `api`, `other`; section 9); the replicas keep the configuration they mounted and `ReplicaStale` follows in 90 s |
