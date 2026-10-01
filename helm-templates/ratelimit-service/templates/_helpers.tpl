@@ -211,3 +211,15 @@ the pod's own selector labels.
       {{- include "ratelimit.selectorLabels" $root | nindent 6 }}
 {{- end }}
 {{- end -}}
+
+{{/*
+A CPU quantity in millicores: "500m" is 500, "1" is 1000.
+*/}}
+{{- define "ratelimit.millicores" -}}
+{{- $value := toString . -}}
+{{- if hasSuffix "m" $value -}}
+{{- trimSuffix "m" $value -}}
+{{- else -}}
+{{- mulf $value 1000 -}}
+{{- end -}}
+{{- end -}}

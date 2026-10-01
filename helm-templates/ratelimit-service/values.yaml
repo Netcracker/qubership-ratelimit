@@ -30,12 +30,14 @@ DEPLOYMENT_SESSION_ID: ""
 # writable.
 PAAS_PLATFORM: KUBERNETES
 READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
-# The rollout. Empty and ramped_slow_rollout replace one pod at a time and keep
-# the old one until the new one is Ready; recreate and
-# best_effort_controlled_rollout stop the old pods first, and custom_rollout
-# takes DEPLOYMENT_STRATEGY_MAXSURGE and DEPLOYMENT_STRATEGY_MAXUNAVAILABLE,
-# 25% each by default.
-DEPLOYMENT_STRATEGY_TYPE: ""
+# The rollout, DEPLOYMENT_STRATEGY_TYPE, is not set here. Unset and
+# ramped_slow_rollout replace one pod at a time and keep the old one until the
+# new one is Ready; recreate and best_effort_controlled_rollout stop the old
+# pods first, and custom_rollout takes DEPLOYMENT_STRATEGY_MAXSURGE and
+# DEPLOYMENT_STRATEGY_MAXUNAVAILABLE, 25% each by default.
+#
+# The delay before the first liveness probe.
+LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15
 
 # ============== SERVICE ============================
 # REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
@@ -44,9 +46,13 @@ DEPLOYMENT_STRATEGY_TYPE: ""
 # without `-f resource-profiles/<profile>.yaml` fails with a clear message
 # instead of rendering a Deployment with empty resources.
 #
-# Every replica answers rate limit checks from the configuration the operator
-# writes, so scaling REPLICAS out needs no other change. GOMEMLIMIT is derived
-# from MEMORY_LIMIT, so it governs the Go heap and not only the cgroup ceiling.
+# The profile also sets the HPA_* parameters of the HorizontalPodAutoscaler,
+# the platform's autoscaler on CPU: off in dev, between HPA_MIN_REPLICAS and
+# HPA_MAX_REPLICAS in the others. Every replica answers rate limit checks from
+# the configuration the operator writes and counts in the shared store, so
+# scaling out, by REPLICAS or by the autoscaler, needs no other change.
+# GOMEMLIMIT is derived from MEMORY_LIMIT, so it governs the Go heap and not
+# only the cgroup ceiling.
 
 # Passed as LOGGING_LEVEL_ROOT, in lower case: the platform logger resolves
 # its root level from the logging.level.root property, and a LOG_LEVEL in the

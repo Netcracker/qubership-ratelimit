@@ -182,9 +182,11 @@ helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
 
 The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`,
 `dev-ha`, `prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`,
-`MEMORY_LIMIT`, and, for the service, `REPLICAS`. Each `values.schema.json` requires its keys, so an install without
-`-f` fails with `missing properties 'CPU_REQUEST', ...` rather than rendering a Deployment with empty resources. The
-`-ha` and `prod` profiles of the service differ from their siblings only by running two replicas; the operator runs one.
+`MEMORY_LIMIT`, and, for the service, `REPLICAS` and the `HPA_*` parameters of its autoscaler. Each `values.schema.json`
+requires its keys, so an install without `-f` fails with `missing properties 'CPU_REQUEST', ...` rather than rendering a
+Deployment with empty resources. The service's autoscaler is off in `dev` and scales between 1 or 2 and 5 replicas in
+the others, the way the platform's other services do; the `-ha` and `prod` profiles start two replicas. The operator
+runs one.
 
 `MEMORY_LIMIT` is not only a cgroup ceiling: the platform's `memlimit` package derives `GOMEMLIMIT` from it at startup,
 so it governs when the Go heap starts collecting.
@@ -198,11 +200,11 @@ the Lease, the Events, and the EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
 `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
-`grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `PodMonitor`, a `PrometheusRule`, and
-the dashboard. Its values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`, `alerts.*`, and the five
-resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way:
-a satellite gets the filters from the operator chart and nothing from the service chart, so the platform installs the
-same pair in every namespace.
+`grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`,
+a `PrometheusRule`, and the dashboard. Its values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`,
+`alerts.*`, and the five resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read
+`BASELINE_ORIGIN` the same way: a satellite gets the filters from the operator chart and nothing from the service chart,
+so the platform installs the same pair in every namespace.
 
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
 `MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the

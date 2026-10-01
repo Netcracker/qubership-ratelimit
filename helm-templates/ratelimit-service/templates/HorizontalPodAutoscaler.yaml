@@ -1,0 +1,66 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+{{- /*
+The autoscaler the platform's other services render, read from the same
+HPA_* parameters. It is always rendered: with HPA_ENABLED off both directions
+are Disabled, and REPLICAS alone sets the size. The replicas share their
+counters through the store, so a replica added under load enforces the same
+limits as the others. The target is a share of CPU_LIMIT, expressed against
+CPU_REQUEST, which is what Utilization measures. autoscaling/v2 is the only
+version left on the Kubernetes releases the chart runs on.
+*/}}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "ratelimit.fullname" . }}
+  namespace: {{ include "ratelimit.namespace" . }}
+  labels:
+    {{- include "ratelimit.deploymentLabels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "ratelimit.fullname" . }}
+  {{- if .Values.HPA_ENABLED }}
+  minReplicas: {{ coalesce .Values.HPA_MIN_REPLICAS .Values.REPLICAS }}
+  maxReplicas: {{ required "HPA_MAX_REPLICAS is required when HPA_ENABLED is true" .Values.HPA_MAX_REPLICAS }}
+  {{- else }}
+  minReplicas: 1
+  maxReplicas: 9999
+  {{- end }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ int (divf (mulf (default 75 .Values.HPA_AVG_CPU_UTILIZATION_TARGET_PERCENT) (include "ratelimit.millicores" .Values.CPU_LIMIT)) (include "ratelimit.millicores" .Values.CPU_REQUEST)) }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: {{ default 0 .Values.HPA_SCALING_UP_STABILIZATION_WINDOW_SECONDS }}
+      selectPolicy: {{ if .Values.HPA_ENABLED }}{{ default "Max" .Values.HPA_SCALING_UP_SELECT_POLICY }}{{ else }}Disabled{{ end }}
+      policies:
+        {{- if and .Values.HPA_SCALING_UP_PERCENT_VALUE (ge (int .Values.HPA_SCALING_UP_PERCENT_PERIOD_SECONDS) 0) }}
+        - type: Percent
+          value: {{ .Values.HPA_SCALING_UP_PERCENT_VALUE }}
+          periodSeconds: {{ .Values.HPA_SCALING_UP_PERCENT_PERIOD_SECONDS }}
+        {{- end }}
+        {{- if and .Values.HPA_SCALING_UP_PODS_VALUE (ge (int .Values.HPA_SCALING_UP_PODS_PERIOD_SECONDS) 0) }}
+        - type: Pods
+          value: {{ .Values.HPA_SCALING_UP_PODS_VALUE }}
+          periodSeconds: {{ .Values.HPA_SCALING_UP_PODS_PERIOD_SECONDS }}
+        {{- end }}
+    scaleDown:
+      stabilizationWindowSeconds: {{ default 300 .Values.HPA_SCALING_DOWN_STABILIZATION_WINDOW_SECONDS }}
+      selectPolicy: {{ if .Values.HPA_ENABLED }}{{ default "Max" .Values.HPA_SCALING_DOWN_SELECT_POLICY }}{{ else }}Disabled{{ end }}
+      policies:
+        {{- if and .Values.HPA_SCALING_DOWN_PERCENT_VALUE (ge (int .Values.HPA_SCALING_DOWN_PERCENT_PERIOD_SECONDS) 0) }}
+        - type: Percent
+          value: {{ .Values.HPA_SCALING_DOWN_PERCENT_VALUE }}
+          periodSeconds: {{ .Values.HPA_SCALING_DOWN_PERCENT_PERIOD_SECONDS }}
+        {{- end }}
+        {{- if and .Values.HPA_SCALING_DOWN_PODS_VALUE (ge (int .Values.HPA_SCALING_DOWN_PODS_PERIOD_SECONDS) 0) }}
+        - type: Pods
+          value: {{ .Values.HPA_SCALING_DOWN_PODS_VALUE }}
+          periodSeconds: {{ .Values.HPA_SCALING_DOWN_PODS_PERIOD_SECONDS }}
+        {{- end }}
+{{- end }}

@@ -109,13 +109,11 @@
       "title": "The DEPLOYMENT_STRATEGY_TYPE schema",
       "description": "Specify Deployment Strategy type for deploying service",
       "enum": [
-        "",
         "recreate",
         "best_effort_controlled_rollout",
         "ramped_slow_rollout",
         "custom_rollout"
       ],
-      "default": "",
       "examples": [
         "recreate",
         "best_effort_controlled_rollout",
@@ -142,6 +140,12 @@
         "50%",
         "2"
       ]
+    },
+    "LIVENESS_PROBE_INITIAL_DELAY_SECONDS": {
+      "$id": "#/properties/LIVENESS_PROBE_INITIAL_DELAY_SECONDS",
+      "type": "integer",
+      "title": "The LIVENESS_PROBE_INITIAL_DELAY_SECONDS schema",
+      "internal": true
     },
     "IMAGE_REPOSITORY": {
       "$id": "#/properties/IMAGE_REPOSITORY",

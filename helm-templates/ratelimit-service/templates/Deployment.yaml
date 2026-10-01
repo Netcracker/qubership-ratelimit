@@ -134,7 +134,7 @@ spec:
             httpGet:
               path: /healthz
               port: probes
-            initialDelaySeconds: 15
+            initialDelaySeconds: {{ .Values.LIVENESS_PROBE_INITIAL_DELAY_SECONDS }}
             periodSeconds: 20
           # readyz keeps a replica out of the Endpoints until it has applied
           # a manifest from the volume, without a timeout: a replica serving

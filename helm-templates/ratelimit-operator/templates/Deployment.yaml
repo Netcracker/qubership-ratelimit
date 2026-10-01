@@ -80,7 +80,7 @@ spec:
             httpGet:
               path: /healthz
               port: probes
-            initialDelaySeconds: 15
+            initialDelaySeconds: {{ .Values.LIVENESS_PROBE_INITIAL_DELAY_SECONDS }}
             periodSeconds: 20
           readinessProbe:
             httpGet:

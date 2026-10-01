@@ -505,3 +505,28 @@ func TestCharts_placeEveryObjectInThePlatformsNamespace(t *testing.T) {
 		assert.Contains(t, string(out), "is this release's own namespace", chart)
 	}
 }
+
+// The service chart renders the autoscaler the platform's other services
+// render: disabled in both directions without HPA_ENABLED, so REPLICAS alone
+// sizes the Deployment, and between HPA_MIN_REPLICAS and HPA_MAX_REPLICAS
+// with it, at a CPU target that is a share of the limit. The operator keeps
+// one replica and renders none.
+func TestServiceChart_scalesWithTheAutoscalerParameters(t *testing.T) {
+	hpa := only(t, render(t, serviceChart, "biz"), "HorizontalPodAutoscaler")
+	assert.Equal(t, serviceChart, hpa.at("spec", "scaleTargetRef", "name").str2())
+	assert.Equal(t, "Disabled", hpa.at("spec", "behavior", "scaleUp", "selectPolicy").str2())
+	assert.Equal(t, "Disabled", hpa.at("spec", "behavior", "scaleDown", "selectPolicy").str2())
+
+	hpa = only(t, render(t, serviceChart, "biz", "--set", "HPA_ENABLED=true", "--set", "HPA_MIN_REPLICAS=2",
+		"--set", "HPA_MAX_REPLICAS=4", "--set", "CPU_REQUEST=100m", "--set", "CPU_LIMIT=1"), "HorizontalPodAutoscaler")
+	assert.EqualValues(t, 2, hpa.at("spec", "minReplicas").v)
+	assert.EqualValues(t, 4, hpa.at("spec", "maxReplicas").v)
+	assert.Equal(t, "Max", hpa.at("spec", "behavior", "scaleUp", "selectPolicy").str2())
+	metric := hpa.at("spec", "metrics").list()[0]
+	assert.EqualValues(t, 750, metric.at("resource", "target", "averageUtilization").v,
+		"75% of a 1-CPU limit is 750% of a 100m request")
+
+	assert.NotContains(t, kinds(render(t, operatorChart, "biz")), "HorizontalPodAutoscaler")
+	assert.NotContains(t, kinds(render(t, serviceChart, "biz", "--set", "BASELINE_ORIGIN=base")),
+		"HorizontalPodAutoscaler")
+}

@@ -28,12 +28,14 @@ DEPLOYMENT_SESSION_ID: ""
 # writable.
 PAAS_PLATFORM: KUBERNETES
 READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
-# The rollout. Empty and ramped_slow_rollout replace one pod at a time and keep
-# the old one until the new one is Ready; recreate and
-# best_effort_controlled_rollout stop the old pods first, and custom_rollout
-# takes DEPLOYMENT_STRATEGY_MAXSURGE and DEPLOYMENT_STRATEGY_MAXUNAVAILABLE,
-# 25% each by default.
-DEPLOYMENT_STRATEGY_TYPE: ""
+# The rollout, DEPLOYMENT_STRATEGY_TYPE, is not set here. Unset and
+# ramped_slow_rollout replace one pod at a time and keep the old one until the
+# new one is Ready; recreate and best_effort_controlled_rollout stop the old
+# pods first, and custom_rollout takes DEPLOYMENT_STRATEGY_MAXSURGE and
+# DEPLOYMENT_STRATEGY_MAXUNAVAILABLE, 25% each by default.
+#
+# The delay before the first liveness probe.
+LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15
 
 # ============== OPERATOR ============================
 # CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by the

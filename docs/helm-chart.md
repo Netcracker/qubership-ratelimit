@@ -47,6 +47,8 @@ helm-templates/ratelimit-service/templates/
 ├── Deployment.yaml                # the Deployment ratelimit-service, REPLICAS replicas; mounts ratelimit-config
 │                                  #   at /etc/ratelimit/config with optional: true and the counter store's
 │                                  #   Secret under /etc/secrets/dbaas-secrets without it; no token mounted
+├── HorizontalPodAutoscaler.yaml   # autoscaling/v2 on CPU, from the HPA_* parameters; both directions Disabled
+│                                  #   without HPA_ENABLED
 ├── DatabaseClaim.yaml             # the InternalDatabase and the DatabaseSecretClaim of the counter store,
 │                                  #   behind redis.dbaas.enabled
 ├── Service.yaml                   # FIXED name ratelimit; grpc 9000 (appProtocol: grpc is mandatory), metrics (the
@@ -129,14 +131,17 @@ only the keys its templates read:
 | `LOG_LEVEL` | both | the root level of the platform logger, passed as `LOGGING_LEVEL_ROOT` in lower case |
 | `APPLICATION_NAME`, `MANAGED_BY`, `ARTIFACT_DESCRIPTOR_VERSION`, `DEPLOYMENT_SESSION_ID` | both | the labels the platform's other services carry: `app.kubernetes.io/part-of`, `app.kubernetes.io/managed-by` (empty is Helm), `app.kubernetes.io/version` (empty is the chart's `appVersion`), and `deployment.netcracker.com/sessionId` on the Deployment alone |
 | `PAAS_PLATFORM`, `READONLY_CONTAINER_FILE_SYSTEM_ENABLED` | both | on `KUBERNETES` the container runs as group 10001 and, with the flag set (the default), on a read-only root filesystem; on `OPENSHIFT` the platform assigns both and the root filesystem is writable |
-| `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; empty and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`, `recreate` and `best_effort_controlled_rollout` stop the old pods first, which leaves the gateways without an RLS endpoint during a service rollout |
+| `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; unset and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`, `recreate` and `best_effort_controlled_rollout` stop the old pods first, which leaves the gateways without an RLS endpoint during a service rollout |
+| `LIVENESS_PROBE_INITIAL_DELAY_SECONDS` | both | the delay before the first liveness probe, 15 by default |
+| `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`; off, both directions are `Disabled` and `REPLICAS` sizes the service. The operator has none |
 | `CLOUD_TOPOLOGIES` | both | the platform's list of topologies; when set, it replaces `CLOUD_TOPOLOGY_KEY` with one constraint per entry, each with its `topologyKey` and optional `maxSkew` and `whenUnsatisfiable` |
 
 The resource parameters are required in the schema of each chart: the four sizes in the operator chart, the five with
-`REPLICAS` in the service chart. An installation without `-f resource-profiles/<profile>.yaml` fails with a clear error
-instead of rendering a Deployment with empty resources. One source of truth: the defaults cannot drift apart from the
-profiles because there are no defaults. `GOMEMLIMIT` is derived from `MEMORY_LIMIT` automatically (the memlimit import
-in the binaries), so the limit governs the Go heap, not only the cgroup ceiling.
+`REPLICAS` in the service chart, whose profiles also carry the `HPA_*` parameters. An installation without `-f
+resource-profiles/<profile>.yaml` fails with a clear error instead of rendering a Deployment with empty resources. One
+source of truth: the defaults cannot drift apart from the profiles because there are no defaults. `GOMEMLIMIT` is
+derived from `MEMORY_LIMIT` automatically (the memlimit import in the binaries), so the limit governs the Go heap, not
+only the cgroup ceiling.
 
 ## Values reference
 
@@ -156,7 +161,8 @@ ARTIFACT_DESCRIPTOR_VERSION: ""      #   unimplemented
 DEPLOYMENT_SESSION_ID: ""
 PAAS_PLATFORM: KUBERNETES            # _helpers.tpl (containerSecurityContext)
 READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
-DEPLOYMENT_STRATEGY_TYPE: ""         # _helpers.tpl (strategy): empty = maxSurge 1, maxUnavailable 0
+LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15   # Deployment.yaml; DEPLOYMENT_STRATEGY_TYPE is not set here:
+                                     #   unset = maxSurge 1, maxUnavailable 0 (_helpers.tpl, strategy)
 
 LOG_LEVEL: info                      # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
                                      # NOT --zap-log-level: LOG_LEVEL only applies until configloader initializes;
@@ -231,8 +237,9 @@ ARTIFACT_DESCRIPTOR_VERSION: ""
 DEPLOYMENT_SESSION_ID: ""
 PAAS_PLATFORM: KUBERNETES            # _helpers.tpl (containerSecurityContext)
 READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
-DEPLOYMENT_STRATEGY_TYPE: ""         # _helpers.tpl (strategy): recreate and best_effort_controlled_rollout leave
-                                     #   the gateways without an RLS endpoint during the rollout
+LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15   # Deployment.yaml; DEPLOYMENT_STRATEGY_TYPE is not set here: recreate
+                                     #   and best_effort_controlled_rollout leave the gateways without an RLS
+                                     #   endpoint during the rollout
 
 LOG_LEVEL: info                      # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
                                      # NOT --zap-log-level: LOG_LEVEL only applies until configloader initializes
