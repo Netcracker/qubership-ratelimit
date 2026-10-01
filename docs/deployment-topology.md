@@ -10,7 +10,7 @@ and the client groups ([specification](ratelimitpolicy-cr-spec.md)).
 
 ## Deployment schemes
 
-Business applications are installed in one of two schemes. The deployer marks the role with one variable:
+Business applications are installed in one of two schemes. The platform marks the role with one variable:
 `BASELINE_ORIGIN` is set, and non-empty, only in a satellite; a baseline and a single namespace do not receive it.
 Both charts refuse to render a `BASELINE_ORIGIN` that names the release's own namespace.
 
@@ -114,7 +114,7 @@ plane:
   port 9000 named `grpc`, the probe port published on the Service under the name `metrics` (the service's metrics
   port, 8080 by default), the ConfigMap `ratelimit-config`, the mode rule, and the one namespace for both charts.
   Satellites compute the RLS address from the Service name, `ratelimit.<BASELINE_ORIGIN>.svc.cluster.local:9000` (or
-  `BASELINE_CONTROLLER` when the deployer sets it, read for parity with `control-plane`), and the operator reads its
+  `BASELINE_CONTROLLER` when the platform sets it, read for parity with `control-plane`), and the operator reads its
   fleet through the same name. A CI test renders both charts and compares the rendered names and ports with the
   constants, and the [chart document](helm-chart.md) lists the contract.
 - **Counter key** carries the service's namespace in the hash tag: `rl:v1:{<namespace>/<domain>}:<block>/<rule>:…`.
@@ -216,7 +216,7 @@ freezes, and the age of `lastCheckTime` shows how stale it is. Details and examp
 
 The code lives in a monorepo; the delivery is **one application**, `ratelimit`, made of **two charts** and **two
 images**, `qubership-ratelimit-operator` and `qubership-ratelimit-service`. The charts live under
-`helm-templates/ratelimit-operator` and `helm-templates/ratelimit-service`, the deployer installs the same pair in
+`helm-templates/ratelimit-operator` and `helm-templates/ratelimit-service`, the platform installs the same pair in
 every namespace, and both derive their contents from `BASELINE_ORIGIN`:
 
 | Scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
@@ -225,7 +225,7 @@ every namespace, and both derive their contents from `BASELINE_ORIGIN`:
 | composite, baseline | the same | the same |
 | composite, satellite | only EnvoyFilters that target the baseline RLS; no ServiceAccount, no RBAC | nothing: an empty release |
 
-Each chart declares only the values its templates read, and shared deployer inputs keep identical key names in both.
+Each chart declares only the values its templates read, and shared platform parameters keep identical key names in both.
 `REPLICAS` exists only in the service chart, the filter settings move to the operator chart under `filter`, and
 `rls.port` exists in neither: the port is a contract constant. The values are listed in [helm](helm-chart.md).
 

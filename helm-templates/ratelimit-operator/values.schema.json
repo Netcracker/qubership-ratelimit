@@ -3,9 +3,10 @@
   "$id": "https://netcracker.com/ratelimit-operator/values.schema.json",
   "type": "object",
   "title": "The ratelimit-operator schema.",
-  "description": "JSON Schema for the ratelimit-operator chart. The root stays open: the deployer passes one parameter set to every chart of the application, so the service chart's blocks reach this schema and are ignored. The blocks this chart reads are closed.",
+  "description": "JSON Schema for the ratelimit-operator chart. The root stays open: the platform passes one parameter set to every chart of the application, so the service chart's blocks reach this schema and are ignored. The blocks this chart reads are closed.",
   "required": [
-    "image",
+    "SERVICE_NAME",
+    "IMAGE_REPOSITORY",
     "filter",
     "ISTIO_PUBLIC_GATEWAY_NAME",
     "ISTIO_PRIVATE_GATEWAY_NAME",
@@ -16,54 +17,110 @@
     "MEMORY_LIMIT"
   ],
   "properties": {
-    "nameOverride": {
+    "SERVICE_NAME": {
       "type": "string",
-      "title": "Chart name override",
-      "description": "Replaces the chart name in resource names and labels."
+      "title": "Service name",
+      "minLength": 1,
+      "default": "ratelimit-operator",
+      "description": "Platform parameter. The name of the operator's Deployment and ServiceAccount, and its app.kubernetes.io/name and name labels. The service chart's Service keeps its fixed name, ratelimit."
     },
-    "fullnameOverride": {
+    "NAMESPACE": {
       "type": "string",
-      "title": "Full name override",
-      "description": "Replaces the generated name of the Deployment, ServiceAccount and RBAC pair. The Service of the service chart keeps its fixed name, ratelimit: a satellite computes the RLS address from it and cannot know how the baseline was named."
+      "title": "Namespace",
+      "default": "",
+      "description": "Platform parameter. The namespace every object of the chart lands in; empty is the release namespace."
     },
-    "image": {
-      "type": "object",
-      "title": "Operator image",
-      "required": [
-        "repository",
-        "tag"
+    "APPLICATION_NAME": {
+      "type": "string",
+      "title": "Application name",
+      "default": "ratelimit",
+      "description": "Platform parameter. The value of the app.kubernetes.io/part-of label."
+    },
+    "MANAGED_BY": {
+      "type": "string",
+      "title": "Managed by",
+      "default": "",
+      "description": "Platform parameter. The value of the app.kubernetes.io/managed-by label; empty is Helm."
+    },
+    "ARTIFACT_DESCRIPTOR_VERSION": {
+      "type": "string",
+      "title": "Artifact descriptor version",
+      "default": "",
+      "description": "Platform parameter. The value of the app.kubernetes.io/version label; empty is the chart's appVersion."
+    },
+    "DEPLOYMENT_SESSION_ID": {
+      "type": "string",
+      "title": "Deployment session",
+      "default": "",
+      "description": "Platform parameter. The deployment.netcracker.com/sessionId label of the Deployment; empty is unimplemented."
+    },
+    "PAAS_PLATFORM": {
+      "type": "string",
+      "title": "PaaS platform",
+      "enum": [
+        "KUBERNETES",
+        "OPENSHIFT"
       ],
-      "properties": {
-        "repository": {
-          "type": "string",
-          "title": "Image repository"
-        },
-        "tag": {
-          "type": "string",
-          "title": "Image tag"
-        },
-        "pullPolicy": {
-          "type": "string",
-          "title": "Image pull policy",
-          "enum": [
-            "Always",
-            "IfNotPresent",
-            "Never"
-          ]
-        }
-      },
-      "additionalProperties": false
+      "default": "KUBERNETES",
+      "description": "Platform parameter. On KUBERNETES the container runs as group 10001 and may have a read-only root filesystem; on OPENSHIFT the platform assigns both."
     },
-    "logLevel": {
+    "READONLY_CONTAINER_FILE_SYSTEM_ENABLED": {
+      "type": "boolean",
+      "title": "Read-only root filesystem",
+      "default": true,
+      "description": "Platform parameter. Mounts the container's root filesystem read-only on KUBERNETES."
+    },
+    "DEPLOYMENT_STRATEGY_TYPE": {
+      "type": "string",
+      "title": "Deployment strategy",
+      "enum": [
+        "",
+        "recreate",
+        "best_effort_controlled_rollout",
+        "ramped_slow_rollout",
+        "custom_rollout"
+      ],
+      "default": "",
+      "description": "Platform parameter. Empty and ramped_slow_rollout replace one pod at a time and keep the old one until the new one is Ready; recreate and best_effort_controlled_rollout stop the old pods first."
+    },
+    "DEPLOYMENT_STRATEGY_MAXSURGE": {
+      "$ref": "#/definitions/integerOrString",
+      "title": "Max surge",
+      "description": "Platform parameter. maxSurge of custom_rollout; 25% when unset."
+    },
+    "DEPLOYMENT_STRATEGY_MAXUNAVAILABLE": {
+      "$ref": "#/definitions/integerOrString",
+      "title": "Max unavailable",
+      "description": "Platform parameter. maxUnavailable of custom_rollout; 25% when unset."
+    },
+    "IMAGE_REPOSITORY": {
+      "type": "string",
+      "title": "Image repository",
+      "minLength": 1,
+      "default": "ghcr.io/netcracker/qubership-ratelimit-operator",
+      "description": "Platform parameter. The repository of the image."
+    },
+    "TAG": {
+      "type": "string",
+      "title": "Image tag",
+      "default": "",
+      "description": "Platform parameter. The tag of the image; empty is the chart's appVersion."
+    },
+    "LOG_LEVEL": {
       "type": "string",
       "title": "Log level",
       "enum": [
         "debug",
         "info",
         "warn",
-        "error"
+        "error",
+        "DEBUG",
+        "INFO",
+        "WARN",
+        "ERROR"
       ],
-      "default": "info"
+      "default": "info",
+      "description": "Platform parameter. The root level of the platform logger, passed as LOGGING_LEVEL_ROOT in lower case."
     },
     "filter": {
       "type": "object",
@@ -419,13 +476,13 @@
     "BASELINE_ORIGIN": {
       "type": "string",
       "title": "Baseline origin namespace",
-      "description": "Set by the deployer on a satellite namespace of a composite, naming the baseline's origin namespace. Empty means this release is a standalone installation or the baseline itself. When set, only the gateway filters render and they send checks to the baseline's ratelimit Service.",
+      "description": "Set by the platform on a satellite namespace of a composite, naming the baseline's origin namespace. Empty means this release is a standalone installation or the baseline itself. When set, only the gateway filters render and they send checks to the baseline's ratelimit Service.",
       "default": ""
     },
     "BASELINE_CONTROLLER": {
       "type": "string",
       "title": "Baseline controller namespace",
-      "description": "Read for parity with control-plane, which resolves the baseline the same way; takes precedence over BASELINE_ORIGIN as the namespace of the ratelimit Service a satellite sends checks to. On this platform the baseline is never blue-green'd, so the deployer leaves it empty.",
+      "description": "Read for parity with control-plane, which resolves the baseline the same way; takes precedence over BASELINE_ORIGIN as the namespace of the ratelimit Service a satellite sends checks to. On this platform the baseline is never blue-green'd, so the platform leaves it empty.",
       "default": ""
     }
   },

@@ -155,7 +155,7 @@ type counterStore struct {
 	password  string
 }
 
-// redisSecretName is the Secret the service chart mounts: <fullname>-redis,
+// redisSecretName is the Secret the service chart mounts: <SERVICE_NAME>-redis,
 // and the suites install the chart without a fullnameOverride.
 const redisSecretName = "ratelimit-service-redis"
 

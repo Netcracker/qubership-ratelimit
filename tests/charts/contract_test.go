@@ -408,3 +408,100 @@ func TestCharts_labelThePodsByChartName(t *testing.T) {
 		assert.Equal(t, chart, deployment.at("spec", "template", "metadata", "labels", "app.kubernetes.io/name").str2())
 	}
 }
+
+// Both charts read the parameters the platform sets on every one of its
+// services, the way its other services read them: the name, the image, the
+// labels, the log level, the security context, and the rollout.
+func TestCharts_readThePlatformParameters(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		deployment := only(t, render(t, chart, "biz",
+			"--set", "SERVICE_NAME=rl",
+			"--set", "IMAGE_REPOSITORY=registry.example/rl",
+			"--set", "TAG=1.2.3",
+			"--set", "APPLICATION_NAME=app",
+			"--set", "MANAGED_BY=platform",
+			"--set", "ARTIFACT_DESCRIPTOR_VERSION=1.2.3-ad",
+			"--set", "DEPLOYMENT_SESSION_ID=session",
+			"--set", "LOG_LEVEL=DEBUG",
+			"--set", "DEPLOYMENT_STRATEGY_TYPE=recreate"), "Deployment")
+		assert.Equal(t, "rl", deployment.name(), chart)
+		labels := deployment.at("metadata", "labels")
+		assert.Equal(t, "app", labels.at("app.kubernetes.io/part-of").str2(), chart)
+		assert.Equal(t, "platform", labels.at("app.kubernetes.io/managed-by").str2(), chart)
+		assert.Equal(t, "1.2.3-ad", labels.at("app.kubernetes.io/version").str2(), chart)
+		assert.Equal(t, "session", labels.at("deployment.netcracker.com/sessionId").str2(), chart)
+		assert.Nil(t, deployment.at("spec", "template", "metadata", "labels", "deployment.netcracker.com/sessionId").v,
+			"%s restarts its pods on every deployment", chart)
+		assert.Equal(t, map[string]any{"name": "rl", "app.kubernetes.io/name": "rl", "app.kubernetes.io/instance": "rl-biz"},
+			deployment.at("spec", "selector", "matchLabels").v, chart)
+		assert.Equal(t, "Recreate", deployment.at("spec", "strategy", "type").str2(), chart)
+
+		container := deployment.at("spec", "template", "spec", "containers").list()[0]
+		assert.Equal(t, "registry.example/rl:1.2.3", container.at("image").str2(), chart)
+		env := map[string]string{}
+		for _, variable := range container.at("env").list() {
+			env[variable.at("name").str2()] = variable.at("value").str2()
+		}
+		assert.Equal(t, "debug", env["LOGGING_LEVEL_ROOT"], chart)
+
+		security := container.at("securityContext")
+		assert.Equal(t, true, security.at("readOnlyRootFilesystem").v, chart)
+		assert.EqualValues(t, 10001, security.at("runAsGroup").v, chart)
+		container = only(t, render(t, chart, "biz", "--set", "PAAS_PLATFORM=OPENSHIFT"), "Deployment").
+			at("spec", "template", "spec", "containers").list()[0]
+		assert.Equal(t, false, container.at("securityContext", "readOnlyRootFilesystem").v, chart)
+		assert.Nil(t, container.at("securityContext", "runAsGroup").v, "%s pins a group on OpenShift", chart)
+	}
+}
+
+// Without the platform parameters the chart's appVersion is the image tag
+// and the version label, and the rollout keeps every pod until its
+// replacement is Ready.
+func TestCharts_defaultToTheChartsOwnRelease(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "helm-templates", chart, "Chart.yaml"))
+		require.NoError(t, err)
+		var meta struct {
+			AppVersion string `json:"appVersion"`
+		}
+		require.NoError(t, yaml.Unmarshal(raw, &meta))
+		require.NotEmpty(t, meta.AppVersion, chart)
+
+		deployment := only(t, render(t, chart, "biz"), "Deployment")
+		container := deployment.at("spec", "template", "spec", "containers").list()[0]
+		assert.Equal(t, "ghcr.io/netcracker/qubership-"+chart+":"+meta.AppVersion, container.at("image").str2(), chart)
+		assert.Equal(t, meta.AppVersion, deployment.at("metadata", "labels", "app.kubernetes.io/version").str2(), chart)
+		assert.Equal(t, "Helm", deployment.at("metadata", "labels", "app.kubernetes.io/managed-by").str2(), chart)
+		assert.Equal(t, "RollingUpdate", deployment.at("spec", "strategy", "type").str2(), chart)
+		assert.EqualValues(t, 1, deployment.at("spec", "strategy", "rollingUpdate", "maxSurge").v, chart)
+		assert.EqualValues(t, 0, deployment.at("spec", "strategy", "rollingUpdate", "maxUnavailable").v, chart)
+	}
+}
+
+// NAMESPACE, the platform parameter, places every object of both charts,
+// and the namespace-scoped references inside them follow it: the selector
+// label, the scrape, the rules, and the satellite guard.
+func TestCharts_placeEveryObjectInThePlatformsNamespace(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		objects := render(t, chart, "release-ns", "--set", "NAMESPACE=biz", "--set", "MONITORING_ENABLED=true",
+			"--set", "management.enabled=true")
+		for _, o := range objects {
+			if o.kind() == "CustomResourceDefinition" {
+				continue
+			}
+			assert.Equal(t, "biz", o.at("metadata", "namespace").str2(), "%s %s %s", chart, o.kind(), o.name())
+		}
+		deployment := only(t, objects, "Deployment")
+		assert.Equal(t, "biz", strings.TrimPrefix(
+			deployment.at("spec", "selector", "matchLabels", "app.kubernetes.io/instance").str2(), chart+"-"), chart)
+		assert.Equal(t, []string{"biz"},
+			strs(only(t, objects, "PodMonitor").at("spec", "namespaceSelector", "matchNames")), chart)
+		rules, err := json.Marshal(only(t, objects, "PrometheusRule"))
+		require.NoError(t, err)
+		assert.NotContains(t, string(rules), "release-ns", "%s scopes a rule to the release namespace", chart)
+
+		out, err := renderErr(chart, "release-ns", "--set", "NAMESPACE=biz", "--set", "BASELINE_ORIGIN=biz")
+		require.Error(t, err, "%s rendered NAMESPACE as a satellite of itself", chart)
+		assert.Contains(t, string(out), "is this release's own namespace", chart)
+	}
+}

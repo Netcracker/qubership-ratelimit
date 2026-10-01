@@ -4,8 +4,8 @@ The delivery contract: a reference for the values variables, their JSON schemas,
 The delivery is **one application** of **two charts** and **two images** ([topology](deployment-topology.md)):
 `ratelimit-operator` under `helm-templates/ratelimit-operator` with the image
 `qubership-ratelimit-operator`, and `ratelimit-service` under `helm-templates/ratelimit-service` with the image
-`qubership-ratelimit-service`. The deployer installs the same pair in every namespace of an application. The set of
-objects each chart renders is derived from the deployer's `BASELINE_ORIGIN`: the whole stack where a domain lives, the
+`qubership-ratelimit-service`. The platform installs the same pair in every namespace of an application. The set of
+objects each chart renders is derived from the platform's `BASELINE_ORIGIN`: the whole stack where a domain lives, the
 gateway filters alone in a satellite.
 
 The operator chart is the sole owner of the Envoy configuration (the ratelimit filter on the gateways) and of the
@@ -43,7 +43,7 @@ The service chart:
 helm-templates/ratelimit-service/templates/
 ├── _helpers.tpl                   # name, labels, mode (satellite iff BASELINE_ORIGIN; every template is wrapped
 │                                  #   in it, so a satellite release is empty), serviceName (the constant
-│                                  #   ratelimit), redisSecretName (<fullname>-redis)
+│                                  #   ratelimit), redisSecretName (<SERVICE_NAME>-redis)
 ├── Deployment.yaml                # the Deployment ratelimit-service, REPLICAS replicas; mounts ratelimit-config
 │                                  #   at /etc/ratelimit/config with optional: true and the counter store's
 │                                  #   Secret under /etc/secrets/dbaas-secrets without it; no token mounted
@@ -60,10 +60,10 @@ helm-templates/ratelimit-service/templates/
 └── Dashboard.yaml                 # GrafanaDashboard CR (grafana-operator), behind MONITORING_ENABLED
 ```
 
-The mode is selected by one deployer variable, read the same way by both charts: `BASELINE_ORIGIN` is set, and
+The mode is selected by one platform parameter, read the same way by both charts: `BASELINE_ORIGIN` is set, and
 non-empty, only in a satellite. Absent or empty renders the whole stack of each chart (a single namespace and a
 baseline are the same case). Non-empty renders the filters only from the operator chart, with the RLS address built
-from its value, and nothing from the service chart. The deployer installs the same pair in every namespace. A service
+from its value, and nothing from the service chart. The platform installs the same pair in every namespace. A service
 installed in a satellite would wait for an operator that never comes, stay NotReady, and fail the readiness gate of
 the deployment; the empty render protects against that mistake. The defaults are overridden by explicit values:
 
@@ -86,9 +86,9 @@ both binaries:
 The templates of both charts carry the same names and ports as fixed strings. A CI test renders both charts and
 compares the rendered names and ports with the constants (see "Installation and upgrade"). A satellite release of the
 operator chart uses the Service name and port to compute the RLS address from the baseline namespace, so the name is
-the constant `ratelimit` and depends on neither the release name nor `fullnameOverride`. The port is a contract
+the constant `ratelimit` and depends on neither the release name nor `SERVICE_NAME`. The port is a contract
 constant, so `rls.port` exists in neither chart. The namespace half of that address is `BASELINE_ORIGIN`, or
-`BASELINE_CONTROLLER` when the deployer sets it: the operator chart reads it for parity with `control-plane`, which
+`BASELINE_CONTROLLER` when the platform sets it: the operator chart reads it for parity with `control-plane`, which
 resolves the baseline the same way; on this platform the baseline is never Blue-Green'd, so it stays empty. Each
 chart ships its own alert rules as a `PrometheusRule`, see "Alerts".
 
@@ -109,8 +109,8 @@ releases are per namespace, so the CRD ships in the operator chart with these ru
 
 ## Platform parameters and resource profiles
 
-Both charts are installed by the Qubership deployer, with one parameter set, and take part of their configuration from
-the deployer's cross-cutting parameters. Shared inputs keep identical key names in both charts, and each chart declares
+The platform installs both charts with one parameter set, and they take part of their configuration from its
+cross-cutting parameters. Shared inputs keep identical key names in both charts, and each chart declares
 only the keys its templates read:
 
 | Parameter | Read by | What it does |
@@ -121,8 +121,15 @@ only the keys its templates read:
 | `ISTIO_PUBLIC_GATEWAY_NAME` | the operator chart | the name of the public Gateway object the filter targets; it must match the parameters of qubership-core-mesh-config, which creates the Gateways |
 | `ISTIO_PRIVATE_GATEWAY_NAME` | both | the name of the private Gateway object: the filter target in the operator chart, the default principal of the management AuthorizationPolicy in the service chart; it must match qubership-core-mesh-config the same way |
 | `BASELINE_ORIGIN` | both | the baseline namespace, set only in a satellite; empty renders the whole stack of each chart, non-empty renders only the operator chart's filters, targeting `ratelimit.<BASELINE_ORIGIN>.svc:9000`, and nothing from the service chart; the release's own namespace fails both renders with `BASELINE_ORIGIN "<ns>" is this release's own namespace` |
-| `BASELINE_CONTROLLER` | both | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the operator chart; the deployer leaves it empty on this platform |
+| `BASELINE_CONTROLLER` | both | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the operator chart; the platform leaves it empty on this platform |
 | `CLOUD_TOPOLOGY_KEY` | both | the node label each Deployment spreads its pods over, `kubernetes.io/hostname` by default: one topology spread constraint with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`, selecting the Deployment's own pods |
+| `SERVICE_NAME` | both | the name of each chart's Deployment and ServiceAccount (and the operator's RBAC pair), its `app.kubernetes.io/name` and `name` labels, and in the service chart the DBaaS classifier's `microserviceName`; `ratelimit-operator` and `ratelimit-service` by default; the Service stays `ratelimit` |
+| `NAMESPACE` | both | the namespace every object lands in, as on the platform's other services; empty is the release namespace. The pods read their namespace back through the Downward API, so the installation's scope, the counter key prefix, and the DBaaS classifier follow it |
+| `IMAGE_REPOSITORY`, `TAG` | both | the image; an empty `TAG` takes the chart's `appVersion` |
+| `LOG_LEVEL` | both | the root level of the platform logger, passed as `LOGGING_LEVEL_ROOT` in lower case |
+| `APPLICATION_NAME`, `MANAGED_BY`, `ARTIFACT_DESCRIPTOR_VERSION`, `DEPLOYMENT_SESSION_ID` | both | the labels the platform's other services carry: `app.kubernetes.io/part-of`, `app.kubernetes.io/managed-by` (empty is Helm), `app.kubernetes.io/version` (empty is the chart's `appVersion`), and `deployment.netcracker.com/sessionId` on the Deployment alone |
+| `PAAS_PLATFORM`, `READONLY_CONTAINER_FILE_SYSTEM_ENABLED` | both | on `KUBERNETES` the container runs as group 10001 and, with the flag set (the default), on a read-only root filesystem; on `OPENSHIFT` the platform assigns both and the root filesystem is writable |
+| `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; empty and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`, `recreate` and `best_effort_controlled_rollout` stop the old pods first, which leaves the gateways without an RLS endpoint during a service rollout |
 | `CLOUD_TOPOLOGIES` | both | the platform's list of topologies; when set, it replaces `CLOUD_TOPOLOGY_KEY` with one constraint per entry, each with its `topologyKey` and optional `maxSkew` and `whenUnsatisfiable` |
 
 The resource parameters are required in the schema of each chart: the four sizes in the operator chart, the five with
@@ -139,12 +146,19 @@ template that reads it; a key one chart does not read does not exist in that cha
 The operator chart, `helm-templates/ratelimit-operator/values.yaml`:
 
 ```yaml
-image:                               # Deployment.yaml
-  repository: ghcr.io/netcracker/qubership-ratelimit-operator
-  tag: ""                            # empty = .Chart.AppVersion; do not use floating tags
-  pullPolicy: IfNotPresent
+SERVICE_NAME: ratelimit-operator     # _helpers.tpl (name): the platform's parameters, see "Platform parameters"
+NAMESPACE: ""                         # _helpers.tpl (namespace): empty = the release namespace
+IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-operator   # Deployment.yaml
+TAG: ""                              # empty = .Chart.AppVersion; do not use floating tags
+APPLICATION_NAME: ratelimit          # _helpers.tpl (labels); MANAGED_BY, ARTIFACT_DESCRIPTOR_VERSION and
+MANAGED_BY: ""                       #   DEPLOYMENT_SESSION_ID empty fall back to Helm, .Chart.AppVersion and
+ARTIFACT_DESCRIPTOR_VERSION: ""      #   unimplemented
+DEPLOYMENT_SESSION_ID: ""
+PAAS_PLATFORM: KUBERNETES            # _helpers.tpl (containerSecurityContext)
+READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
+DEPLOYMENT_STRATEGY_TYPE: ""         # _helpers.tpl (strategy): empty = maxSurge 1, maxUnavailable 0
 
-logLevel: info                       # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
+LOG_LEVEL: info                      # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
                                      # NOT --zap-log-level: LOG_LEVEL only applies until configloader initializes;
                                      # debug caps the bridged logr verbosity at 4: no client-go body dumps
 
@@ -181,12 +195,12 @@ alerts:                              # PrometheusRule.yaml: the rules over the p
 
 ISTIO_PUBLIC_GATEWAY_NAME: public-gateway     # EnvoyFilter.yaml: the Gateway of the public role
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway   # EnvoyFilter.yaml: the Gateway of the private role
-BASELINE_ORIGIN: ""                  # _helpers.tpl (mode, serviceNamespace): the deployer's composite variables,
+BASELINE_ORIGIN: ""                  # _helpers.tpl (mode, serviceNamespace): the platform's composite variables,
 BASELINE_CONTROLLER: ""              #   see "Platform parameters": empty = the whole stack (single namespace or
                                      #   baseline), set = the filters only
 
 gateways:                            # EnvoyFilter.yaml and validateDomains: two fixed roles; a third gateway = a
-  public:                            # template change (deliberately: the deployer defines exactly public/private)
+  public:                            # template change (deliberately: the platform defines exactly public/private)
     enabled: true
     domain: gateway.public           # the linking key: must equal the policy's spec.domain; the pattern is the CRD's;
                                      #   in a composite, one domain per role across all namespaces = a shared budget
@@ -207,18 +221,26 @@ CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname   # Deployment.yaml: topologySpreadCo
 The service chart, `helm-templates/ratelimit-service/values.yaml`:
 
 ```yaml
-image:                               # Deployment.yaml
-  repository: ghcr.io/netcracker/qubership-ratelimit-service
-  tag: ""                            # empty = .Chart.AppVersion; do not use floating tags
-  pullPolicy: IfNotPresent
+SERVICE_NAME: ratelimit-service      # _helpers.tpl (name): also the DBaaS classifier's microserviceName
+NAMESPACE: ""                         # _helpers.tpl (namespace): empty = the release namespace
+IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-service    # Deployment.yaml
+TAG: ""                              # empty = .Chart.AppVersion; do not use floating tags
+APPLICATION_NAME: ratelimit          # _helpers.tpl (labels), as in the operator chart
+MANAGED_BY: ""
+ARTIFACT_DESCRIPTOR_VERSION: ""
+DEPLOYMENT_SESSION_ID: ""
+PAAS_PLATFORM: KUBERNETES            # _helpers.tpl (containerSecurityContext)
+READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
+DEPLOYMENT_STRATEGY_TYPE: ""         # _helpers.tpl (strategy): recreate and best_effort_controlled_rollout leave
+                                     #   the gateways without an RLS endpoint during the rollout
 
-logLevel: info                       # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
+LOG_LEVEL: info                      # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
                                      # NOT --zap-log-level: LOG_LEVEL only applies until configloader initializes
 
 redis:                               # DatabaseClaim.yaml; see "The counter store from DBaaS"
   dbaas:
     enabled: true                    # render the InternalDatabase and the DatabaseSecretClaim; false = the Secret
-                                     #   <fullname>-redis is written by someone else in DBaaS's format (CI)
+                                     #   <SERVICE_NAME>-redis is written by someone else in DBaaS's format (CI)
 
 healthProbe: { port: 8081 }          # Deployment.yaml: the probes port
 metrics:
@@ -263,7 +285,7 @@ alerts:                              # PrometheusRule.yaml: the rules over the d
   configAbsentFor: 5m                # RatelimitConfigurationAbsent: past the projection of a recreated ConfigMap
 
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway   # AuthorizationPolicy.yaml: the default allowed principal
-BASELINE_ORIGIN: ""                  # _helpers.tpl (mode): the deployer's composite variables, see "Platform
+BASELINE_ORIGIN: ""                  # _helpers.tpl (mode): the platform's composite variables, see "Platform
 BASELINE_CONTROLLER: ""              #   parameters": BASELINE_ORIGIN empty = the whole stack (single namespace or
                                      #   baseline), set = an empty release; BASELINE_CONTROLLER changes no object
                                      #   of this chart
@@ -288,7 +310,7 @@ What is **deliberately absent** from values:
 | the ConfigMap `ratelimit-config` | written by the operator | Helm and Argo CD overwrite what a chart renders on every sync; the channel to the service cannot come from a chart |
 | the Service name and port | contract constants (`ratelimit`, 9000) | fixed in the templates of both charts and checked against the Go constants by the CI render test; there is no `rls.port` value |
 | sanity bounds (token size and the like) | constants in the binaries | not knobs: nobody tunes them |
-| `replicaCount`, `resources` | resource profiles (`REPLICAS` for the service, `CPU_*`, `MEMORY_*`) | one source of truth with the deployer |
+| `replicaCount`, `resources` | resource profiles (`REPLICAS` for the service, `CPU_*`, `MEMORY_*`) | one source of truth with the platform |
 | the RLS address for a satellite | computed from `BASELINE_ORIGIN` | the Service name and port are fixed by contract |
 | `DestinationRule` for the service cluster | none | see "What the charts do not install" |
 
@@ -308,7 +330,7 @@ the cluster. Key points:
   refuses to load, taking the chart's other rules with it, and a budget at or below zero renders a comparison every
   check satisfies;
 - the root of each schema stays **open**, and each chart closes its own blocks, the ones its templates read. The
-  deployer distributes common installation parameters to the charts and passes one parameter set to every chart of
+  platform distributes common installation parameters to the charts and passes one parameter set to every chart of
   the application. The service's `redis` block therefore reaches the operator chart, and the operator's `filter`
   block reaches the service chart. A closed root would fail on every new parameter and on the other chart's blocks.
   A typo inside a block fails the render; the price of the open root is that a typo at the root is silently ignored.
@@ -330,13 +352,14 @@ template but the filters is wrapped in that check; in the service chart every te
 the service chart is empty. `serviceName` is the constant `ratelimit` in both charts: the installation is
 namespace-scoped by construction (`CLOUD_NAMESPACE`), one per namespace, and a fixed name is a computable RLS address
 for the satellites. The operator discovers the service replicas through the EndpointSlice of the same Service the
-filters target. The labels of each chart put `app.kubernetes.io/name` equal to the chart name on the pods of its
-Deployment, `ratelimit-operator` and `ratelimit-service`. The operator chart also holds `serviceNamespace`: the
+filters target. The labels of each chart put `app.kubernetes.io/name` and `name` equal to `SERVICE_NAME` on the pods of
+its Deployment, `ratelimit-operator` and `ratelimit-service` by default, and `app.kubernetes.io/instance` to that name
+and the namespace; the three are the selector. The operator chart also holds `serviceNamespace`: the
 release namespace, or in a satellite `BASELINE_CONTROLLER` when set and `BASELINE_ORIGIN` otherwise; `rlsAuthority`:
 `<serviceName>.<serviceNamespace>.svc.cluster.local`; `rlsCluster`: `outbound|9000||<fqdn>`; `statPrefix`: the
 gateway name with `-` replaced by `_`; and `validateDomains`, described above. The service chart holds
-`redisSecretName`, the Secret of the counter store, `<fullname>-redis`, which the `DatabaseSecretClaim` names and the
-Deployment mounts.
+`redisSecretName`, the Secret of the counter store, `<SERVICE_NAME>-redis`, which the `DatabaseSecretClaim` names and
+the Deployment mounts.
 
 ### EnvoyFilter.yaml (operator chart): the core of the filter part
 
@@ -386,7 +409,7 @@ context); it is never an identity.
 
 ### Service.yaml (service chart): the critical detail
 
-The name is the constant `ratelimit` whatever the release is called, and `fullnameOverride` does not rename it. The
+The name is the constant `ratelimit` whatever the release is called, and `SERVICE_NAME` does not rename it. The
 e2e install names the service release differently from the Service, so the suite exercises the fixed name. The `grpc`
 port carries `appProtocol: grpc`; without it, Istio decides the port is HTTP/1.1. The Service also publishes the
 service's metrics port under the name `metrics`: the operator takes the port number from the EndpointSlice by that
@@ -438,7 +461,8 @@ delivery that a Role is bound to; the service pod mounts no token at all:
   reported as `ratelimit_build_info`; the pipeline passes no build argument to the image, so without it every scrape
   would say `dev`), `METRICS_NEAR_LIMIT_RATIO`, plus `MANAGEMENT_CLAIMS_*` and `MANAGEMENT_ROLES_*` behind
   `management.enabled`;
-- the `maxSurge: 1 / maxUnavailable: 0` strategy: the gateways must not lose all RLS endpoints at once;
+- the `maxSurge: 1 / maxUnavailable: 0` strategy unless `DEPLOYMENT_STRATEGY_TYPE` says otherwise: the gateways must
+  not lose all RLS endpoints at once;
 - `lifecycle.preStop.sleep: 7s` (the native handler, needs k8s >= 1.30): on deletion the pod leaves Endpoints
   immediately, but xDS takes seconds to reach the gateways; the pause keeps the process serving through that window, so
   a rolling restart drops nothing and lets nothing slip through; the SIGTERM drain picks up the tail, and
@@ -471,12 +495,12 @@ objects of dbaas-operator with the same classifier, `{microserviceName: ratelimi
   Cluster and no Sentinel. It builds the database's `redis.conf` from its own installation and accepts no settings per
   database, so the chart passes none;
 - the `DatabaseSecretClaim` asks dbaas-operator to look the database up and write its connection properties into the
-  Secret `<fullname>-redis` as `connectionProperties.json` (`host`, `port`, `password`, `url`, `role`) beside a
+  Secret `<SERVICE_NAME>-redis` as `connectionProperties.json` (`host`, `port`, `password`, `url`, `role`) beside a
   `metadata.json` that names the classifier, and to rewrite it when they change. Its
   `app.kubernetes.io/name` label is the `originService` of the lookup, and it equals the classifier's
   `microserviceName`, so the service is the owner of the database it reads.
 
-The Deployment mounts the Secret at `/etc/secrets/dbaas-secrets/<fullname>-redis` without `optional`, the platform's
+The Deployment mounts the Secret at `/etc/secrets/dbaas-secrets/<SERVICE_NAME>-redis` without `optional`, the platform's
 path for DBaaS Secrets, and passes `--redis-dbaas-microservice=ratelimit-service` with `MICROSERVICE_NAMESPACE` from
 the pod's namespace. The service resolves its database through the platform's Go DBaaS client
 (`qubership-core-lib-go-dbaas-base-client`), which matches the mounted `metadata.json` to that classifier and type
@@ -513,10 +537,9 @@ The chart needs, and does not install:
 finalizer, so its deletion drops nothing, and the adapter's Redis Deployment stays in its namespace for a reinstall to
 attach to.
 
-`redis.dbaas.enabled=false` renders neither object
-for a cluster without DBaaS: the Deployment still mounts `<fullname>-redis`, and whoever sets up the cluster writes it
-in the same format, `connectionProperties.json` and a `metadata.json` naming the classifier and type `redis`. The e2e
-workflow does exactly that for its own Redis.
+`redis.dbaas.enabled=false` renders neither object for a cluster without DBaaS: the Deployment still mounts
+`<SERVICE_NAME>-redis`, and whoever sets up the cluster writes it in the same format, `connectionProperties.json` and a
+`metadata.json` naming the classifier and type `redis`. The e2e workflow does exactly that for its own Redis.
 
 ## Metrics: the naming contract
 

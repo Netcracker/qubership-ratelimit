@@ -159,7 +159,7 @@ curl -s "http://127.0.0.1:8080/debug/snapshot/gateway.public?format=yaml" | head
 ```
 
 The ConfigMap is owned by the operator Deployment, so it goes with the operator and never with a policy; the operator
-recreates it within a second if it is deleted (section 9). `logLevel: debug` on the operator chart turns on the
+recreates it within a second if it is deleted (section 9). `LOG_LEVEL: debug` on the operator chart turns on the
 operator's own debug lines, controller-runtime's, and the lines client-go writes about its lists, watches, and request
 retries, and nothing above that verbosity: the client's request and response bodies stay out of the log at every level,
 because the bridge in `internal/process/logr_adapter.go` caps the verbosity at 4.
@@ -751,7 +751,7 @@ intent, switch `behavior` to `Enforce`; the counters carry over, the keys do not
 the filter out of the request path. They are Envoy runtime fractions `ratelimit.<gateway>.enabled` and `.enforced`, so
 a runtime override flips them without a redeploy; a values change on the operator release is the durable form, and it
 lasts only while the release's values carry it. An upgrade with `-f` and `--set` and no `--reuse-values` drops it and
-restores enforcement at once; keep the brake in the deployer's values file or the Argo CD application, and check it
+restores enforcement at once; keep the brake in the installation's values file or the Argo CD application, and check it
 after every upgrade ([rollout procedure](rollout-procedure.md), section 4).
 
 **Switching an algorithm or a window.** The counter key carries the algorithm and the period:

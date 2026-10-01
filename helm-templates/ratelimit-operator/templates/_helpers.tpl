@@ -1,24 +1,29 @@
 {{/*
-Chart name, overridable through .Values.nameOverride. It is the value of
-app.kubernetes.io/name on every object, so the pods of the operator carry
-ratelimit-operator unless the deployer says otherwise.
+The namespace every object lands in: NAMESPACE, the platform parameter, as
+on the platform's other services, or the release namespace without it. The
+pods read it back through the Downward API, so the installation's scope is
+this namespace either way.
 */}}
-{{- define "ratelimit.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- define "ratelimit.namespace" -}}
+{{- .Values.NAMESPACE | default .Release.Namespace -}}
 {{- end -}}
 
 {{/*
-Fully qualified name. Used for the Deployment, the ServiceAccount and the
-RBAC pair. The Deployment's name is also what the operator adopts as the
-owner of the configuration ConfigMap, so the Deployment passes it as
---deployment.
+SERVICE_NAME, the platform's name of the microservice. It is the value of
+app.kubernetes.io/name and name on every object, so the pods of the operator
+carry ratelimit-operator unless the platform parameter says otherwise.
+*/}}
+{{- define "ratelimit.name" -}}
+{{- .Values.SERVICE_NAME | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
+The name of the Deployment, the ServiceAccount and the RBAC pair. The
+Deployment's name is also what the operator adopts as the owner of the
+configuration ConfigMap, so the Deployment passes it as --deployment.
 */}}
 {{- define "ratelimit.fullname" -}}
-{{- if .Values.fullnameOverride -}}
-{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
-{{- else -}}
-{{- include "ratelimit.name" . | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
+{{- include "ratelimit.name" . -}}
 {{- end -}}
 
 {{- define "ratelimit.serviceAccountName" -}}
@@ -34,7 +39,7 @@ The operator and the service run in the baseline alone; a satellite gets the
 gateway filters and nothing else, and its filters send checks to the
 baseline's Service.
 
-The signal is the deployer's BASELINE_ORIGIN, and it is the one core-operator
+The signal is the platform's BASELINE_ORIGIN, and it is the one core-operator
 itself renders by: a namespace with BASELINE_ORIGIN set is a satellite, and
 the value is the baseline's namespace. A namespace without it is the baseline,
 or a standalone installation, and those two render the same objects, which
@@ -44,14 +49,14 @@ render: a namespace cannot be a satellite of itself, and rendering it as one
 leaves it without an operator and a service.
 
 BASELINE_CONTROLLER is a hedge, not a supported topology. On this platform
-the baseline is never blue-green'd, so the deployer never sets it for this
+the baseline is never blue-green'd, so the platform never sets it for this
 chart and the coalesce below always resolves to BASELINE_ORIGIN. It is read
 anyway because control-plane reads it the same way, and two charts that would
 disagree about where the baseline is, should the variable ever appear, is a
 worse outcome than one line here.
 */}}
 {{- define "ratelimit.mode" -}}
-{{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN .Release.Namespace) -}}
+{{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN (include "ratelimit.namespace" .)) -}}
 {{- fail (printf "BASELINE_ORIGIN %q is this release's own namespace. Leave it unset in the baseline namespace; in a satellite, set it to the baseline's namespace." .Values.BASELINE_ORIGIN) -}}
 {{- end -}}
 {{- if .Values.BASELINE_ORIGIN -}}satellite{{- else -}}baseline{{- end -}}
@@ -65,7 +70,7 @@ the baseline's for a satellite.
 {{- if .Values.BASELINE_ORIGIN -}}
 {{- coalesce .Values.BASELINE_CONTROLLER .Values.BASELINE_ORIGIN -}}
 {{- else -}}
-{{- .Release.Namespace -}}
+{{- include "ratelimit.namespace" . -}}
 {{- end -}}
 {{- end -}}
 
@@ -86,19 +91,105 @@ ratelimit
 9000
 {{- end -}}
 
+{{/*
+The labels the platform's other services carry, from the platform
+parameters APPLICATION_NAME, ARTIFACT_DESCRIPTOR_VERSION and MANAGED_BY,
+with the chart's appVersion and Helm standing in for a release installed
+without them. The instance is the name in its namespace, as on the
+platform's other services.
+*/}}
 {{- define "ratelimit.labels" -}}
-app.kubernetes.io/name: {{ include "ratelimit.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{ include "ratelimit.selectorLabels" . }}
+app.kubernetes.io/version: {{ include "ratelimit.version" . | quote }}
 app.kubernetes.io/component: operator
+app.kubernetes.io/part-of: {{ .Values.APPLICATION_NAME | quote }}
 app.kubernetes.io/technology: go
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/managed-by: {{ .Values.MANAGED_BY | default .Release.Service | quote }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end -}}
 
+{{/*
+The labels of the Deployment object alone: the deployment session, which
+changes on every deployment and would restart the pods if their template
+carried it.
+*/}}
+{{- define "ratelimit.deploymentLabels" -}}
+{{ include "ratelimit.labels" . }}
+deployment.netcracker.com/sessionId: {{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" | quote }}
+{{- end -}}
+
 {{- define "ratelimit.selectorLabels" -}}
+name: {{ include "ratelimit.name" . }}
 app.kubernetes.io/name: {{ include "ratelimit.name" . }}
-app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/instance: {{ printf "%s-%s" (include "ratelimit.name" .) (include "ratelimit.namespace" .) | trunc 63 | trimSuffix "-" | quote }}
+{{- end -}}
+
+{{/*
+The release the image is: ARTIFACT_DESCRIPTOR_VERSION, the platform
+parameter, or the chart's appVersion without it.
+*/}}
+{{- define "ratelimit.version" -}}
+{{- .Values.ARTIFACT_DESCRIPTOR_VERSION | default .Chart.AppVersion -}}
+{{- end -}}
+
+{{/*
+The image: IMAGE_REPOSITORY and TAG, the platform parameters. An empty TAG
+takes the chart's appVersion, which is a fixed release. A floating tag such as
+"latest" moves under a running workload, so two pods of one rollout can end up
+on different builds.
+*/}}
+{{- define "ratelimit.tag" -}}
+{{- .Values.TAG | default .Chart.AppVersion -}}
+{{- end -}}
+
+{{- define "ratelimit.image" -}}
+{{- printf "%s:%s" .Values.IMAGE_REPOSITORY (include "ratelimit.tag" .) -}}
+{{- end -}}
+
+{{/*
+The rollout, by the platform's DEPLOYMENT_STRATEGY_TYPE, read the way the
+platform's other services read it. Unset is this chart's own default: one pod
+more and none less, so the old pod serves until the new one is Ready.
+*/}}
+{{- define "ratelimit.strategy" -}}
+{{- $type := .Values.DEPLOYMENT_STRATEGY_TYPE | default "" -}}
+{{- if eq $type "recreate" }}
+type: Recreate
+{{- else if eq $type "best_effort_controlled_rollout" }}
+type: RollingUpdate
+rollingUpdate:
+  maxSurge: 0
+  maxUnavailable: 80%
+{{- else if eq $type "custom_rollout" }}
+type: RollingUpdate
+rollingUpdate:
+  maxSurge: {{ .Values.DEPLOYMENT_STRATEGY_MAXSURGE | default "25%" }}
+  maxUnavailable: {{ .Values.DEPLOYMENT_STRATEGY_MAXUNAVAILABLE | default "25%" }}
+{{- else }}
+type: RollingUpdate
+rollingUpdate:
+  maxSurge: 1
+  maxUnavailable: 0
+{{- end }}
+{{- end -}}
+
+{{/*
+The container's security context. The root filesystem is read-only where
+READONLY_CONTAINER_FILE_SYSTEM_ENABLED is set and PAAS_PLATFORM is
+KUBERNETES, as on the platform's other services; on OpenShift the platform
+assigns the user and the group.
+*/}}
+{{- define "ratelimit.containerSecurityContext" -}}
+{{- $kubernetes := eq (.Values.PAAS_PLATFORM | default "KUBERNETES") "KUBERNETES" -}}
+runAsNonRoot: true
+{{- if $kubernetes }}
+runAsGroup: 10001
+{{- end }}
+readOnlyRootFilesystem: {{ and .Values.READONLY_CONTAINER_FILE_SYSTEM_ENABLED $kubernetes }}
+allowPrivilegeEscalation: false
+capabilities:
+  drop:
+    - ALL
 {{- end -}}
 
 {{- define "ratelimit.rlsCluster" -}}

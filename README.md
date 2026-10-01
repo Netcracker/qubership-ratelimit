@@ -173,14 +173,14 @@ The delivery is two charts under `helm-templates/`, installed into one namespace
 helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
-  --set image.tag=<tag>
+  --set TAG=<tag>
 helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
-  --set image.tag=<tag>
+  --set TAG=<tag>
 ```
 
-The profile is not optional. Each chart's `resource-profiles/` holds the four the platform deployer picks from, `dev`,
+The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`,
 `dev-ha`, `prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`,
 `MEMORY_LIMIT`, and, for the service, `REPLICAS`. Each `values.schema.json` requires its keys, so an install without
 `-f` fails with `missing properties 'CPU_REQUEST', ...` rather than rendering a Deployment with empty resources. The
@@ -201,7 +201,7 @@ the Lease, the Events, and the EndpointSlices.
 `grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `PodMonitor`, a `PrometheusRule`, and
 the dashboard. Its values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`, `alerts.*`, and the five
 resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way:
-a satellite gets the filters from the operator chart and nothing from the service chart, so the deployer installs the
+a satellite gets the filters from the operator chart and nothing from the service chart, so the platform installs the
 same pair in every namespace.
 
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
@@ -216,10 +216,10 @@ thresholds and hold durations are under `alerts.*` of each chart, each with its 
 `alerts.enabled=false` keeps the scrape and drops the rules. `tests/charts` renders both rule sets and runs
 `promtool check rules` over them (`make promtool` fetches the binary from the Prometheus release the Makefile pins).
 
-The `Service` is named `ratelimit` whatever the release is called, and `fullnameOverride` does not rename it. A
+The `Service` is named `ratelimit` whatever the release is called, and `SERVICE_NAME` does not rename it. A
 satellite computes the RLS address from that name and the baseline's namespace, so the name cannot depend on how the
-baseline was installed. The CI install exercises exactly that shape by naming its releases after the charts with a
-suffix.
+baseline was installed. The CI install names its releases after the charts with a suffix, so a name derived from the
+release would show.
 
 The management port, when `management.enabled` is set, is exposed on the same `Service` rather than on one of its own.
 The `AuthorizationPolicy` that keeps the port reachable from the private gateway alone is enforced at the pod, so a
@@ -242,7 +242,7 @@ platform's Go DBaaS client, `qubership-core-lib-go-dbaas-base-client`, from `/et
 
 A fresh installation needs no order: the service waits `NotReady` until the operator writes. An upgrade installs the
 service before the operator and a rollback reverses the order, because the service reads the current and the previous
-manifest format version and the operator writes the current one. The root of each schema is open, so the deployer's
+manifest format version and the operator writes the current one. The root of each schema is open, so the platform's
 one parameter set reaches both charts and each ignores the other's blocks; the blocks a chart reads are closed. A CI
 test renders both charts and compares the Service name and ports, the filters' address, the volume's ConfigMap, and
 the mount path with the constants of `api/contract`.
@@ -258,7 +258,7 @@ A business application is installed either into one namespace or as a composite:
 satellites, each with its own gateway. Every gateway of the composite sends the same domains, the component runs in the
 baseline alone, and a satellite gets the gateway filters and nothing else.
 
-Both charts read the deployer's composite variables, the same ones `core-operator` renders by:
+Both charts read the platform's composite variables, the same ones `core-operator` renders by:
 
 | `BASELINE_ORIGIN` | Operator chart renders            | Service chart renders | Filters send checks to             |
 |-------------------|-----------------------------------|-----------------------|------------------------------------|
@@ -267,10 +267,10 @@ Both charts read the deployer's composite variables, the same ones `core-operato
 
 `BASELINE_CONTROLLER` is read for parity with `control-plane`, which resolves the baseline the same way, and takes
 precedence over `BASELINE_ORIGIN` as the target namespace when set. On this platform the baseline is never blue-green'd,
-so the deployer leaves it empty. The e2e workflow and the local install above run in the first row.
+so the platform leaves it empty. The e2e workflow and the local install above run in the first row.
 
 The gateway names are not this chart's to choose. They are deployment parameters shared with
-`qubership-core-mesh-config`, the chart that creates the `Gateway` objects, and the deployer injects the same set into
+`qubership-core-mesh-config`, the chart that creates the `Gateway` objects, and the platform injects the same set into
 every chart of the application:
 
 ```yaml

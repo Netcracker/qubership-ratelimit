@@ -26,7 +26,7 @@ apiVersion: dbaas.netcracker.com/v1
 kind: InternalDatabase
 metadata:
   name: {{ include "ratelimit.redisSecretName" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "ratelimit.namespace" . }}
   labels:
     {{- include "ratelimit.labels" . | nindent 4 }}
 spec:
@@ -34,14 +34,14 @@ spec:
   classifier:
     microserviceName: {{ include "ratelimit.name" . }}
     scope: service
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "ratelimit.namespace" . }}
   type: redis
 ---
 apiVersion: dbaas.netcracker.com/v1
 kind: DatabaseSecretClaim
 metadata:
   name: {{ include "ratelimit.redisSecretName" . }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "ratelimit.namespace" . }}
   labels:
     {{- include "ratelimit.labels" . | nindent 4 }}
 spec:
@@ -49,7 +49,7 @@ spec:
   classifier:
     microserviceName: {{ include "ratelimit.name" . }}
     scope: service
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ include "ratelimit.namespace" . }}
   type: redis
   secretName: {{ include "ratelimit.redisSecretName" . }}
 {{- end }}

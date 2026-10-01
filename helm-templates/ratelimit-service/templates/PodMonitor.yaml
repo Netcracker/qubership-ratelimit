@@ -4,7 +4,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: {{ printf "%s-pod-monitor" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "ratelimit.namespace" . }}
   labels:
     {{- include "ratelimit.labels" . | nindent 4 }}
     app.kubernetes.io/component: monitoring
@@ -17,7 +17,7 @@ spec:
       path: /metrics
   namespaceSelector:
     matchNames:
-      - {{ .Release.Namespace }}
+      - {{ include "ratelimit.namespace" . }}
   selector:
     matchLabels:
       {{- include "ratelimit.selectorLabels" . | nindent 6 }}

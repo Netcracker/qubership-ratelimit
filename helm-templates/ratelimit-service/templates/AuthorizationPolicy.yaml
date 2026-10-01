@@ -29,7 +29,7 @@ apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
   name: {{ printf "%s-management" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "ratelimit.namespace" . }}
   labels:
     {{- include "ratelimit.labels" . | nindent 4 }}
 spec:
@@ -46,7 +46,7 @@ spec:
         - source:
             notPrincipals:
               {{- range $allowed }}
-              - cluster.local/ns/{{ $.Release.Namespace }}/sa/{{ . }}
+              - cluster.local/ns/{{ include "ratelimit.namespace" $ }}/sa/{{ . }}
               {{- end }}
 {{- end }}
 {{- end }}

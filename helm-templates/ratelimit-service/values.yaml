@@ -1,11 +1,41 @@
-# ============== IMAGE ============================
-image:
-  repository: ghcr.io/netcracker/qubership-ratelimit-service
-  # Empty takes the chart's appVersion, which is a fixed release. A floating tag
-  # such as "latest" moves under a running workload, so two pods of one rollout
-  # can end up on different builds.
-  tag: ""
-  pullPolicy: IfNotPresent
+# ============== PLATFORM ============================
+# The parameters the platform sets on every one of its services, read the way
+# its other services read them. The defaults are for an installation without
+# them.
+#
+# The name of the Deployment and the ServiceAccount, the app.kubernetes.io/name
+# and name labels, and the microserviceName of the counter store's DBaaS
+# classifier. The Service keeps its fixed name, ratelimit: a satellite's
+# filters compute the RLS address from it and cannot know how the baseline was
+# named.
+SERVICE_NAME: ratelimit-service
+# The namespace every object lands in; empty is the release namespace. The
+# platform sets it to the namespace it installs into.
+NAMESPACE: ""
+# The image. An empty TAG takes the chart's appVersion, which is a fixed
+# release. A floating tag such as "latest" moves under a running workload, so
+# two pods of one rollout can end up on different builds.
+IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-service
+TAG: ""
+# Labels: app.kubernetes.io/part-of, app.kubernetes.io/managed-by (empty is
+# Helm), app.kubernetes.io/version (empty is the chart's appVersion), and the
+# Deployment's deployment.netcracker.com/sessionId (empty is unimplemented).
+APPLICATION_NAME: ratelimit
+MANAGED_BY: ""
+ARTIFACT_DESCRIPTOR_VERSION: ""
+DEPLOYMENT_SESSION_ID: ""
+# On KUBERNETES the container runs as group 10001, and its root filesystem is
+# read-only while READONLY_CONTAINER_FILE_SYSTEM_ENABLED is true; on OPENSHIFT
+# the platform assigns the user and the group, and the root filesystem is
+# writable.
+PAAS_PLATFORM: KUBERNETES
+READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
+# The rollout. Empty and ramped_slow_rollout replace one pod at a time and keep
+# the old one until the new one is Ready; recreate and
+# best_effort_controlled_rollout stop the old pods first, and custom_rollout
+# takes DEPLOYMENT_STRATEGY_MAXSURGE and DEPLOYMENT_STRATEGY_MAXUNAVAILABLE,
+# 25% each by default.
+DEPLOYMENT_STRATEGY_TYPE: ""
 
 # ============== SERVICE ============================
 # REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
@@ -18,10 +48,10 @@ image:
 # writes, so scaling REPLICAS out needs no other change. GOMEMLIMIT is derived
 # from MEMORY_LIMIT, so it governs the Go heap and not only the cgroup ceiling.
 
-# Passed as LOGGING_LEVEL_ROOT: the platform logger resolves its root level
-# from the logging.level.root property; LOG_LEVEL only applies before the
-# configloader is initialized.
-logLevel: info
+# Passed as LOGGING_LEVEL_ROOT, in lower case: the platform logger resolves
+# its root level from the logging.level.root property, and a LOG_LEVEL in the
+# environment only applies before the configloader is initialized.
+LOG_LEVEL: info
 
 # ============== COUNTER STORE ============================
 # Redis holds the counters, and that is what makes a limit a limit of the domain
@@ -31,7 +61,7 @@ logLevel: info
 # The database is DBaaS's. The chart declares an InternalDatabase of type redis
 # for the release and a DatabaseSecretClaim for it; dbaas-operator provisions
 # the database through the DBaaS Redis adapter and writes its connection
-# properties into the Secret <fullname>-redis, and every replica mounts that
+# properties into the Secret <SERVICE_NAME>-redis, and every replica mounts that
 # Secret. A replica does not start until the Secret exists. dbaas-operator
 # needs a Role in the namespace that lets it write Secrets, and DBaaS needs its
 # Redis adapter, installed with redis.conf maxmemory-policy: noeviction: the
@@ -40,9 +70,9 @@ logLevel: info
 redis:
   dbaas:
     # Render the InternalDatabase and the DatabaseSecretClaim. false leaves
-    # both to someone else, who still has to produce the Secret <fullname>-redis
-    # with the key connectionProperties.json in DBaaS's format: a test cluster
-    # without DBaaS, as the e2e workflow's is.
+    # both to someone else, who still has to produce the Secret
+    # <SERVICE_NAME>-redis with the key connectionProperties.json in DBaaS's
+    # format: a test cluster without DBaaS, as the e2e workflow's is.
     enabled: true
 
 # The address of dbaas-aggregator, a platform parameter shared by every chart
@@ -83,7 +113,7 @@ metrics:
 # Service of its own. What keeps the port safe is the AuthorizationPolicy,
 # and that is enforced by ztunnel at the pod: a second Service would change
 # nothing about who can reach the port, and would add a second name for the
-# deployer's HTTPRoute to get right. The gateway's route names the port on
+# platform's HTTPRoute to get right. The gateway's route names the port on
 # the one Service, which is what backendRefs.port is for.
 management:
   enabled: false
@@ -130,16 +160,16 @@ management:
 # ============== MONITORING DELIVERY ============================
 # The scrape target, the alert rules, and the Grafana dashboard, delivered as
 # custom resources: a PodMonitor and a PrometheusRule for the platform's
-# Prometheus and a GrafanaDashboard for grafana-operator v4. The deployer
-# sets this platform parameter; off by default because all three need their
+# Prometheus and a GrafanaDashboard for grafana-operator v4. The platform
+# sets this parameter; off by default because all three need their
 # operators' CRDs, and installing them into a cluster without monitoring
 # fails the release.
 MONITORING_ENABLED: false
 
 # The alert rules of the data plane, one PrometheusRule scoped to the release
 # namespace. Every rule reads the service's own series; the operator chart
-# ships the rules over the policy status. The thresholds below are the ones a
-# deployer may need to move; the expressions stay in the template.
+# ships the rules over the policy status. The thresholds below are the ones an
+# installation may need to move; the expressions stay in the template.
 alerts:
   enabled: true
 
@@ -194,11 +224,11 @@ alerts:
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
 
 # ============== COMPOSITE ============================
-# The deployer's composite variables, the same ones core-operator and the
+# The platform's composite variables, the same ones core-operator and the
 # operator chart render by. BASELINE_ORIGIN empty is a standalone installation
 # or the baseline of a composite: the whole chart renders. BASELINE_ORIGIN set
 # is a satellite: this chart renders nothing, because a satellite runs no
-# service and its gateway filters send checks to the baseline's. The deployer
+# service and its gateway filters send checks to the baseline's. The platform
 # installs the same pair of charts in every namespace, and the empty render is
 # what keeps a satellite from waiting NotReady for an operator that never
 # comes. BASELINE_CONTROLLER is read for parity with control-plane and the
