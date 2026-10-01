@@ -509,8 +509,8 @@ func TestCharts_placeEveryObjectInThePlatformsNamespace(t *testing.T) {
 // The service chart renders the autoscaler the platform's other services
 // render: disabled in both directions without HPA_ENABLED, so REPLICAS alone
 // sizes the Deployment, and between HPA_MIN_REPLICAS and HPA_MAX_REPLICAS
-// with it, at a CPU target that is a share of the limit. The operator keeps
-// one replica and renders none.
+// with it, at a CPU target that is a share of the limit. The operator has
+// none: its replicas beyond the Lease holder add no capacity.
 func TestServiceChart_scalesWithTheAutoscalerParameters(t *testing.T) {
 	hpa := only(t, render(t, serviceChart, "biz"), "HorizontalPodAutoscaler")
 	assert.Equal(t, serviceChart, hpa.at("spec", "scaleTargetRef", "name").str2())
@@ -529,4 +529,14 @@ func TestServiceChart_scalesWithTheAutoscalerParameters(t *testing.T) {
 	assert.NotContains(t, kinds(render(t, operatorChart, "biz")), "HorizontalPodAutoscaler")
 	assert.NotContains(t, kinds(render(t, serviceChart, "biz", "--set", "BASELINE_ORIGIN=base")),
 		"HorizontalPodAutoscaler")
+}
+
+// The operator reads REPLICAS like the service: the HA profiles run a
+// standby beside the Lease holder, the others run the holder alone.
+func TestOperatorChart_readsReplicasFromTheProfile(t *testing.T) {
+	for profile, replicas := range map[string]int{"dev": 1, "dev-ha": 2, "prod-nonha": 1, "prod": 2} {
+		dir := filepath.Join("..", "..", "helm-templates", operatorChart, "resource-profiles", profile+".yaml")
+		deployment := only(t, render(t, operatorChart, "biz", "-f", dir), "Deployment")
+		assert.EqualValues(t, replicas, deployment.at("spec", "replicas").v, profile)
+	}
 }

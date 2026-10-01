@@ -11,6 +11,7 @@
     "ISTIO_PUBLIC_GATEWAY_NAME",
     "ISTIO_PRIVATE_GATEWAY_NAME",
     "gateways",
+    "REPLICAS",
     "CPU_REQUEST",
     "MEMORY_REQUEST",
     "CPU_LIMIT",
@@ -516,6 +517,13 @@
         "- topologyKey: kubernetes.io/hostname"
       ],
       "internal": true
+    },
+    "REPLICAS": {
+      "$id": "#/properties/REPLICAS",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The REPLICAS schema",
+      "internal": true,
+      "envSpecific": true
     },
     "CPU_REQUEST": {
       "$id": "#/properties/CPU_REQUEST",

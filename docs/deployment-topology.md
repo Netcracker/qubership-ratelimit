@@ -46,7 +46,7 @@ team ── kubectl apply ──► RateLimitPolicy <domain>                    
                                    │  informer (own ns only)
                                    ▼
                           ratelimit-operator ── status ──► RateLimitPolicy
-                          (one replica: decode → compile → size check;
+                          (Lease holder: decode → compile → size check;
                            a Lease covers the rollout overlap)
                                    │  writes the whole object on every reconcile
                                    ▼
@@ -87,11 +87,11 @@ the status. The full list of bounds and their origin is in [limits](limits.md).
 Two binaries, two images. The operator holds the control plane of its namespace, and the service holds the data
 plane:
 
-- **Operator** `ratelimit-operator`: a Deployment with one replica and a Lease that covers the overlap of two pods
-  during a rollout. An informer on the `RateLimitPolicy` of its own namespace: event → strict decode → compile → size
-  check → a write of the ConfigMap `ratelimit-config` and of the policy status. It is the only writer of both. Its
-  chart ships the CRD, its ServiceAccount with the only Role of the delivery, the EnvoyFilters in every mode, and its
-  own PodMonitor.
+- **Operator** `ratelimit-operator`: a Deployment whose Lease holder alone does the work, with a standby in the `-ha`
+  and `prod` profiles; the Lease also covers the overlap of two pods during a rollout. An informer on the
+  `RateLimitPolicy` of its own namespace: event → strict decode → compile → size check → a write of the ConfigMap
+  `ratelimit-config` and of the policy status. It is the only writer of both. Its chart ships the CRD, its
+  ServiceAccount with the only Role of the delivery, the EnvoyFilters in every mode, and its own PodMonitor.
 - **Service** `ratelimit-service`: a Deployment with `REPLICAS` replicas. gRPC `ShouldRateLimit` on all replicas, with
   no coordination; the counter store is a single Redis instance that the DBaaS Redis adapter provisions for the
   release and runs in its own namespace. Every replica mounts the ConfigMap as a whole
@@ -221,7 +221,7 @@ every namespace, and both derive their contents from `BASELINE_ORIGIN`:
 
 | Scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | CRD, Deployment (one replica), ServiceAccount, Role/RoleBinding, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
+| single namespace | CRD, Deployment (`REPLICAS` replicas, one active), ServiceAccount, Role/RoleBinding, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | only EnvoyFilters that target the baseline RLS; no ServiceAccount, no RBAC | nothing: an empty release |
 

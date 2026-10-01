@@ -25,7 +25,7 @@ helm-templates/ratelimit-operator/templates/
 ├── _helpers.tpl                   # name, labels, mode (satellite iff BASELINE_ORIGIN), serviceName (the constant
 │                                  #   ratelimit), serviceNamespace, rlsAuthority/rlsCluster, statPrefix,
 │                                  #   validateDomains (fails the render on a duplicate domain)
-├── Deployment.yaml                # the Deployment ratelimit-operator, one replica; single namespace and baseline
+├── Deployment.yaml                # ratelimit-operator, one replica active; single namespace and baseline
 │                                  #   only, as is every template but EnvoyFilter.yaml
 ├── ServiceAccount.yaml            # bound to the only Role of the delivery
 ├── Role.yaml                      # policies and their status, leases, endpointslices, configmaps, events, all in
@@ -117,7 +117,7 @@ only the keys its templates read:
 
 | Parameter | Read by | What it does |
 | --- | --- | --- |
-| `REPLICAS` | the service chart | the replica count of the service; the operator runs one replica and reads no `REPLICAS` |
+| `REPLICAS` | both | the replica count, from the resource profile; the operator's `dev-ha` and `prod` profiles set 2, and the second operator replica is a standby that takes the Lease over, not added capacity |
 | `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT` | both | installation size; there are NO defaults in values, the resource profile supplies them |
 | `MONITORING_ENABLED` | both | enables the PodMonitor and the PrometheusRule of each chart and the GrafanaDashboard of the service chart; false by default, since all three need the CRDs of their operators |
 | `ISTIO_PUBLIC_GATEWAY_NAME` | the operator chart | the name of the public Gateway object the filter targets; it must match the parameters of qubership-core-mesh-config, which creates the Gateways |
@@ -136,12 +136,11 @@ only the keys its templates read:
 | `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`; off, both directions are `Disabled` and `REPLICAS` sizes the service. The operator has none |
 | `CLOUD_TOPOLOGIES` | both | the platform's list of topologies; when set, it replaces `CLOUD_TOPOLOGY_KEY` with one constraint per entry, each with its `topologyKey` and optional `maxSkew` and `whenUnsatisfiable` |
 
-The resource parameters are required in the schema of each chart: the four sizes in the operator chart, the five with
-`REPLICAS` in the service chart, whose profiles also carry the `HPA_*` parameters. An installation without `-f
-resource-profiles/<profile>.yaml` fails with a clear error instead of rendering a Deployment with empty resources. One
-source of truth: the defaults cannot drift apart from the profiles because there are no defaults. `GOMEMLIMIT` is
-derived from `MEMORY_LIMIT` automatically (the memlimit import in the binaries), so the limit governs the Go heap, not
-only the cgroup ceiling.
+The resource parameters are required in the schema of each chart: the four sizes and `REPLICAS` in both, and the
+service's profiles also carry the `HPA_*` parameters. An installation without `-f resource-profiles/<profile>.yaml`
+fails with a clear error instead of rendering a Deployment with empty resources. One source of truth: the defaults
+cannot drift apart from the profiles because there are no defaults. `GOMEMLIMIT` is derived from `MEMORY_LIMIT`
+automatically (the memlimit import in the binaries), so the limit governs the Go heap, not only the cgroup ceiling.
 
 ## Values reference
 
@@ -313,7 +312,7 @@ What is **deliberately absent** from values:
 | --- | --- | --- |
 | limit rules, claim extraction, groups | `RateLimitPolicy` | a matter for the teams, not for the installation |
 | the descriptor list | hardwired in the EnvoyFilter template | the four fields `path`/`method`/`token`/`request_id` are a contract with the service; extending it is a deliberate chart change |
-| the Lease | always on, in the operator | one replica writes the status and `ratelimit-config`; the Lease covers the overlap of two pods during a rollout |
+| the Lease | always on, in the operator | the Lease holder alone writes the status and `ratelimit-config`, a standby takes over when it goes, and the Lease covers the overlap of two pods during a rollout |
 | the ConfigMap `ratelimit-config` | written by the operator | Helm and Argo CD overwrite what a chart renders on every sync; the channel to the service cannot come from a chart |
 | the Service name and port | contract constants (`ratelimit`, 9000) | fixed in the templates of both charts and checked against the Go constants by the CI render test; there is no `rls.port` value |
 | sanity bounds (token size and the like) | constants in the binaries | not knobs: nobody tunes them |
@@ -440,8 +439,8 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 
 ### Deployment.yaml of the operator chart: the essentials
 
-- one replica, with no `REPLICAS` value: the operator writes the status and `ratelimit-config`, and the Lease keeps
-  one writer while two pods overlap during a rollout;
+- `REPLICAS` replicas, 2 in `dev-ha` and `prod`: only the Lease holder writes the status and `ratelimit-config`, another
+  replica is a standby, and the Lease keeps one writer while two pods overlap during a rollout;
 - env: `LOGGING_LEVEL_ROOT` (not `--zap-log-level`), `CLOUD_NAMESPACE` from a fieldRef (the namespace scope is
   mandatory, the process does not start without it), `POD_NAME` from a fieldRef (the Lease identity);
 - the ConfigMap `ratelimit-config` is not rendered here either: the operator creates it on the first reconcile with an

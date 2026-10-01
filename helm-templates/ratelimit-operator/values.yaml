@@ -38,16 +38,18 @@ READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
 LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15
 
 # ============== OPERATOR ============================
-# CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by the
-# resource profile, not here: one source of truth, so the defaults cannot
+# REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
+# the resource profile, not here: one source of truth, so the defaults cannot
 # drift away from the profiles. values.schema.json requires them, so installing
 # without `-f resource-profiles/<profile>.yaml` fails with a clear message
 # instead of rendering a Deployment with empty resources.
 #
-# The operator runs one replica and reads no REPLICAS: it writes the policy
-# status and the configuration ConfigMap, and the Lease keeps one writer while
-# two pods overlap during a rollout. GOMEMLIMIT is derived from MEMORY_LIMIT,
-# so it governs the Go heap and not only the cgroup ceiling.
+# REPLICAS is 2 in dev-ha and prod, 1 in the others. Only the pod that holds
+# the Lease writes the policy status and the configuration ConfigMap; the
+# second replica adds no capacity, only a standby that takes the Lease over
+# when the holder goes, without waiting for a new pod to schedule and start.
+# GOMEMLIMIT is derived from MEMORY_LIMIT, so it governs the Go heap and not
+# only the cgroup ceiling.
 
 # Passed as LOGGING_LEVEL_ROOT, in lower case: the platform logger resolves
 # its root level from the logging.level.root property, and a LOG_LEVEL in the

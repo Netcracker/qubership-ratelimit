@@ -32,13 +32,13 @@ On every request the gateway sends one flat descriptor — `path`, the `authoriz
 `x-request-id`. Those are the inputs the schema is written against: a rule matches on identity read out of the token,
 and on the path through the routes of its block.
 
-The delivery is two components in one namespace, joined by one ConfigMap. The operator, one replica, watches the
+The delivery is two components in one namespace, joined by one ConfigMap. The operator, one active replica, watches the
 policies of its namespace, compiles them, and writes `ratelimit-config`: a manifest with the generation, UID, and
 content hash of every domain, and one compressed payload per domain. The service replicas mount that ConfigMap as a
 volume, hold no Kubernetes credentials at all, apply what the kubelet projects, and answer checks from it. The operator
-also reads `/debug/applied` on every ready replica through the Service and writes the policy status from what it
-finds. The operator's Lease covers the overlap of two pods during its own rollout; it signs the lease with its pod
-name, which the chart passes as `POD_NAME` through the Downward API.
+also reads `/debug/applied` on every ready replica through the Service and writes the policy status from what it finds.
+The operator's Lease covers the overlap of two pods during its own rollout; it signs the lease with its pod name, which
+the chart passes as `POD_NAME` through the Downward API.
 
 | Component            | Runs in               | Does                                                             |
 |----------------------|-----------------------|------------------------------------------------------------------|
@@ -180,23 +180,23 @@ helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
   --set TAG=<tag>
 ```
 
-The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`,
-`dev-ha`, `prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`,
-`MEMORY_LIMIT`, and, for the service, `REPLICAS` and the `HPA_*` parameters of its autoscaler. Each `values.schema.json`
-requires its keys, so an install without `-f` fails with `missing properties 'CPU_REQUEST', ...` rather than rendering a
-Deployment with empty resources. The service's autoscaler is off in `dev` and scales between 1 or 2 and 5 replicas in
-the others, the way the platform's other services do; the `-ha` and `prod` profiles start two replicas. The operator
-runs one.
+The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`, `dev-ha`,
+`prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT`, and,
+for the service, `REPLICAS` and the `HPA_*` parameters of its autoscaler. Each `values.schema.json` requires its keys,
+so an install without `-f` fails with `missing properties 'CPU_REQUEST', ...` rather than rendering a Deployment with
+empty resources. The service's autoscaler is off in `dev` and scales between 1 or 2 and 5 replicas in the others, the
+way the platform's other services do; the `-ha` and `prod` profiles start two replicas. The operator runs two there as
+well: the Lease holder and a standby.
 
 `MEMORY_LIMIT` is not only a cgroup ceiling: the platform's `memlimit` package derives `GOMEMLIMIT` from it at startup,
 so it governs when the Go heap starts collecting.
 
-`ratelimit-operator` renders the CRD, one operator replica with the only `Role` of the delivery, one `EnvoyFilter`
-per enabled gateway, a `PodMonitor`, and a `PrometheusRule`. Its values are the filter's (`filter.*`; the port the
-filters send checks to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`, `alerts.*`, the gateway
-names, and the resource sizes without `REPLICAS`. It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap
-`ratelimit-config` and the operator's own Deployment by name, and nothing else in the namespace beyond the policies,
-the Lease, the Events, and the EndpointSlices.
+`ratelimit-operator` renders the CRD, the operator replicas with the only `Role` of the delivery, one `EnvoyFilter` per
+enabled gateway, a `PodMonitor`, and a `PrometheusRule`. Its values are the filter's (`filter.*`; the port the filters
+send checks to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`, `alerts.*`, the gateway names, and
+the resource sizes with `REPLICAS`, 2 in the `-ha` and `prod` profiles. It installs no `ClusterRole` and no
+`ClusterRoleBinding`; the `Role` reaches the ConfigMap `ratelimit-config` and the operator's own Deployment by name, and
+nothing else in the namespace beyond the policies, the Lease, the Events, and the EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
 `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
