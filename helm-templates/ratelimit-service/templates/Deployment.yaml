@@ -15,7 +15,14 @@ metadata:
     app.kubernetes.io/technology: 'go'
     deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
 spec:
+  # With HPA_ENABLED the autoscaler owns the count, and the field is left out:
+  # a rendered count would conflict with the autoscaler's under server-side
+  # apply, or set the scaled-out count back on every upgrade. A release that
+  # turns the autoscaler on starts from the API default of one pod, and the
+  # autoscaler raises it to HPA_MIN_REPLICAS on its next sync.
+  {{- if not .Values.HPA_ENABLED }}
   replicas: {{ .Values.REPLICAS }}
+  {{- end }}
   selector:
     matchLabels:
       name: '{{ .Values.SERVICE_NAME }}'

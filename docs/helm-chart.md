@@ -123,9 +123,9 @@ only the keys its templates read:
 | `ISTIO_PUBLIC_GATEWAY_NAME` | the operator chart | the name of the public Gateway object the filter targets; it must match the parameters of qubership-core-mesh-config, which creates the Gateways |
 | `ISTIO_PRIVATE_GATEWAY_NAME` | both | the name of the private Gateway object: the filter target in the operator chart, the default principal of the management AuthorizationPolicy in the service chart; it must match qubership-core-mesh-config the same way |
 | `BASELINE_ORIGIN` | both | the baseline namespace, set only in a satellite; empty renders the whole stack of each chart, non-empty renders only the operator chart's filters, targeting `ratelimit.<BASELINE_ORIGIN>.svc:9000`, and nothing from the service chart; the release's own namespace fails both renders with `BASELINE_ORIGIN "<ns>" is this release's own namespace` |
-| `BASELINE_CONTROLLER` | both | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the operator chart; the platform leaves it empty on this platform |
+| `BASELINE_CONTROLLER` | both | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the operator chart; on this platform the baseline is never blue-green'd, so it stays empty |
 | `CLOUD_TOPOLOGY_KEY` | both | the node label each Deployment spreads its pods over, `kubernetes.io/hostname` by default: one topology spread constraint with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`, selecting the Deployment's own pods |
-| `SERVICE_NAME` | both | the name of each chart's Deployment and ServiceAccount (and the operator's RBAC pair), its `app.kubernetes.io/name` and `name` labels, and in the service chart the DBaaS classifier's `microserviceName`; `ratelimit-operator` and `ratelimit-service` by default; the Service stays `ratelimit` |
+| `SERVICE_NAME` | both | the name of each chart's Deployment and ServiceAccount (and the operator's RBAC pair), its `app.kubernetes.io/name` and `name` labels, and in the service chart the DBaaS classifier's `microserviceName`; `ratelimit-operator` and `ratelimit-service` by default; the Service stays `ratelimit`; a DNS label of at most 63 characters, which the schema checks |
 | `NAMESPACE` | both | the namespace every object lands in, as on the platform's other services; empty is the release namespace. The pods read their namespace back through the Downward API, so the installation's scope, the counter key prefix, and the DBaaS classifier follow it |
 | `IMAGE_REPOSITORY`, `TAG` | both | the image; an empty `TAG` takes the chart's `appVersion` |
 | `LOG_LEVEL` | both | the root level of the platform logger, passed as `LOGGING_LEVEL_ROOT` in lower case |
@@ -133,8 +133,12 @@ only the keys its templates read:
 | `PAAS_PLATFORM`, `READONLY_CONTAINER_FILE_SYSTEM_ENABLED` | both | on `KUBERNETES` the container runs as group 10001 and, with the flag set (the default), on a read-only root filesystem; on `OPENSHIFT` the platform assigns both and the root filesystem is writable |
 | `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; unset and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`, `recreate` and `best_effort_controlled_rollout` stop the old pods first, which leaves the gateways without an RLS endpoint during a service rollout |
 | `LIVENESS_PROBE_INITIAL_DELAY_SECONDS` | both | the delay before the first liveness probe, 15 by default |
-| `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`; off, both directions are `Disabled` and `REPLICAS` sizes the service. The operator has none |
+| `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`. While it is on, the Deployment renders no `replicas`, so an upgrade keeps the scaled count; off, both directions are `Disabled` and `REPLICAS` sizes the service |
 | `CLOUD_TOPOLOGIES` | both | the platform's list of topologies; when set, it replaces `CLOUD_TOPOLOGY_KEY` with one constraint per entry, each with its `topologyKey` and optional `maxSkew` and `whenUnsatisfiable` |
+
+The keys the charts read before the platform parameters, `image.*`, `logLevel`, `nameOverride`, and `fullnameOverride`,
+are refused by both schemas rather than ignored: an installation that still sets one fails the render at that key
+instead of running the default image at the default level.
 
 The resource parameters are required in the schema of each chart: the four sizes and `REPLICAS` in both, and the
 service's profiles also carry the `HPA_*` parameters. An installation without `-f resource-profiles/<profile>.yaml`
@@ -316,7 +320,7 @@ What is **deliberately absent** from values:
 | the ConfigMap `ratelimit-config` | written by the operator | Helm and Argo CD overwrite what a chart renders on every sync; the channel to the service cannot come from a chart |
 | the Service name and port | contract constants (`ratelimit`, 9000) | fixed in the templates of both charts and checked against the Go constants by the CI render test; there is no `rls.port` value |
 | sanity bounds (token size and the like) | constants in the binaries | not knobs: nobody tunes them |
-| `replicaCount`, `resources` | resource profiles (`REPLICAS` for the service, `CPU_*`, `MEMORY_*`) | one source of truth with the platform |
+| `replicaCount`, `resources` | resource profiles (`REPLICAS`, `CPU_*`, `MEMORY_*`, and the service's `HPA_*`) | one source of truth with the platform |
 | the RLS address for a satellite | computed from `BASELINE_ORIGIN` | the Service name and port are fixed by contract |
 | `DestinationRule` for the service cluster | none | see "What the charts do not install" |
 
@@ -452,8 +456,9 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 
 ### Deployment.yaml of the service chart: the essentials
 
-- `REPLICAS` replicas from the profile; the pod sets `automountServiceAccountToken: false` and holds no Role: the
-  process that parses tokens from the internet reaches no API server object;
+- `REPLICAS` replicas from the profile, or none rendered while `HPA_ENABLED` hands the count to the autoscaler; the pod
+  sets `automountServiceAccountToken: false` and holds no Role: the process that parses tokens from the internet reaches
+  no API server object;
 - the volume: the ConfigMap `ratelimit-config` mounted as a whole directory at `/etc/ratelimit/config` with
   `optional: true`, so the pod starts before the operator has written;
 - on the `..data` symlink swap the process decodes the manifest strictly, compiles every domain with the engine module,

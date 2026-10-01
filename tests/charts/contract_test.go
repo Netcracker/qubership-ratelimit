@@ -540,3 +540,155 @@ func TestOperatorChart_readsReplicasFromTheProfile(t *testing.T) {
 		assert.EqualValues(t, replicas, deployment.at("spec", "replicas").v, profile)
 	}
 }
+
+// SERVICE_NAME names every object and every reference to one, not only the
+// Deployment: a flag that differs from the claim's classifier leaves the
+// service without its database, an autoscaler aimed at another name scales
+// nothing, and an operator started with another --deployment owns nothing.
+func TestCharts_nameEveryReferenceAfterServiceName(t *testing.T) {
+	objects := render(t, serviceChart, "biz", "-f",
+		filepath.Join("..", "..", "helm-templates", serviceChart, "resource-profiles", "prod.yaml"),
+		"--set", "SERVICE_NAME=rl", "--set", "management.enabled=true")
+	deployment := only(t, objects, "Deployment")
+	pod := deployment.at("spec", "template", "spec")
+	assert.Equal(t, "rl", only(t, objects, "ServiceAccount").name())
+	assert.Equal(t, "rl", pod.at("serviceAccountName").str2())
+	assert.Contains(t, argsOf(pod.at("containers").list()[0]), "--redis-dbaas-microservice=rl")
+	for _, kind := range []string{"InternalDatabase", "DatabaseSecretClaim"} {
+		claim := only(t, objects, kind)
+		assert.Equal(t, "rl-redis", claim.name(), kind)
+		assert.Equal(t, "rl", claim.at("spec", "classifier", "microserviceName").str2(), kind)
+	}
+	assert.Equal(t, "rl-redis", only(t, objects, "DatabaseSecretClaim").at("spec", "secretName").str2())
+	var mounted []string
+	for _, volume := range pod.at("volumes").list() {
+		if name := volume.at("secret", "secretName").str2(); name != "" {
+			mounted = append(mounted, name)
+		}
+	}
+	assert.Equal(t, []string{"rl-redis"}, mounted, "the Deployment mounts a Secret the claim does not name")
+	hpa := only(t, objects, "HorizontalPodAutoscaler")
+	assert.Equal(t, "rl", hpa.name())
+	assert.Equal(t, "rl", hpa.at("spec", "scaleTargetRef", "name").str2(), "the autoscaler targets another Deployment")
+
+	objects = render(t, operatorChart, "biz", "--set", "SERVICE_NAME=rl")
+	deployment = only(t, objects, "Deployment")
+	pod = deployment.at("spec", "template", "spec")
+	assert.Equal(t, "rl", only(t, objects, "ServiceAccount").name())
+	assert.Equal(t, "rl", pod.at("serviceAccountName").str2())
+	assert.Contains(t, argsOf(pod.at("containers").list()[0]), "--deployment=rl")
+	assert.Equal(t, "rl", only(t, objects, "Role").name())
+	binding := only(t, objects, "RoleBinding")
+	assert.Equal(t, "rl", binding.name())
+	assert.Equal(t, "rl", binding.at("roleRef", "name").str2())
+	assert.Equal(t, "rl", binding.at("subjects").list()[0].at("name").str2())
+	var owner []string
+	for _, rule := range only(t, objects, "Role").at("rules").list() {
+		if slices.Contains(strs(rule.at("resources")), "deployments") {
+			owner = strs(rule.at("resourceNames"))
+		}
+	}
+	assert.Equal(t, []string{"rl"}, owner, "the operator may not read the Deployment it is told to adopt")
+
+	// The instance label is the name and the namespace, cut to a label's 63.
+	long := strings.Repeat("n", 50)
+	labels := only(t, render(t, serviceChart, strings.Repeat("s", 40), "--set", "SERVICE_NAME="+long),
+		"Deployment").at("metadata", "labels")
+	instance := labels.at("app.kubernetes.io/instance").str2()
+	assert.Len(t, instance, 63)
+	assert.True(t, strings.HasPrefix(instance, long+"-"))
+}
+
+// DEPLOYMENT_STRATEGY_TYPE is read the way the platform's other services read
+// it, with this chart's own rollout when it is unset.
+func TestCharts_rollOutByTheStrategyType(t *testing.T) {
+	type rollout struct{ kind, surge, unavailable string }
+	cases := map[string]struct {
+		args []string
+		want rollout
+	}{
+		"unset":                          {nil, rollout{"RollingUpdate", "1", "0"}},
+		"ramped_slow_rollout":            {nil, rollout{"RollingUpdate", "1", "0"}},
+		"recreate":                       {nil, rollout{"Recreate", "", ""}},
+		"best_effort_controlled_rollout": {nil, rollout{"RollingUpdate", "0", "80%"}},
+		"custom_rollout": {[]string{"--set", "DEPLOYMENT_STRATEGY_MAXSURGE=2",
+			"--set-string", "DEPLOYMENT_STRATEGY_MAXUNAVAILABLE=50%"}, rollout{"RollingUpdate", "2", "50%"}},
+	}
+	for _, chart := range []string{operatorChart, serviceChart} {
+		for name, c := range cases {
+			args := c.args
+			if name != "unset" {
+				args = append([]string{"--set", "DEPLOYMENT_STRATEGY_TYPE=" + name}, args...)
+			}
+			strategy := only(t, render(t, chart, "biz", args...), "Deployment").at("spec", "strategy")
+			got := rollout{
+				strategy.at("type").str2(),
+				fmt.Sprint(strategy.at("rollingUpdate", "maxSurge").v),
+				fmt.Sprint(strategy.at("rollingUpdate", "maxUnavailable").v),
+			}
+			if got.surge == "<nil>" {
+				got.surge, got.unavailable = "", ""
+			}
+			assert.Equal(t, c.want, got, "%s: %s", chart, name)
+		}
+		strategy := only(t, render(t, chart, "biz", "--set", "DEPLOYMENT_STRATEGY_TYPE=custom_rollout"),
+			"Deployment").at("spec", "strategy", "rollingUpdate")
+		assert.Equal(t, "25%", strategy.at("maxSurge").str2(), chart)
+		assert.Equal(t, "25%", strategy.at("maxUnavailable").str2(), chart)
+	}
+}
+
+// The container's own platform parameters: a writable root filesystem when
+// READONLY_CONTAINER_FILE_SYSTEM_ENABLED is off, and the liveness delay.
+func TestCharts_readTheContainerParameters(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		container := only(t, render(t, chart, "biz", "--set", "READONLY_CONTAINER_FILE_SYSTEM_ENABLED=false",
+			"--set", "LIVENESS_PROBE_INITIAL_DELAY_SECONDS=42"), "Deployment").
+			at("spec", "template", "spec", "containers").list()[0]
+		assert.Equal(t, false, container.at("securityContext", "readOnlyRootFilesystem").v, chart)
+		assert.EqualValues(t, 42, container.at("livenessProbe", "initialDelaySeconds").v, chart)
+	}
+}
+
+// Each service profile sizes the autoscaler, and the Deployment leaves the
+// count to it whenever it is on: a rendered count would conflict with the
+// autoscaler's under server-side apply, or undo its scaling on an upgrade.
+func TestServiceChart_profilesSizeTheAutoscaler(t *testing.T) {
+	type sizing struct {
+		enabled          bool
+		replicas         any
+		minimum, maximum float64
+	}
+	for profile, want := range map[string]sizing{
+		"dev":        {false, float64(1), 1, 9999},
+		"dev-ha":     {true, nil, 2, 5},
+		"prod-nonha": {true, nil, 1, 5},
+		"prod":       {true, nil, 2, 5},
+	} {
+		objects := render(t, serviceChart, "biz", "-f",
+			filepath.Join("..", "..", "helm-templates", serviceChart, "resource-profiles", profile+".yaml"))
+		assert.Equal(t, want.replicas, only(t, objects, "Deployment").at("spec", "replicas").v, profile)
+		spec := only(t, objects, "HorizontalPodAutoscaler").at("spec")
+		assert.Equal(t, want.minimum, spec.at("minReplicas").v, profile)
+		assert.Equal(t, want.maximum, spec.at("maxReplicas").v, profile)
+		policy := "Disabled"
+		if want.enabled {
+			policy = "Max"
+		}
+		assert.Equal(t, policy, spec.at("behavior", "scaleUp", "selectPolicy").str2(), profile)
+		assert.EqualValues(t, 60, spec.at("behavior", "scaleUp", "stabilizationWindowSeconds").v, profile)
+		assert.EqualValues(t, 300, spec.at("behavior", "scaleDown", "stabilizationWindowSeconds").v, profile)
+		for _, direction := range []string{"scaleUp", "scaleDown"} {
+			assert.Equal(t, []any{map[string]any{"type": "Pods", "value": float64(1), "periodSeconds": float64(60)}},
+				spec.at("behavior", direction, "policies").v, "%s %s", profile, direction)
+		}
+	}
+
+	spec := only(t, render(t, serviceChart, "biz", "--set", "HPA_ENABLED=true", "--set", "HPA_MAX_REPLICAS=3",
+		"--set", "HPA_AVG_CPU_UTILIZATION_TARGET_PERCENT=50", "--set", "HPA_SCALING_UP_PERCENT_VALUE=100",
+		"--set", "HPA_SCALING_UP_PERCENT_PERIOD_SECONDS=30"), "HorizontalPodAutoscaler").at("spec")
+	assert.EqualValues(t, 2500, spec.at("metrics").list()[0].at("resource", "target", "averageUtilization").v,
+		"50% of the dev profile's 500m limit is 2500% of its 10m request")
+	assert.Contains(t, spec.at("behavior", "scaleUp", "policies").v,
+		map[string]any{"type": "Percent", "value": float64(100), "periodSeconds": float64(30)})
+}

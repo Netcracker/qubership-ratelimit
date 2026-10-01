@@ -45,8 +45,9 @@ type Options struct {
 	Version string
 
 	// LeaderElection is off only in a test that starts the manager itself.
-	// In the binary it is always on: the Lease covers the overlap of two
-	// pods during a rollout, which is the only time there are two.
+	// In the binary it is always on: the Lease keeps one writer across the
+	// standby replica of the HA profiles and the overlap of two pods during
+	// a rollout.
 	LeaderElection bool
 
 	// Log is the logger the components write through.

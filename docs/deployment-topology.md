@@ -226,8 +226,8 @@ every namespace, and both derive their contents from `BASELINE_ORIGIN`:
 | composite, satellite | only EnvoyFilters that target the baseline RLS; no ServiceAccount, no RBAC | nothing: an empty release |
 
 Each chart declares only the values its templates read, and shared platform parameters keep identical key names in both.
-`REPLICAS` exists only in the service chart, the filter settings move to the operator chart under `filter`, and
-`rls.port` exists in neither: the port is a contract constant. The values are listed in [helm](helm-chart.md).
+`REPLICAS` comes from the resource profile of each chart, the filter settings move to the operator chart under `filter`,
+and `rls.port` exists in neither: the port is a contract constant. The values are listed in [helm](helm-chart.md).
 
 The repository holds one root Go module plus the engine module: `operator/cmd`, `operator/internal`, and
 `operator/Dockerfile`; `service/cmd`, `service/internal`, and `service/Dockerfile`; shared code in the root

@@ -165,9 +165,10 @@ func TestLoad_oneReplicaHoldsTheFloor(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	client := envoyratelimit.NewRateLimitServiceClient(conn)
 
-	// The floor and the budget are judged on their own best windows: a slow
-	// window can still have the highest throughput, and the failure message
-	// names the window each number came from.
+	// A run passes on the first window that clears the floor and the budget
+	// at once: the requirement is one replica holding both. A failure reports
+	// the best of each over the windows, with the window it came from, since
+	// a slow window can still have the highest throughput.
 	var fastest, quickest loadWindow
 	for window := 1; window <= loadWindows; window++ {
 		measured := measureWindow(t, client)
@@ -180,11 +181,13 @@ func TestLoad_oneReplicaHoldsTheFloor(t *testing.T) {
 		if window == 1 || measured.p99 < quickest.p99 {
 			quickest = measured
 		}
-		if fastest.perSecond >= loadFloorPerSecond && quickest.p99 <= loadP99Budget {
+		if measured.perSecond >= loadFloorPerSecond && measured.p99 <= loadP99Budget {
 			return
 		}
 	}
 
+	t.Errorf("no window of %d held the floor of %d/s and the budget of %s at once against %s",
+		loadWindows, loadFloorPerSecond, loadP99Budget, backend)
 	assert.GreaterOrEqualf(t, fastest.perSecond, float64(loadFloorPerSecond),
 		"one replica served at most %.0f decisions/s over %s against %s, in window %d of %d; the floor is %d/s",
 		fastest.perSecond, loadDuration, backend, fastest.index, loadWindows, loadFloorPerSecond)

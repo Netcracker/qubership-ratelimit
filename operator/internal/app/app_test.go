@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/config"
+	operatorpolicy "github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
 const testNamespace = "ratelimit-app-envtest"
@@ -106,6 +109,53 @@ var _ = Describe("the operator, built", Ordered, func() {
 			}
 			return ""
 		}).WithTimeout(20 * time.Second).Should(Equal(v1.ReasonNoReplicas))
+
+		// The writer as built reports a lost last-good generation as an event:
+		// a saved generation this build does not compile, under a latest one
+		// that does not compile either, ends in a Warning on the policy.
+		broken := v1.RateLimitPolicySpec{Domain: "gateway.lost", Limits: []v1.LimitBlock{{
+			Name: "a", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60}},
+				Matches: []v1.Predicate{{Key: "ghost", Operator: v1.OperatorExists}}}}}}}
+		lost := &v1.RateLimitPolicy{
+			ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "gateway.lost"},
+			Spec:       broken,
+		}
+		Expect(k8sClient.Create(ctx, lost)).To(Succeed())
+		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, lost))).To(Succeed()) })
+		// The save goes in once the manager's cache holds the policy: a writer
+		// that reconciles the saved object before it sees the policy drops the
+		// generation of a domain it does not know, with no outcome to report.
+		Eventually(func() string {
+			var got v1.RateLimitPolicy
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(lost), &got); err != nil {
+				return ""
+			}
+			for _, c := range got.Status.Conditions {
+				if c.Type == v1.ConditionReady {
+					return c.Reason
+				}
+			}
+			return ""
+		}).WithTimeout(20 * time.Second).Should(Equal(v1.ReasonNotCompiled))
+		store := config.New(k8sClient, testNamespace, nil, "0.0.0-test", logf.Log)
+		Expect(store.Save(ctx, map[string]operatorpolicy.Bundle{"gateway.lost": {
+			UID: string(lost.UID), GoodGeneration: 1, GoodSpec: broken,
+		}}, operatorpolicy.ConfigMapLimit)).To(Succeed())
+		Eventually(func() []string {
+			var list eventsv1.EventList
+			if err := k8sClient.List(ctx, &list, client.InNamespace(testNamespace)); err != nil {
+				return nil
+			}
+			var notes []string
+			for _, e := range list.Items {
+				if e.Reason == config.ReasonLastGoodLost && e.Regarding.Name == lost.Name {
+					notes = append(notes, e.Type+": "+e.Note)
+				}
+			}
+			return notes
+		}).WithTimeout(20*time.Second).Should(ContainElement(
+			ContainSubstring("Warning: last-good generation 1 does not compile with this operator build")),
+			"the operator as built leaves no event for a lost last-good generation")
 
 		// And the probes answer.
 		Eventually(func() int {

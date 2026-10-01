@@ -95,7 +95,7 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 
 	It("logs each check without ever logging the token", func() {
 		// The per-check line is Debug; the e2e install runs with
-		// logLevel=debug precisely so this contract stays observable.
+		// LOG_LEVEL=debug precisely so this contract stays observable.
 		since := time.Now()
 		secret := "e2e-secret-token-should-never-be-logged"
 		requestID := fmt.Sprintf("e2e-correlation-%d", time.Now().Unix())

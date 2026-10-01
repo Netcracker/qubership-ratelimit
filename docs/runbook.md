@@ -457,10 +457,13 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 comment. A domain that lost its last-good to an operator upgrade has a `Warning` event with reason `LastGoodLost`,
 `last-good generation N does not compile with this operator build`, and the same line in the operator's log; the
 `Ready` message carries it only until the configuration writer drops the saved generation. The saved spec is gone
-then, and rolling the operator back does not bring it back: apply a generation that compiles.
+then, and rolling the operator back does not bring it back: apply a generation that compiles. The API server deletes
+the event after its `--event-ttl`, one hour by default; for an older loss, search the operator's log for
+`dropped a saved last-good generation; the domain enforces nothing`, which carries the domain and the reason as fields.
 
 ```bash
 kubectl get events -n "$NS" --field-selector reason=LastGoodLost
+kubectl logs -n "$NS" -l name=ratelimit-operator --prefix | grep 'dropped a saved last-good generation'
 ```
 
 **Act.** Fix the spec at the address and apply it. The compiler judges the whole generation, so fix every listed problem

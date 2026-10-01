@@ -2,7 +2,8 @@
 {{- /*
 The autoscaler the platform's other services render, read from the same
 HPA_* parameters. It is always rendered: with HPA_ENABLED off both directions
-are Disabled, and REPLICAS alone sets the size. The replicas share their
+are Disabled, and REPLICAS alone sets the size; with it on, the Deployment
+renders no count of its own. The replicas share their
 counters through the store, so a replica added under load enforces the same
 limits as the others. The target is a share of CPU_LIMIT, expressed against
 CPU_REQUEST, which is what Utilization measures. autoscaling/v2 is the only
