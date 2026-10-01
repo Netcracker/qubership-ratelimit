@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 RUN go version -m ratelimit-service | grep -E '^\s+dep\s+(k8s.io/client-go|sigs.k8s.io/controller-runtime)\s' \
     && { echo "the service binary depends on a Kubernetes client"; exit 1; } || true
 
-FROM ghcr.io/netcracker/qubership-core-base:alpine-2.5.5@sha256:1e207c43e907165f9c55838bb853465357a28bfd50799cf4aa66b959fe72a836
+FROM ghcr.io/netcracker/qubership-core-base:alpine-2.5.6@sha256:e85e971e33cdb218bf1c23ccbad0d0ddaee7d3abfc442247d81081e3d0467467
 WORKDIR /app
 COPY --chown=10001:0 --chmod=555 --from=builder /app/ratelimit-service /app/ratelimit-service
 COPY --chown=10001:0 --chmod=444 --from=builder /app/service/application.yaml /app/application.yaml
