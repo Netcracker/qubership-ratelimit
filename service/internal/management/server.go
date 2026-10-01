@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 
 	fiberserver "github.com/netcracker/qubership-core-lib-go-fiber-server-utils/v2"
 	fibererrors "github.com/netcracker/qubership-core-lib-go-fiber-server-utils/v2/errors"
