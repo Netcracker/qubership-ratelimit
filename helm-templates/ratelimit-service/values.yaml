@@ -17,11 +17,11 @@ NAMESPACE: ""
 # two pods of one rollout can end up on different builds.
 IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-service
 TAG: ""
-# Labels: app.kubernetes.io/part-of, app.kubernetes.io/managed-by (empty is
-# Helm), app.kubernetes.io/version (empty is the chart's appVersion), and the
-# Deployment's deployment.netcracker.com/sessionId (empty is unimplemented).
+# Labels: app.kubernetes.io/part-of, app.kubernetes.io/managed-by,
+# app.kubernetes.io/version (empty is the chart's appVersion), and
+# deployment.netcracker.com/sessionId (empty is unimplemented).
 APPLICATION_NAME: ratelimit
-MANAGED_BY: ""
+MANAGED_BY: Helm
 ARTIFACT_DESCRIPTOR_VERSION: ""
 DEPLOYMENT_SESSION_ID: ""
 # On KUBERNETES the container runs as group 10001, and its root filesystem is
@@ -245,7 +245,7 @@ BASELINE_CONTROLLER: ""
 # ============== KUBERNETES ============================
 serviceAccount:
   create: true
-  # Defaults to the chart's fullname when empty.
+  # Defaults to SERVICE_NAME when empty.
   name: ""
 
 podAnnotations: {}

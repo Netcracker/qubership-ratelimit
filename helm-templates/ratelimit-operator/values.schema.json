@@ -51,7 +51,7 @@
       "type": "string",
       "title": "The MANAGED_BY schema",
       "description": "The tool being used to manage the operation of an application",
-      "default": "",
+      "default": "Helm",
       "examples": [
         "helm",
         "operator",
@@ -451,7 +451,7 @@
         },
         "name": {
           "type": "string",
-          "description": "Defaults to the chart's fullname when empty."
+          "description": "Defaults to SERVICE_NAME when empty."
         }
       },
       "additionalProperties": false

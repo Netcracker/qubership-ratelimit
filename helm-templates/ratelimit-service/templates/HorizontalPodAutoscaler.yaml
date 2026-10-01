@@ -11,15 +11,18 @@ version left on the Kubernetes releases the chart runs on.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "ratelimit.fullname" . }}
-  namespace: {{ include "ratelimit.namespace" . }}
+  name: '{{ .Values.SERVICE_NAME }}'
+  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   labels:
-    {{- include "ratelimit.deploymentLabels" . | nindent 4 }}
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "ratelimit.fullname" . }}
+    name: '{{ .Values.SERVICE_NAME }}'
   {{- if .Values.HPA_ENABLED }}
   minReplicas: {{ coalesce .Values.HPA_MIN_REPLICAS .Values.REPLICAS }}
   maxReplicas: {{ required "HPA_MAX_REPLICAS is required when HPA_ENABLED is true" .Values.HPA_MAX_REPLICAS }}

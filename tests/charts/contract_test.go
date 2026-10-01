@@ -432,8 +432,8 @@ func TestCharts_readThePlatformParameters(t *testing.T) {
 		assert.Equal(t, "session", labels.at("deployment.netcracker.com/sessionId").str2(), chart)
 		assert.Nil(t, deployment.at("spec", "template", "metadata", "labels", "deployment.netcracker.com/sessionId").v,
 			"%s restarts its pods on every deployment", chart)
-		assert.Equal(t, map[string]any{"name": "rl", "app.kubernetes.io/name": "rl", "app.kubernetes.io/instance": "rl-biz"},
-			deployment.at("spec", "selector", "matchLabels").v, chart)
+		assert.Equal(t, map[string]any{"name": "rl"}, deployment.at("spec", "selector", "matchLabels").v, chart)
+		assert.Equal(t, "rl-biz", labels.at("app.kubernetes.io/instance").str2(), chart)
 		assert.Equal(t, "Recreate", deployment.at("spec", "strategy", "type").str2(), chart)
 
 		container := deployment.at("spec", "template", "spec", "containers").list()[0]
@@ -479,7 +479,7 @@ func TestCharts_defaultToTheChartsOwnRelease(t *testing.T) {
 }
 
 // NAMESPACE, the platform parameter, places every object of both charts,
-// and the namespace-scoped references inside them follow it: the selector
+// and the namespace-scoped references inside them follow it: the instance
 // label, the scrape, the rules, and the satellite guard.
 func TestCharts_placeEveryObjectInThePlatformsNamespace(t *testing.T) {
 	for _, chart := range []string{operatorChart, serviceChart} {
@@ -493,7 +493,7 @@ func TestCharts_placeEveryObjectInThePlatformsNamespace(t *testing.T) {
 		}
 		deployment := only(t, objects, "Deployment")
 		assert.Equal(t, "biz", strings.TrimPrefix(
-			deployment.at("spec", "selector", "matchLabels", "app.kubernetes.io/instance").str2(), chart+"-"), chart)
+			deployment.at("metadata", "labels", "app.kubernetes.io/instance").str2(), chart+"-"), chart)
 		assert.Equal(t, []string{"biz"},
 			strs(only(t, objects, "PodMonitor").at("spec", "namespaceSelector", "matchNames")), chart)
 		rules, err := json.Marshal(only(t, objects, "PrometheusRule"))

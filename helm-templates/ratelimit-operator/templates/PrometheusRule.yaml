@@ -13,15 +13,18 @@ syntax passed through Helm's.
 */ -}}
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if and .Values.MONITORING_ENABLED .Values.alerts.enabled }}
-{{- $ns := include "ratelimit.namespace" . }}
+{{- $ns := .Values.NAMESPACE | default .Release.Namespace }}
 {{- $sel := printf "namespace=%q" $ns }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ printf "%s-alerts" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
+  name: '{{ .Values.SERVICE_NAME }}-alerts'
   namespace: {{ $ns }}
   labels:
-    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
     app.kubernetes.io/component: monitoring
     app.kubernetes.io/processed-by-operator: victoriametrics-operator
 spec:

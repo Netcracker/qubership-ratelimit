@@ -3,10 +3,13 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
-  name: {{ printf "%s-pod-monitor" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
-  namespace: {{ include "ratelimit.namespace" . }}
+  name: '{{ .Values.SERVICE_NAME }}-pod-monitor'
+  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   labels:
-    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
     app.kubernetes.io/component: monitoring
     app.kubernetes.io/processed-by-operator: victoriametrics-operator
 spec:
@@ -17,9 +20,9 @@ spec:
       path: /metrics
   namespaceSelector:
     matchNames:
-      - {{ include "ratelimit.namespace" . }}
+      - '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   selector:
     matchLabels:
-      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+      name: '{{ .Values.SERVICE_NAME }}'
 {{- end }}
 {{- end }}

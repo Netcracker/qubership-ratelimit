@@ -2,10 +2,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ratelimit.fullname" . }}
-  namespace: {{ include "ratelimit.namespace" . }}
+  name: '{{ .Values.SERVICE_NAME }}'
+  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   labels:
-    {{- include "ratelimit.deploymentLabels" . | nindent 4 }}
+    name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/instance: '{{ cat .Values.SERVICE_NAME "-" (.Values.NAMESPACE | default .Release.Namespace) | nospace | trunc 63 | trimSuffix "-" }}'
+    app.kubernetes.io/version: '{{ .Values.ARTIFACT_DESCRIPTOR_VERSION | default .Chart.AppVersion }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    app.kubernetes.io/component: 'operator'
+    app.kubernetes.io/technology: 'go'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
 spec:
   # REPLICAS from the resource profile: 2 in dev-ha and prod, 1 in the
   # others. Only the pod that holds the Lease reconciles, writes the policy
@@ -18,26 +26,50 @@ spec:
   replicas: {{ .Values.REPLICAS | default 1 }}
   selector:
     matchLabels:
-      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+      name: '{{ .Values.SERVICE_NAME }}'
   strategy:
-    {{- include "ratelimit.strategy" . | trim | nindent 4 }}
+    {{- if eq (default "" .Values.DEPLOYMENT_STRATEGY_TYPE) "recreate" }}
+    type: Recreate
+    {{- else if eq (default "" .Values.DEPLOYMENT_STRATEGY_TYPE) "best_effort_controlled_rollout" }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 80%
+    {{- else if eq (default "" .Values.DEPLOYMENT_STRATEGY_TYPE) "custom_rollout" }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.DEPLOYMENT_STRATEGY_MAXSURGE | default "25%" }}
+      maxUnavailable: {{ .Values.DEPLOYMENT_STRATEGY_MAXUNAVAILABLE | default "25%" }}
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- end }}
   template:
     metadata:
       labels:
-        {{- include "ratelimit.labels" . | nindent 8 }}
+        app: '{{ .Values.SERVICE_NAME }}'
+        name: '{{ .Values.SERVICE_NAME }}'
+        app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+        app.kubernetes.io/instance: '{{ cat .Values.SERVICE_NAME "-" (.Values.NAMESPACE | default .Release.Namespace) | nospace | trunc 63 | trimSuffix "-" }}'
+        app.kubernetes.io/version: '{{ .Values.ARTIFACT_DESCRIPTOR_VERSION | default .Chart.AppVersion }}'
+        app.kubernetes.io/component: 'operator'
+        app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+        app.kubernetes.io/technology: 'go'
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "ratelimit.serviceAccountName" . }}
+      serviceAccountName: '{{ .Values.serviceAccount.name | default .Values.SERVICE_NAME }}'
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: operator
-          image: {{ include "ratelimit.image" . | quote }}
+          image: '{{ .Values.IMAGE_REPOSITORY }}:{{ .Values.TAG | default .Chart.AppVersion }}'
           imagePullPolicy: IfNotPresent
           # The base image's entrypoint runs its arguments as the command, so
           # the binary is the first argument.
@@ -50,7 +82,7 @@ spec:
             # The operator's own Deployment, which owns the configuration
             # ConfigMap so that the object goes with the operator and never
             # with a policy.
-            - --deployment={{ include "ratelimit.fullname" . }}
+            - '--deployment={{ .Values.SERVICE_NAME }}'
           env:
             # The name this replica signs the leader election lease with.
             - name: POD_NAME
@@ -71,7 +103,7 @@ spec:
             # pipeline passes no build arguments to the image, so without this
             # every manifest would say "dev".
             - name: OPERATOR_VERSION
-              value: {{ include "ratelimit.tag" . | quote }}
+              value: '{{ .Values.TAG | default .Chart.AppVersion }}'
           ports:
             - name: probes
               containerPort: 8081
@@ -92,7 +124,15 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
           securityContext:
-            {{- include "ratelimit.containerSecurityContext" . | nindent 12 }}
+            runAsNonRoot: true
+            {{- if eq .Values.PAAS_PLATFORM "KUBERNETES" }}
+            runAsGroup: 10001
+            {{- end }}
+            readOnlyRootFilesystem: {{ and .Values.READONLY_CONTAINER_FILE_SYSTEM_ENABLED (eq .Values.PAAS_PLATFORM "KUBERNETES") }}
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           resources:
             requests:
               cpu: '{{ .Values.CPU_REQUEST }}'
@@ -118,7 +158,23 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       topologySpreadConstraints:
-        {{- include "ratelimit.topologySpreadConstraints" . | trim | nindent 8 }}
+        {{- if .Values.CLOUD_TOPOLOGIES }}
+        {{- range $v := .Values.CLOUD_TOPOLOGIES }}
+        - topologyKey: '{{ $v.topologyKey }}'
+          maxSkew: {{ $v.maxSkew | default 1 }}
+          whenUnsatisfiable: {{ $v.whenUnsatisfiable | default "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              name: '{{ $.Values.SERVICE_NAME }}'
+        {{- end }}
+        {{- else }}
+        - topologyKey: '{{ .Values.CLOUD_TOPOLOGY_KEY }}'
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              name: '{{ .Values.SERVICE_NAME }}'
+        {{- end }}
       # Long enough for the manager to hand the lease over on SIGTERM before
       # the kubelet sends SIGKILL.
       terminationGracePeriodSeconds: 30
