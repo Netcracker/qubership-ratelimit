@@ -18,61 +18,96 @@
   ],
   "properties": {
     "SERVICE_NAME": {
+      "$id": "#/properties/SERVICE_NAME",
       "type": "string",
-      "title": "Service name",
+      "title": "The SERVICE_NAME schema",
+      "description": "Name of a service.",
       "minLength": 1,
       "default": "ratelimit-operator",
-      "description": "Platform parameter. The name of the operator's Deployment and ServiceAccount, and its app.kubernetes.io/name and name labels. The service chart's Service keeps its fixed name, ratelimit."
+      "internal": true
     },
     "NAMESPACE": {
+      "$id": "#/properties/NAMESPACE",
       "type": "string",
-      "title": "Namespace",
+      "title": "The NAMESPACE schema",
+      "description": "The namespace it is going to be deployed.",
       "default": "",
-      "description": "Platform parameter. The namespace every object of the chart lands in; empty is the release namespace."
+      "internal": true
     },
     "APPLICATION_NAME": {
+      "$id": "#/properties/APPLICATION_NAME",
       "type": "string",
-      "title": "Application name",
+      "title": "The APPLICATION_NAME schema",
+      "description": "Defines application name",
       "default": "ratelimit",
-      "description": "Platform parameter. The value of the app.kubernetes.io/part-of label."
+      "examples": [
+        "MyApplication"
+      ],
+      "internal": true
     },
     "MANAGED_BY": {
+      "$id": "#/properties/MANAGED_BY",
       "type": "string",
-      "title": "Managed by",
+      "title": "The MANAGED_BY schema",
+      "description": "The tool being used to manage the operation of an application",
       "default": "",
-      "description": "Platform parameter. The value of the app.kubernetes.io/managed-by label; empty is Helm."
+      "examples": [
+        "helm",
+        "operator",
+        "argocd"
+      ],
+      "internal": true
     },
     "ARTIFACT_DESCRIPTOR_VERSION": {
+      "$id": "#/properties/ARTIFACT_DESCRIPTOR_VERSION",
       "type": "string",
-      "title": "Artifact descriptor version",
+      "title": "The ARTIFACT_DESCRIPTOR_VERSION schema",
+      "description": "Artifact descriptor version which is installed",
       "default": "",
-      "description": "Platform parameter. The value of the app.kubernetes.io/version label; empty is the chart's appVersion."
+      "internal": true
     },
     "DEPLOYMENT_SESSION_ID": {
+      "$id": "#/properties/DEPLOYMENT_SESSION_ID",
       "type": "string",
-      "title": "Deployment session",
+      "title": "The DEPLOYMENT_SESSION_ID schema",
+      "description": "Unique identifier of deployment session used to track e2e deploy activity",
       "default": "",
-      "description": "Platform parameter. The deployment.netcracker.com/sessionId label of the Deployment; empty is unimplemented."
+      "examples": [
+        "516736bf-d4b7-4900-beab-9599573ac8a8"
+      ],
+      "internal": true
     },
     "PAAS_PLATFORM": {
+      "$id": "#/properties/PAAS_PLATFORM",
       "type": "string",
-      "title": "PaaS platform",
+      "title": "The PAAS_PLATFORM schema",
+      "description": "PaaS Platform.",
       "enum": [
         "KUBERNETES",
         "OPENSHIFT"
       ],
       "default": "KUBERNETES",
-      "description": "Platform parameter. On KUBERNETES the container runs as group 10001 and may have a read-only root filesystem; on OPENSHIFT the platform assigns both."
+      "examples": [
+        "KUBERNETES",
+        "OPENSHIFT"
+      ],
+      "internal": true
     },
     "READONLY_CONTAINER_FILE_SYSTEM_ENABLED": {
+      "$id": "#/properties/READONLY_CONTAINER_FILE_SYSTEM_ENABLED",
       "type": "boolean",
-      "title": "Read-only root filesystem",
+      "title": "The READONLY_CONTAINER_FILE_SYSTEM_ENABLED schema",
+      "description": "Read-only container file system is enabled",
       "default": true,
-      "description": "Platform parameter. Mounts the container's root filesystem read-only on KUBERNETES."
+      "examples": [
+        false
+      ]
     },
     "DEPLOYMENT_STRATEGY_TYPE": {
+      "$id": "#/properties/DEPLOYMENT_STRATEGY_TYPE",
       "type": "string",
-      "title": "Deployment strategy",
+      "title": "The DEPLOYMENT_STRATEGY_TYPE schema",
+      "description": "Specify Deployment Strategy type for deploying service",
       "enum": [
         "",
         "recreate",
@@ -81,34 +116,53 @@
         "custom_rollout"
       ],
       "default": "",
-      "description": "Platform parameter. Empty and ramped_slow_rollout replace one pod at a time and keep the old one until the new one is Ready; recreate and best_effort_controlled_rollout stop the old pods first."
+      "examples": [
+        "recreate",
+        "best_effort_controlled_rollout",
+        "ramped_slow_rollout",
+        "custom_rollout"
+      ]
     },
     "DEPLOYMENT_STRATEGY_MAXSURGE": {
+      "$id": "#/properties/DEPLOYMENT_STRATEGY_MAXSURGE",
       "$ref": "#/definitions/integerOrString",
-      "title": "Max surge",
-      "description": "Platform parameter. maxSurge of custom_rollout; 25% when unset."
+      "title": "The DEPLOYMENT_STRATEGY_MAXSURGE schema",
+      "description": "Specify .spec.strategy.rollingUpdate.maxSurge parameter",
+      "examples": [
+        "50%",
+        "2"
+      ]
     },
     "DEPLOYMENT_STRATEGY_MAXUNAVAILABLE": {
+      "$id": "#/properties/DEPLOYMENT_STRATEGY_MAXUNAVAILABLE",
       "$ref": "#/definitions/integerOrString",
-      "title": "Max unavailable",
-      "description": "Platform parameter. maxUnavailable of custom_rollout; 25% when unset."
+      "title": "The DEPLOYMENT_STRATEGY_MAXUNAVAILABLE schema",
+      "description": "Specify .spec.strategy.rollingUpdate.maxUnavailable parameter",
+      "examples": [
+        "50%",
+        "2"
+      ]
     },
     "IMAGE_REPOSITORY": {
+      "$id": "#/properties/IMAGE_REPOSITORY",
       "type": "string",
-      "title": "Image repository",
+      "title": "The IMAGE_REPOSITORY schema",
       "minLength": 1,
       "default": "ghcr.io/netcracker/qubership-ratelimit-operator",
-      "description": "Platform parameter. The repository of the image."
+      "internal": true
     },
     "TAG": {
+      "$id": "#/properties/TAG",
       "type": "string",
-      "title": "Image tag",
+      "title": "The TAG schema",
       "default": "",
-      "description": "Platform parameter. The tag of the image; empty is the chart's appVersion."
+      "internal": true
     },
     "LOG_LEVEL": {
+      "$id": "#/properties/LOG_LEVEL",
       "type": "string",
-      "title": "Log level",
+      "title": "The LOG_LEVEL schema",
+      "description": "Log level for service.",
       "enum": [
         "debug",
         "info",
@@ -120,7 +174,12 @@
         "ERROR"
       ],
       "default": "info",
-      "description": "Platform parameter. The root level of the platform logger, passed as LOGGING_LEVEL_ROOT in lower case."
+      "examples": [
+        "info",
+        "debug",
+        "warn"
+      ],
+      "internal": true
     },
     "filter": {
       "type": "object",
@@ -191,7 +250,7 @@
       "$id": "#/properties/MONITORING_ENABLED",
       "type": "boolean",
       "title": "The MONITORING_ENABLED schema",
-      "description": "Set to true to render the PodMonitor of the operator. Requires the monitoring operator's CRDs on the target cluster.",
+      "description": "Set to true to import dashboards to Grafana and configure integration with Prometheus. Requires Platform System Monitor CRDs to be deployed to target k8s/openshift cluster",
       "examples": [
         true,
         false
@@ -259,18 +318,22 @@
       "additionalProperties": false
     },
     "ISTIO_PUBLIC_GATEWAY_NAME": {
+      "$id": "#/properties/ISTIO_PUBLIC_GATEWAY_NAME",
       "type": "string",
-      "title": "Public gateway name",
-      "description": "Name of the public Istio gateway. Shared deployment parameter: must equal ISTIO_PUBLIC_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "title": "The ISTIO_PUBLIC_GATEWAY_NAME schema",
+      "description": "Name of the public Istio gateway.",
       "minLength": 1,
-      "default": "public-gateway"
+      "default": "public-gateway",
+      "internal": true
     },
     "ISTIO_PRIVATE_GATEWAY_NAME": {
+      "$id": "#/properties/ISTIO_PRIVATE_GATEWAY_NAME",
       "type": "string",
-      "title": "Private gateway name",
-      "description": "Name of the private Istio gateway. Shared deployment parameter: must equal ISTIO_PRIVATE_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "title": "The ISTIO_PRIVATE_GATEWAY_NAME schema",
+      "description": "Name of the private Istio gateway.",
       "minLength": 1,
-      "default": "private-gateway"
+      "default": "private-gateway",
+      "internal": true
     },
     "gateways": {
       "type": "object",
@@ -405,16 +468,21 @@
       "title": "Affinity"
     },
     "CLOUD_TOPOLOGY_KEY": {
+      "$id": "#/properties/CLOUD_TOPOLOGY_KEY",
       "type": "string",
-      "title": "Topology key",
+      "title": "The CLOUD_TOPOLOGY_KEY schema",
+      "description": "Affinity key.",
       "minLength": 1,
       "default": "kubernetes.io/hostname",
-      "description": "Platform parameter. The node label the pods spread over when CLOUD_TOPOLOGIES is not set."
+      "examples": [
+        "kubernetes.io/hostname"
+      ]
     },
     "CLOUD_TOPOLOGIES": {
+      "$id": "#/properties/CLOUD_TOPOLOGIES",
       "type": "array",
-      "title": "Topologies",
-      "description": "Platform parameter. One topology spread constraint per entry; it replaces CLOUD_TOPOLOGY_KEY.",
+      "title": "Topologies settings for topologySpreadConstraints",
+      "description": "Array of topologies settings for topologySpreadConstraints. Each array item must contain at least 'topologyKey' attribute. Other supported attributes are 'maxSkew' and 'whenUnsatisfiable' - optional.",
       "items": {
         "type": "object",
         "required": [
@@ -439,7 +507,11 @@
             "default": "ScheduleAnyway"
           }
         }
-      }
+      },
+      "examples": [
+        "- topologyKey: kubernetes.io/hostname"
+      ],
+      "internal": true
     },
     "CPU_REQUEST": {
       "$id": "#/properties/CPU_REQUEST",
@@ -474,16 +546,24 @@
       "envSpecific": true
     },
     "BASELINE_ORIGIN": {
+      "$id": "#/properties/BASELINE_ORIGIN",
       "type": "string",
-      "title": "Baseline origin namespace",
-      "description": "Set by the platform on a satellite namespace of a composite, naming the baseline's origin namespace. Empty means this release is a standalone installation or the baseline itself. When set, only the gateway filters render and they send checks to the baseline's ratelimit Service.",
-      "default": ""
+      "title": "The BASELINE_ORIGIN schema",
+      "description": "Baseline Blue-Green Origin namespace name",
+      "default": "",
+      "examples": [
+        "baseline-origin"
+      ]
     },
     "BASELINE_CONTROLLER": {
+      "$id": "#/properties/BASELINE_CONTROLLER",
       "type": "string",
-      "title": "Baseline controller namespace",
-      "description": "Read for parity with control-plane, which resolves the baseline the same way; takes precedence over BASELINE_ORIGIN as the namespace of the ratelimit Service a satellite sends checks to. On this platform the baseline is never blue-green'd, so the platform leaves it empty.",
-      "default": ""
+      "title": "The BASELINE_CONTROLLER schema",
+      "description": "Baseline Blue-Green Controller namespace name",
+      "default": "",
+      "examples": [
+        "baseline-controller"
+      ]
     }
   },
   "definitions": {
