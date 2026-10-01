@@ -713,3 +713,161 @@ func TestShouldRateLimit_storeErrorAfterRefusalStillDenies(t *testing.T) {
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
 	assert.NotEmpty(t, headerMap(resp)["retry-after"], "the refused decision's headers survive the store error")
 }
+
+// exemptPrefix and exemptDomain stand in for what the service passes to
+// WithExemptPath: the base path of its management API, and the domain of the
+// gateway that routes to it.
+const (
+	exemptPrefix = "/ratelimit/v1"
+	exemptDomain = "gateway.private"
+)
+
+// onePerHourRuleSet compiles onePerHourPolicy into the given domain over the
+// given counter store: failingCounters for a store that is down, memory.New
+// for one that counts.
+func onePerHourRuleSet(t *testing.T, domain string, counterStore counters.Store) *store.RuleSet {
+	t.Helper()
+	p := onePerHourPolicy()
+	p.Domain = domain
+	snap, problems := compile.Compile(testNamespace, domain, &p)
+	require.Empty(t, problems, "broken fixture")
+	return store.NewRuleSet(map[string]store.Domain{
+		domain: {Engine: engine.New(snap, counterStore), Snapshot: snap},
+	})
+}
+
+// The exempt paths are the prefix and everything under it by whole segments,
+// with or without a query string. The domain's one rule covers every path and
+// its counter store is down, so a check that was decided fails, and only an
+// exempt one returns OK.
+func TestShouldRateLimit_exemptPathPassesWhileTheStoreIsDown(t *testing.T) {
+	ruleStore := store.New()
+	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, failingCounters{}))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+
+	for _, tc := range []struct{ name, path string }{
+		{"the prefix itself", "/ratelimit/v1"},
+		{"one segment under the prefix", "/ratelimit/v1/status"},
+		{"several segments under the prefix", "/ratelimit/v1/domains/gateway.public/rules"},
+		{"a query string after the prefix", "/ratelimit/v1?limited=true"},
+		{"a query string after a deeper path", "/ratelimit/v1/domains/gateway.public/counters?limited=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := server.ShouldRateLimit(context.Background(),
+				request(exemptDomain, map[string]string{"path": tc.path, "method": "GET"}))
+
+			require.NoError(t, err, "ShouldRateLimit(path=%q)", tc.path)
+			assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
+				"ShouldRateLimit(path=%q)", tc.path)
+		})
+	}
+}
+
+// A path that shares characters with the prefix, without lying under it by
+// whole segments, is decided like any other path of the domain: with the
+// counter store down the check fails.
+func TestShouldRateLimit_pathOutsideTheExemptPrefixIsDecided(t *testing.T) {
+	ruleStore := store.New()
+	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, failingCounters{}))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+
+	for _, tc := range []struct{ name, path string }{
+		{"a longer last segment", "/ratelimit/v10/status"},
+		{"a suffix on the last segment", "/ratelimit/v1beta"},
+		{"the parent of the prefix", "/ratelimit"},
+		{"the prefix deeper in the path", "/api/ratelimit/v1/status"},
+		{"the prefix in the query string", "/api?next=/ratelimit/v1/status"},
+		{"an unrelated path", "/api/v1/orders"},
+		{"an empty path", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := server.ShouldRateLimit(context.Background(),
+				request(exemptDomain, map[string]string{"path": tc.path, "method": "GET"}))
+
+			assert.Equal(t, codes.Unavailable, status.Code(err), "ShouldRateLimit(path=%q)", tc.path)
+		})
+	}
+}
+
+// The exemption holds in the domains WithExemptPath names and in no other:
+// the same path in another domain leads to another backend, and is decided.
+func TestShouldRateLimit_exemptPathInAnotherDomainIsDecided(t *testing.T) {
+	const otherDomain = "gateway.public"
+	ruleStore := store.New()
+	ruleStore.Replace(onePerHourRuleSet(t, otherDomain, failingCounters{}))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+
+	_, err := server.ShouldRateLimit(context.Background(),
+		request(otherDomain, map[string]string{"path": "/ratelimit/v1/status"}))
+
+	assert.Equal(t, codes.Unavailable, status.Code(err),
+		"ShouldRateLimit(domain=%q, path=/ratelimit/v1/status)", otherDomain)
+}
+
+// A server exempts nothing unless WithExemptPath gives it both a prefix and a
+// domain. An empty prefix in particular must not turn into every path.
+func TestShouldRateLimit_noPathIsExemptWithoutAPrefixAndADomain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []Option
+	}{
+		{"no option", nil},
+		{"an empty prefix", []Option{WithExemptPath("", []string{exemptDomain})}},
+		{"no domains", []Option{WithExemptPath(exemptPrefix, nil)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ruleStore := store.New()
+			ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, failingCounters{}))
+			log, _ := recordingLogger()
+
+			_, err := NewServer(ruleStore, log, tc.opts...).ShouldRateLimit(context.Background(),
+				request(exemptDomain, map[string]string{"path": "/ratelimit/v1/status"}))
+
+			assert.Equal(t, codes.Unavailable, status.Code(err), "ShouldRateLimit(path=/ratelimit/v1/status)")
+		})
+	}
+}
+
+// An exempt check charges no counter. The domain admits one request per hour:
+// two exempt checks leave that request for the first check of another path,
+// and the second check of that path is refused.
+func TestShouldRateLimit_exemptPathChargesNoCounter(t *testing.T) {
+	ruleStore := store.New()
+	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, memory.New()))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+	check := func(path string) envoyratelimit.RateLimitResponse_Code {
+		resp, err := server.ShouldRateLimit(context.Background(),
+			request(exemptDomain, map[string]string{"path": path}))
+		require.NoError(t, err, "ShouldRateLimit(path=%q)", path)
+		return resp.GetOverallCode()
+	}
+
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("/ratelimit/v1/status"), "the first exempt check")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("/ratelimit/v1/status"), "the second exempt check")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("/api"), "the first check of /api")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("/api"), "the second check of /api")
+}
+
+// An exempt descriptor is dropped and the descriptor beside it is decided on
+// its own: the second check is refused because the first one charged the one
+// request per hour for /api.
+func TestShouldRateLimit_decidesTheDescriptorBesideAnExemptOne(t *testing.T) {
+	ruleStore := store.New()
+	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, memory.New()))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+	check := func() envoyratelimit.RateLimitResponse_Code {
+		req := requestWith(map[string]string{"path": "/ratelimit/v1/status"}, map[string]string{"path": "/api"})
+		req.Domain = exemptDomain
+		resp, err := server.ShouldRateLimit(context.Background(), req)
+		require.NoError(t, err)
+		return resp.GetOverallCode()
+	}
+
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check(), "the first check")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check(), "the second check")
+}

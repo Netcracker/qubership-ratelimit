@@ -28,6 +28,7 @@ const (
 	VerdictOK          = "ok"
 	VerdictOverLimit   = "over_limit"
 	VerdictUnavailable = "unavailable"
+	VerdictExempt      = "exempt"
 )
 
 // Outcomes of one applied rule.
@@ -51,10 +52,13 @@ var durationBuckets = []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .2
 var (
 	// Checks counts every ShouldRateLimit call by its final verdict. The
 	// unavailable verdict is the fail-open exposure window: traffic that
-	// passed or was cut by the gateway's failure mode, not by a limit.
+	// passed or was cut by the gateway's failure mode, not by a limit. The
+	// exempt verdict counts the checks admitted without a decision, which
+	// the service does for requests to its own management API.
 	Checks = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_checks_total",
-		Help: "Rate limit checks by final verdict; unavailable means the gateway's failure mode decided.",
+		Help: "Rate limit checks by final verdict; unavailable means the gateway's failure mode decided, " +
+			"exempt means the service admitted the check without a decision.",
 	}, []string{"domain", "verdict"})
 
 	// CheckDuration is the full gRPC handler time — the number the gateway

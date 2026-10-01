@@ -272,7 +272,9 @@ The full contract, the interfaces, and the implementations are in the [store con
   the service itself is unreachable (`failure_mode_deny`, the operator chart's `filter.failClosed` and
   `gateways.<role>.failClosed`). With `failClosed: false`, the default, the request passes unlimited; with `true`, the
   gateway answers 503. One exception: a check that a rule already refused before the store failed answers
-  `OVER_LIMIT` whatever the setting, so a refusal never turns into unlimited traffic.
+  `OVER_LIMIT` whatever the setting, so a refusal never turns into unlimited traffic. A request to the management API
+  in a domain listed in the service chart's `management.gatewayDomains` is not decided at all: its check reads
+  no store, answers `OK`, and counts as `verdict="exempt"` ([chart](helm-chart.md), "Management API port").
 - **Store operations carry a budget** of tens of milliseconds, enforced with context timeouts, so a slow store reaches
   the gateway's failure mode rather than stalling the filter.
 

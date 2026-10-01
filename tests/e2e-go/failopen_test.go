@@ -27,21 +27,7 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 		store   counterStore
 	)
 
-	scaleRedis := func(replicas int32) {
-		var dep appsv1.Deployment
-		Expect(k8s.Get(ctx, client.ObjectKey{Namespace: store.namespace, Name: store.service}, &dep)).
-			To(Succeed())
-		dep.Spec.Replicas = &replicas
-		Expect(k8s.Update(ctx, &dep)).To(Succeed())
-		Eventually(func() int32 {
-			var d appsv1.Deployment
-			if err := k8s.Get(ctx, client.ObjectKey{Namespace: store.namespace, Name: store.service}, &d); err != nil {
-				return -1
-			}
-			return d.Status.ReadyReplicas
-		}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Equal(replicas),
-			"the store deployment never reached %d ready replicas", replicas)
-	}
+	scaleRedis := func(replicas int32) { store.scale(replicas) }
 
 	BeforeAll(func() {
 		var ok bool
