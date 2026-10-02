@@ -344,20 +344,36 @@ func waitRolloutSettled(name string) {
 // helmScale sets the service release's replica count through Helm: a kubectl
 // scale would take field-manager ownership of .spec.replicas and make every
 // later helm upgrade conflict.
+func helmScale(release string, replicas int32) {
+	helmSet(serviceChart, release, fmt.Sprintf("REPLICAS=%d", replicas))
+}
+
+// helmSet upgrades a release of one of the two charts with the given values
+// set over the ones its install set.
 //
 // Values are reset to the chart's defaults and re-overlaid with what the
 // install set, rather than reused wholesale: a release installed from an
 // older chart lacks the values that chart has grown since, and reusing them
 // fails the render on the first new required value.
-func helmScale(release string, replicas int32) {
-	chart, err := filepath.Abs(filepath.Join("..", "..", "helm-templates", serviceChart))
+func helmSet(chart, release string, values ...string) {
+	dir, err := filepath.Abs(filepath.Join("..", "..", "helm-templates", chart))
 	Expect(err).NotTo(HaveOccurred())
-	cmd := exec.CommandContext(ctx, "helm", "upgrade", release, chart,
-		"-n", namespace, "--reset-then-reuse-values",
-		"--set", fmt.Sprintf("REPLICAS=%d", replicas),
-		"--wait", "--timeout", "3m")
-	out, err := cmd.CombinedOutput()
+	args := []string{"upgrade", release, dir, "-n", namespace, "--reset-then-reuse-values"}
+	for _, value := range values {
+		args = append(args, "--set", value)
+	}
+	args = append(args, "--wait", "--timeout", "3m")
+	out, err := exec.CommandContext(ctx, "helm", args...).CombinedOutput()
 	Expect(err).NotTo(HaveOccurred(), "helm upgrade failed: %s", out)
+}
+
+// helmRelease names the Helm release that owns a Deployment.
+func helmRelease(deployment string) string {
+	var dep appsv1.Deployment
+	Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: deployment}, &dep)).To(Succeed())
+	release := dep.Annotations["meta.helm.sh/release-name"]
+	Expect(release).NotTo(BeEmpty(), "cannot determine the Helm release owning %s", deployment)
+	return release
 }
 
 // fleetScale is the service release scaled for one container, remembering

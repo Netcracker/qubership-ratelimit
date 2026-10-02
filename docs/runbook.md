@@ -27,8 +27,9 @@ api() { curl -sS -H "Authorization: Bearer $TOKEN" "$@"; }
 op()  { curl -sS -H "Authorization: Bearer $OPTOKEN" "$@"; }
 ```
 
-On the platform the same API is routed through the private gateway under the same prefix; the port-forward is the
-path for an operator who already holds `kubectl` access. The service never verifies the token signature, the gateway
+On the platform the same API is routed through the private gateway under the same prefix, and stays reachable there
+during a store outage whatever the gateway's failure mode (section 1); the port-forward is the path for an operator
+who already holds `kubectl` access. The service never verifies the token signature, the gateway
 does, so a port-forward is a shortcut that bypasses that check: use it for diagnosis, not as a habit.
 
 The installation is two Deployments in the namespace. The operator pod reads the policies, writes their status, and
@@ -187,6 +188,14 @@ ratelimit_store_errors_total{domain="gateway.public",reason="timeout"} 25
 
 The management API answers every call that needs the store with `RLS-0503`, and the gateway's clients see no `429` at
 all while `failClosed` is off.
+
+The API itself stays reachable through the private gateway, also with `failClosed: true` on it: the service admits
+the checks of `/ratelimit/v1` in the domains of `management.gatewayDomains` of the service chart without reading the
+store, and counts them as `verdict="exempt"`. The endpoints that read no counters, `GET /status`, `/domains`,
+`/domains/{domain}/rules`, and `/openapi.yaml`, return `200` during the outage. A `503` from the API with no `RLS-`
+code in its body is the gateway's: the gateway's domain is missing from `management.gatewayDomains`, or the check
+itself got no answer within `filter.timeout`. The port-forward of section 0 reaches the API past the gateway in both
+cases.
 
 **Diagnose.**
 
@@ -975,7 +984,7 @@ controller and probe metrics from the operator pod.
 
 | Metric | On | Read it for |
 | --- | --- | --- |
-| `ratelimit_checks_total{domain, verdict}` | service pods | `unavailable` counts the checks the gateway's failure mode decided (section 1) |
+| `ratelimit_checks_total{domain, verdict}` | service pods | `unavailable` counts the checks the gateway's failure mode decided (section 1); `exempt` counts the requests to the management API, admitted without a decision |
 | `ratelimit_decisions_total{domain, rule, outcome}` | service pods | `shadow_over_limit` while introducing a limit (section 6) |
 | `ratelimit_near_limit_total{domain, rule}` | service pods | clients close to a limit before it fires; the margin is a share of the window's capacity, `burst` for GCRA |
 | `ratelimit_unknown_domain_checks_total` | service pods | a domain typo between the gateway and the policy (section 2) |

@@ -169,6 +169,13 @@ func ManagementRoles() management.RoleMapping {
 	}
 }
 
+// ManagementGatewayDomains lists the rate limit domains of the gateways that
+// route to the management API, a comma-separated property. The chart sets it
+// from management.gatewayDomains; unset or empty is no domain.
+func ManagementGatewayDomains() []string {
+	return csv(configloader.GetOrDefaultString("management.gateway.domains", ""))
+}
+
 // csv splits a comma-separated property, dropping the empty entries a trailing
 // comma or a blank value leaves behind.
 func csv(value string) []string {

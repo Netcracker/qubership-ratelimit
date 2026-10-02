@@ -19,6 +19,13 @@
         "sigs.k8s.io/controller-runtime"
       ],
       "groupName": "kubernetes"
+    },
+    {
+      "description": "fiber stays on v2 until qubership-core-lib-go-fiber-server-utils publishes its /v3 module. The management server is built by that library: fiberserver.New takes a fiber v2 Config and its builder returns a fiber v2 App, so the service cannot move to fiber v3 alone. Remove this rule in the change that moves the library and fiber to v3 together.",
+      "matchManagers": ["gomod"],
+      "matchPackageNames": ["github.com/gofiber/fiber/v2"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
     }
   ]
 }

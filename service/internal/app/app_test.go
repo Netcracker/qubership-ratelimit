@@ -215,3 +215,84 @@ func TestService_reportsAListenerItCannotTake(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listen for probes")
 }
+
+// onePerMinute admits one request per minute for the whole domain, on every
+// path: the second decided check of the domain is refused.
+func onePerMinute(domain string) v1.RateLimitPolicySpec {
+	return v1.RateLimitPolicySpec{Domain: domain, Limits: []v1.LimitBlock{{
+		Name: "all", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}}
+}
+
+// checker runs a service that enforces onePerMinute in gateway.private and in
+// gateway.public, and returns a function that sends one check of the path to
+// the service's gRPC listener.
+func checker(t *testing.T, managementAddr string) func(domain, path string) envoyratelimit.RateLimitResponse_Code {
+	t.Helper()
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	dir := t.TempDir()
+	writeConfiguration(t, dir, onePerMinute("gateway.private"), onePerMinute("gateway.public"))
+	options := Options{
+		ProbeAddr: "0", MetricsAddr: "0", ManagementAddr: managementAddr, RLSAddr: freeAddr(t),
+		ConfigDir: dir, DrainTimeout: time.Second, Replica: "ratelimit-0",
+		Log: logr.Discard(), Platform: logging.GetLogger("test"),
+	}
+	service, err := Build("biz", options)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- service.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-done)
+	})
+	require.Eventually(t, func() bool { return service.Ready() == nil }, 5*time.Second, 20*time.Millisecond,
+		"the service never became ready")
+
+	conn, err := grpc.NewClient(options.RLSAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	client := envoyratelimit.NewRateLimitServiceClient(conn)
+	return func(domain, path string) envoyratelimit.RateLimitResponse_Code {
+		t.Helper()
+		callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer callCancel()
+		resp, err := client.ShouldRateLimit(callCtx, &envoyratelimit.RateLimitRequest{
+			Domain: domain,
+			Descriptors: []*envoycommon.RateLimitDescriptor{{Entries: []*envoycommon.RateLimitDescriptor_Entry{
+				{Key: "path", Value: path}}}},
+		})
+		require.NoError(t, err, "ShouldRateLimit(domain=%q, path=%q)", domain, path)
+		return resp.GetOverallCode()
+	}
+}
+
+// With the management API on, a check of a path under its base path is exempt
+// in the domains MANAGEMENT_GATEWAY_DOMAINS names: the second check passes
+// where the domain admits one request per minute. The same path in another
+// domain is decided, and its second check is refused.
+func TestService_exemptsTheManagementPathsInTheGatewayDomains(t *testing.T) {
+	t.Setenv("MANAGEMENT_GATEWAY_DOMAINS", "gateway.private")
+	check := checker(t, freeAddr(t))
+
+	const path = "/ratelimit/v1/status"
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("gateway.private", path),
+		"the first check in gateway.private")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("gateway.private", path),
+		"the second check in gateway.private")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("gateway.public", path),
+		"the first check in gateway.public")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("gateway.public", path),
+		"the second check in gateway.public")
+}
+
+// With the management API off, nothing serves its base path, and the path is
+// decided like any other whatever MANAGEMENT_GATEWAY_DOMAINS names.
+func TestService_exemptsNothingWithTheManagementAPIOff(t *testing.T) {
+	t.Setenv("MANAGEMENT_GATEWAY_DOMAINS", "gateway.private")
+	check := checker(t, "0")
+
+	const path = "/ratelimit/v1/status"
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("gateway.private", path), "the first check")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("gateway.private", path), "the second check")
+}
