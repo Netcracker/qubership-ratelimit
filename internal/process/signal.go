@@ -11,7 +11,10 @@ import (
 // process that runs no controller-runtime manager, and the function that
 // releases it. A second signal exits at once, as controller-runtime's handler
 // does, so a drain that hangs can still be interrupted from the terminal.
-// The caller defers stop: it stops the signal delivery and ends the context.
+//
+// The caller calls stop once the context is no longer needed. stop ends the
+// context and stops the signal delivery, so a later SIGTERM or SIGINT
+// terminates the process at once.
 func SignalContext() (ctx context.Context, stop context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	signals := make(chan os.Signal, 2)

@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"os"
 	"syscall"
 	"testing"
@@ -25,13 +26,9 @@ func TestSignalContext_endsOnSIGTERM(t *testing.T) {
 	}
 }
 
-// stop ends the context without a signal, and releases the signal delivery.
+// stop ends the context without a signal.
 func TestSignalContext_endsOnStop(t *testing.T) {
 	ctx, stop := SignalContext()
 	stop()
-	select {
-	case <-ctx.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("the context did not end on stop")
-	}
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
 }

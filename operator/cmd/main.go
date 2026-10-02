@@ -10,8 +10,9 @@ import (
 	"fmt"
 	"os"
 
-	// The client-go auth plugins (OIDC and the cloud providers), for a
-	// kubeconfig that names one when the operator runs outside a pod.
+	// The OIDC auth provider, for a kubeconfig that names it when the
+	// operator runs outside a pod. The azure and gcp providers that this
+	// import also registers only report that they were removed.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	// Sets GOMEMLIMIT from the container's memory limit at start.
