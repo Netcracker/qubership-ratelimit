@@ -298,8 +298,21 @@ jobs:
       # The JUnit report is the surefire analog, and the HTML page next to it
       # is the same run for human eyes - both uploaded below whatever the
       # outcome.
+      #
+      # Suites that hang have to end as a failure of this step. If the job's
+      # timeout stopped them instead, GitHub would cancel the run, and a
+      # canceled run sends no mail and dumps no state. So three timeouts
+      # nest. Ginkgo's own, 25 minutes in the Makefile, expires first: Ginkgo
+      # fails the suite and still writes the report, with the spec that was
+      # running marked in it. Ginkgo can take a few more minutes to exit,
+      # since it retries that spec and gives every cleanup node 30 seconds,
+      # so the step's timeout is 5 minutes longer. That timeout covers a
+      # Ginkgo that does not exit at all, and it stops the suites without a
+      # report. It leaves 10 of the job's 40 minutes to the steps before this
+      # one, which take about 5, and to the steps after it.
       - name: Run the e2e suites
         id: e2e
+        timeout-minutes: 30
         run: make test-e2e-go E2E_NAMESPACE="${E2E_NAMESPACE}"
 
       - name: Upload the e2e report
@@ -313,14 +326,15 @@ jobs:
           if-no-files-found: ignore
 
       # When the suites fail, the run is reported to the configured mailing
-      # list with the HTML report attached. A run that passes sends no mail,
-      # and neither does one where the suites do not run to the end: a step
-      # before them fails, or the run is canceled, by hand or by the job's
-      # timeout. Recipients live in the EMAIL_TO repository variable, and an
-      # empty one turns the step off; connection settings come from the
-      # organization's EMAIL_* variables. Mail is a courtesy, not a gate, so
-      # the step never fails the run - on a pull request from a fork it
-      # quietly does nothing, since forks see no secrets.
+      # list with the HTML report attached; suites that the step's timeout
+      # stopped leave no report to attach. A run that passes sends no mail,
+      # and neither does one where a step before the suites fails or the run
+      # is canceled, by hand or by the job's timeout. Recipients live in the
+      # EMAIL_TO repository variable, and an empty one turns the step off;
+      # connection settings come from the organization's EMAIL_* variables.
+      # Mail is a courtesy, not a gate, so the step never fails the run - on
+      # a pull request from a fork it quietly does nothing, since forks see
+      # no secrets.
       - name: Email the e2e report
         if: always() && steps.e2e.outcome == 'failure' && vars.EMAIL_TO != ''
         continue-on-error: true
@@ -337,7 +351,7 @@ jobs:
           body: |
             The e2e run finished with outcome: ${{ steps.e2e.outcome }}.
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            The HTML report of the run is attached.
+            The HTML report of the run is attached, unless the step's timeout stopped the suites before they wrote one.
           attachments: artifacts/e2e-go.html
           priority: high
 
