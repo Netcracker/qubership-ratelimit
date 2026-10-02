@@ -443,6 +443,8 @@ func TestCharts_readThePlatformParameters(t *testing.T) {
 			env[variable.at("name").str2()] = variable.at("value").str2()
 		}
 		assert.Equal(t, "debug", env["LOGGING_LEVEL_ROOT"], chart)
+		version := map[string]string{operatorChart: "OPERATOR_VERSION", serviceChart: "SERVICE_VERSION"}[chart]
+		assert.Equal(t, "1.2.3", env[version], "%s reports a version other than its image tag", chart)
 
 		security := container.at("securityContext")
 		assert.Equal(t, true, security.at("readOnlyRootFilesystem").v, chart)
@@ -691,4 +693,55 @@ func TestServiceChart_profilesSizeTheAutoscaler(t *testing.T) {
 		"50% of the dev profile's 500m limit is 2500% of its 10m request")
 	assert.Contains(t, spec.at("behavior", "scaleUp", "policies").v,
 		map[string]any{"type": "Percent", "value": float64(100), "periodSeconds": float64(30)})
+}
+
+// Every object of both charts reads NAMESPACE and SERVICE_NAME, and the
+// platform's labels, from the platform parameters; no place keeps the release
+// namespace or the chart's own name. A reference that drifted would leave an
+// installation that does not work once a parameter differs from its default:
+// a classifier in another namespace, a policy principal or a RoleBinding
+// subject that matches nothing, a selector that selects no pod. The two
+// places that keep the chart's name by design are skipped: the binary's path
+// in the container's arguments, and the alert rules' text.
+func TestCharts_readTheParametersInEveryObject(t *testing.T) {
+	topologies := []string{"--set", "CLOUD_TOPOLOGIES[0].topologyKey=topology.kubernetes.io/zone"}
+	for _, chart := range []string{operatorChart, serviceChart} {
+		args := append([]string{"-f", filepath.Join("..", "..", "helm-templates", chart, "resource-profiles", "prod.yaml"),
+			"--set", "NAMESPACE=biz", "--set", "SERVICE_NAME=rl", "--set", "IMAGE_REPOSITORY=registry.example/rl",
+			"--set", "MANAGED_BY=platform", "--set", "DEPLOYMENT_SESSION_ID=session",
+			"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true"}, topologies...)
+		objects := render(t, chart, "release-ns", args...)
+		require.NotEmpty(t, objects, chart)
+		for _, o := range objects {
+			if o.kind() == "CustomResourceDefinition" {
+				continue
+			}
+			what := chart + " " + o.kind() + " " + o.name()
+			labels := o.at("metadata", "labels")
+			assert.Equal(t, "platform", labels.at("app.kubernetes.io/managed-by").str2(), what)
+			assert.Equal(t, "session", labels.at("deployment.netcracker.com/sessionId").str2(), what)
+			assert.Equal(t, "rl", labels.at("app.kubernetes.io/name").str2(), what)
+
+			if o.kind() == "PrometheusRule" {
+				continue
+			}
+			for _, container := range o.at("spec", "template", "spec", "containers").list() {
+				kept := []any{}
+				for _, arg := range container.at("args").list() {
+					if !strings.HasPrefix(arg.str2(), "/app/") {
+						kept = append(kept, arg.v)
+					}
+				}
+				container.v.(map[string]any)["args"] = kept
+			}
+			raw, err := json.Marshal(o)
+			require.NoError(t, err)
+			assert.NotContains(t, string(raw), "release-ns", "%s reads the release namespace", what)
+			assert.NotContains(t, string(raw), chart, "%s keeps the chart's own name", what)
+		}
+
+		deployment := only(t, objects, "Deployment")
+		assert.Equal(t, "rl", deployment.at("spec", "template", "metadata", "labels", "name").str2(),
+			"%s: the pods do not carry the label the selector reads", chart)
+	}
 }
