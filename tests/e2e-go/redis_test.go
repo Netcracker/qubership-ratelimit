@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -212,4 +214,23 @@ func (s counterStore) cli(args ...string) (string, error) {
 		command = append(command, "--no-auth-warning", "-a", s.password)
 	}
 	return execPodIn(s.namespace, pods.Items[0].Name, "", append(command, args...)...)
+}
+
+// scale sets the replica count of the store's Deployment and returns once
+// that many replicas are ready. A suite takes the store down with it and has
+// to bring it back: a store left at zero fails every container after it.
+func (s counterStore) scale(replicas int32) {
+	var dep appsv1.Deployment
+	Expect(k8s.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: s.service}, &dep)).
+		To(Succeed())
+	dep.Spec.Replicas = &replicas
+	Expect(k8s.Update(ctx, &dep)).To(Succeed())
+	Eventually(func() int32 {
+		var d appsv1.Deployment
+		if err := k8s.Get(ctx, client.ObjectKey{Namespace: s.namespace, Name: s.service}, &d); err != nil {
+			return -1
+		}
+		return d.Status.ReadyReplicas
+	}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Equal(replicas),
+		"the store deployment never reached %d ready replicas", replicas)
 }

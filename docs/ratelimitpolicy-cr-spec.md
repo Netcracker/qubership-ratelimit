@@ -321,7 +321,10 @@ client ──HTTP──> gateway ──jwt_authn──> (token signature verifie
 1. **The gateway sends a flat descriptor**: `domain`, `path` (with the query), `method`, `token`, `request_id`.
 2. **Preparation**: the query is stripped from `path` (otherwise `?page=2` would split one endpoint across different
    buckets); the token payload is decoded without signature verification, since the gateway has already done it; the
-   identity keys are extracted per the mapping. No token means no identity keys, and this is not an error.
+   identity keys are extracted per the mapping. No token means no identity keys, and this is not an error. A request
+   to the management API ends here with `OK`: for a path under `/ratelimit/v1` in a domain listed in the service
+   chart's `management.gatewayDomains`, no block is matched, whatever its `target`
+   ([chart](helm-chart.md), "Management API port").
 3. **Matching**: the blocks whose `target` matched are selected; inside a block, `mode` decides between all matched
    rules and the first one. A rule without its axis (`client` for an anonymous caller) does not match. A `Bypass` rule
    ends its cascade with an allow and does not go to the store.

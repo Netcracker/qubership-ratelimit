@@ -133,6 +133,20 @@ func Build(namespace string, options Options) (*Service, error) {
 	cacheStats := &engine.CacheStats{}
 	metrics.RegisterCacheStats(registry, cacheStats)
 
+	serverOptions := []rls.Option{rls.WithNearLimitRatio(settings.NearLimitRatio(platform.Errorf))}
+	if enabled(options.ManagementAddr) {
+		// A check that reads the counter store fails while the store is down,
+		// and a gateway that fails closed returns 503 for the request it
+		// checked. An operator diagnoses that outage through the management
+		// API, so its paths are exempt in the domains of the gateways that
+		// route to it. The same path in any other domain stays checked.
+		if domains := settings.ManagementGatewayDomains(); len(domains) > 0 {
+			serverOptions = append(serverOptions, rls.WithExemptPath(management.BasePath, domains))
+			platform.Infof("management API paths are exempt from rate limit checks prefix=%v domains=%v",
+				management.BasePath, domains)
+		}
+	}
+
 	rules := store.New()
 	applier := &config.Applier{
 		Namespace:  namespace,
@@ -150,9 +164,8 @@ func Build(namespace string, options Options) (*Service, error) {
 			Resync:  options.Resync,
 		},
 		rls: &rls.Runner{
-			Addr: options.RLSAddr,
-			Server: rls.NewServer(rules, platform,
-				rls.WithNearLimitRatio(settings.NearLimitRatio(platform.Errorf))),
+			Addr:         options.RLSAddr,
+			Server:       rls.NewServer(rules, platform, serverOptions...),
 			DrainTimeout: options.DrainTimeout,
 			Log:          options.Log.WithName("rls"),
 		},
