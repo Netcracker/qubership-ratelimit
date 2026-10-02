@@ -325,18 +325,18 @@ jobs:
             artifacts/e2e-go.html
           if-no-files-found: ignore
 
-      # When the suites fail, the run is reported to the configured mailing
-      # list with the HTML report attached; suites that the step's timeout
-      # stopped leave no report to attach. A run that passes sends no mail,
-      # and neither does one where a step before the suites fails or the run
-      # is canceled, by hand or by the job's timeout. Recipients live in the
-      # EMAIL_TO repository variable, and an empty one turns the step off;
-      # connection settings come from the organization's EMAIL_* variables.
-      # Mail is a courtesy, not a gate, so the step never fails the run - on
-      # a pull request from a fork it quietly does nothing, since forks see
-      # no secrets.
+      # A run where a step before this one has failed is reported to the
+      # configured mailing list, whether the suites ran or not. The HTML
+      # report is attached where the suites wrote one. A run that passes
+      # sends no mail, and neither does one that is canceled, by hand or by
+      # the job's timeout, or one that fails only in a step after this one.
+      # Recipients live in the EMAIL_TO repository variable, and an empty one
+      # turns the step off; connection settings come from the organization's
+      # EMAIL_* variables. Mail is a courtesy, not a gate, so the step never
+      # fails the run - on a pull request from a fork it quietly does
+      # nothing, since forks see no secrets.
       - name: Email the e2e report
-        if: always() && steps.e2e.outcome == 'failure' && vars.EMAIL_TO != ''
+        if: failure() && vars.EMAIL_TO != ''
         continue-on-error: true
         uses: netcracker/qubership-workflow-hub/actions/email-action@0eefd4976131d113c986281eed8bc642b6da303d # v2.8.1
         env:
@@ -347,11 +347,12 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ vars.EMAIL_TO }}
         with:
-          subject: "[e2e] ${{ steps.e2e.outcome }} - ${{ github.repository }} (${{ github.head_ref || github.ref_name }})"
+          subject: "[e2e] failed - ${{ github.repository }} (${{ github.head_ref || github.ref_name }})"
           body: |
-            The e2e run finished with outcome: ${{ steps.e2e.outcome }}.
+            The e2e run failed. Outcome of the step that runs the suites: ${{ steps.e2e.outcome }}.
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            The HTML report of the run is attached, unless the step's timeout stopped the suites before they wrote one.
+            "skipped" means that a step before the suites failed and no test ran; "success" means that the suites passed and a later step failed.
+            The HTML report of the run is attached where the suites wrote one. There is none if they never started or the step's timeout stopped them.
           attachments: artifacts/e2e-go.html
           priority: high
 
