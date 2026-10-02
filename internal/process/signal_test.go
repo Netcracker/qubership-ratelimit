@@ -24,3 +24,14 @@ func TestSignalContext_endsOnSIGTERM(t *testing.T) {
 		t.Fatal("the context did not end on SIGTERM")
 	}
 }
+
+// stop ends the context without a signal, and releases the signal delivery.
+func TestSignalContext_endsOnStop(t *testing.T) {
+	ctx, stop := SignalContext()
+	stop()
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the context did not end on stop")
+	}
+}

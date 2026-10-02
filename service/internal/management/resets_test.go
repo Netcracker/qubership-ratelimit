@@ -358,3 +358,19 @@ func TestBulk_refusesAnUnknownSelectorMember(t *testing.T) {
 
 	requireError(t, h.send(t, request), http.StatusBadRequest, CodeInvalidRequest)
 }
+
+// An axis the selector cannot address is refused before anything is read,
+// and the refusal names the field, so a client can point at its own input.
+func TestBulk_refusesAnAxisThatAddressesNoCounter(t *testing.T) {
+	h := newTestAPI(t)
+	for name, axes := range map[string]map[string][]string{
+		"an axis without a name":      {"": {"alice"}},
+		"an axis without values":      {model.KeyClient: {}},
+		"an axis with an empty value": {model.KeyClient: {"alice", ""}},
+	} {
+		body := requireError(t, h.bulk(t, map[string]any{
+			"selector": map[string]any{"axes": axes}, "dryRun": true,
+		}, "key-"+strings.ReplaceAll(name, " ", "-"), operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+		require.Equal(t, []string{"selector.axes"}, body.Meta.Fields, name)
+	}
+}
