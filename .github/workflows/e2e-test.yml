@@ -312,14 +312,17 @@ jobs:
             artifacts/e2e-go.html
           if-no-files-found: ignore
 
-      # The verdict of every run goes to the configured mailing list with the
-      # HTML report attached. Recipients live in the EMAIL_TO repository
-      # variable, and an empty one turns the step off; connection settings
-      # come from the organization's EMAIL_* variables. Mail is a courtesy,
-      # not a gate, so the step never fails the run - on a pull request from
-      # a fork it quietly does nothing, since forks see no secrets.
+      # When the suites fail, the run is reported to the configured mailing
+      # list with the HTML report attached. A run that passes sends no mail,
+      # and neither does one where the suites do not run to the end: a step
+      # before them fails, or the run is canceled, by hand or by the job's
+      # timeout. Recipients live in the EMAIL_TO repository variable, and an
+      # empty one turns the step off; connection settings come from the
+      # organization's EMAIL_* variables. Mail is a courtesy, not a gate, so
+      # the step never fails the run - on a pull request from a fork it
+      # quietly does nothing, since forks see no secrets.
       - name: Email the e2e report
-        if: always() && vars.EMAIL_TO != ''
+        if: always() && steps.e2e.outcome == 'failure' && vars.EMAIL_TO != ''
         continue-on-error: true
         uses: netcracker/qubership-workflow-hub/actions/email-action@0eefd4976131d113c986281eed8bc642b6da303d # v2.8.1
         env:
@@ -336,7 +339,7 @@ jobs:
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             The HTML report of the run is attached.
           attachments: artifacts/e2e-go.html
-          priority: ${{ steps.e2e.outcome == 'success' && 'normal' || 'high' }}
+          priority: high
 
       - name: Collect the pod logs
         id: pod_logs
