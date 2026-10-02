@@ -488,3 +488,28 @@ func TestShouldRateLimit_theBudgetBindsOneDecisionNotTheCall(t *testing.T) {
 		"two decisions of 128 buckets each are within the budget")
 	assert.Equal(t, 0.0, refused, "the budget is not the sum over the call")
 }
+
+// An exempt check is counted under its own verdict, in its domain, and not as
+// ok: ok stays the count of checks the engine decided.
+func TestShouldRateLimit_countsAnExemptCheck(t *testing.T) {
+	ruleStore := store.New()
+	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, memory.New()))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+
+	exempt := func() float64 {
+		return testutil.ToFloat64(metrics.Checks.WithLabelValues(exemptDomain, metrics.VerdictExempt))
+	}
+	ok := func() float64 {
+		return testutil.ToFloat64(metrics.Checks.WithLabelValues(exemptDomain, metrics.VerdictOK))
+	}
+	okBefore := ok()
+	got := delta(exempt, func() {
+		_, err := server.ShouldRateLimit(context.Background(),
+			request(exemptDomain, map[string]string{"path": "/ratelimit/v1/status"}))
+		require.NoError(t, err)
+	})
+
+	assert.Equal(t, 1.0, got, `ratelimit_checks_total{verdict="exempt"} after one exempt check`)
+	assert.Equal(t, okBefore, ok(), `ratelimit_checks_total{verdict="ok"} after one exempt check`)
+}

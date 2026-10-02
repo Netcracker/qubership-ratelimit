@@ -275,6 +275,8 @@ management:                          # Deployment.yaml, Service.yaml, Authorizat
   roles:                             # the IdP's role names mapped onto viewer and operator; lists, at least one of
     viewer: [viewer]                 #   them non-empty (both empty would switch the mapping off, so the schema
     operator: [operator]             #   refuses it); a read-only deployment sets viewer alone
+  gatewayDomains: [gateway.private]  # the rate limit domains of the gateways that route to the API: its paths are
+                                     #   exempt from the checks of these domains (see "Management API port")
 
 MONITORING_ENABLED: false            # PodMonitor.yaml, PrometheusRule.yaml, Dashboard.yaml; see "Platform
                                      #   parameters"
@@ -401,7 +403,9 @@ typed_config:
 `failure_mode_deny` is the one failure-mode switch, and it covers two cases: the RLS itself is unreachable or times out,
 and the RLS answers `UNAVAILABLE` because its counter store failed. Either way the check is counted as
 `verdict="unavailable"` on the service's scrape when the service answered, and `failClosed` decides whether the traffic
-flows unlimited or gets a 503.
+flows unlimited or gets a 503. A request to the management API through a gateway whose domain is in
+`management.gatewayDomains` is outside both cases while the service answers: its check reads no counter store (see
+"Management API port").
 
 There are four descriptor actions (VIRTUAL_HOST, MERGE), and they are a contract with the service:
 
@@ -467,8 +471,8 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 - env: `LOGGING_LEVEL_ROOT` (not `--zap-log-level`), `CLOUD_NAMESPACE` and `POD_NAME` from fieldRefs (the Downward API;
   the namespace is the installation scope and the namespace segment in counter keys), `SERVICE_VERSION` (the image tag,
   reported as `ratelimit_build_info`; the pipeline passes no build argument to the image, so without it every scrape
-  would say `dev`), `METRICS_NEAR_LIMIT_RATIO`, plus `MANAGEMENT_CLAIMS_*` and `MANAGEMENT_ROLES_*` behind
-  `management.enabled`;
+  would say `dev`), `METRICS_NEAR_LIMIT_RATIO`, plus `MANAGEMENT_CLAIMS_*`, `MANAGEMENT_ROLES_*`, and
+  `MANAGEMENT_GATEWAY_DOMAINS` behind `management.enabled`;
 - the `maxSurge: 1 / maxUnavailable: 0` strategy unless `DEPLOYMENT_STRATEGY_TYPE` says otherwise: the gateways must
   not lose all RLS endpoints at once;
 - `lifecycle.preStop.sleep: 7s` (the native handler, needs k8s >= 1.30): on deletion the pod leaves Endpoints
@@ -560,7 +564,7 @@ exclude.
 
 | Metric | Labels | What it counts |
 | --- | --- | --- |
-| `ratelimit_checks_total` | `domain`, `verdict: ok\|over_limit\|unavailable` | checks; unavailable = store unavailable, the checks the gateway's failure mode decided |
+| `ratelimit_checks_total` | `domain`, `verdict: ok\|over_limit\|unavailable\|exempt` | checks; unavailable = store unavailable, the checks the gateway's failure mode decided; exempt = requests to the management API, admitted without a decision |
 | `ratelimit_check_duration_seconds` | `domain` | decision histogram; the bucket bounds are laid on the 10ms budget and the filter timeout |
 | `ratelimit_decisions_total` | `domain`, `rule` (limit block/rule), `outcome: ok\|over_limit\|shadow_over_limit` | per-rule outcomes |
 | `ratelimit_near_limit_total` | `domain`, `rule` | allowed requests within the margin of the window's capacity, the burst of a GCRA window or the requests of a fixed one (the threshold is `metrics.nearLimitRatio`); shadow is excluded |
@@ -716,6 +720,30 @@ renders none of this: the service chart is empty there. The identity the service
 least one of them non-empty); the Deployment renders them as `MANAGEMENT_CLAIMS_*` and `MANAGEMENT_ROLES_*`, which the
 configloader maps onto the service's properties. The e2e install uses a nested
 claim and IdP role names of its own, so the suite proves the values reach the service, not only the Deployment.
+
+`management.gatewayDomains` (a list of rate limit domains, default `[gateway.private]`) names the domains of the
+gateways that route to the API. The gateway checks a request to the API like any other request it carries, and the
+service admits that check without a decision: for a path that is `/ratelimit/v1` or lies under it by whole segments,
+in one of these domains, it reads neither the rules nor the counter store, and counts the check as `verdict="exempt"`
+in `ratelimit_checks_total` (in a domain no policy claims, the check passes as an unknown domain's does). Two things
+follow. The API stays reachable through a gateway that fails closed while the
+counter store is down: the endpoints that read no counters return `200`, and the ones that read them return the
+service's own `RLS-0503` instead of the gateway's `503`. And a policy of these domains has no effect on the API's
+paths, whatever its targets: requests to the API charge no counter and are never refused with `429`.
+
+Each entry has to equal `gateways.<role>.domain` of the operator chart for that gateway; the schema holds an entry to
+the pattern of `spec.domain`, and nothing checks that a gateway sends it. An entry that is no gateway's domain exempts
+nothing, and the API's requests are then checked like the rest of the gateway's traffic. The same path in a domain
+outside the list is always checked. In a composite every gateway sends the same domains, so the exemption holds on the
+satellites' gateways of a listed domain too: a request under `/ratelimit/v1` through a satellite's private gateway is
+not rate limited either, whatever that gateway routes the path to. Change the list when the private gateway's domain is
+not the default, or when a gateway added to `management.authorizationPolicy.allowedServiceAccounts` routes to the API as
+well. An empty list exempts nothing. The Deployment renders the list as `MANAGEMENT_GATEWAY_DOMAINS`, read at start;
+with `management.enabled: false` the variable is not rendered and no path is exempt.
+
+The exemption removes the dependency on the counter store, not on the check: the gateway still sends one, and under
+`failClosed: true` a check that gets no answer within `filter.timeout` is a `503` for the API's request as for any
+other. A `503` with no `RLS-` code in its body is that case, or a gateway whose domain is missing from the list.
 
 `/debug/*` on the metrics port is not the management API: read-only diagnostics with no mutations and no
 authentication, cluster-internal, outside the compatibility promises. `/debug/applied` is the operator's probe, and

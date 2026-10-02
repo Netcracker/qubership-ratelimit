@@ -331,4 +331,8 @@ property of the access model. Axis values and the Idempotency-Key land in the lo
 - **Deployment.** The API lives on the service, on a port of its own behind an AuthorizationPolicy that admits the
   private gateway alone ([chart](helm-chart.md)); the counters, the enforced set, and the command records are its
   state. The actual IdP role and claim names are deployment configuration, the chart values `management.claims` and
-  `management.roles`.
+  `management.roles`. Requests to the API are not rate limited in the rate limit domains listed in the chart value
+  `management.gatewayDomains`, the private gateway's by default: the service admits their checks without reading the
+  rules or the counter store, so the API stays reachable through a gateway that fails closed while the store is down,
+  and a policy of those domains does not apply to the API's paths. `POST /simulations` does not model the
+  exemption: for a path under `/ratelimit/v1` in such a domain it reports the decision the policy's rules make.

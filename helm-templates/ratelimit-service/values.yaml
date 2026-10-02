@@ -163,6 +163,22 @@ management:
     #     -o jsonpath='{.items[0].spec.serviceAccountName}'
     allowedServiceAccounts: []
 
+  # The rate limit domains of the gateways that route to the management API.
+  # A request under /ratelimit/v1 through such a gateway is not rate limited:
+  # the service admits its check without reading the rules or the counter
+  # store, and counts it in ratelimit_checks_total as verdict="exempt". The
+  # API therefore stays reachable through a gateway that fails closed while
+  # the counter store is down, and a policy of these domains has no effect on
+  # the API's paths. The same path in any other domain is checked as usual.
+  #
+  # Each entry has to equal gateways.<role>.domain of the operator chart for
+  # that gateway. Nothing validates the match, and an entry that is no
+  # gateway's domain exempts nothing. Change the list when the private
+  # gateway's domain is not the default, or when another gateway from
+  # authorizationPolicy.allowedServiceAccounts routes to the API. An empty
+  # list rate limits the API's requests like any others.
+  gatewayDomains: [gateway.private]
+
 # ============== MONITORING DELIVERY ============================
 # The scrape target, the alert rules, and the Grafana dashboard, delivered as
 # custom resources: a PodMonitor and a PrometheusRule for the platform's

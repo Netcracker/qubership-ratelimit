@@ -671,6 +671,20 @@
           },
           "additionalProperties": false
         },
+        "gatewayDomains": {
+          "type": "array",
+          "title": "Gateway domains",
+          "description": "The rate limit domains of the gateways that route to the management API. A request under /ratelimit/v1 in one of them is admitted without reading the rules or the counter store, so the API stays reachable through a gateway that fails closed while the store is down. Each entry has to equal gateways.<role>.domain of the operator chart; the pattern is the CRD's spec.domain pattern. Empty rate limits the API's requests like any others.",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+            "minLength": 1,
+            "maxLength": 63
+          },
+          "default": [
+            "gateway.private"
+          ]
+        },
         "claims": {
           "type": "object",
           "title": "Identity claims",

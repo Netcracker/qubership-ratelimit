@@ -228,6 +228,10 @@ The `AuthorizationPolicy` that keeps the port reachable from the private gateway
 dedicated `Service` would add a name without adding a boundary; the gateway's `HTTPRoute` names the port on the one
 `Service`. The identity the API reads is configured under `management.claims` (the claim names, dotted for a nested
 claim such as `realm_access.roles`) and `management.roles` (the IdP's role names mapped onto `viewer` and `operator`).
+`management.gatewayDomains` names the rate limit domains of the gateways that route to the API, the private gateway's
+by default. Requests to the API are exempt from the checks of those domains, so the API stays reachable through a
+gateway that fails closed while the counter store is down; the details are in
+[the chart reference](docs/helm-chart.md#management-api-port).
 
 The counter store is a Redis database from DBaaS. The service chart renders an `InternalDatabase` of type `redis`
 and a `DatabaseSecretClaim` for the release; dbaas-operator provisions the database through the DBaaS Redis adapter

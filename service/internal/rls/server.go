@@ -86,6 +86,12 @@ type Server struct {
 
 	nearLimitRatio float64
 
+	// exemptPrefix and exemptDomains are set by WithExemptPath: a descriptor
+	// of one of these domains whose path is under the prefix is not decided.
+	// An empty prefix or no domains exempts nothing.
+	exemptPrefix  string
+	exemptDomains map[string]struct{}
+
 	// refusalLog samples the ordinary over-limit lines, violationLog the
 	// configuration-violation errors, unknownLog the unknown-domain reports,
 	// and storeLog the store failures. Separate budgets on purpose: a storm
@@ -106,6 +112,26 @@ func WithNearLimitRatio(ratio float64) Option {
 	return func(s *Server) {
 		if ratio > 0 && ratio < 1 {
 			s.nearLimitRatio = ratio
+		}
+	}
+}
+
+// WithExemptPath exempts the paths under prefix from the checks of domains.
+// For a descriptor of one of these domains whose path is prefix or lies under
+// it by whole segments, the server makes no decision: it reads neither the
+// rules nor the counter store, and a check with no other descriptor returns
+// OK. prefix is a path without a trailing slash, and the query string of a
+// descriptor's path is not compared. An empty prefix or no domains exempts
+// nothing.
+func WithExemptPath(prefix string, domains []string) Option {
+	return func(s *Server) {
+		if prefix == "" || len(domains) == 0 {
+			return
+		}
+		s.exemptPrefix = prefix
+		s.exemptDomains = make(map[string]struct{}, len(domains))
+		for _, domain := range domains {
+			s.exemptDomains[domain] = struct{}{}
 		}
 	}
 }
@@ -182,6 +208,14 @@ func (s *Server) ShouldRateLimit(
 		return &envoyratelimit.RateLimitResponse{
 			OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
 		}, nil
+	}
+	requests = s.withoutExempt(domain, requests)
+	if len(requests) == 0 {
+		// Every descriptor was exempt, so nothing was decided and the store
+		// was not read: the answer is OK whatever state the store is in.
+		metrics.Checks.WithLabelValues(domain, metrics.VerdictExempt).Inc()
+		s.log.DebugC(ctx, "rate limit check exempt domain=%v path=%v", domain, path)
+		return &envoyratelimit.RateLimitResponse{OverallCode: envoyratelimit.RateLimitResponse_OK}, nil
 	}
 	decisions := make([]engine.Decision, 0, len(requests))
 	allowed := true
@@ -340,6 +374,35 @@ func costViolation(req *envoyratelimit.RateLimitRequest) string {
 		}
 	}
 	return ""
+}
+
+// withoutExempt drops the requests WithExemptPath exempts in this domain and
+// returns the rest in their order. engineRequests returns at least one
+// request, so an empty result means every one of them was exempt.
+func (s *Server) withoutExempt(domain string, requests []check) []check {
+	if _, ok := s.exemptDomains[domain]; !ok {
+		return requests
+	}
+	kept := requests[:0]
+	for _, c := range requests {
+		if !underPrefix(c.Path, s.exemptPrefix) {
+			kept = append(kept, c)
+		}
+	}
+	return kept
+}
+
+// underPrefix reports whether path, without its query string, is prefix or
+// lies under it by whole segments: /ratelimit/v1 and /ratelimit/v1/status are
+// under /ratelimit/v1, and /ratelimit/v10 is not. A Gateway API PathPrefix
+// match admits the same paths, so the exemption covers what a route with this
+// prefix serves and nothing beside it.
+func underPrefix(path, prefix string) bool {
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	rest, ok := strings.CutPrefix(path, prefix)
+	return ok && (rest == "" || rest[0] == '/')
 }
 
 // observeDecision feeds the per-rule and extraction series of one decision.

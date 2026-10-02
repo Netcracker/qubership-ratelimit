@@ -278,7 +278,8 @@ the satellite namespace" step, run with `make test-e2e-go E2E_SATELLITE_NAMESPAC
 The suites cover both halves:
 
 - The data-plane suites (`ratelimit`, `jwt`, `budget`, `failopen`, `redis`, `shadow`, `unknowndomain`, `management`,
-  `snapshot`) exercise the service through the gateway, the management port, and the diagnostics port.
+  `management-outage`, `snapshot`) exercise the service through the gateway, the management port, and the diagnostics
+  port.
 - The `policy`, `lagging`, `rollout`, `metrics`, and `satellite` suites cover the configuration path: the operator
   writes the status and the ConfigMap, and a policy change reaches the replicas through the volume.
 - The operator suite covers its rollout: the one pod is replaced under the Lease, rate limiting continues throughout,

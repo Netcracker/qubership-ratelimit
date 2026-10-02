@@ -137,6 +137,10 @@ spec:
               value: '{{ join "," .Values.management.roles.viewer }}'
             - name: MANAGEMENT_ROLES_OPERATOR
               value: '{{ join "," .Values.management.roles.operator }}'
+            # The domains in which a check of the API's own paths is exempt,
+            # comma-separated.
+            - name: MANAGEMENT_GATEWAY_DOMAINS
+              value: '{{ join "," .Values.management.gatewayDomains }}'
             {{- end }}
           ports:
             - name: grpc

@@ -102,3 +102,18 @@ func (f fixedResolver) GetConnection(context.Context, string, map[string]any,
 	rest.BaseDbParams) (map[string]any, error) {
 	return f, nil
 }
+
+// MANAGEMENT_GATEWAY_DOMAINS is a comma-separated list, read with the blanks
+// around an entry and the empty entries dropped.
+func TestManagementGatewayDomains_readsACommaSeparatedList(t *testing.T) {
+	t.Setenv("MANAGEMENT_GATEWAY_DOMAINS", "gateway.private, gateway.internal,")
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+
+	assert.Equal(t, []string{"gateway.private", "gateway.internal"}, ManagementGatewayDomains())
+}
+
+func TestManagementGatewayDomains_unsetIsNoDomain(t *testing.T) {
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+
+	assert.Empty(t, ManagementGatewayDomains())
+}
