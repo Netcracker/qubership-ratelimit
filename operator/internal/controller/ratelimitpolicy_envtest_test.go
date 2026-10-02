@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ratelimitv1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
@@ -551,7 +552,16 @@ var _ = Describe("the manager's cache", Ordered, func() {
 		DeferCleanup(func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(context.Background(), cached))).To(Succeed())
 		})
-		Eventually(policyCount).Should(BeNumerically(">", 0), "the informer never saw the policy")
+		// The specs below read through the cache, and the informer delivers the
+		// policy some time after the API server has it, so the wait is on the
+		// cache itself.
+		Eventually(func() int {
+			list := policy.ObjectList()
+			if err := mgr.GetClient().List(context.Background(), list, client.InNamespace(envtestNamespace)); err != nil {
+				return -1
+			}
+			return len(list.Items)
+		}).Should(BeNumerically(">", 0), "the informer never saw the policy")
 
 		DeferCleanup(func() { cancel() })
 		managerUnderTest = mgr
@@ -581,9 +591,13 @@ var _ = Describe("the manager's cache", Ordered, func() {
 
 		// A read failure is logged and swallowed here, so the assertion is on
 		// the requests: the fan-out going quiet is exactly how the bug this
-		// pins presented.
-		Expect(reconciler.policiesBehind(context.Background(), slice)).
-			To(HaveLen(policyCount()), "the EndpointSlice fan-out reconciles nothing")
+		// pins presented. The fan-out reads the cache and policyCount the API
+		// server, so a policy another spec just created or deleted is given
+		// time to reach the cache; a fan-out that fails every read never
+		// matches.
+		Eventually(func() []reconcile.Request {
+			return reconciler.policiesBehind(context.Background(), slice)
+		}).Should(HaveLen(policyCount()), "the EndpointSlice fan-out reconciles nothing")
 	})
 
 	It("gives the store updater an informer without starting a second one", func() {

@@ -140,6 +140,11 @@ type Headers struct {
 	// request, and two windows of one rule report the same shape.
 	Algorithm     string
 	PeriodSeconds int64
+
+	// Block and Rule name the rule whose bucket these numbers came from: on a
+	// refusal, the rule that refused.
+	Block string
+	Rule  string
 }
 
 // RuleOutcome is one applied rule's own verdict, for metrics and the decision
@@ -261,7 +266,7 @@ func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decis
 		Skips:         skips,
 		ExtractedKeys: e.keyNames(keys),
 	}
-	decision.Headers, decision.CostExceedsCapacity = aggregate(buckets, verdicts, decision.Allowed)
+	decision.Headers, decision.CostExceedsCapacity = aggregate(matched, buckets, verdicts, decision.Allowed)
 	return decision, nil
 }
 
@@ -359,7 +364,7 @@ func bucketCapacity(w algo.Window) int64 {
 // pair: deterministic across replicas, so headers do not jitter between them.
 // A refusal that no waiting cures surfaces as CostExceedsCapacity with no
 // retry hint.
-func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (*Headers, bool) {
+func aggregate(matched match.Result, buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (*Headers, bool) {
 	costExceeds := false
 	if !allowed {
 		for i := range buckets {
@@ -382,10 +387,23 @@ func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (
 		Algorithm:     algorithmName(buckets[best].Algorithm),
 		PeriodSeconds: int64(buckets[best].Window.Period / time.Second),
 	}
+	h.Block, h.Rule = ruleOf(matched, best)
 	if costExceeds {
 		h.RetryAfter = -1
 	}
 	return h, costExceeds
+}
+
+// ruleOf names the rule that owns bucket index of matched.Buckets(), which lays
+// the buckets out rule by rule in the order of matched.Rules.
+func ruleOf(matched match.Result, index int) (block, rule string) {
+	for _, m := range matched.Rules {
+		if index < len(m.Buckets) {
+			return m.Block, m.Rule
+		}
+		index -= len(m.Buckets)
+	}
+	return "", ""
 }
 
 // strictestIndex picks the strictest bucket of a range: on allow, the minimum

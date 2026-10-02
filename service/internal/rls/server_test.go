@@ -198,6 +198,8 @@ func TestShouldRateLimit_deniesPastTheWindowWithRetryAfter(t *testing.T) {
 	assert.Equal(t, "1", headers["x-ratelimit-limit"])
 	assert.Equal(t, "0", headers["x-ratelimit-remaining"])
 	assert.NotEmpty(t, headers["retry-after"], "a refusal waiting can cure carries the hint")
+	assert.Equal(t, "b/all", headers["x-ratelimit-rule"], "a refusal names the block/rule that refused")
+	assert.NotContains(t, headerMap(first), "x-ratelimit-rule", "an admission names no rule")
 }
 
 func TestShouldRateLimit_doesNotCountAnUnclaimedDomain(t *testing.T) {
@@ -712,6 +714,7 @@ func TestShouldRateLimit_storeErrorAfterRefusalStillDenies(t *testing.T) {
 	require.NoError(t, err, "a known refusal is an answer, not an error")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
 	assert.NotEmpty(t, headerMap(resp)["retry-after"], "the refused decision's headers survive the store error")
+	assert.Equal(t, "b/each", headerMap(resp)["x-ratelimit-rule"], "the refusing rule survives the store error")
 }
 
 // exemptPrefix and exemptDomain stand in for what the service passes to

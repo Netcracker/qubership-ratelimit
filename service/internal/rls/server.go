@@ -455,9 +455,10 @@ func strictestDecision(decisions []engine.Decision, allowed bool) engine.Decisio
 
 // responseHeaders turns the strictest-rule numbers into the x-ratelimit-*
 // response headers; a refusal that waiting can cure also carries retry-after.
-// A decision without matched counting rules carries no headers at all, and a
-// refusal no waiting cures carries no retry hint — the engine marks it with a
-// negative RetryAfter.
+// A refusal also carries x-ratelimit-rule, the block/rule pair that refused, so
+// the 429 names the rule to look at. A decision without matched counting rules
+// carries no headers at all, and a refusal no waiting cures carries no retry
+// hint — the engine marks it with a negative RetryAfter.
 func responseHeaders(decision engine.Decision) []*corev3.HeaderValue {
 	h := decision.Headers
 	if h == nil {
@@ -471,6 +472,12 @@ func responseHeaders(decision engine.Decision) []*corev3.HeaderValue {
 	if !decision.Allowed && h.RetryAfter >= 0 {
 		out = append(out, &corev3.HeaderValue{
 			Key: "retry-after", Value: strconv.FormatInt(ceilSeconds(h.RetryAfter), 10)})
+	}
+	if !decision.Allowed && h.Rule != "" {
+		// Block and rule names are limited by the CRD to lower-case letters,
+		// digits, dots, dashes, and underscores, so the pair is a safe header
+		// value.
+		out = append(out, &corev3.HeaderValue{Key: "x-ratelimit-rule", Value: h.Block + "/" + h.Rule})
 	}
 	return out
 }

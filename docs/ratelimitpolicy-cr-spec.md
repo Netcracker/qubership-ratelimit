@@ -283,7 +283,7 @@ component, enforces that a token is required.
 4. **A missing axis**: a rule whose `counters` axis is absent from the request (for example `client` for an anonymous
    caller) does not match; there is nothing to key the bucket with.
 5. **The verdict**: `OVER_LIMIT` if at least one applied rule (of any block) is exceeded; the `x-ratelimit-*` headers
-   come from the strictest matched rule.
+   come from the strictest matched rule, and on a refusal `x-ratelimit-rule` names it as `<block>/<rule>`.
 6. **Request cost**: the protocol field `hits_addend` (default 1); a cost above the burst capacity produces a
    deterministic refusal, not a wait.
 7. **A refusal does not spend quota**, a guarantee of every algorithm: a refused request does not advance the counter
@@ -335,11 +335,12 @@ client ──HTTP──> gateway ──jwt_authn──> (token signature verifie
    charged only per its own verdict.
 6. **Response**: the verdict is an AND over the enforcing buckets; the `x-ratelimit-*` headers come from the strictest
    matched bucket (the minimal remaining when the request is allowed, the maximal retry-after on a refusal; on a tie, a
-   deterministic tie-break by bucket key). A refusal is `OVER_LIMIT` with `retry-after`; a cost that can never fit gets
-   no retry headers. If the store does not answer within the budget, the service answers `UNAVAILABLE` and the gateway's
-   failure mode decides: with `failClosed: false`, the default, the request passes unlimited, and with `true` the
-   gateway answers 503. The error metric grows either way. A check some rule already refused answers `OVER_LIMIT`
-   regardless.
+   deterministic tie-break by bucket key). A refusal is `OVER_LIMIT` with `retry-after` and `x-ratelimit-rule`, the
+   `<block>/<rule>` pair of the rule that refused; a cost that can never fit gets no retry headers. A refusal that no
+   rule made, over the descriptor limit or the bucket budget, carries neither header. If the store does not answer within the
+   budget, the service answers `UNAVAILABLE` and the gateway's failure mode decides: with `failClosed: false`, the
+   default, the request passes unlimited, and with `true` the gateway answers 503. The error metric grows either way. A
+   check some rule already refused answers `OVER_LIMIT` regardless.
 
 ## Compilation model
 
