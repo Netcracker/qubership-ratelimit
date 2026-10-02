@@ -7,19 +7,30 @@ import (
 	"syscall"
 )
 
-// SignalContext is a context that ends on SIGTERM or SIGINT, for a process
-// that runs no controller-runtime manager. A second signal exits at once,
-// as controller-runtime's handler does, so a drain that hangs can still be
-// interrupted from the terminal.
-func SignalContext() context.Context {
+// SignalContext returns a context that ends on SIGTERM or SIGINT, for a
+// process that runs no controller-runtime manager, and the function that
+// releases it. A second signal exits at once, as controller-runtime's handler
+// does, so a drain that hangs can still be interrupted from the terminal.
+//
+// The caller calls stop once the context is no longer needed. stop ends the
+// context and stops the signal delivery, so a later SIGTERM or SIGINT
+// terminates the process at once.
+func SignalContext() (ctx context.Context, stop context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-signals
+		select {
+		case <-signals:
+		case <-ctx.Done():
+			return
+		}
 		cancel()
 		<-signals
 		os.Exit(1)
 	}()
-	return ctx
+	return ctx, func() {
+		signal.Stop(signals)
+		cancel()
+	}
 }

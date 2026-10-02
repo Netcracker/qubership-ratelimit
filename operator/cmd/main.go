@@ -10,8 +10,12 @@ import (
 	"fmt"
 	"os"
 
+	// The OIDC auth provider, for a kubeconfig that names it when the
+	// operator runs outside a pod. The azure and gcp providers that this
+	// import also registers only report that they were removed.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	// Sets GOMEMLIMIT from the container's memory limit at start.
 	_ "github.com/netcracker/qubership-core-lib-go/v3/memlimit"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"

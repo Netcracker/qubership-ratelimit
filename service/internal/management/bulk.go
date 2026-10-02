@@ -60,6 +60,9 @@ const pollInterval = 5 * time.Second
 // benefits from being handed a hundred thousand keys.
 const keySampleLimit = 100
 
+// fieldSelectorAxes is the field a refused axis is reported under.
+const fieldSelectorAxes = "selector.axes"
+
 // BulkResetRequest is the body of the counter-resets action: exactly one of four
 // shapes, preview or execute, by selector or domain-wide.
 type BulkResetRequest struct {
@@ -306,15 +309,15 @@ func (s *SelectorBody) parse() (selector, *apiError) {
 
 	for name, values := range s.Axes {
 		if name == "" {
-			return selector{}, invalid("an axis in selector.axes needs a name", "selector.axes")
+			return selector{}, invalid("an axis in selector.axes needs a name", fieldSelectorAxes)
 		}
 		if len(values) == 0 {
 			return selector{}, invalid("axis "+logSafe(name)+" carries no values; omit it instead",
-				"selector.axes")
+				fieldSelectorAxes)
 		}
 		if slices.Contains(values, "") {
 			return selector{}, invalid("axis "+logSafe(name)+
-				" has an empty value, which addresses no counter", "selector.axes")
+				" has an empty value, which addresses no counter", fieldSelectorAxes)
 		}
 		if out.Axes == nil {
 			out.Axes = map[string][]string{}

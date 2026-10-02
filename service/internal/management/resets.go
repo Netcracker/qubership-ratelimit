@@ -18,6 +18,9 @@ import (
 // key spent here and on the addressed DELETE is two bindings.
 const endpointResets = "counter-resets"
 
+// headerIdempotencyKey carries a mutation's idempotency key.
+const headerIdempotencyKey = "Idempotency-Key"
+
 // handleBulkReset runs a bulk reset: a preview that mints a confirmation token,
 // or the execution that token authorizes.
 //
@@ -402,15 +405,15 @@ func (a *API) mintToken(
 
 // idempotencyKeyOf reads the mandatory key of a mutation.
 func idempotencyKeyOf(c *fiber.Ctx) (string, *apiError) {
-	key := c.Get("Idempotency-Key")
+	key := c.Get(headerIdempotencyKey)
 	if key == "" {
-		return "", invalid("this mutation needs an Idempotency-Key header", "Idempotency-Key")
+		return "", invalid("this mutation needs an Idempotency-Key header", headerIdempotencyKey)
 	}
 	if !requestIDPattern.MatchString(key) {
 		// The key lands in the audit journal verbatim, so it is refused rather
 		// than sanitized, exactly like a request id.
 		return "", invalid("the Idempotency-Key does not match "+requestIDPattern.String(),
-			"Idempotency-Key")
+			headerIdempotencyKey)
 	}
 	return key, nil
 }

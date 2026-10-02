@@ -70,7 +70,7 @@ type RateLimitPolicyReconciler struct {
 	// Probe reads the enforced generation from every ready replica. Without it
 	// Ready cannot be established and reports ProbeFailed, which is the honest
 	// answer for a leader that cannot see the fleet.
-	Probe FleetProbe
+	Probe FleetObserver
 
 	// Events records the Warning a generation that does not compile raises.
 	// It may be nil, which leaves the condition and the log as the only trace.
@@ -96,10 +96,10 @@ func (r *RateLimitPolicyReconciler) now() time.Time {
 	return time.Now()
 }
 
-// FleetProbe reports which replicas enforce which generation of a domain.
+// FleetObserver reports which replicas enforce which generation of a domain.
 // With fresh set, Observe answers from a round taken during the call, whatever
 // the probe kept from an earlier one.
-type FleetProbe interface {
+type FleetObserver interface {
 	Observe(ctx context.Context, domain string, want applied.Domain, fresh bool) (FleetView, error)
 }
 

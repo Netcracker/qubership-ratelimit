@@ -63,7 +63,9 @@ type Options struct {
 func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, options Options) (ctrl.Manager, error) {
 	warn := options.Warn
 	if warn == nil {
-		warn = func(string, ...any) {}
+		warn = func(string, ...any) {
+			// A caller without a warning sink drops the warnings.
+		}
 	}
 
 	// The lease is signed with the pod name, so the leader a reader finds on

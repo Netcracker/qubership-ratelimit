@@ -1,6 +1,7 @@
 package process
 
 import (
+	"context"
 	"os"
 	"syscall"
 	"testing"
@@ -10,7 +11,8 @@ import (
 )
 
 func TestSignalContext_endsOnSIGTERM(t *testing.T) {
-	ctx := SignalContext()
+	ctx, stop := SignalContext()
+	defer stop()
 	select {
 	case <-ctx.Done():
 		t.Fatal("the context ended before any signal")
@@ -22,4 +24,11 @@ func TestSignalContext_endsOnSIGTERM(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the context did not end on SIGTERM")
 	}
+}
+
+// stop ends the context without a signal.
+func TestSignalContext_endsOnStop(t *testing.T) {
+	ctx, stop := SignalContext()
+	stop()
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 
+	// Sets GOMEMLIMIT from the container's memory limit at start.
 	_ "github.com/netcracker/qubership-core-lib-go/v3/memlimit"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
@@ -90,7 +91,10 @@ func main() {
 
 	setupLog.Infof("starting service namespace=%v pod=%v config=%v version=%v",
 		namespace, options.Replica, options.ConfigDir, options.Version)
-	if err := service.Run(process.SignalContext()); err != nil {
+	ctx, stop := process.SignalContext()
+	err = service.Run(ctx)
+	stop()
+	if err != nil {
 		setupLog.Errorf("service exited with an error: %v", err)
 		os.Exit(1)
 	}
