@@ -61,6 +61,48 @@ func fieldsGolden(version int) string {
 	return filepath.Join("testdata", fmt.Sprintf("v%d.fields.txt", version))
 }
 
+// payloadGolden is a payload of the version: a spec that sets every field
+// the version's field set lists, as the operator writes it before compression.
+func payloadGolden(version int) string {
+	return filepath.Join("testdata", fmt.Sprintf("v%d.payload.json", version))
+}
+
+// payloadSample is the spec the payload golden of a new version is written
+// from. It sets every field of the spec, so the golden carries each of them.
+func payloadSample() v1.RateLimitPolicySpec {
+	burst := int32(20)
+	return v1.RateLimitPolicySpec{
+		Domain: "gateway.public",
+		Mappings: []v1.ClaimMapping{
+			{Key: "tenant", Claim: "org_id", Type: v1.ClaimTypeString, Normalization: v1.NormalizeLowercase,
+				Fallbacks: []string{"tenant_id"}},
+			{Key: "roles", ClaimPath: []string{"realm_access", "roles"}, Type: v1.ClaimTypeStringArray,
+				Normalization: v1.NormalizeNone},
+		},
+		Groups: []v1.ClientGroup{{Name: "partners", Clients: []string{"partner-a"}}},
+		Limits: []v1.LimitBlock{{
+			Name: "orders",
+			Target: &v1.Target{Routes: []v1.Route{{
+				Path:    v1.PathMatch{Type: v1.PathMatchTemplate, Value: "/api/v1/orders/{id}"},
+				Methods: []v1.HTTPMethod{"GET", "POST"},
+			}}},
+			Mode: v1.BlockModeAll,
+			Rules: []v1.Rule{{
+				Name: "per-tenant",
+				Matches: []v1.Predicate{
+					{Key: "tenant", Operator: v1.OperatorEquals, Value: "acme"},
+					{Key: "roles", Operator: v1.OperatorIn, Values: []string{"admin"}},
+				},
+				Counters: []string{"tenant"},
+				Rates: []v1.Rate{{Requests: 100, PeriodSeconds: 60, Burst: &burst,
+					Algorithm: v1.AlgorithmGCRA}},
+				Behavior:      v1.RuleBehaviorEnforce,
+				ReplacedRules: []string{"base"},
+			}},
+		}},
+	}
+}
+
 // TestDecode_readsEverySupportedVersion is the skew guarantee: the service
 // reads the current format and the one before it, so the golden of each has
 // to decode with this reader. A golden that stops decoding is a reader that
@@ -128,6 +170,85 @@ func TestPayloadFields_matchTheGoldenOfTheCurrentVersion(t *testing.T) {
 	require.Equal(t, string(want), got,
 		"the field set of RateLimitPolicySpec changed without a version increment: an older service would "+
 			"refuse the payload as malformed. Increment FormatVersion, then write the new goldens with -update")
+}
+
+// The service reads the payloads of every supported version, so a field of any
+// of them has to stay in RateLimitPolicySpec, under its JSON name, until that
+// version is dropped. The field-set check above sees only the current version,
+// and a field renamed together with a version increment passed it while the
+// service stopped reading the previous version's payloads.
+func TestPayloadFields_ofEverySupportedVersionAreStillDefined(t *testing.T) {
+	current := map[string]bool{}
+	for _, path := range FieldPaths(reflect.TypeFor[v1.RateLimitPolicySpec]()) {
+		current[path] = true
+	}
+	for _, version := range SupportedVersions() {
+		raw, err := os.ReadFile(fieldsGolden(version))
+		require.NoError(t, err)
+		for path := range strings.FieldsSeq(string(raw)) {
+			assert.True(t, current[path],
+				"field %s of format version %d is gone from RateLimitPolicySpec; a removed or renamed field "+
+					"stays in the struct under its old JSON name while version %d is supported", path, version, version)
+		}
+	}
+}
+
+// The payload of every supported version decodes with this reader. Its golden
+// sets every field of the version, so a field the reader lost fails here with
+// the error an older operator's payload would meet on a replica.
+func TestPayload_ofEverySupportedVersionDecodes(t *testing.T) {
+	if *update {
+		raw, err := json.MarshalIndent(payloadSample(), "", "  ")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(payloadGolden(FormatVersion), append(raw, '\n'), 0o644))
+		t.Logf("wrote %s", payloadGolden(FormatVersion))
+	}
+	for _, version := range SupportedVersions() {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			raw, err := os.ReadFile(payloadGolden(version))
+			require.NoError(t, err, "no payload golden for a supported version; write it with -update when the version is introduced")
+
+			fields, err := os.ReadFile(fieldsGolden(version))
+			require.NoError(t, err)
+			var document any
+			require.NoError(t, json.Unmarshal(raw, &document))
+			carried := map[string]bool{}
+			jsonPaths(document, "", carried)
+			for path := range strings.FieldsSeq(string(fields)) {
+				assert.True(t, carried[path], "the payload golden of version %d does not set %s", version, path)
+			}
+
+			var compressed bytes.Buffer
+			zw := gzip.NewWriter(&compressed)
+			_, err = zw.Write(raw)
+			require.NoError(t, err)
+			require.NoError(t, zw.Close())
+			var spec v1.RateLimitPolicySpec
+			_, err = DecodePayload(compressed.Bytes(), &spec)
+			require.NoError(t, err, "this reader does not read a payload of version %d", version)
+		})
+	}
+}
+
+// jsonPaths records the path of every leaf of a decoded JSON document, in the
+// form FieldPaths uses: a list element is [] after its list's name.
+func jsonPaths(v any, prefix string, out map[string]bool) {
+	switch node := v.(type) {
+	case map[string]any:
+		for key, value := range node {
+			path := key
+			if prefix != "" {
+				path = prefix + "." + key
+			}
+			jsonPaths(value, path, out)
+		}
+	case []any:
+		for _, element := range node {
+			jsonPaths(element, prefix+"[]", out)
+		}
+	default:
+		out[prefix] = true
+	}
 }
 
 // TestFieldPaths_walksTheShapesTheSpecUses pins the walker on a type built
@@ -201,10 +322,11 @@ func TestGoldens_areOnlyTheSupportedVersions(t *testing.T) {
 	}
 	expected := make([]string, 0, 2*len(SupportedVersions()))
 	for _, v := range SupportedVersions() {
-		expected = append(expected, fmt.Sprintf("v%d.json", v), fmt.Sprintf("v%d.fields.txt", v))
+		expected = append(expected, fmt.Sprintf("v%d.json", v), fmt.Sprintf("v%d.fields.txt", v),
+			fmt.Sprintf("v%d.payload.json", v))
 	}
 	assert.ElementsMatch(t, expected, present,
-		"testdata holds the two goldens of every supported version and nothing else")
+		"testdata holds the three goldens of every supported version and nothing else")
 }
 
 func TestDecode_refusesAnUnknownField(t *testing.T) {

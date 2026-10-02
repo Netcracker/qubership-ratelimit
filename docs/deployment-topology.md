@@ -10,8 +10,9 @@ and the client groups ([specification](ratelimitpolicy-cr-spec.md)).
 
 ## Deployment schemes
 
-Business applications are installed in one of two schemes. The deployer marks the role with one variable:
+Business applications are installed in one of two schemes. The platform marks the role with one variable:
 `BASELINE_ORIGIN` is set, and non-empty, only in a satellite; a baseline and a single namespace do not receive it.
+Both charts refuse to render a `BASELINE_ORIGIN` that names the release's own namespace.
 
 1. **Single namespace.** Everything in one place: both components, the gateway filters, and the policy.
 2. **Composite.** A set of related namespaces: one **baseline** and one or more **satellites**. Every namespace has a
@@ -45,7 +46,7 @@ team ── kubectl apply ──► RateLimitPolicy <domain>                    
                                    │  informer (own ns only)
                                    ▼
                           ratelimit-operator ── status ──► RateLimitPolicy
-                          (one replica: decode → compile → size check;
+                          (Lease holder: decode → compile → size check;
                            a Lease covers the rollout overlap)
                                    │  writes the whole object on every reconcile
                                    ▼
@@ -86,11 +87,11 @@ the status. The full list of bounds and their origin is in [limits](limits.md).
 Two binaries, two images. The operator holds the control plane of its namespace, and the service holds the data
 plane:
 
-- **Operator** `ratelimit-operator`: a Deployment with one replica and a Lease that covers the overlap of two pods
-  during a rollout. An informer on the `RateLimitPolicy` of its own namespace: event → strict decode → compile → size
-  check → a write of the ConfigMap `ratelimit-config` and of the policy status. It is the only writer of both. Its
-  chart ships the CRD, its ServiceAccount with the only Role of the delivery, the EnvoyFilters in every mode, and its
-  own PodMonitor.
+- **Operator** `ratelimit-operator`: a Deployment whose Lease holder alone does the work, with a standby in the `-ha`
+  and `prod` profiles; the Lease also covers the overlap of two pods during a rollout. An informer on the
+  `RateLimitPolicy` of its own namespace: event → strict decode → compile → size check → a write of the ConfigMap
+  `ratelimit-config` and of the policy status. It is the only writer of both. Its chart ships the CRD, its
+  ServiceAccount with the only Role of the delivery, the EnvoyFilters in every mode, and its own PodMonitor.
 - **Service** `ratelimit-service`: a Deployment with `REPLICAS` replicas. gRPC `ShouldRateLimit` on all replicas, with
   no coordination; the counter store is a single Redis instance that the DBaaS Redis adapter provisions for the
   release and runs in its own namespace. Every replica mounts the ConfigMap as a whole
@@ -113,7 +114,7 @@ plane:
   port 9000 named `grpc`, the probe port published on the Service under the name `metrics` (the service's metrics
   port, 8080 by default), the ConfigMap `ratelimit-config`, the mode rule, and the one namespace for both charts.
   Satellites compute the RLS address from the Service name, `ratelimit.<BASELINE_ORIGIN>.svc.cluster.local:9000` (or
-  `BASELINE_CONTROLLER` when the deployer sets it, read for parity with `control-plane`), and the operator reads its
+  `BASELINE_CONTROLLER` when the platform sets it, read for parity with `control-plane`), and the operator reads its
   fleet through the same name. A CI test renders both charts and compares the rendered names and ports with the
   constants, and the [chart document](helm-chart.md) lists the contract.
 - **Counter key** carries the service's namespace in the hash tag: `rl:v1:{<namespace>/<domain>}:<block>/<rule>:…`.
@@ -215,18 +216,18 @@ freezes, and the age of `lastCheckTime` shows how stale it is. Details and examp
 
 The code lives in a monorepo; the delivery is **one application**, `ratelimit`, made of **two charts** and **two
 images**, `qubership-ratelimit-operator` and `qubership-ratelimit-service`. The charts live under
-`helm-templates/ratelimit-operator` and `helm-templates/ratelimit-service`, the deployer installs the same pair in
+`helm-templates/ratelimit-operator` and `helm-templates/ratelimit-service`, the platform installs the same pair in
 every namespace, and both derive their contents from `BASELINE_ORIGIN`:
 
 | Scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | CRD, Deployment (one replica), ServiceAccount, Role/RoleBinding, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
+| single namespace | CRD, Deployment (`REPLICAS` replicas, one active), ServiceAccount, Role/RoleBinding, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | only EnvoyFilters that target the baseline RLS; no ServiceAccount, no RBAC | nothing: an empty release |
 
-Each chart declares only the values its templates read, and shared deployer inputs keep identical key names in both.
-`REPLICAS` exists only in the service chart, the filter settings move to the operator chart under `filter`, and
-`rls.port` exists in neither: the port is a contract constant. The values are listed in [helm](helm-chart.md).
+Each chart declares only the values its templates read, and shared platform parameters keep identical key names in both.
+`REPLICAS` comes from the resource profile of each chart, the filter settings move to the operator chart under `filter`,
+and `rls.port` exists in neither: the port is a contract constant. The values are listed in [helm](helm-chart.md).
 
 The repository holds one root Go module plus the engine module: `operator/cmd`, `operator/internal`, and
 `operator/Dockerfile`; `service/cmd`, `service/internal`, and `service/Dockerfile`; shared code in the root

@@ -102,7 +102,7 @@ var _ = Describe("the operator", Ordered, Label("operator", "leader"), func() {
 			"the identity carries controller-runtime's random suffix, so POD_NAME is not reaching it")
 
 		pods := operatorPods()
-		Expect(pods).To(HaveLen(1), "the operator runs one replica outside a rollout")
+		Expect(pods).To(HaveLen(1), "the dev profile runs one operator replica outside a rollout")
 		Expect(pods[0].Name).To(Equal(operator), "the lease holder is not the operator pod")
 	})
 

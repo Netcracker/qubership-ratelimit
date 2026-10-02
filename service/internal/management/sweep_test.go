@@ -279,3 +279,189 @@ func TestReset_versionConflictNamesItsRecovery(t *testing.T) {
 		"key-1", operatorRoles()), http.StatusConflict, CodeConflict)
 	require.Equal(t, ConflictStaleRuleSet, body.Meta.ConflictType)
 }
+
+// contextBoundRecords refuses a write under a done context, the way the Redis
+// client refuses to send one; the in-memory store ignores the context.
+type contextBoundRecords struct {
+	records.Store
+}
+
+func (c contextBoundRecords) Commit(ctx context.Context, commit records.Commit) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Store.Commit(ctx, commit)
+}
+
+func (c contextBoundRecords) Put(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.Store.Put(ctx, key, value, ttl)
+}
+
+// shutDown gives the sweeps a background context that is already cancelled,
+// as a service shutting down does, over records that refuse a done context.
+func (h *testAPI) shutDown(t *testing.T) {
+	t.Helper()
+	h.api.Records = contextBoundRecords{Store: h.records}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	h.api.StartBackground(ctx)
+}
+
+// A sweep that shutdown interrupts still records its outcome and answers it.
+// The outcome used to be written under the walk's cancelled context, which
+// the store refused, so the client got RLS-0503 and the command stayed
+// accepted until its lease expired.
+func TestBulk_recordsItsOutcomeWhenShutdownEndsTheWalk(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.shutDown(t)
+
+	var preview BulkResult
+	decode(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", operatorRoles()), http.StatusOK, &preview)
+	require.NotEmpty(t, preview.ConfirmationToken, "the preview's token was not stored")
+}
+
+// The failure of such a sweep is recorded as well, with its own code rather
+// than RLS-0503.
+func TestBulk_recordsAFailureWhenShutdownEndsTheWalk(t *testing.T) {
+	h := newTestAPI(t)
+	for _, client := range []string{"alice", "bob", "carol"} {
+		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+	}
+	h.shutDown(t)
+	h.deadlineAfter(t, 3)
+
+	body := requireError(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	require.NotNil(t, body.Meta.PartialReset)
+}
+
+// batchRefusingRecords cancels the sweeps' context when the first batch is
+// sent and then refuses it, the way the Redis client refuses a call under a
+// done context: the walk fails inside a store call, and nothing is deleted.
+type batchRefusingRecords struct {
+	contextBoundRecords
+	cancel context.CancelFunc
+}
+
+func (b batchRefusingRecords) Batch(ctx context.Context, batch records.Batch) error {
+	b.cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return b.Store.Batch(ctx, batch)
+}
+
+// A sweep that shutdown interrupts inside a batch discloses what the store
+// committed, not what the walker counted. The walker counts a batch before the
+// store runs it, and the failure used to report the three deletions of a batch
+// the store refused, while all three counters still existed.
+func TestBulk_aFailureInsideABatchDisclosesWhatTheStoreCommitted(t *testing.T) {
+	h := newTestAPI(t)
+	for _, client := range []string{"alice", "bob", "carol"} {
+		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+	}
+	selector := map[string]any{"ruleIds": []string{"orders"}}
+	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	h.api.StartBackground(ctx)
+	h.api.Records = batchRefusingRecords{contextBoundRecords: contextBoundRecords{Store: h.records}, cancel: cancel}
+
+	body := requireError(t, h.bulk(t, map[string]any{
+		"selector": selector, "confirmationToken": preview.ConfirmationToken,
+	}, "key-execute", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+	require.NotNil(t, body.Meta.PartialReset)
+	require.NotNil(t, body.Meta.PartialReset.ResetCount)
+	require.Zero(t, *body.Meta.PartialReset.ResetCount, "the failure names deletions the store refused")
+
+	for _, client := range []string{"alice", "bob", "carol"} {
+		_, found := h.remaining(t, client)
+		require.True(t, found, "the counter of %s is gone", client)
+	}
+}
+
+// readBackFailingRecords refuses the first batch the way batchRefusingRecords
+// does, and then answers the read-back of the failed sweep's record with
+// lookupErr, or with no record when lookupErr is nil.
+type readBackFailingRecords struct {
+	batchRefusingRecords
+	refused   *bool
+	lookupErr error
+}
+
+func (r readBackFailingRecords) Batch(ctx context.Context, batch records.Batch) error {
+	*r.refused = true
+	return r.batchRefusingRecords.Batch(ctx, batch)
+}
+
+func (r readBackFailingRecords) Lookup(ctx context.Context, keys records.Keys) (records.Record, error) {
+	if !*r.refused {
+		return r.Store.Lookup(ctx, keys)
+	}
+	return records.Record{}, r.lookupErr
+}
+
+// A sweep that fails inside a batch reads its committed progress back before
+// it records the failure. When that read fails, or finds no record, the
+// command has nothing true to report: it answers that the store is down,
+// rather than reporting the walker's count or a progress of zero.
+func TestBulk_aFailureWithoutItsCommittedProgressAnswersThatTheStoreIsDown(t *testing.T) {
+	for name, lookupErr := range map[string]error{"read fails": errStoreDown, "record gone": nil} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestAPI(t)
+			for _, client := range []string{"alice", "bob", "carol"} {
+				h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+			}
+			selector := map[string]any{"ruleIds": []string{"orders"}}
+			preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
+
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+			h.api.StartBackground(ctx)
+			refused := false
+			h.api.Records = readBackFailingRecords{
+				batchRefusingRecords: batchRefusingRecords{contextBoundRecords: contextBoundRecords{Store: h.records}, cancel: cancel},
+				refused:              &refused,
+				lookupErr:            lookupErr,
+			}
+
+			requireError(t, h.bulk(t, map[string]any{
+				"selector": selector, "confirmationToken": preview.ConfirmationToken,
+			}, "key-execute", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
+			require.True(t, refused, "the sweep never reached the store")
+		})
+	}
+}
+
+// putRefusingRecords fails every Put, which is how a preview's token write
+// fails, over records that refuse a done context.
+type putRefusingRecords struct {
+	contextBoundRecords
+}
+
+func (putRefusingRecords) Put(context.Context, string, []byte, time.Duration) error {
+	return errStoreDown
+}
+
+// A preview whose token cannot be stored records that failure too when
+// shutdown has ended the walk, rather than answering that the store is down.
+func TestBulk_recordsAFailedMintWhenShutdownEndsTheWalk(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	h.api.StartBackground(ctx)
+	h.api.Records = putRefusingRecords{contextBoundRecords{Store: h.records}}
+
+	requireError(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+}

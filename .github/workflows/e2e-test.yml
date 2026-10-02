@@ -184,9 +184,9 @@ jobs:
           helm upgrade --install ratelimit-operator-baseline helm-templates/ratelimit-operator \
             --namespace "${E2E_NAMESPACE}" \
             -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
-            --set logLevel=debug \
-            --set image.repository=ratelimit-operator \
-            --set image.tag=e2e \
+            --set LOG_LEVEL=debug \
+            --set IMAGE_REPOSITORY=ratelimit-operator \
+            --set TAG=e2e \
             --wait --timeout 5m
 
           # The management identity is not the default either: the roles
@@ -198,9 +198,9 @@ jobs:
           helm upgrade --install ratelimit-service-baseline helm-templates/ratelimit-service \
             --namespace "${E2E_NAMESPACE}" \
             -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
-            --set logLevel=debug \
-            --set image.repository=ratelimit-service \
-            --set image.tag=e2e \
+            --set LOG_LEVEL=debug \
+            --set IMAGE_REPOSITORY=ratelimit-service \
+            --set TAG=e2e \
             --set redis.dbaas.enabled=false \
             --set management.enabled=true \
             --set management.claims.roles=realm_access.roles \

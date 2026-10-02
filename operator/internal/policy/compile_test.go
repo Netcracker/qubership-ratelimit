@@ -182,6 +182,32 @@ func TestCompile_theLastGoodGenerationKeepsServing(t *testing.T) {
 		"the bundle must keep pointing at the generation that runs")
 }
 
+// A saved last-good spec this build no longer compiles leaves the domain
+// unprotected, and the outcome says so with the reason, so the status tells
+// it apart from a policy that never compiled.
+func TestCompile_aLastGoodThisBuildCannotCompileSaysSo(t *testing.T) {
+	good := policyObject(v1.LimitBlock{Name: "a", Rules: []v1.Rule{simpleRule("total")}})
+	saved := *good.Spec.DeepCopy()
+	saved.Limits[0].Rules[0].Matches = []v1.Predicate{{Key: "ghost", Operator: v1.OperatorExists}}
+
+	broken := *good.DeepCopy()
+	broken.Generation = 2
+	broken.Spec.Limits[0].Rules[0].Matches = []v1.Predicate{{Key: "ghost", Operator: v1.OperatorExists}}
+
+	result := Compile(Input{
+		Namespace: testNamespace,
+		Policies:  []v1.RateLimitPolicy{broken},
+		State: map[string]Bundle{testDomain: {
+			UID: "uid-1", GoodGeneration: 1, GoodSpec: saved,
+		}},
+	})
+
+	outcome := result.Policies[key()]
+	assert.Zero(t, outcome.ActiveGeneration)
+	assert.Contains(t, outcome.LastGoodLost, "last-good generation 1 does not compile with this operator build")
+	assert.Contains(t, outcome.LastGoodLost, string(v1.ProblemUnresolvedKeyReference))
+}
+
 // TestCompile_aRecreatedObjectInheritsNothing pins the UID guard: a policy
 // deleted and recreated under the same name starts at generation 1 too, and
 // reviving its namesake's spec would enforce rules nobody wrote.
@@ -203,6 +229,7 @@ func TestCompile_aRecreatedObjectInheritsNothing(t *testing.T) {
 
 	outcome := result.Policies[key()]
 	assert.Zero(t, outcome.ActiveGeneration, "somebody else's last-good spec must not be resurrected")
+	assert.Empty(t, outcome.LastGoodLost, "a last-good that was never this object's is not one it lost")
 	assert.Empty(t, result.Snapshots[testDomain].Blocks)
 	assert.Empty(t, result.State[testDomain].UID, "and it must not be written back either")
 }
@@ -453,6 +480,8 @@ func TestCompile_anUnknownFieldDoesNotFallBackToItsOwnGeneration(t *testing.T) {
 	outcome := result.Policies[key()]
 	assert.False(t, outcome.Compiled())
 	assert.Zero(t, outcome.ActiveGeneration, "a bundle of the skewed generation itself came from a pruned read")
+	assert.Equal(t, "last-good generation 2 was saved from a read that did not carry every field",
+		outcome.LastGoodLost, "the status says why the saved generation does not serve")
 	assert.Zero(t, outcome.Rules)
 	assert.Empty(t, result.Snapshots[testDomain].Blocks)
 	assert.Empty(t, result.State[testDomain].UID, "the pruned bundle is not carried forward")

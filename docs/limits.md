@@ -16,6 +16,7 @@ no list needs `maxItems`.
 | | blocks, rules, groups, clients, mapping keys | unbounded | object size only; the number of blocks is an observed metric | — |
 | **Namespace** | the compressed configuration of all domains, the ConfigMap `ratelimit-config` | ≤ 1 MiB compressed total | the Kubernetes object size limit of a ConfigMap | the operator before the write, `ConfigMapTooLarge`; last-good stays enforced |
 | **Call** | descriptors of one gRPC check | ≤ 16 | every descriptor is its own decision and its own store trip; a gateway sends one | the adapter, `too_many_descriptors` → `OVER_LIMIT` |
+| | cost of one descriptor (`hits_addend`) | ≤ 1 000 000 000, not negative | Envoy's own ceiling; the engine gives no budget back | the adapter, `invalid_cost` → `OVER_LIMIT` |
 | **Block** | rules, routes | unbounded | object size only | — |
 | | route methods | enum: the 8 RFC 9110 methods + `PATCH` (RFC 5789) | closed set; a method outside the enum matches only routes without `methods` | enum, `listType: set` |
 | | route path | ≤ 2048 characters | the conventional URL length limit | `maxLength` |

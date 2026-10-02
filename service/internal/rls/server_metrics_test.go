@@ -14,6 +14,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -161,6 +162,38 @@ func TestShouldRateLimit_countsTheDescriptorOverflow(t *testing.T) {
 	// a sampler; the first line of a window always comes through.
 	assert.Contains(t, output(), "descriptors, over the limit")
 	assert.Contains(t, output(), "suppressed=0")
+}
+
+// A cost the engine cannot charge is counted as its own refusal cause, and
+// the check as over_limit, not as unavailable.
+func TestShouldRateLimit_countsAnInvalidCost(t *testing.T) {
+	const domain = "gateway.public"
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	req := request(domain, map[string]string{"path": "/api"})
+	req.Descriptors[0].HitsAddend = wrapperspb.UInt64(5)
+	req.Descriptors[0].IsNegativeHits = true
+
+	refusals := func() float64 {
+		return testutil.ToFloat64(metrics.Refusals.WithLabelValues(domain, metrics.CauseInvalidCost))
+	}
+	overLimit := func() float64 {
+		return testutil.ToFloat64(metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit))
+	}
+	unavailable := func() float64 {
+		return testutil.ToFloat64(metrics.Checks.WithLabelValues(domain, metrics.VerdictUnavailable))
+	}
+	beforeOver, beforeUnavailable := overLimit(), unavailable()
+	got := delta(refusals, func() {
+		_, err := server.ShouldRateLimit(context.Background(), req)
+		require.NoError(t, err)
+	})
+	assert.Equal(t, 1.0, got)
+	assert.Equal(t, 1.0, overLimit()-beforeOver, "the refused check is not counted over_limit")
+	assert.Zero(t, unavailable()-beforeUnavailable, "the refused check is counted as the store's failure")
 }
 
 func TestShouldRateLimit_samplesTheViolationLog(t *testing.T) {

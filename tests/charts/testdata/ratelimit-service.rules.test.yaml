@@ -144,3 +144,31 @@ tests:
                 Domain gateway.public in biz can collect 104 buckets in one decision, against the budget of
                 128. An edit past the budget is rejected as DomainBudgetExceeded and the domain stays on its
                 last-good generation. Narrow the rules' routes or split the domain before it gets there.
+
+  # A configuration that the kubelet projects back within the hold does not
+  # page; one that stays gone does, per replica.
+  - interval: 1m
+    name: a vanished configuration beside one that comes back
+    input_series:
+      - series: 'ratelimit_config_absent{namespace="biz", pod="ratelimit-service-0"}'
+        values: "1x10"
+      - series: 'ratelimit_config_absent{namespace="biz", pod="ratelimit-service-1"}'
+        values: "1x2 0x8"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RatelimitConfigurationAbsent
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RatelimitConfigurationAbsent
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              pod: ratelimit-service-0
+              severity: warning
+            exp_annotations:
+              summary: A replica's mounted configuration is gone; nothing will change what it enforces
+              description: >-
+                Service replica ratelimit-service-0 in biz finds no manifest in its mounted configuration. It
+                keeps enforcing what it last applied, or stays NotReady if it never applied anything, and no
+                policy change reaches it. The ConfigMap ratelimit-config is written by the operator: check
+                that the operator release is installed and holds the Lease.

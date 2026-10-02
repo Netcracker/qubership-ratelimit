@@ -399,7 +399,7 @@ func preempt(
 // In a FirstMatch cascade that is every earlier rule that decides. Shadow rules
 // count and report without stopping the walk, so they preempt nothing, while
 // bypass ends it. In an All block it is every rule that names this one in its
-// replaces.
+// replaces, except a Shadow rule, whose replaces suppress nothing.
 func preemptors(block *compile.Block, i int) []int {
 	var out []int
 	if block.Mode == model.ModeFirstMatch {
@@ -412,7 +412,7 @@ func preemptors(block *compile.Block, i int) []int {
 		return out
 	}
 	for j := range block.Rules {
-		if j == i {
+		if j == i || block.Rules[j].Behavior == model.BehaviorShadow {
 			continue
 		}
 		if slices.Contains(block.Rules[j].ReplacedRules, block.Rules[i].Name) {

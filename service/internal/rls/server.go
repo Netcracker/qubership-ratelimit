@@ -4,6 +4,7 @@ package rls
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,11 @@ const (
 	// the gateway form sends exactly one. Sixteen leaves room for legitimate
 	// direct consumers without letting one call become an unbounded store scan.
 	maxDescriptorsPerCheck = 16
+
+	// maxHitsAddend bounds a descriptor's hits_addend: the largest cost Envoy
+	// accepts in a route's hits_addend, far past any bucket's capacity, and
+	// well inside the engine's int64.
+	maxHitsAddend = 1_000_000_000
 
 	// maxLoggedValueLength bounds a logged descriptor value. The value is chosen
 	// by the caller, not by us, so an unbounded copy is an unbounded log record.
@@ -192,6 +198,17 @@ func (s *Server) ShouldRateLimit(
 			OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
 		}, nil
 	}
+	if violation := costViolation(req); violation != "" {
+		// A cost the engine cannot charge is a protocol violation like the
+		// descriptor bound above, and refused the same way, off the fail-open
+		// path.
+		metrics.Refusals.WithLabelValues(domain, metrics.CauseInvalidCost).Inc()
+		metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit).Inc()
+		s.logViolation(ctx, "rate limit check carries %v domain=%v path=%v", violation, domain, path)
+		return &envoyratelimit.RateLimitResponse{
+			OverallCode: envoyratelimit.RateLimitResponse_OVER_LIMIT,
+		}, nil
+	}
 	requests = s.withoutExempt(domain, requests)
 	if len(requests) == 0 {
 		// Every descriptor was exempt, so nothing was decided and the store
@@ -202,11 +219,16 @@ func (s *Server) ShouldRateLimit(
 	}
 	decisions := make([]engine.Decision, 0, len(requests))
 	allowed := true
-	for _, er := range requests {
+	for _, c := range requests {
+		er := c.Request
 		if er.Token != "" {
 			metrics.TokensSeen.WithLabelValues(domain).Inc()
 		}
-		decision, err := eng.Decide(ctx, er)
+		decide := eng.Decide
+		if c.free {
+			decide = eng.Peek
+		}
+		decision, err := decide(ctx, er)
 		if err != nil {
 			if errors.Is(err, engine.ErrTooManyBuckets) {
 				// The bucket-budget backstop reports a configuration
@@ -283,17 +305,28 @@ func (s *Server) ShouldRateLimit(
 // Within a descriptor, path, method, and token feed the built-in keys,
 // request_id stays a log correlation field, and any other entry arrives as a
 // pre-extracted identity key — the direct-consumer form of the protocol. An
-// empty value means absence, mirroring the identity layer. hits_addend is
-// the cost of every decision; zero means the protocol default of one.
-func engineRequests(req *envoyratelimit.RateLimitRequest) []engine.Request {
+// empty value means absence, mirroring the identity layer.
+//
+// The request's hits_addend is the cost of every decision, and an unset
+// value, which a uint32 cannot tell from zero, is the protocol default of
+// one. A descriptor's own hits_addend overrides it for that descriptor, and
+// because that field can be unset, a zero there is the caller's choice: the
+// descriptor is checked without charging anything. The descriptor costs are
+// checked by costViolation first.
+func engineRequests(req *envoyratelimit.RateLimitRequest) []check {
 	cost := int64(req.GetHitsAddend())
 	descriptors := req.GetDescriptors()
 	if len(descriptors) == 0 {
-		return []engine.Request{{Cost: cost}}
+		return []check{{Request: engine.Request{Cost: cost}}}
 	}
-	out := make([]engine.Request, 0, len(descriptors))
+	out := make([]check, 0, len(descriptors))
 	for _, descriptor := range descriptors {
 		er := engine.Request{Cost: cost}
+		free := false
+		if addend := descriptor.GetHitsAddend(); addend != nil {
+			er.Cost = int64(addend.GetValue())
+			free = er.Cost == 0
+		}
 		for _, entry := range descriptor.GetEntries() {
 			value := entry.GetValue()
 			if value == "" {
@@ -314,22 +347,46 @@ func engineRequests(req *envoyratelimit.RateLimitRequest) []engine.Request {
 				er.Keys[entry.GetKey()] = append(er.Keys[entry.GetKey()], value)
 			}
 		}
-		out = append(out, er)
+		out = append(out, check{Request: er, free: free})
 	}
 	return out
+}
+
+// check is one descriptor's engine request, and whether it is decided without
+// charging: free is set for a descriptor whose hits_addend is an explicit zero.
+type check struct {
+	engine.Request
+	free bool
+}
+
+// costViolation describes a descriptor cost the engine does not charge, and is
+// empty when every descriptor's cost is one it does. is_negative_hits asks to
+// give budget back, which the engine has no way to do and which would let any
+// caller of the port refill its own counters; a hits_addend past
+// maxHitsAddend is past what Envoy itself sends.
+func costViolation(req *envoyratelimit.RateLimitRequest) string {
+	for i, descriptor := range req.GetDescriptors() {
+		if descriptor.GetIsNegativeHits() {
+			return fmt.Sprintf("is_negative_hits on descriptor %d", i)
+		}
+		if addend := descriptor.GetHitsAddend(); addend != nil && addend.GetValue() > maxHitsAddend {
+			return fmt.Sprintf("hits_addend %d on descriptor %d, over the limit of %d", addend.GetValue(), i, maxHitsAddend)
+		}
+	}
+	return ""
 }
 
 // withoutExempt drops the requests WithExemptPath exempts in this domain and
 // returns the rest in their order. engineRequests returns at least one
 // request, so an empty result means every one of them was exempt.
-func (s *Server) withoutExempt(domain string, requests []engine.Request) []engine.Request {
+func (s *Server) withoutExempt(domain string, requests []check) []check {
 	if _, ok := s.exemptDomains[domain]; !ok {
 		return requests
 	}
 	kept := requests[:0]
-	for _, er := range requests {
-		if !underPrefix(er.Path, s.exemptPrefix) {
-			kept = append(kept, er)
+	for _, c := range requests {
+		if !underPrefix(c.Path, s.exemptPrefix) {
+			kept = append(kept, c)
 		}
 	}
 	return kept

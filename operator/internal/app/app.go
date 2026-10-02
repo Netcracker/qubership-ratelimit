@@ -45,8 +45,9 @@ type Options struct {
 	Version string
 
 	// LeaderElection is off only in a test that starts the manager itself.
-	// In the binary it is always on: the Lease covers the overlap of two
-	// pods during a rollout, which is the only time there are two.
+	// In the binary it is always on: the Lease keeps one writer across the
+	// standby replica of the HA profiles and the overlap of two pods during
+	// a rollout.
 	LeaderElection bool
 
 	// Log is the logger the components write through.
@@ -121,7 +122,8 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 	}
 	cancel()
 
-	writer := &config.Reconciler{Client: mgr.GetClient(), Namespace: namespace, Store: store}
+	writer := &config.Reconciler{Client: mgr.GetClient(), Namespace: namespace, Store: store,
+		Events: mgr.GetEventRecorder(ManagedBy)}
 	if err := writer.SetupWithManager(mgr); err != nil {
 		return nil, fmt.Errorf("set up the configuration writer: %w", err)
 	}

@@ -182,22 +182,27 @@ func (a *API) sweep(
 	deadline := a.now().Add(sweepDeadline)
 
 	if err := walker.run(ctx, deadline); err != nil {
-		return a.recordFailure(ctx, c, keys, fencing, walker, command, err)
+		octx, ocancel := outcomeContext(ctx)
+		defer ocancel()
+		return a.recordFailure(octx, c, keys, fencing, walker, command, err)
 	}
 
 	result := walker.result(snapshot.Domain)
 	outcome := records.Outcome{Progress: walker.snapshotProgress()}
 
+	octx, ocancel := outcomeContext(ctx)
+	defer ocancel()
+
 	if command.DryRun {
-		token, expires, apiErr := a.mintToken(ctx, snapshot.Domain, version, subject, command)
+		token, expires, apiErr := a.mintToken(octx, snapshot.Domain, version, subject, command)
 		if apiErr != nil {
-			return a.recordFailure(ctx, c, keys, fencing, walker, command, apiErr)
+			return a.recordFailure(octx, c, keys, fencing, walker, command, apiErr)
 		}
 		result.ConfirmationToken, result.ConfirmationExpiresAt = token, &expires
 		outcome.Token, outcome.TokenExpiresAt = token, expires
 	}
 
-	if err := a.Records.Commit(ctx, records.Commit{
+	if err := a.Records.Commit(octx, records.Commit{
 		Keys: keys, Fencing: fencing, Outcome: outcome,
 	}); err != nil {
 		if errors.Is(err, records.ErrLeaseLost) {
@@ -205,15 +210,34 @@ func (a *API) sweep(
 			// recorded is the truth; this call reports that rather than its own.
 			return a.replayFrom(c, keys, command)
 		}
-		a.Log.ErrorC(ctx, "failed to record the outcome of a bulk reset error=%v", err)
+		a.Log.ErrorC(octx, "failed to record the outcome of a bulk reset error=%v", err)
 		// The record stays accepted, and recovery runs on the lease: a retry
 		// polls while it lives and finalizes once it expires.
-		return storeDown("the counter store did not answer while recording the outcome")
+		return storeDown(outcomeNotRecorded)
 	}
 	return writeJSON(c, result)
 }
 
-// recordFailure writes the failure of an accepted command and answers it.
+// outcomeTimeout bounds the writes that record a sweep's outcome. It is well
+// inside the management listener's drain, so a sweep that shutdown interrupts
+// still records what it did before the process exits.
+const outcomeTimeout = 5 * time.Second
+
+// outcomeNotRecorded is the detail of the answer to a sweep whose outcome the
+// store did not take.
+const outcomeNotRecorded = "the counter store did not answer while recording the outcome"
+
+// outcomeContext is the context a sweep records its outcome under: ctx's
+// values without its cancellation, bounded by outcomeTimeout. The walk runs
+// under a context that shutdown and the lease timeout cancel, the store refuses
+// a call under a done context, and the outcome of a walk that ended that way is
+// the one that most needs recording.
+func outcomeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), outcomeTimeout)
+}
+
+// recordFailure writes the failure of an accepted command and answers it. ctx
+// is an outcome context, not the walk's.
 //
 // The binding is never released: releasing would let the same key run a second
 // sweep and leave a consumed token ambiguous. What the walk managed to do is
@@ -229,6 +253,18 @@ func (a *API) recordFailure(
 	cause error,
 ) error {
 	progress := walker.snapshotProgress()
+	if !errors.Is(cause, errDeadline) {
+		// The walk failed inside a store call, and the walker counts a batch
+		// before the store runs it, so its count can name deletions that never
+		// happened. The record holds the progress the last batch committed
+		// together with its deletions, which is what the store actually did.
+		record, err := a.Records.Lookup(ctx, keys)
+		if err != nil || !record.Found {
+			a.Log.ErrorC(ctx, "failed to read back the progress of a failed bulk reset error=%v", err)
+			return storeDown(outcomeNotRecorded)
+		}
+		progress = record.Progress
+	}
 	partial := partialOf(progress, command.DryRun)
 
 	failure := interrupted("the command was interrupted after acceptance", partial)
@@ -256,7 +292,7 @@ func (a *API) recordFailure(
 		// The one error a walker cannot record is the store itself failing. The
 		// record stays accepted, and the lease carries the recovery.
 		a.Log.ErrorC(ctx, "failed to record a failed bulk reset error=%v", err)
-		return storeDown("the counter store did not answer while recording the outcome")
+		return storeDown(outcomeNotRecorded)
 	}
 	return failure
 }

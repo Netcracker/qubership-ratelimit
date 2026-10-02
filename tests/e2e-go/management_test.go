@@ -74,7 +74,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			Should(Equal("True"), "the policy of this suite never became Ready")
 
 		// The chart ships no HTTPRoute: on the platform the route to an
-		// internal API is the deployer's, not this chart's. The suite makes
+		// internal API is the platform's, not this chart's. The suite makes
 		// its own so the request travels the path the policy is written for -
 		// through the gateway's identity, not a port-forward.
 		Expect(apply(managementRoute(route, basePath, port))).To(Succeed())

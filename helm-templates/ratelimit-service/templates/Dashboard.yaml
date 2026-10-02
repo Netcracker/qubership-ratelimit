@@ -1,7 +1,7 @@
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if .Values.MONITORING_ENABLED }}
-{{- $namespaceHash := sha256sum .Release.Namespace | trunc 6 }}
-{{- $dashboardNamespace := .Release.Namespace | trunc 18 | trimSuffix "-" }}
+{{- $namespaceHash := sha256sum (.Values.NAMESPACE | default .Release.Namespace) | trunc 6 }}
+{{- $dashboardNamespace := .Values.NAMESPACE | default .Release.Namespace | trunc 18 | trimSuffix "-" }}
 {{- /*
 The uid must be unique per installation and at most 40 characters: Grafana
 rejects longer ones at import. A truncated namespace alone can collide, so a
@@ -17,14 +17,17 @@ hand when newer samples are needed.
 apiVersion: integreatly.org/v1alpha1
 kind: GrafanaDashboard
 metadata:
-  name: {{ printf "%s-dashboard" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
-  namespace: {{ .Release.Namespace }}
+  name: '{{ .Values.SERVICE_NAME }}-dashboard'
+  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   labels:
     app: grafana
-    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
     app.kubernetes.io/component: monitoring
 spec:
-  name: {{ printf "%s-dashboard" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}.json
-  json: {{ .Files.Get "dashboards/ratelimit-dashboard.json" | toJson | replace "dashboard-uid-placeholder" $dashboardUID | replace "namespace-default-placeholder" .Release.Namespace }}
+  name: '{{ .Values.SERVICE_NAME }}-dashboard.json'
+  json: {{ .Files.Get "dashboards/ratelimit-dashboard.json" | toJson | replace "dashboard-uid-placeholder" $dashboardUID | replace "namespace-default-placeholder" (.Values.NAMESPACE | default .Release.Namespace) }}
 {{- end }}
 {{- end }}

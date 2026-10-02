@@ -175,7 +175,8 @@ type Rule struct {
 	Behavior Behavior // empty reads as BehaviorEnforce
 
 	// ReplacedRules suppresses named rules of the same block for requests
-	// this rule matched; ModeAll only.
+	// this rule matched; ModeAll only. A Shadow rule's ReplacedRules suppresses
+	// nothing.
 	ReplacedRules []string
 }
 

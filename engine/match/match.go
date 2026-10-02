@@ -382,7 +382,10 @@ func evalFirstMatch(block *compile.Block, ctx *blockCtx) []MatchedRule {
 
 // evalAll applies every matching rule. A matching rule's replacedRules
 // suppresses the rules it names; for a bypass that is the whole effect — a
-// targeted exemption, never the whole block.
+// targeted exemption, never the whole block. A shadow rule's replacedRules
+// suppresses nothing: a shadow rule never changes the verdict, so trying an
+// override in Shadow leaves the rules it names enforcing until it is switched
+// to Enforce.
 func evalAll(block *compile.Block, ctx *blockCtx) []MatchedRule {
 	var out []MatchedRule
 	var suppressed map[string]struct{} // lazy: replacedRules is the rare case
@@ -394,6 +397,9 @@ func evalAll(block *compile.Block, ctx *blockCtx) []MatchedRule {
 		}
 		if rule.Behavior != model.BehaviorBypass {
 			out = append(out, matchedRule(block, rule, ctx))
+		}
+		if rule.Behavior == model.BehaviorShadow {
+			continue
 		}
 		for _, name := range rule.ReplacedRules {
 			if suppressed == nil {

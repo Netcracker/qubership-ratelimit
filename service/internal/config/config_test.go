@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
+	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/service/internal/store"
 )
 
@@ -299,6 +301,33 @@ func TestApplier_reusesTheEngineOfAnUnchangedDomain(t *testing.T) {
 		"the generation moves with the manifest even when the payload did not")
 }
 
+// The swap time moves only when the enforced rules change while the replica
+// runs. It used to be set on every apply, the first one after a restart
+// included, so a restarted replica reported a rule change that never happened.
+func TestApplier_stampsTheSwapTimeOnlyWhenTheRulesChange(t *testing.T) {
+	metrics.SnapshotTimestamp.Set(0)
+	f := newFixture(t)
+	f.write(1, spec("gateway.public", 10))
+	cfg, err := Read(f.dir)
+	require.NoError(t, err)
+	a := newApplier()
+
+	a.Apply(cfg)
+	assert.Zero(t, testutil.ToFloat64(metrics.SnapshotTimestamp), "the first apply after a start is not a change")
+
+	f.write(2, spec("gateway.public", 10))
+	cfg, err = Read(f.dir)
+	require.NoError(t, err)
+	a.Apply(cfg)
+	assert.Zero(t, testutil.ToFloat64(metrics.SnapshotTimestamp), "a new generation of the same payload is not a change")
+
+	f.write(3, spec("gateway.public", 11))
+	cfg, err = Read(f.dir)
+	require.NoError(t, err)
+	a.Apply(cfg)
+	assert.Positive(t, testutil.ToFloat64(metrics.SnapshotTimestamp), "a changed payload is")
+}
+
 // A spec the operator validated under rules this build does not share: two
 // rules of one name, which the compiler refuses.
 func badSpec(domain string) v1.RateLimitPolicySpec {
@@ -390,17 +419,22 @@ func TestWatcher_appliesWhatIsThereAndThenEachChange(t *testing.T) {
 	assert.True(t, a.Store.HasDomain("gateway.public"))
 	assert.Equal(t, int64(2), a.Report().Domains["gateway.public"].Generation)
 
-	// The files vanish: still Ready, still generation 2.
+	// The files vanish: still Ready, still generation 2, and the absence is
+	// reported and counted, since nothing will rebuild what the replica holds.
 	f.remove(contract.ManifestKey)
-	time.Sleep(300 * time.Millisecond)
+	require.Eventually(t, func() bool { return a.Report().ConfigAbsent }, 2*time.Second, 10*time.Millisecond,
+		"a vanished configuration is not reported")
+	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.ConfigAbsent))
 	assert.True(t, a.Ready())
 	assert.Equal(t, int64(2), a.Report().Domains["gateway.public"].Generation)
 
-	// The good manifest comes back, and the refusal goes.
+	// The good manifest comes back, and the refusal and the absence go.
 	f.write(3, spec("gateway.public", 11))
 	require.Eventually(t, func() bool {
 		return a.Report().Refusal == nil && a.Report().Domains["gateway.public"].Generation == 3
 	}, 2*time.Second, 10*time.Millisecond)
+	assert.False(t, a.Report().ConfigAbsent)
+	assert.Zero(t, testutil.ToFloat64(metrics.ConfigAbsent))
 }
 
 func TestWatcher_staysNotReadyWithoutAConfigurationAndWatchesADirectoryThatAppearsLater(t *testing.T) {

@@ -133,8 +133,9 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.metadata.ownerReferences
 ```
 
 `/debug/applied` on the metrics port of a service pod, 8080 by default, reports what the replica applied: the
-generation per domain, the manifest format versions the replica reads, and, after a refused manifest, the refusal with
-its reason. The operator reads the same endpoint once per probe cycle, and the `REPLICAS` column counts what it read.
+generation per domain, the manifest format versions the replica reads, after a refused manifest the refusal with its
+reason, and `"configAbsent": true` while the mounted directory holds no manifest (section 9). The operator reads the
+same endpoint once per probe cycle, and the `REPLICAS` column counts what it read.
 
 ```bash
 kubectl get pods -n "$NS" -l app.kubernetes.io/name=ratelimit-service -o name
@@ -159,7 +160,7 @@ curl -s "http://127.0.0.1:8080/debug/snapshot/gateway.public?format=yaml" | head
 ```
 
 The ConfigMap is owned by the operator Deployment, so it goes with the operator and never with a policy; the operator
-recreates it within a second if it is deleted (section 9). `logLevel: debug` on the operator chart turns on the
+recreates it within a second if it is deleted (section 9). `LOG_LEVEL: debug` on the operator chart turns on the
 operator's own debug lines, controller-runtime's, and the lines client-go writes about its lists, watches, and request
 retries, and nothing above that verbosity: the client's request and response bodies stay out of the log at every level,
 because the bridge in `internal/process/logr_adapter.go` caps the verbosity at 4.
@@ -462,7 +463,17 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 `GET /domains` showed `ruleSetVersion 5ff0f5a9e94d` with 12 rules throughout, and the manifest kept generation 1. If
 `activeGeneration` is `0`, the domain has no last-good and enforces nothing; the `Ready` message says
 `no generation is enforced: domain is unprotected`. That is the one case to treat as an incident rather than a review
-comment.
+comment. A domain that lost its last-good to an operator upgrade has a `Warning` event with reason `LastGoodLost`,
+`last-good generation N does not compile with this operator build`, and the same line in the operator's log; the
+`Ready` message carries it only until the configuration writer drops the saved generation. The saved spec is gone
+then, and rolling the operator back does not bring it back: apply a generation that compiles. The API server deletes
+the event after its `--event-ttl`, one hour by default; for an older loss, search the operator's log for
+`dropped a saved last-good generation; the domain enforces nothing`, which carries the domain and the reason as fields.
+
+```bash
+kubectl get events -n "$NS" --field-selector reason=LastGoodLost
+kubectl logs -n "$NS" -l name=ratelimit-operator --prefix | grep 'dropped a saved last-good generation'
+```
 
 **Act.** Fix the spec at the address and apply it. The compiler judges the whole generation, so fix every listed problem
 in one edit; a second `apply` that fixes one of two does nothing for traffic.
@@ -752,7 +763,7 @@ intent, switch `behavior` to `Enforce`; the counters carry over, the keys do not
 the filter out of the request path. They are Envoy runtime fractions `ratelimit.<gateway>.enabled` and `.enforced`, so
 a runtime override flips them without a redeploy; a values change on the operator release is the durable form, and it
 lasts only while the release's values carry it. An upgrade with `-f` and `--set` and no `--reuse-values` drops it and
-restores enforcement at once; keep the brake in the deployer's values file or the Argo CD application, and check it
+restores enforcement at once; keep the brake in the installation's values file or the Argo CD application, and check it
 after every upgrade ([rollout procedure](rollout-procedure.md), section 4).
 
 **Switching an algorithm or a window.** The counter key carries the algorithm and the period:
@@ -875,7 +886,7 @@ stand runs no Argo CD, so this table is the mapping the check implements, not an
 | `True` | any | Degraded | a breakage: `ReplicaStale` or `ReplicaFormatUnsupported` (section 4), `NotCompiled` (sections 3 and 5), or `ConfigMapTooLarge` (section 0) |
 | `False` | `True` | Healthy | every ready service replica enforces the latest generation |
 | `False` | `False` | Progressing | a rollout in flight, `NoReplicas`, or the operator still catching up |
-| `False` | `Unknown` | Progressing | `ProbeFailed`: the operator cannot read the replicas (section 4) |
+| `Unknown` | `Unknown` | Progressing | `ProbeFailed`: the operator cannot read the replicas (section 4); `ratelimit_policy_stalled` keeps its last observed value |
 
 A sync wave that waits on the policy closes only when every service replica enforces the rule; a Helm release closes on
 the Deployments, before a later generation reaches the replicas. A wave that stays Progressing longer than the rollout
@@ -954,6 +965,18 @@ operator back, it writes the object, the kubelet projects it into the empty volu
 turns Ready: 33 s on the stand with the kubelet at 5 s, a minute or so at the production default. Nothing else is
 needed; the empty volume is `optional: true` by design so that the pod exists before the operator does.
 
+**A replica without its manifest.** Every pod whose mounted directory holds no manifest reports
+`ratelimit_config_absent 1` and `"configAbsent": true` on `/debug/applied`: a fresh pod as above, or a serving one
+whose ConfigMap was deleted under it. A serving pod keeps enforcing the snapshot it applied, and nothing rebuilds it
+until the object returns. The operator writes the object again on its delete; when it does not, the operator is down
+or its writes fail (`ratelimit_config_write_errors_total`). The service chart's `RatelimitConfigurationAbsent` fires
+after `alerts.configAbsentFor`, 5 minutes by default, past the kubelet's projection of a recreated object.
+
+```bash
+curl -s http://127.0.0.1:8080/debug/applied | jq '.configAbsent'   # through the port-forward of section 0
+kubectl get cm -n "$NS" ratelimit-config -o name
+```
+
 ## Appendix: the metrics an operator reads
 
 Each chart ships its own PodMonitor. The RLS, store, and management metrics are scraped from the service pods; the
@@ -974,4 +997,5 @@ controller and probe metrics from the operator pod.
 | `ratelimit_policy_rule_problems{domain, severity}` | operator pod | `blocking` above zero is a rejected edit (sections 3 and 5) |
 | `ratelimit_policy_applied_generation{domain}` | service pods | per pod: the generation each replica enforces (section 4) |
 | `ratelimit_domain_decision_buckets{domain}` | service pods | headroom before `DomainBudgetExceeded`, against 128 |
+| `ratelimit_config_absent` | service pods | `1` while the pod's mounted directory holds no manifest: a pod that has not received one yet, or one that lost it (section 9) |
 | `ratelimit_config_write_errors_total{reason}` | operator pod | the write of `ratelimit-config` failed (`size`, `api`, `other`; section 9); the replicas keep the configuration they mounted and `ReplicaStale` follows in 90 s |

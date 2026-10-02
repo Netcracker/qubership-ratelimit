@@ -25,32 +25,38 @@ DBaaS where something else writes the Secret in the same format.
 apiVersion: dbaas.netcracker.com/v1
 kind: InternalDatabase
 metadata:
-  name: {{ include "ratelimit.redisSecretName" . }}
-  namespace: {{ .Release.Namespace }}
+  name: '{{ .Values.SERVICE_NAME }}-redis'
+  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   labels:
-    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
 spec:
   operatorNamespace: {{ include "ratelimit.dbaasNamespace" . | quote }}
   classifier:
-    microserviceName: {{ include "ratelimit.name" . }}
+    microserviceName: '{{ .Values.SERVICE_NAME }}'
     scope: service
-    namespace: {{ .Release.Namespace }}
+    namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   type: redis
 ---
 apiVersion: dbaas.netcracker.com/v1
 kind: DatabaseSecretClaim
 metadata:
-  name: {{ include "ratelimit.redisSecretName" . }}
-  namespace: {{ .Release.Namespace }}
+  name: '{{ .Values.SERVICE_NAME }}-redis'
+  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   labels:
-    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
 spec:
   operatorNamespace: {{ include "ratelimit.dbaasNamespace" . | quote }}
   classifier:
-    microserviceName: {{ include "ratelimit.name" . }}
+    microserviceName: '{{ .Values.SERVICE_NAME }}'
     scope: service
-    namespace: {{ .Release.Namespace }}
+    namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   type: redis
-  secretName: {{ include "ratelimit.redisSecretName" . }}
+  secretName: '{{ .Values.SERVICE_NAME }}-redis'
 {{- end }}
 {{- end }}

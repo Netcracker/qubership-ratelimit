@@ -2,43 +2,75 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "ratelimit.fullname" . }}
-  namespace: {{ .Release.Namespace }}
+  name: '{{ .Values.SERVICE_NAME }}'
+  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   labels:
-    {{- include "ratelimit.labels" . | nindent 4 }}
+    name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/instance: '{{ cat .Values.SERVICE_NAME "-" (.Values.NAMESPACE | default .Release.Namespace) | nospace | trunc 63 | trimSuffix "-" }}'
+    app.kubernetes.io/version: '{{ .Values.ARTIFACT_DESCRIPTOR_VERSION | default .Chart.AppVersion }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    app.kubernetes.io/component: 'operator'
+    app.kubernetes.io/technology: 'go'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
 spec:
-  # One replica, and no REPLICAS value: the operator writes the policy status
-  # and the configuration ConfigMap, and the Lease keeps one writer while two
-  # pods overlap during a rollout. The overlap is deliberate: the new pod
-  # takes the lease when the old one lets go, and the service reads a
-  # ConfigMap that is there throughout.
-  replicas: 1
+  # REPLICAS from the resource profile: 2 in dev-ha and prod, 1 in the
+  # others. Only the pod that holds the Lease reconciles, writes the policy
+  # status and the configuration ConfigMap, and publishes the policy series;
+  # the other replica is a standby that takes the Lease over when the holder
+  # goes. The Lease also keeps one writer while two pods overlap during a
+  # rollout. The overlap is deliberate: the new pod takes the lease when the
+  # old one lets go, and the service reads a ConfigMap that is there
+  # throughout.
+  replicas: {{ .Values.REPLICAS | default 1 }}
   selector:
     matchLabels:
-      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+      name: '{{ .Values.SERVICE_NAME }}'
   strategy:
+    {{- if eq (default "" .Values.DEPLOYMENT_STRATEGY_TYPE) "recreate" }}
+    type: Recreate
+    {{- else if eq (default "" .Values.DEPLOYMENT_STRATEGY_TYPE) "best_effort_controlled_rollout" }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 80%
+    {{- else if eq (default "" .Values.DEPLOYMENT_STRATEGY_TYPE) "custom_rollout" }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.DEPLOYMENT_STRATEGY_MAXSURGE | default "25%" }}
+      maxUnavailable: {{ .Values.DEPLOYMENT_STRATEGY_MAXUNAVAILABLE | default "25%" }}
+    {{- else }}
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
       maxUnavailable: 0
+    {{- end }}
   template:
     metadata:
       labels:
-        {{- include "ratelimit.labels" . | nindent 8 }}
+        app: '{{ .Values.SERVICE_NAME }}'
+        name: '{{ .Values.SERVICE_NAME }}'
+        app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+        app.kubernetes.io/instance: '{{ cat .Values.SERVICE_NAME "-" (.Values.NAMESPACE | default .Release.Namespace) | nospace | trunc 63 | trimSuffix "-" }}'
+        app.kubernetes.io/version: '{{ .Values.ARTIFACT_DESCRIPTOR_VERSION | default .Chart.AppVersion }}'
+        app.kubernetes.io/component: 'operator'
+        app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+        app.kubernetes.io/technology: 'go'
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "ratelimit.serviceAccountName" . }}
+      serviceAccountName: '{{ .Values.serviceAccount.name | default .Values.SERVICE_NAME }}'
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: operator
-          image: '{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}'
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: '{{ .Values.IMAGE_REPOSITORY }}:{{ .Values.TAG | default .Chart.AppVersion }}'
+          imagePullPolicy: IfNotPresent
           # The base image's entrypoint runs its arguments as the command, so
           # the binary is the first argument.
           command:
@@ -50,7 +82,7 @@ spec:
             # The operator's own Deployment, which owns the configuration
             # ConfigMap so that the object goes with the operator and never
             # with a policy.
-            - --deployment={{ include "ratelimit.fullname" . }}
+            - '--deployment={{ .Values.SERVICE_NAME }}'
           env:
             # The name this replica signs the leader election lease with.
             - name: POD_NAME
@@ -58,7 +90,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: LOGGING_LEVEL_ROOT
-              value: '{{ lower .Values.logLevel }}'
+              value: '{{ lower .Values.LOG_LEVEL }}'
             # The namespace this installation serves. It is what keeps the
             # operator's RBAC a Role: unset is a startup error, not a fallback
             # to watching the whole cluster.
@@ -71,7 +103,7 @@ spec:
             # pipeline passes no build arguments to the image, so without this
             # every manifest would say "dev".
             - name: OPERATOR_VERSION
-              value: '{{ .Values.image.tag | default .Chart.AppVersion }}'
+              value: '{{ .Values.TAG | default .Chart.AppVersion }}'
           ports:
             - name: probes
               containerPort: 8081
@@ -83,7 +115,7 @@ spec:
             httpGet:
               path: /healthz
               port: probes
-            initialDelaySeconds: 15
+            initialDelaySeconds: {{ .Values.LIVENESS_PROBE_INITIAL_DELAY_SECONDS }}
             periodSeconds: 20
           readinessProbe:
             httpGet:
@@ -93,7 +125,10 @@ spec:
             periodSeconds: 10
           securityContext:
             runAsNonRoot: true
-            readOnlyRootFilesystem: true
+            {{- if eq .Values.PAAS_PLATFORM "KUBERNETES" }}
+            runAsGroup: 10001
+            {{- end }}
+            readOnlyRootFilesystem: {{ and .Values.READONLY_CONTAINER_FILE_SYSTEM_ENABLED (eq .Values.PAAS_PLATFORM "KUBERNETES") }}
             allowPrivilegeEscalation: false
             capabilities:
               drop:
@@ -122,6 +157,24 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      topologySpreadConstraints:
+        {{- if .Values.CLOUD_TOPOLOGIES }}
+        {{- range $v := .Values.CLOUD_TOPOLOGIES }}
+        - topologyKey: '{{ $v.topologyKey }}'
+          maxSkew: {{ $v.maxSkew | default 1 }}
+          whenUnsatisfiable: {{ $v.whenUnsatisfiable | default "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              name: '{{ $.Values.SERVICE_NAME }}'
+        {{- end }}
+        {{- else }}
+        - topologyKey: '{{ .Values.CLOUD_TOPOLOGY_KEY }}'
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              name: '{{ .Values.SERVICE_NAME }}'
+        {{- end }}
       # Long enough for the manager to hand the lease over on SIGTERM before
       # the kubelet sends SIGKILL.
       terminationGracePeriodSeconds: 30

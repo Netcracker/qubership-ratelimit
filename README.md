@@ -32,13 +32,13 @@ On every request the gateway sends one flat descriptor — `path`, the `authoriz
 `x-request-id`. Those are the inputs the schema is written against: a rule matches on identity read out of the token,
 and on the path through the routes of its block.
 
-The delivery is two components in one namespace, joined by one ConfigMap. The operator, one replica, watches the
+The delivery is two components in one namespace, joined by one ConfigMap. The operator, one active replica, watches the
 policies of its namespace, compiles them, and writes `ratelimit-config`: a manifest with the generation, UID, and
 content hash of every domain, and one compressed payload per domain. The service replicas mount that ConfigMap as a
 volume, hold no Kubernetes credentials at all, apply what the kubelet projects, and answer checks from it. The operator
-also reads `/debug/applied` on every ready replica through the Service and writes the policy status from what it
-finds. The operator's Lease covers the overlap of two pods during its own rollout; it signs the lease with its pod
-name, which the chart passes as `POD_NAME` through the Downward API.
+also reads `/debug/applied` on every ready replica through the Service and writes the policy status from what it finds.
+The operator's Lease covers the overlap of two pods during its own rollout; it signs the lease with its pod name, which
+the chart passes as `POD_NAME` through the Downward API.
 
 | Component            | Runs in               | Does                                                             |
 |----------------------|-----------------------|------------------------------------------------------------------|
@@ -160,7 +160,7 @@ does:
 | the Service has no ready endpoint                            | False   | False     | `NoReplicas`   |
 | a replica lags past the threshold: broken informer, or skew  | False   | True      | `ReplicaStale` |
 | the latest generation does not compile, last-good is running | False   | True      | `NotCompiled`  |
-| the operator could not observe the replicas at all           | Unknown | False     | `ProbeFailed`  |
+| the operator could not observe the replicas at all           | Unknown | Unknown   | `ProbeFailed`  |
 
 For Argo CD: `Stalled: True` is Degraded, `Ready: True` is Healthy, everything else is Progressing. A sync wave closes
 only once every pod enforces the rules.
@@ -173,51 +173,55 @@ The delivery is two charts under `helm-templates/`, installed into one namespace
 helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
-  --set image.tag=<tag>
+  --set TAG=<tag>
 helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
-  --set image.tag=<tag>
+  --set TAG=<tag>
 ```
 
-The profile is not optional. Each chart's `resource-profiles/` holds the four the platform deployer picks from, `dev`,
-`dev-ha`, `prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`,
-`MEMORY_LIMIT`, and, for the service, `REPLICAS`. Each `values.schema.json` requires its keys, so an install without
-`-f` fails with `missing properties 'CPU_REQUEST', ...` rather than rendering a Deployment with empty resources. The
-`-ha` and `prod` profiles of the service differ from their siblings only by running two replicas; the operator runs one.
+The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`, `dev-ha`,
+`prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT`, and,
+for the service, `REPLICAS` and the `HPA_*` parameters of its autoscaler. Each `values.schema.json` requires its keys,
+so an install without `-f` fails with `missing properties 'CPU_REQUEST', ...` rather than rendering a Deployment with
+empty resources. The service's autoscaler is off in `dev` and scales between 1 or 2 and 5 replicas in the others, the
+way the platform's other services do; the `-ha` and `prod` profiles start two replicas. The operator runs two there as
+well: the Lease holder and a standby.
 
 `MEMORY_LIMIT` is not only a cgroup ceiling: the platform's `memlimit` package derives `GOMEMLIMIT` from it at startup,
 so it governs when the Go heap starts collecting.
 
-`ratelimit-operator` renders the CRD, one operator replica with the only `Role` of the delivery, one `EnvoyFilter`
-per enabled gateway, a `PodMonitor`, and a `PrometheusRule`. Its values are the filter's (`filter.*`; the port the
-filters send checks to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`, `alerts.*`, the gateway
-names, and the resource sizes without `REPLICAS`. It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap
-`ratelimit-config` and the operator's own Deployment by name, and nothing else in the namespace beyond the policies,
-the Lease, the Events, and the EndpointSlices.
+`ratelimit-operator` renders the CRD, the operator replicas with the only `Role` of the delivery, one `EnvoyFilter` per
+enabled gateway, a `PodMonitor`, and a `PrometheusRule`. Its values are the filter's (`filter.*`; the port the filters
+send checks to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`, `alerts.*`, the gateway names, and
+the resource sizes with `REPLICAS`, 2 in the `-ha` and `prod` profiles. It installs no `ClusterRole` and no
+`ClusterRoleBinding`; the `Role` reaches the ConfigMap `ratelimit-config` and the operator's own Deployment by name, and
+nothing else in the namespace beyond the policies, the Lease, the Events, and the EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
 `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
-`grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `PodMonitor`, a `PrometheusRule`, and
-the dashboard. Its values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`, `alerts.*`, and the five
-resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way:
-a satellite gets the filters from the operator chart and nothing from the service chart, so the deployer installs the
-same pair in every namespace.
+`grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`,
+a `PrometheusRule`, and the dashboard. Its values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`,
+`alerts.*`, and the five resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read
+`BASELINE_ORIGIN` the same way: a satellite gets the filters from the operator chart and nothing from the service chart,
+so the platform installs the same pair in every namespace.
 
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
 `MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the
 way the series are: the service chart alerts on the data plane (`RatelimitUnknownDomain`, `RatelimitStoreErrors`,
-`RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`) and the
-operator chart on the policy status (`RatelimitStalled`, `RatelimitNotReadyLong`, `RatelimitRuleProblems`,
-`RatelimitConfigWriteErrors`, `RatelimitNoOperatorLeader`). Every expression is scoped to the release namespace. The
+`RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`,
+`RatelimitConfigurationAbsent`) and the
+operator chart on the policy status and the fleet (`RatelimitStalled`, `RatelimitNotReadyLong`,
+`RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`, `RatelimitConfigWriteErrors`,
+`RatelimitNoOperatorLeader`). Every expression is scoped to the release namespace. The
 thresholds and hold durations are under `alerts.*` of each chart, each with its rationale beside it in `values.yaml`;
 `alerts.enabled=false` keeps the scrape and drops the rules. `tests/charts` renders both rule sets and runs
 `promtool check rules` over them (`make promtool` fetches the binary from the Prometheus release the Makefile pins).
 
-The `Service` is named `ratelimit` whatever the release is called, and `fullnameOverride` does not rename it. A
+The `Service` is named `ratelimit` whatever the release is called, and `SERVICE_NAME` does not rename it. A
 satellite computes the RLS address from that name and the baseline's namespace, so the name cannot depend on how the
-baseline was installed. The CI install exercises exactly that shape by naming its releases after the charts with a
-suffix.
+baseline was installed. The CI install names its releases after the charts with a suffix, so a name derived from the
+release would show.
 
 The management port, when `management.enabled` is set, is exposed on the same `Service` rather than on one of its own.
 The `AuthorizationPolicy` that keeps the port reachable from the private gateway alone is enforced at the pod, so a
@@ -244,7 +248,7 @@ platform's Go DBaaS client, `qubership-core-lib-go-dbaas-base-client`, from `/et
 
 A fresh installation needs no order: the service waits `NotReady` until the operator writes. An upgrade installs the
 service before the operator and a rollback reverses the order, because the service reads the current and the previous
-manifest format version and the operator writes the current one. The root of each schema is open, so the deployer's
+manifest format version and the operator writes the current one. The root of each schema is open, so the platform's
 one parameter set reaches both charts and each ignores the other's blocks; the blocks a chart reads are closed. A CI
 test renders both charts and compares the Service name and ports, the filters' address, the volume's ConfigMap, and
 the mount path with the constants of `api/contract`.
@@ -260,7 +264,7 @@ A business application is installed either into one namespace or as a composite:
 satellites, each with its own gateway. Every gateway of the composite sends the same domains, the component runs in the
 baseline alone, and a satellite gets the gateway filters and nothing else.
 
-Both charts read the deployer's composite variables, the same ones `core-operator` renders by:
+Both charts read the platform's composite variables, the same ones `core-operator` renders by:
 
 | `BASELINE_ORIGIN` | Operator chart renders            | Service chart renders | Filters send checks to             |
 |-------------------|-----------------------------------|-----------------------|------------------------------------|
@@ -269,10 +273,10 @@ Both charts read the deployer's composite variables, the same ones `core-operato
 
 `BASELINE_CONTROLLER` is read for parity with `control-plane`, which resolves the baseline the same way, and takes
 precedence over `BASELINE_ORIGIN` as the target namespace when set. On this platform the baseline is never blue-green'd,
-so the deployer leaves it empty. The e2e workflow and the local install above run in the first row.
+so the platform leaves it empty. The e2e workflow and the local install above run in the first row.
 
 The gateway names are not this chart's to choose. They are deployment parameters shared with
-`qubership-core-mesh-config`, the chart that creates the `Gateway` objects, and the deployer injects the same set into
+`qubership-core-mesh-config`, the chart that creates the `Gateway` objects, and the platform injects the same set into
 every chart of the application:
 
 ```yaml

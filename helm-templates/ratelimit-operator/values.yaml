@@ -1,28 +1,60 @@
-# ============== IMAGE ============================
-image:
-  repository: ghcr.io/netcracker/qubership-ratelimit-operator
-  # Empty takes the chart's appVersion, which is a fixed release. A floating tag
-  # such as "latest" moves under a running workload, so two pods of one rollout
-  # can end up on different builds.
-  tag: ""
-  pullPolicy: IfNotPresent
+# ============== PLATFORM ============================
+# The parameters the platform sets on every one of its services, read the way
+# its other services read them. The defaults are for an installation without
+# them.
+#
+# The name of the Deployment, the ServiceAccount and the RBAC pair, and the
+# app.kubernetes.io/name and name labels. The service chart's Service keeps
+# its fixed name, ratelimit, whatever this is.
+SERVICE_NAME: ratelimit-operator
+# The namespace every object lands in; empty is the release namespace. The
+# platform sets it to the namespace it installs into.
+NAMESPACE: ""
+# The image. An empty TAG takes the chart's appVersion, which is a fixed
+# release. A floating tag such as "latest" moves under a running workload, so
+# two pods of one rollout can end up on different builds.
+IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-operator
+TAG: ""
+# Labels: app.kubernetes.io/part-of, app.kubernetes.io/managed-by,
+# app.kubernetes.io/version (empty is the chart's appVersion), and
+# deployment.netcracker.com/sessionId (empty is unimplemented).
+APPLICATION_NAME: ratelimit
+MANAGED_BY: Helm
+ARTIFACT_DESCRIPTOR_VERSION: ""
+DEPLOYMENT_SESSION_ID: ""
+# On KUBERNETES the container runs as group 10001, and its root filesystem is
+# read-only while READONLY_CONTAINER_FILE_SYSTEM_ENABLED is true; on OPENSHIFT
+# the platform assigns the user and the group, and the root filesystem is
+# writable.
+PAAS_PLATFORM: KUBERNETES
+READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
+# The rollout, DEPLOYMENT_STRATEGY_TYPE, is not set here. Unset and
+# ramped_slow_rollout replace one pod at a time and keep the old one until the
+# new one is Ready; recreate and best_effort_controlled_rollout stop the old
+# pods first, and custom_rollout takes DEPLOYMENT_STRATEGY_MAXSURGE and
+# DEPLOYMENT_STRATEGY_MAXUNAVAILABLE, 25% each by default.
+#
+# The delay before the first liveness probe.
+LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15
 
 # ============== OPERATOR ============================
-# CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by the
-# resource profile, not here: one source of truth, so the defaults cannot
+# REPLICAS, CPU_REQUEST, MEMORY_REQUEST, CPU_LIMIT and MEMORY_LIMIT are set by
+# the resource profile, not here: one source of truth, so the defaults cannot
 # drift away from the profiles. values.schema.json requires them, so installing
 # without `-f resource-profiles/<profile>.yaml` fails with a clear message
 # instead of rendering a Deployment with empty resources.
 #
-# The operator runs one replica and reads no REPLICAS: it writes the policy
-# status and the configuration ConfigMap, and the Lease keeps one writer while
-# two pods overlap during a rollout. GOMEMLIMIT is derived from MEMORY_LIMIT,
-# so it governs the Go heap and not only the cgroup ceiling.
+# REPLICAS is 2 in dev-ha and prod, 1 in the others. Only the pod that holds
+# the Lease writes the policy status and the configuration ConfigMap; the
+# second replica adds no capacity, only a standby that takes the Lease over
+# when the holder goes, without waiting for a new pod to schedule and start.
+# GOMEMLIMIT is derived from MEMORY_LIMIT, so it governs the Go heap and not
+# only the cgroup ceiling.
 
-# Passed as LOGGING_LEVEL_ROOT: the platform logger resolves its root level
-# from the logging.level.root property; LOG_LEVEL only applies before the
-# configloader is initialized.
-logLevel: info
+# Passed as LOGGING_LEVEL_ROOT, in lower case: the platform logger resolves
+# its root level from the logging.level.root property, and a LOG_LEVEL in the
+# environment only applies before the configloader is initialized.
+LOG_LEVEL: info
 
 # ============== GATEWAY FILTER ============================
 # The install-wide defaults of the rate limit filter on each gateway; each
@@ -66,8 +98,8 @@ runtime:
 
 # ============== MONITORING DELIVERY ============================
 # The scrape target and the alert rules of the operator, delivered as a
-# PodMonitor and a PrometheusRule for the platform's Prometheus. The deployer
-# sets this platform parameter; off by default because both need the
+# PodMonitor and a PrometheusRule for the platform's Prometheus. The platform
+# sets this parameter; off by default because both need the
 # monitoring operator's CRDs, and installing them into a cluster without
 # monitoring fails the release.
 MONITORING_ENABLED: false
@@ -75,8 +107,8 @@ MONITORING_ENABLED: false
 # The alert rules over the policy status, one PrometheusRule scoped to the
 # release namespace. Every rule reads the operator's own series, the ones the
 # pod holding the Lease publishes; the service chart ships the rules over the
-# data plane. The durations below are the ones a deployer may need to move;
-# the expressions stay in the template.
+# data plane. The durations below are the ones an installation may need to
+# move; the expressions stay in the template.
 alerts:
   enabled: true
 
@@ -98,6 +130,21 @@ alerts:
   # author fixing a typo within minutes does not page.
   ruleProblemsFor: 5m
 
+  # RatelimitNoReplicas: no ready service replica, so every check of the
+  # domain is decided by the gateway's failure mode, unlimited under
+  # fail-open. Held for noReplicasFor, long enough for a rollout's surge pod
+  # to become ready, and far shorter than notReadyFor, which also fires then.
+  noReplicasFor: 5m
+
+  # RatelimitChecksStopped: ready replicas enforce a domain, and no check of
+  # it has arrived over checksStoppedWindow: the gateway's filter is off or
+  # gone, its domain does not match, or the path to the Service is broken,
+  # and the traffic passes unlimited with every status Ready. A domain whose
+  # gateway carries no traffic fires too, so raise the window for a domain
+  # that is idle for long stretches.
+  checksStoppedWindow: 10m
+  checksStoppedFor: 15m
+
   # RatelimitConfigWriteErrors: the operator could not save the namespace's
   # configuration. The replicas keep the previous one and the last-good
   # fallback a restart would need is not being saved; any increase over the
@@ -113,14 +160,14 @@ ISTIO_PUBLIC_GATEWAY_NAME: public-gateway
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
 
 # ============== COMPOSITE ============================
-# The deployer's composite variables, the same ones core-operator renders by.
+# The platform's composite variables, the same ones core-operator renders by.
 # Both empty is a standalone installation or the baseline of a composite:
 # the whole chart renders. BASELINE_ORIGIN set is a satellite: only the
 # gateway filters render, and they send checks to the baseline's Service at
 # ratelimit.<baseline namespace>:9000, which is why that Service has a fixed
 # name. BASELINE_CONTROLLER is read for parity with control-plane, which
 # resolves the baseline the same way; on this platform the baseline is never
-# blue-green'd, so the deployer leaves it empty.
+# blue-green'd, so the platform leaves it empty.
 BASELINE_ORIGIN: ""
 BASELINE_CONTROLLER: ""
 
@@ -145,10 +192,17 @@ gateways:
 # ============== KUBERNETES ============================
 serviceAccount:
   create: true
-  # Defaults to the chart's fullname when empty.
+  # Defaults to SERVICE_NAME when empty.
   name: ""
 
 podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# The node label the pods spread over: one topology spread constraint,
+# maxSkew 1, whenUnsatisfiable ScheduleAnyway, selecting this Deployment's
+# own pods. CLOUD_TOPOLOGIES, the platform parameter, replaces it with one
+# constraint per entry; an entry sets topologyKey and may set maxSkew and
+# whenUnsatisfiable.
+CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname

@@ -111,6 +111,29 @@ func TestAcceptanceOverrideOnTopOfBase(t *testing.T) {
 	}
 }
 
+// Trying an override in Shadow before enforcing it: the live base limit keeps
+// refusing while the shadow counts. A shadow rule's replacedRules used to
+// remove the rule it named, and the trial switched the live limit off.
+func TestAcceptanceShadowOverrideLeavesTheBaseEnforcing(t *testing.T) {
+	e := engineFor(t, model.Policy{
+		Domain: domain,
+		Blocks: []model.Block{prefixBlock("api",
+			model.Rule{Name: "base", Counters: []string{model.KeyClient},
+				Rates: []model.Rate{{Requests: 2, Period: time.Minute}}},
+			model.Rule{Name: "trial", Behavior: model.BehaviorShadow,
+				Counters:      []string{model.KeyClient},
+				Rates:         []model.Rate{{Requests: 1, Period: time.Minute}},
+				ReplacedRules: []string{"base"}},
+		)},
+	})
+
+	decide(t, e, widgets(t, "bob"))
+	decide(t, e, widgets(t, "bob"))
+	if d := decide(t, e, widgets(t, "bob")); d.Allowed {
+		t.Error("request 3 admitted past the base limit of 2: the shadow trial switched it off")
+	}
+}
+
 // Pattern 3: role tiers from an array claim — the mapping extracts the array,
 // Contains picks the tier, the tiers cascade.
 func TestAcceptanceRoleTiersFromArrayClaim(t *testing.T) {

@@ -30,10 +30,12 @@ type FleetSample struct {
 	// when Stalled is false, where it is the reason of the negative condition.
 	//
 	// The series keeps one label set per domain: the value of reason follows
-	// the condition, so a recovered domain reports Progressing at 0 and its
-	// ReplicaStale series stops being emitted and goes stale. A query on
-	// max(ratelimit_policy_stalled) is unaffected; one on a specific reason
-	// sees that series disappear rather than drop to zero.
+	// a True or False condition, so a recovered domain reports Progressing at
+	// 0 and its ReplicaStale series stops being emitted and goes stale. A
+	// query on max(ratelimit_policy_stalled) is unaffected; one on a specific
+	// reason sees that series disappear rather than drop to zero. While the
+	// condition is Unknown, the publisher keeps the last sample it published,
+	// reason included, so a failed probe neither raises nor clears the alert.
 	Stalled bool
 	Reason  string
 }
@@ -53,6 +55,15 @@ func PublishFleet(domain string, sample FleetSample) {
 	fleetMu.Lock()
 	defer fleetMu.Unlock()
 	fleetSample[domain] = sample
+}
+
+// PublishedFleet is the sample last published for domain, and whether there
+// is one.
+func PublishedFleet(domain string) (FleetSample, bool) {
+	fleetMu.RLock()
+	defer fleetMu.RUnlock()
+	sample, ok := fleetSample[domain]
+	return sample, ok
 }
 
 // DropFleet forgets a domain. Without it the series of a deleted policy would

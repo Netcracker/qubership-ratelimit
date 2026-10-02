@@ -42,6 +42,7 @@ const (
 const (
 	CauseTooManyBuckets     = "too_many_buckets"
 	CauseTooManyDescriptors = "too_many_descriptors"
+	CauseInvalidCost        = "invalid_cost"
 )
 
 // durationBuckets align with the contract numbers: the 10ms decision budget
@@ -88,11 +89,12 @@ var (
 	}, []string{"domain", "rule"})
 
 	// Refusals counts denials that are not a limit at work: the bucket-budget
-	// backstop and the descriptor bound. Both deny regardless of the failure
-	// mode, and both mean configuration, not traffic.
+	// backstop and the descriptor bound, which mean configuration, and an
+	// invalid cost, which is a caller breaking the protocol. All three deny
+	// regardless of the failure mode, and none is traffic over a limit.
 	Refusals = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_refusals_total",
-		Help: "Hard refusals by cause; these are configuration violations, not limits at work.",
+		Help: "Hard refusals by cause: configuration or protocol violations, not limits at work.",
 	}, []string{"domain", "cause"})
 
 	// UnknownDomainChecks counts checks for domains no policy claims — the
@@ -174,11 +176,21 @@ var (
 		Help: "Failed writes of the configuration ConfigMap by reason: size, api, other.",
 	}, []string{"reason"})
 
-	// SnapshotTimestamp is when the serving snapshot was last swapped — the
-	// forensic answer to "did the rules change right before the incident".
+	// ConfigAbsent is 1 while the mounted configuration directory holds no
+	// manifest: the ConfigMap is gone, and the replica keeps serving a
+	// snapshot nothing will rebuild, or has none and stays NotReady.
+	ConfigAbsent = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ratelimit_config_absent",
+		Help: "1 while the mounted configuration directory holds no manifest; the replica keeps what it applied.",
+	})
+
+	// SnapshotTimestamp is when the rules this replica enforces last changed
+	// while it ran — the forensic answer to "did the rules change right before
+	// the incident". It stays 0 until the first change after the process
+	// starts: a restart applies the rules it finds, which is not a change.
 	SnapshotTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ratelimit_snapshot_timestamp_seconds",
-		Help: "Unix time of the last successful rule store swap.",
+		Help: "Unix time the enforced rules last changed while this replica ran; 0 until the first change.",
 	})
 )
 
@@ -193,7 +205,7 @@ func RegisterService(registry prometheus.Registerer, version string) {
 		Checks, CheckDuration, Decisions, NearLimit, Refusals,
 		UnknownDomainChecks, UnmatchedChecks, ExtractionSkips, Extractions, TokensSeen,
 		StoreRoundtrip, StoreErrors,
-		SnapshotRebuilds, SnapshotTimestamp,
+		SnapshotRebuilds, SnapshotTimestamp, ConfigAbsent,
 		stateCollector{},
 		buildInfo(ComponentService, version))
 }

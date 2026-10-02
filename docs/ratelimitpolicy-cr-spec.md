@@ -200,7 +200,7 @@ compared as written, and the exact case is the author's responsibility. The comp
 | `counters` | list of keys | bucket axes: `client`, `path`, `method`, a scalar `mappings` key, or a capture; empty = one shared bucket |
 | `rates` | list of entries | counting windows; absent in a rule with `behavior: Bypass` |
 | `behavior` | `Enforce` (default) \| `Shadow` \| `Bypass` | Shadow: count and write metrics, never refuse; Bypass: skip without going to the store |
-| `replacedRules` | list of names | suppresses rules of its own block (only with `mode: All`) |
+| `replacedRules` | list of names | suppresses rules of its own block (only with `mode: All`); inert while the rule is `Shadow` |
 
 ### The rates[] entry
 
@@ -284,7 +284,8 @@ component, enforces that a token is required.
    caller) does not match; there is nothing to key the bucket with.
 5. **The verdict**: `OVER_LIMIT` if at least one applied rule (of any block) is exceeded; the `x-ratelimit-*` headers
    come from the strictest matched rule.
-6. **Request cost**: the protocol field `hits_addend` (default 1); a cost above the burst capacity produces a
+6. **Request cost**: the protocol field `hits_addend` (default 1), a descriptor's own `hits_addend` taking precedence
+   for that descriptor, where an explicit zero checks without charging; a cost above the burst capacity produces a
    deterministic refusal, not a wait.
 7. **A refusal does not spend quota**, a guarantee of every algorithm: a refused request does not advance the counter
    state. Shadow follows the same logic: a Shadow bucket is charged only when its own verdict is "allow", mirroring
@@ -547,7 +548,7 @@ pair from the `/debug/applied` payload.
 | the latest generation does not compile, last-good is enforced | False | True | `NotCompiled` |
 | the latest generation compiles but does not fit into the ConfigMap with the other domains, last-good is enforced | False | True | `ConfigMapTooLarge` |
 | a replica refuses the manifest's format version and keeps its snapshot | False | True | `ReplicaFormatUnsupported` |
-| the operator could not probe the replicas (the EndpointSlice or the `metrics` port is unavailable) | Unknown | False | `ProbeFailed` |
+| the operator could not probe the replicas (the EndpointSlice or the `metrics` port is unavailable) | Unknown | Unknown | `ProbeFailed` |
 
 The threshold counts from the moment this generation started spreading, not from the previous status change:
 `lastTransitionTime` of `Ready` is rewound when the reason enters `Reconciling`, `Propagating`, or `ReplicaStale` from
@@ -585,7 +586,10 @@ UID):
 `observedGeneration: 8`, `activeGeneration: 7`, `replicas: {total: 3, applied: 3}`, everyone unanimously enforcing 7,
 but `Ready: False / NotCompiled`, `Stalled: True`, `Accepted: False / CompilationFailed` with a summary `message`, and
 `ruleProblems` with the root causes. If there is no last-good or the UID does not match: `activeGeneration: 0`, the
-domain is empty, `message: 'no generation is enforced: domain is unprotected'`.
+domain is empty, `message: 'no generation is enforced: domain is unprotected'`. When a saved last-good exists and is
+not in effect either, because this operator build does not compile it or it was saved from a read that did not carry
+every field, the operator drops it and says why: in a `Warning` event with reason `LastGoodLost` on the policy and in
+its log, and in the `Ready` message until the drop is written.
 
 For Argo CD: by default it does not assess the health of a CR; the platform's Lua check (given in the
 [Helm doc](helm-chart.md)) reads `Ready` and `Stalled`: `Stalled: True` is Degraded, `Ready: True` is Healthy,

@@ -409,10 +409,10 @@ func (f *fleetScale) restore() {
 
 // scaleDeployment sets a Deployment's replica count through the scale
 // subresource and waits for the count to settle. It is for the operator,
-// whose chart has no replica value to go through Helm with: the scale
+// which the suites stop and start again outside its release: the scale
 // subresource leaves its own field manager on .spec.replicas, and a later
-// helm upgrade that applies the same value as the chart's meets no
-// conflict, so a suite that puts the count back leaves the release clean.
+// helm upgrade that applies the same value as the profile's REPLICAS meets
+// no conflict, so a suite that puts the count back leaves the release clean.
 func scaleDeployment(name string, replicas int32) {
 	scale, err := clientset.AppsV1().Deployments(namespace).GetScale(ctx, name, metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred())

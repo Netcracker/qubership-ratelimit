@@ -3,9 +3,10 @@
   "$id": "https://netcracker.com/ratelimit-service/values.schema.json",
   "type": "object",
   "title": "The ratelimit-service schema.",
-  "description": "JSON Schema for the ratelimit-service chart. The root stays open: the deployer passes one parameter set to every chart of the application, so the operator chart's blocks reach this schema and are ignored. The blocks this chart reads are closed.",
+  "description": "JSON Schema for the ratelimit-service chart. The root stays open: the platform passes one parameter set to every chart of the application, so the operator chart's blocks reach this schema and are ignored. The blocks this chart reads are closed.",
   "required": [
-    "image",
+    "SERVICE_NAME",
+    "IMAGE_REPOSITORY",
     "redis",
     "ISTIO_PRIVATE_GATEWAY_NAME",
     "REPLICAS",
@@ -15,59 +16,180 @@
     "MEMORY_LIMIT"
   ],
   "properties": {
-    "nameOverride": {
+    "SERVICE_NAME": {
+      "$id": "#/properties/SERVICE_NAME",
       "type": "string",
-      "title": "Chart name override",
-      "description": "Replaces the chart name in resource names and labels."
+      "title": "The SERVICE_NAME schema",
+      "description": "Name of a service.",
+      "minLength": 1,
+      "default": "ratelimit-service",
+      "internal": true,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
     },
-    "fullnameOverride": {
+    "NAMESPACE": {
+      "$id": "#/properties/NAMESPACE",
       "type": "string",
-      "title": "Full name override",
-      "description": "Replaces the generated name of the Deployment and the ServiceAccount. The Service keeps its fixed name, ratelimit: a satellite's filters compute the RLS address from it and cannot know how the baseline was named."
+      "title": "The NAMESPACE schema",
+      "description": "The namespace it is going to be deployed.",
+      "default": "",
+      "internal": true
     },
-    "image": {
-      "type": "object",
-      "title": "Service image",
-      "required": [
-        "repository",
-        "tag"
+    "APPLICATION_NAME": {
+      "$id": "#/properties/APPLICATION_NAME",
+      "type": "string",
+      "title": "The APPLICATION_NAME schema",
+      "description": "Defines application name",
+      "default": "ratelimit",
+      "examples": [
+        "MyApplication"
       ],
-      "properties": {
-        "repository": {
-          "type": "string",
-          "title": "Image repository"
-        },
-        "tag": {
-          "type": "string",
-          "title": "Image tag"
-        },
-        "pullPolicy": {
-          "type": "string",
-          "title": "Image pull policy",
-          "enum": [
-            "Always",
-            "IfNotPresent",
-            "Never"
-          ]
-        }
-      },
-      "additionalProperties": false
+      "internal": true
     },
-    "logLevel": {
+    "MANAGED_BY": {
+      "$id": "#/properties/MANAGED_BY",
       "type": "string",
-      "title": "Log level",
+      "title": "The MANAGED_BY schema",
+      "description": "The tool being used to manage the operation of an application",
+      "default": "Helm",
+      "examples": [
+        "helm",
+        "operator",
+        "argocd"
+      ],
+      "internal": true
+    },
+    "ARTIFACT_DESCRIPTOR_VERSION": {
+      "$id": "#/properties/ARTIFACT_DESCRIPTOR_VERSION",
+      "type": "string",
+      "title": "The ARTIFACT_DESCRIPTOR_VERSION schema",
+      "description": "Artifact descriptor version which is installed",
+      "default": "",
+      "internal": true
+    },
+    "DEPLOYMENT_SESSION_ID": {
+      "$id": "#/properties/DEPLOYMENT_SESSION_ID",
+      "type": "string",
+      "title": "The DEPLOYMENT_SESSION_ID schema",
+      "description": "Unique identifier of deployment session used to track e2e deploy activity",
+      "default": "",
+      "examples": [
+        "516736bf-d4b7-4900-beab-9599573ac8a8"
+      ],
+      "internal": true
+    },
+    "PAAS_PLATFORM": {
+      "$id": "#/properties/PAAS_PLATFORM",
+      "type": "string",
+      "title": "The PAAS_PLATFORM schema",
+      "description": "PaaS Platform.",
+      "enum": [
+        "KUBERNETES",
+        "OPENSHIFT"
+      ],
+      "default": "KUBERNETES",
+      "examples": [
+        "KUBERNETES",
+        "OPENSHIFT"
+      ],
+      "internal": true
+    },
+    "READONLY_CONTAINER_FILE_SYSTEM_ENABLED": {
+      "$id": "#/properties/READONLY_CONTAINER_FILE_SYSTEM_ENABLED",
+      "type": "boolean",
+      "title": "The READONLY_CONTAINER_FILE_SYSTEM_ENABLED schema",
+      "description": "Read-only container file system is enabled",
+      "default": true,
+      "examples": [
+        false
+      ]
+    },
+    "DEPLOYMENT_STRATEGY_TYPE": {
+      "$id": "#/properties/DEPLOYMENT_STRATEGY_TYPE",
+      "type": "string",
+      "title": "The DEPLOYMENT_STRATEGY_TYPE schema",
+      "description": "Specify Deployment Strategy type for deploying service",
+      "enum": [
+        "recreate",
+        "best_effort_controlled_rollout",
+        "ramped_slow_rollout",
+        "custom_rollout"
+      ],
+      "examples": [
+        "recreate",
+        "best_effort_controlled_rollout",
+        "ramped_slow_rollout",
+        "custom_rollout"
+      ]
+    },
+    "DEPLOYMENT_STRATEGY_MAXSURGE": {
+      "$id": "#/properties/DEPLOYMENT_STRATEGY_MAXSURGE",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The DEPLOYMENT_STRATEGY_MAXSURGE schema",
+      "description": "Specify .spec.strategy.rollingUpdate.maxSurge parameter",
+      "examples": [
+        "50%",
+        "2"
+      ]
+    },
+    "DEPLOYMENT_STRATEGY_MAXUNAVAILABLE": {
+      "$id": "#/properties/DEPLOYMENT_STRATEGY_MAXUNAVAILABLE",
+      "$ref": "#/definitions/integerOrString",
+      "title": "The DEPLOYMENT_STRATEGY_MAXUNAVAILABLE schema",
+      "description": "Specify .spec.strategy.rollingUpdate.maxUnavailable parameter",
+      "examples": [
+        "50%",
+        "2"
+      ]
+    },
+    "LIVENESS_PROBE_INITIAL_DELAY_SECONDS": {
+      "$id": "#/properties/LIVENESS_PROBE_INITIAL_DELAY_SECONDS",
+      "type": "integer",
+      "title": "The LIVENESS_PROBE_INITIAL_DELAY_SECONDS schema",
+      "internal": true
+    },
+    "IMAGE_REPOSITORY": {
+      "$id": "#/properties/IMAGE_REPOSITORY",
+      "type": "string",
+      "title": "The IMAGE_REPOSITORY schema",
+      "minLength": 1,
+      "default": "ghcr.io/netcracker/qubership-ratelimit-service",
+      "internal": true
+    },
+    "TAG": {
+      "$id": "#/properties/TAG",
+      "type": "string",
+      "title": "The TAG schema",
+      "default": "",
+      "internal": true
+    },
+    "LOG_LEVEL": {
+      "$id": "#/properties/LOG_LEVEL",
+      "type": "string",
+      "title": "The LOG_LEVEL schema",
+      "description": "Log level for service.",
       "enum": [
         "debug",
         "info",
         "warn",
-        "error"
+        "error",
+        "DEBUG",
+        "INFO",
+        "WARN",
+        "ERROR"
       ],
-      "default": "info"
+      "default": "info",
+      "examples": [
+        "info",
+        "debug",
+        "warn"
+      ],
+      "internal": true
     },
     "redis": {
       "type": "object",
       "title": "Counter store",
-      "description": "Redis holds the counters, in a database DBaaS provisions for the release through its Redis adapter. The replicas read its connection from the Secret <fullname>-redis that dbaas-operator writes for the chart's DatabaseSecretClaim.",
+      "description": "Redis holds the counters, in a database DBaaS provisions for the release through its Redis adapter. The replicas read its connection from the Secret <SERVICE_NAME>-redis that dbaas-operator writes for the chart's DatabaseSecretClaim.",
       "required": [
         "dbaas"
       ],
@@ -79,7 +201,7 @@
             "enabled": {
               "type": "boolean",
               "default": true,
-              "description": "Render the InternalDatabase and the DatabaseSecretClaim. false expects the Secret <fullname>-redis, with connectionProperties.json in DBaaS's format, to be provided otherwise, as on a test cluster without DBaaS."
+              "description": "Render the InternalDatabase and the DatabaseSecretClaim. false expects the Secret <SERVICE_NAME>-redis, with connectionProperties.json in DBaaS's format, to be provided otherwise, as on a test cluster without DBaaS."
             }
           },
           "additionalProperties": false
@@ -88,11 +210,16 @@
       "additionalProperties": false
     },
     "API_DBAAS_ADDRESS": {
+      "$id": "#/properties/API_DBAAS_ADDRESS",
       "type": "string",
-      "title": "DBaaS aggregator address",
-      "description": "Address of dbaas-aggregator, http://<aggregator>.<namespace>:<port>. Shared platform parameter; the namespace in its host is the dbaas-operator the chart's InternalDatabase and DatabaseSecretClaim are assigned to.",
+      "title": "The API_DBAAS_ADDRESS schema",
+      "description": "Hostname Dbaas Server.",
       "pattern": "^https?://[^.:/]+\\.[^.:/]+",
-      "default": "http://dbaas-aggregator.dbaas:8080"
+      "default": "http://dbaas-aggregator.dbaas:8080",
+      "examples": [
+        "http://dbaas-aggregator.dbaas:8080"
+      ],
+      "internal": true
     },
     "healthProbe": {
       "type": "object",
@@ -130,7 +257,7 @@
       "$id": "#/properties/MONITORING_ENABLED",
       "type": "boolean",
       "title": "The MONITORING_ENABLED schema",
-      "description": "Set to true to render the PodMonitor and the Grafana dashboard of the service. Requires the monitoring and grafana operators' CRDs on the target cluster.",
+      "description": "Set to true to import dashboards to Grafana and configure integration with Prometheus. Requires Platform System Monitor CRDs to be deployed to target k8s/openshift cluster",
       "examples": [
         true,
         false
@@ -188,16 +315,24 @@
           "maximum": 128,
           "default": 104,
           "description": "The worst-case decision buckets of a domain at which RatelimitDomainBudgetNearLimit fires; the budget is 128."
+        },
+        "configAbsentFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long a replica finds no manifest in its mounted configuration before RatelimitConfigurationAbsent fires."
         }
       },
       "additionalProperties": false
     },
     "ISTIO_PRIVATE_GATEWAY_NAME": {
+      "$id": "#/properties/ISTIO_PRIVATE_GATEWAY_NAME",
       "type": "string",
-      "title": "Private gateway name",
-      "description": "Name of the private Istio gateway: the default principal the management AuthorizationPolicy allows. Shared deployment parameter: must equal ISTIO_PRIVATE_GATEWAY_NAME in qubership-core-mesh-config, which creates the Gateway.",
+      "title": "The ISTIO_PRIVATE_GATEWAY_NAME schema",
+      "description": "Name of the private Istio gateway.",
       "minLength": 1,
-      "default": "private-gateway"
+      "default": "private-gateway",
+      "internal": true
     },
     "serviceAccount": {
       "type": "object",
@@ -208,7 +343,7 @@
         },
         "name": {
           "type": "string",
-          "description": "Defaults to the chart's fullname when empty."
+          "description": "Defaults to SERVICE_NAME when empty."
         }
       },
       "additionalProperties": false
@@ -228,6 +363,52 @@
     "affinity": {
       "type": "object",
       "title": "Affinity"
+    },
+    "CLOUD_TOPOLOGY_KEY": {
+      "$id": "#/properties/CLOUD_TOPOLOGY_KEY",
+      "type": "string",
+      "title": "The CLOUD_TOPOLOGY_KEY schema",
+      "description": "Affinity key.",
+      "minLength": 1,
+      "default": "kubernetes.io/hostname",
+      "examples": [
+        "kubernetes.io/hostname"
+      ]
+    },
+    "CLOUD_TOPOLOGIES": {
+      "$id": "#/properties/CLOUD_TOPOLOGIES",
+      "type": "array",
+      "title": "Topologies settings for topologySpreadConstraints",
+      "description": "Array of topologies settings for topologySpreadConstraints. Each array item must contain at least 'topologyKey' attribute. Other supported attributes are 'maxSkew' and 'whenUnsatisfiable' - optional.",
+      "items": {
+        "type": "object",
+        "required": [
+          "topologyKey"
+        ],
+        "properties": {
+          "topologyKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "maxSkew": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "whenUnsatisfiable": {
+            "type": "string",
+            "enum": [
+              "ScheduleAnyway",
+              "DoNotSchedule"
+            ],
+            "default": "ScheduleAnyway"
+          }
+        }
+      },
+      "examples": [
+        "- topologyKey: kubernetes.io/hostname"
+      ],
+      "internal": true
     },
     "REPLICAS": {
       "$id": "#/properties/REPLICAS",
@@ -265,6 +446,197 @@
       "$id": "#/properties/MEMORY_LIMIT",
       "type": "string",
       "title": "The MEMORY_LIMIT schema",
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_AVG_CPU_UTILIZATION_TARGET_PERCENT": {
+      "$id": "#/properties/HPA_AVG_CPU_UTILIZATION_TARGET_PERCENT",
+      "type": "integer",
+      "title": "The HPA_AVG_CPU_UTILIZATION_TARGET_PERCENT schema",
+      "description": "Target average CPU utilization for horizontal pod autoscaling",
+      "examples": [
+        75
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_ENABLED": {
+      "$id": "#/properties/HPA_ENABLED",
+      "type": "boolean",
+      "title": "The HPA_ENABLED schema",
+      "description": "Defines whether horizontal autoscaling enabled for microservice",
+      "examples": [
+        true,
+        false
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_MAX_REPLICAS": {
+      "$id": "#/properties/HPA_MAX_REPLICAS",
+      "type": "integer",
+      "title": "The HPA_MAX_REPLICAS schema",
+      "description": "Defines the upper limit for the number of replicas to which the autoscaler can scale up. It cannot be less that HPA_MIN_REPLICAS",
+      "examples": [
+        5
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_MIN_REPLICAS": {
+      "$id": "#/properties/HPA_MIN_REPLICAS",
+      "type": "integer",
+      "title": "The HPA_MIN_REPLICAS schema",
+      "description": "Defines the lower limit for the number of replicas to which the autoscaler can scale down",
+      "examples": [
+        2
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_DOWN_PERCENT_PERIOD_SECONDS": {
+      "$id": "#/properties/HPA_SCALING_DOWN_PERCENT_PERIOD_SECONDS",
+      "type": "integer",
+      "title": "The HPA_SCALING_DOWN_PERCENT_PERIOD_SECONDS schema",
+      "description": "Defines behavior.scaleDown.policies[].periodSeconds property in HPA resource for Percent type",
+      "examples": [
+        60
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_DOWN_PERCENT_VALUE": {
+      "$id": "#/properties/HPA_SCALING_DOWN_PERCENT_VALUE",
+      "type": "integer",
+      "title": "The HPA_SCALING_DOWN_PERCENT_VALUE schema",
+      "description": "Defines behavior.scaleDown.policies[].value property in HPA resource for Percent type",
+      "examples": [
+        100
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_DOWN_PODS_PERIOD_SECONDS": {
+      "$id": "#/properties/HPA_SCALING_DOWN_PODS_PERIOD_SECONDS",
+      "type": "integer",
+      "title": "The HPA_SCALING_DOWN_PODS_PERIOD_SECONDS schema",
+      "description": "Defines behavior.scaleDown.policies[].periodSeconds property in HPA resource for Pods type",
+      "examples": [
+        60
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_DOWN_PODS_VALUE": {
+      "$id": "#/properties/HPA_SCALING_DOWN_PODS_VALUE",
+      "type": "integer",
+      "title": "The HPA_SCALING_DOWN_PODS_VALUE schema",
+      "description": "Defines behavior.scaleDown.policies[].value property in HPA resource for Pods type",
+      "examples": [
+        1
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_DOWN_SELECT_POLICY": {
+      "$id": "#/properties/HPA_SCALING_DOWN_SELECT_POLICY",
+      "type": "string",
+      "title": "The HPA_SCALING_DOWN_SELECT_POLICY schema",
+      "description": "Defines behavior.scaleDown.selectPolicy property in HPA resource. Allowed values are: Min, Max, Disabled",
+      "enum": [
+        "Min",
+        "Max",
+        "Disabled"
+      ],
+      "examples": [
+        "Min",
+        "Max",
+        "Disabled"
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_DOWN_STABILIZATION_WINDOW_SECONDS": {
+      "$id": "#/properties/HPA_SCALING_DOWN_STABILIZATION_WINDOW_SECONDS",
+      "type": "integer",
+      "title": "The HPA_SCALING_DOWN_STABILIZATION_WINDOW_SECONDS schema",
+      "description": "Defines behavior.scaleDown.stabilizationWindowSeconds property in HPA resource",
+      "examples": [
+        300
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_UP_PERCENT_PERIOD_SECONDS": {
+      "$id": "#/properties/HPA_SCALING_UP_PERCENT_PERIOD_SECONDS",
+      "type": "integer",
+      "title": "The HPA_SCALING_UP_PERCENT_PERIOD_SECONDS schema",
+      "description": "Defines behavior.scaleUp.policies[].periodSeconds property in HPA resource for Percent type",
+      "examples": [
+        60
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_UP_PERCENT_VALUE": {
+      "$id": "#/properties/HPA_SCALING_UP_PERCENT_VALUE",
+      "type": "integer",
+      "title": "The HPA_SCALING_UP_PERCENT_VALUE schema",
+      "description": "Defines behavior.scaleUp.policies[].value property in HPA resource for Percent type",
+      "examples": [
+        100
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_UP_PODS_PERIOD_SECONDS": {
+      "$id": "#/properties/HPA_SCALING_UP_PODS_PERIOD_SECONDS",
+      "type": "integer",
+      "title": "The HPA_SCALING_UP_PODS_PERIOD_SECONDS schema",
+      "description": "Defines behavior.scaleUp.policies[].periodSeconds property in HPA resource for Pods type",
+      "examples": [
+        60
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_UP_PODS_VALUE": {
+      "$id": "#/properties/HPA_SCALING_UP_PODS_VALUE",
+      "type": "integer",
+      "title": "The HPA_SCALING_UP_PODS_VALUE schema",
+      "description": "Defines behavior.scaleUp.policies[].value property in HPA resource for Pods type",
+      "examples": [
+        1
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_UP_SELECT_POLICY": {
+      "$id": "#/properties/HPA_SCALING_UP_SELECT_POLICY",
+      "type": "string",
+      "title": "The HPA_SCALING_UP_SELECT_POLICY schema",
+      "description": "Defines behavior.scaleUp.selectPolicy property in HPA resource. Allowed values are: Min, Max, Disabled",
+      "enum": [
+        "Min",
+        "Max",
+        "Disabled"
+      ],
+      "examples": [
+        "Min",
+        "Max",
+        "Disabled"
+      ],
+      "internal": true,
+      "envSpecific": true
+    },
+    "HPA_SCALING_UP_STABILIZATION_WINDOW_SECONDS": {
+      "$id": "#/properties/HPA_SCALING_UP_STABILIZATION_WINDOW_SECONDS",
+      "type": "integer",
+      "title": "The HPA_SCALING_UP_STABILIZATION_WINDOW_SECONDS schema",
+      "description": "Defines behavior.scaleUp.stabilizationWindowSeconds property in HPA resource",
+      "examples": [
+        60
+      ],
       "internal": true,
       "envSpecific": true
     },
@@ -387,16 +759,40 @@
       "additionalProperties": false
     },
     "BASELINE_ORIGIN": {
+      "$id": "#/properties/BASELINE_ORIGIN",
       "type": "string",
-      "title": "Baseline origin namespace",
-      "description": "Set by the deployer on a satellite namespace of a composite, naming the baseline's origin namespace. Empty means this release is a standalone installation or the baseline itself. When set, this chart renders nothing: a satellite runs no service, its gateway filters send checks to the baseline's.",
-      "default": ""
+      "title": "The BASELINE_ORIGIN schema",
+      "description": "Baseline Blue-Green Origin namespace name",
+      "default": "",
+      "examples": [
+        "baseline-origin"
+      ]
     },
     "BASELINE_CONTROLLER": {
+      "$id": "#/properties/BASELINE_CONTROLLER",
       "type": "string",
-      "title": "Baseline controller namespace",
-      "description": "Read for parity with control-plane and the operator chart; it changes no object of this chart. On this platform the baseline is never blue-green'd, so the deployer leaves it empty.",
-      "default": ""
+      "title": "The BASELINE_CONTROLLER schema",
+      "description": "Baseline Blue-Green Controller namespace name",
+      "default": "",
+      "examples": [
+        "baseline-controller"
+      ]
+    },
+    "image": {
+      "description": "Removed: the image is IMAGE_REPOSITORY and TAG.",
+      "not": {}
+    },
+    "logLevel": {
+      "description": "Removed: the log level is LOG_LEVEL.",
+      "not": {}
+    },
+    "nameOverride": {
+      "description": "Removed: the name is SERVICE_NAME.",
+      "not": {}
+    },
+    "fullnameOverride": {
+      "description": "Removed: the name is SERVICE_NAME.",
+      "not": {}
     }
   },
   "definitions": {

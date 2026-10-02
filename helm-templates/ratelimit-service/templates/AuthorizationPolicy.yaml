@@ -28,14 +28,17 @@
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
-  name: {{ printf "%s-management" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
-  namespace: {{ .Release.Namespace }}
+  name: '{{ .Values.SERVICE_NAME }}-management'
+  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
   labels:
-    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
 spec:
   selector:
     matchLabels:
-      {{- include "ratelimit.selectorLabels" . | nindent 6 }}
+      name: '{{ .Values.SERVICE_NAME }}'
   action: DENY
   rules:
     - to:
@@ -46,7 +49,7 @@ spec:
         - source:
             notPrincipals:
               {{- range $allowed }}
-              - cluster.local/ns/{{ $.Release.Namespace }}/sa/{{ . }}
+              - cluster.local/ns/{{ $.Values.NAMESPACE | default $.Release.Namespace }}/sa/{{ . }}
               {{- end }}
 {{- end }}
 {{- end }}

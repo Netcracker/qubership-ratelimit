@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,7 +46,15 @@ type Reconciler struct {
 	// Zero means policy.ConfigMapLimit, the API server's own wall; a test
 	// sets a small one so the size path runs on a small object.
 	Limit int
+
+	// Events records a policy's lost last-good generation; nil records only
+	// the log line.
+	Events events.EventRecorder
 }
+
+// ReasonLastGoodLost is the reason of the Warning a policy gets when the
+// writer drops a saved last-good generation that is no longer usable.
+const ReasonLastGoodLost = "LastGoodLost"
 
 func (r *Reconciler) limit() int {
 	if r.Limit > 0 {
@@ -86,7 +95,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result
 		log.Error(err, "failed to write the configuration")
 		return ctrl.Result{}, err
 	}
+	r.reportLostLastGood(ctx, input, result)
 	return ctrl.Result{}, nil
+}
+
+// reportLostLastGood records every policy whose saved last-good generation
+// the save above dropped, with the reason, as a Warning event on the policy
+// and a log line. It runs once per loss: the next pass finds no saved
+// generation and has nothing to report. The policy's status message carries
+// the reason only until this pass, so the event and the log are where it
+// stays.
+func (r *Reconciler) reportLostLastGood(ctx context.Context, input policy.Input, result *policy.Result) {
+	for i := range input.Policies {
+		object := &input.Policies[i]
+		outcome, ok := result.Policies[client.ObjectKeyFromObject(object)]
+		if !ok || outcome.LastGoodLost == "" {
+			continue
+		}
+		logf.FromContext(ctx).Error(nil, "dropped a saved last-good generation; the domain enforces nothing",
+			"domain", object.Spec.Domain, "reason", outcome.LastGoodLost)
+		if r.Events != nil {
+			r.Events.Eventf(object, nil, corev1.EventTypeWarning, ReasonLastGoodLost, "Compile",
+				"%s; the domain enforces nothing until a generation compiles", outcome.LastGoodLost)
+		}
+	}
 }
 
 // writeErrorReason labels a failed write for the scrape: size for a state

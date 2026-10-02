@@ -201,13 +201,24 @@ func (r *RateLimitPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 	// Published before the write, and whether or not it changes anything: these
 	// series report what the leader last saw, and a scrape between two
-	// unchanged reconciles has to keep seeing it.
-	metrics.PublishFleet(object.Spec.Domain, metrics.FleetSample{
+	// unchanged reconciles has to keep seeing it. A fleet the leader cannot
+	// observe says nothing new about being stuck, so while Stalled is Unknown
+	// the stalled series keeps the last value that was observed rather than
+	// reading as 0, which would clear an alert on a domain that may still be
+	// stuck.
+	sample := metrics.FleetSample{
 		Applied: object.Status.Replicas.Applied,
 		Total:   object.Status.Replicas.Total,
 		Stalled: judged.stalled == metav1.ConditionTrue,
 		Reason:  judged.stalledReason,
-	})
+	}
+	if judged.stalled == metav1.ConditionUnknown {
+		sample.Stalled, sample.Reason = false, v1.ReasonProgressing
+		if last, ok := metrics.PublishedFleet(object.Spec.Domain); ok {
+			sample.Stalled, sample.Reason = last.Stalled, last.Reason
+		}
+	}
+	metrics.PublishFleet(object.Spec.Domain, sample)
 	metrics.PublishPolicy(policyView(&object, outcome, judged))
 
 	written, err := writeStatus(ctx, r.Client, &object, before, &object.Status)

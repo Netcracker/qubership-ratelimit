@@ -29,10 +29,13 @@ var alertsOf = map[string][]string{
 		"RatelimitDecisionLatencyHigh",
 		"RatelimitKeyDeclaredNotExtracted",
 		"RatelimitDomainBudgetNearLimit",
+		"RatelimitConfigurationAbsent",
 	},
 	operatorChart: {
 		"RatelimitStalled",
 		"RatelimitNotReadyLong",
+		"RatelimitNoReplicas",
+		"RatelimitChecksStopped",
 		"RatelimitRuleProblems",
 		"RatelimitConfigWriteErrors",
 		"RatelimitNoOperatorLeader",
@@ -211,8 +214,10 @@ func TestCharts_refuseAlertValuesThatBreakTheRules(t *testing.T) {
 		{serviceChart, "alerts.latencyBudgetSeconds=abc"},
 		{serviceChart, "alerts.keyNotExtractedWindow=0m"},
 		{serviceChart, "alerts.storeErrorsFor=abc"},
+		{serviceChart, "alerts.configAbsentFor=5"},
 		{operatorChart, "alerts.stalledFor=0s"},
 		{operatorChart, "alerts.configWriteErrorsWindow=0m"},
+		{operatorChart, "alerts.checksStoppedWindow=10"},
 	} {
 		_, err := renderErr(bad.chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", bad.set)
 		assert.Error(t, err, "%s accepts %s", bad.chart, bad.set)

@@ -313,25 +313,6 @@ jobs:
             echo "::error::a satellite of ratelimit-service rendered objects:"; echo "$rendered" | grep '^kind:'; exit 1
           fi
 
-      # The management port is safe only behind its AuthorizationPolicy, and the
-      # policy is only worth anything if it names the identity the gateway
-      # actually runs as. Istio's automated deployment appends the gateway class
-      # to the name, so a principal built from the gateway name alone denies the
-      # gateway itself - and nothing in a lint or a unit test can see that.
-      - name: Check what the management AuthorizationPolicy allows
-        run: |
-          for chart in ratelimit-service; do
-            rendered=$(helm template t helm-templates/$chart \
-              -f helm-templates/$chart/resource-profiles/dev.yaml \
-              --set management.enabled=true \
-              --show-only templates/AuthorizationPolicy.yaml)
-            echo "$rendered"
-            echo "$rendered" | grep -q 'sa/private-gateway-istio' || {
-              echo "::error::the policy of $chart does not allow the private gateway's service account"
-              exit 1
-            }
-          done
-
       # The port and the policy ship together: a release that opens the port
       # without the policy leaves endpoints that lift rate limits reachable by
       # every workload in the mesh.

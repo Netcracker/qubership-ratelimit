@@ -24,8 +24,11 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
   `gateway.public`, `service.billing`.
 - The descriptor arrives flat and the counting axes are decomposed internally, per the rule set. A caller never has to
   enumerate axis combinations as separate descriptors.
-- `hits_addend` is the request cost, defaulting to 1. A cost that can never be admitted, greater than the rule's burst
-  capacity, produces a deterministic `OVER_LIMIT`, never a wait or a loop.
+- `hits_addend` is the request cost, defaulting to 1; a descriptor's own `hits_addend` overrides the request's for that
+  descriptor, and an explicit zero there checks the descriptor without charging it. A cost that can never be admitted,
+  greater than the rule's burst capacity, produces a deterministic `OVER_LIMIT`, never a wait or a loop. A descriptor
+  with `is_negative_hits`, or with a `hits_addend` above 1 000 000 000, is refused as `invalid_cost` and charges
+  nothing: the engine gives no budget back.
 - The verdict is aggregated: `OVER_LIMIT` if any matched rule is exceeded, `OK` otherwise. `statuses` stays empty: the
   response carries `overall_code` and headers, and per-descriptor detail is not returned, so a caller that needs
   separate verdicts sends separate checks. Per-rule detail (which rule fired, remaining, retry-after) comes back in the
@@ -141,7 +144,8 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   no-op.
 - **`replacedRules`** lets a matched rule suppress named other rules, expressing overrides (an enterprise tier replacing
   the default per-client limit) without mutually exclusive `matches` clauses. References resolve within the rule's own
-  block only, and only under `mode: All`.
+  block only, and only under `mode: All`. A `Shadow` rule suppresses nothing, since it never changes the verdict: an
+  override tried in `Shadow` counts beside the rules it names, which keep enforcing until it is switched to `Enforce`.
 - **Multiple windows per selector** are a `rates[]` list inside one rule: each entry is an independent bucket with its
   own period, and a burst for GCRA; periods are unique within a rule. The algorithm is a property of the entry, the
   window: optional in the entry, GCRA by default, so one rule may carry windows of different algorithms, such as a

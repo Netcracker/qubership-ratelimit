@@ -333,12 +333,12 @@ so the metrics kept telling the truth; with `enabled=0` the filter never called,
 `runtime_modify?ratelimit.public-gateway.enforced=`.
 
 The durable form is the value in the operator chart, and it lasts only as long as the values it lives in. Put it where
-the next upgrade reads it: the deployer's values file, or the parameters of the operator's Argo CD application. Set on
-the command line, the brake is part of the release's values until an upgrade that does not reuse them. The install
+the next upgrade reads it: the installation's values file, or the parameters of the operator's Argo CD application. Set
+on the command line, the brake is part of the release's values until an upgrade that does not reuse them. The install
 command of the README passes `-f` and `--set` without `--reuse-values`, so such an upgrade renders
 `runtime.enforcedPercent` back to `100`, and istiod pushes the filter to the gateway at once: `429` returns to live
-traffic in the middle of the incident that turned it off, with no condition or metric to say so. The service release
-is not touched either way.
+traffic in the middle of the incident that turned it off, with no condition or metric to say so. The service release is
+not touched either way.
 
 For an emergency from the command line, carry the release's values into the upgrade:
 

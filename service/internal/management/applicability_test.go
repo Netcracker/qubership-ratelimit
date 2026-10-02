@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
+	"github.com/netcracker/qubership-ratelimit/engine/model"
 	"github.com/netcracker/qubership-ratelimit/service/internal/ruleview"
 )
 
@@ -105,6 +106,36 @@ func TestApplicability_replacesPreemptsInsideAnAllBlock(t *testing.T) {
 	require.Equal(t, ruleview.ApplicabilityConditional, perClient.Applicability)
 	require.Equal(t, []string{ruleview.GateMayBePreempted}, gateReasons(perClient))
 	require.Equal(t, "orders/support", perClient.ConditionalOn[0].Rule)
+}
+
+// A Shadow rule's replaces suppress nothing, so the rule it names applies to
+// a request the Shadow rule matches. The listing used to report it never
+// applying, while the decision path enforced it.
+func TestApplicability_aShadowRuleReplacesNothing(t *testing.T) {
+	blocks := orderBlocks()
+	blocks[0].Rules[1].Behavior = model.BehaviorShadow
+	snapshot := compileSnapshot(t, append(cascadeBlocks(), blocks...))
+	values, err := url.ParseQuery("axis.client=alice&axis.roles=support")
+	require.NoError(t, err)
+	sc, apiErr := parseScope(snapshot, values)
+	require.Nil(t, apiErr, "scope: %+v", apiErr)
+
+	for i := range snapshot.Blocks {
+		block := &snapshot.Blocks[i]
+		if block.Name != "orders" {
+			continue
+		}
+		view := ruleview.Block(block)
+		annotate(block, &view, sc)
+		for _, rule := range view.Rules {
+			if rule.ID == "orders/per-client" {
+				require.Equal(t, ruleview.ApplicabilityAlways, rule.Applicability,
+					"a rule a Shadow rule names is reported as never applying")
+				return
+			}
+		}
+	}
+	t.Fatal("no orders/per-client in the listing")
 }
 
 func TestApplicability_aCompleteRoleSetDecidesContains(t *testing.T) {

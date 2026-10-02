@@ -15,6 +15,7 @@ import (
 	envoyratelimit "github.com/envoyproxy/go-control-plane/envoy/service/ratelimit/v3"
 	"github.com/go-logr/logr"
 	goredis "github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -52,6 +53,12 @@ const (
 	loadDuration = 3 * time.Second
 	loadWorkers  = 16
 )
+
+// loadWindows is how many windows a run may measure before it fails. A CI
+// runner, or a parallel go test ./..., shares the cores with the measurement,
+// and a busy neighbour shows up as one slow window; a regression in the path
+// slows every window. A healthy run passes on the first.
+const loadWindows = 3
 
 // loadWorkerCount lets an experiment vary concurrency without a rebuild.
 func loadWorkerCount() int {
@@ -158,21 +165,58 @@ func TestLoad_oneReplicaHoldsTheFloor(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	client := envoyratelimit.NewRateLimitServiceClient(conn)
 
+	// A run passes on the first window that clears the floor and the budget
+	// at once: the requirement is one replica holding both. A failure reports
+	// the best of each over the windows, with the window it came from, since
+	// a slow window can still have the highest throughput.
+	var fastest, quickest loadWindow
+	for window := 1; window <= loadWindows; window++ {
+		measured := measureWindow(t, client)
+		measured.index = window
+		t.Logf("backend=%s window=%d decisions=%d throughput=%.0f/s p50=%s p99=%s",
+			backend, window, measured.decisions, measured.perSecond, measured.p50, measured.p99)
+		if window == 1 || measured.perSecond > fastest.perSecond {
+			fastest = measured
+		}
+		if window == 1 || measured.p99 < quickest.p99 {
+			quickest = measured
+		}
+		if measured.perSecond >= loadFloorPerSecond && measured.p99 <= loadP99Budget {
+			return
+		}
+	}
+
+	t.Errorf("no window of %d held the floor of %d/s and the budget of %s at once against %s",
+		loadWindows, loadFloorPerSecond, loadP99Budget, backend)
+	assert.GreaterOrEqualf(t, fastest.perSecond, float64(loadFloorPerSecond),
+		"one replica served at most %.0f decisions/s over %s against %s, in window %d of %d; the floor is %d/s",
+		fastest.perSecond, loadDuration, backend, fastest.index, loadWindows, loadFloorPerSecond)
+	assert.LessOrEqualf(t, quickest.p99, loadP99Budget,
+		"p99 was at least %s against %s, in window %d of %d; the decision budget is %s",
+		quickest.p99, backend, quickest.index, loadWindows, loadP99Budget)
+}
+
+// loadWindow is what one window of load measured; index counts the windows
+// of a run from 1.
+type loadWindow struct {
+	index     int
+	decisions int
+	perSecond float64
+	p50, p99  time.Duration
+}
+
+// measureWindow drives the server for one window and reduces its latencies.
+func measureWindow(t *testing.T, client envoyratelimit.RateLimitServiceClient) loadWindow {
+	t.Helper()
 	latencies := runLoad(t, client)
 	require.NotEmpty(t, latencies, "no request completed")
-
 	slices.Sort(latencies)
-	perSecond := float64(len(latencies)) / loadDuration.Seconds()
-	p99 := latencies[(len(latencies)*99)/100]
-
-	t.Logf("backend=%s decisions=%d throughput=%.0f/s p50=%s p99=%s",
-		backend, len(latencies), perSecond, latencies[len(latencies)/2], p99)
-
-	require.GreaterOrEqualf(t, perSecond, float64(loadFloorPerSecond),
-		"one replica served %.0f decisions/s over %s against %s; the floor is %d/s",
-		perSecond, loadDuration, backend, loadFloorPerSecond)
-	require.LessOrEqualf(t, p99, loadP99Budget,
-		"p99 was %s against %s; the decision budget is %s", p99, backend, loadP99Budget)
+	return loadWindow{
+		decisions: len(latencies),
+		perSecond: float64(len(latencies)) / loadDuration.Seconds(),
+		p50:       latencies[len(latencies)/2],
+		p99:       latencies[(len(latencies)*99)/100],
+	}
 }
 
 // runLoad drives the server for loadDuration and returns every latency it

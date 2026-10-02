@@ -9,6 +9,7 @@ package charts
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -284,6 +285,106 @@ func TestOperatorChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
 	})
 }
 
+// A BASELINE_ORIGIN naming the release's own namespace is refused by both
+// charts. Rendered as a satellite of itself, the namespace used to lose its
+// operator and its service in one upgrade, with filters left pointing at the
+// Service that upgrade removed.
+func TestCharts_refuseABaselineOriginOfTheirOwnNamespace(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		out, err := renderErr(chart, "team-a", "--set", "BASELINE_ORIGIN=team-a")
+		require.Error(t, err, "%s rendered a namespace as a satellite of itself", chart)
+		assert.Contains(t, string(out), "is this release's own namespace", chart)
+	}
+}
+
+// Both Deployments spread their pods the way the platform's other services
+// do: one constraint on CLOUD_TOPOLOGY_KEY, the node by default, or one per
+// entry of CLOUD_TOPOLOGIES, each selecting the Deployment's own pods.
+func TestCharts_spreadTheirPodsOverTheTopology(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		deployment := only(t, render(t, chart, "biz"), "Deployment")
+		spread := deployment.at("spec", "template", "spec", "topologySpreadConstraints").list()
+		require.Len(t, spread, 1, chart)
+		assert.Equal(t, "kubernetes.io/hostname", spread[0].at("topologyKey").str2(), chart)
+		assert.EqualValues(t, 1, spread[0].at("maxSkew").v, chart)
+		assert.Equal(t, "ScheduleAnyway", spread[0].at("whenUnsatisfiable").str2(), chart)
+		assert.Equal(t, deployment.at("spec", "selector", "matchLabels").v,
+			spread[0].at("labelSelector", "matchLabels").v, "%s spreads over pods it does not own", chart)
+
+		deployment = only(t, render(t, chart, "biz",
+			"--set", "CLOUD_TOPOLOGIES[0].topologyKey=topology.kubernetes.io/zone",
+			"--set", "CLOUD_TOPOLOGIES[1].topologyKey=kubernetes.io/hostname",
+			"--set", "CLOUD_TOPOLOGIES[1].maxSkew=2",
+			"--set", "CLOUD_TOPOLOGIES[1].whenUnsatisfiable=DoNotSchedule"), "Deployment")
+		spread = deployment.at("spec", "template", "spec", "topologySpreadConstraints").list()
+		require.Len(t, spread, 2, chart)
+		assert.Equal(t, "topology.kubernetes.io/zone", spread[0].at("topologyKey").str2(), chart)
+		assert.Equal(t, "ScheduleAnyway", spread[0].at("whenUnsatisfiable").str2(), chart)
+		assert.EqualValues(t, 2, spread[1].at("maxSkew").v, chart)
+		assert.Equal(t, "DoNotSchedule", spread[1].at("whenUnsatisfiable").str2(), chart)
+
+		_, err := renderErr(chart, "biz", "--set", "CLOUD_TOPOLOGIES[0].topologyKey=x",
+			"--set", "CLOUD_TOPOLOGIES[0].whenUnsatisfiable=Sometimes")
+		assert.Error(t, err, "%s accepts an unknown whenUnsatisfiable", chart)
+	}
+}
+
+// The management port is safe only behind its AuthorizationPolicy, and the
+// policy is only worth anything in the exact shape it has: DENY on the
+// management port for every principal except the private gateway's service
+// account, which Istio's automated deployment names after the gateway and its
+// class. The check reads the structure, so a policy that keeps the same
+// principal under principals, or turns into an ALLOW, fails here.
+func TestServiceChart_managementPolicyDeniesAllButThePrivateGateway(t *testing.T) {
+	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true")
+	policy := only(t, objects, "AuthorizationPolicy")
+	deployment := only(t, objects, "Deployment")
+
+	assert.Equal(t, "DENY", policy.at("spec", "action").str2())
+	assert.Equal(t, deployment.at("spec", "selector", "matchLabels").v,
+		policy.at("spec", "selector", "matchLabels").v, "the policy does not select the service's pods")
+
+	rules := policy.at("spec", "rules").list()
+	require.Len(t, rules, 1)
+	to := rules[0].at("to").list()
+	require.Len(t, to, 1)
+	assert.Equal(t, []string{"8082"}, strs(to[0].at("operation", "ports")), "the policy covers another port")
+
+	from := rules[0].at("from").list()
+	require.Len(t, from, 1)
+	assert.Equal(t, []string{"cluster.local/ns/biz/sa/private-gateway-istio"},
+		strs(from[0].at("source", "notPrincipals")), "the only exception is not the private gateway")
+	assert.Nil(t, from[0].at("source", "principals").v, "a principals list turns the exception into the target")
+}
+
+// The dashboard opens on its own release's namespace. Domain names repeat
+// across namespaces, so a default of All merged one installation's panels with
+// every other's; All stays available as a choice.
+func TestServiceChart_dashboardOpensOnItsOwnNamespace(t *testing.T) {
+	dashboard := only(t, render(t, serviceChart, "team-a", "--set", "MONITORING_ENABLED=true"), "GrafanaDashboard")
+	var model struct {
+		Templating struct {
+			List []struct {
+				Name    string `json:"name"`
+				Current struct {
+					Value any `json:"value"`
+				} `json:"current"`
+				IncludeAll bool `json:"includeAll"`
+			} `json:"list"`
+		} `json:"templating"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dashboard.at("spec", "json").str2()), &model))
+	for _, variable := range model.Templating.List {
+		if variable.Name != "namespace" {
+			continue
+		}
+		assert.Equal(t, "team-a", variable.Current.Value, "the dashboard does not open on its release's namespace")
+		assert.True(t, variable.IncludeAll, "All is no longer a choice")
+		return
+	}
+	t.Fatal("the dashboard has no namespace variable")
+}
+
 // The service chart renders nothing in a satellite, whatever the values say.
 func TestServiceChart_rendersNothingInASatellite(t *testing.T) {
 	objects := render(t, serviceChart, "sat", "--set", "BASELINE_ORIGIN=base",
@@ -305,5 +406,342 @@ func TestCharts_labelThePodsByChartName(t *testing.T) {
 	for _, chart := range []string{operatorChart, serviceChart} {
 		deployment := only(t, render(t, chart, "biz"), "Deployment")
 		assert.Equal(t, chart, deployment.at("spec", "template", "metadata", "labels", "app.kubernetes.io/name").str2())
+	}
+}
+
+// Both charts read the parameters the platform sets on every one of its
+// services, the way its other services read them: the name, the image, the
+// labels, the log level, the security context, and the rollout.
+func TestCharts_readThePlatformParameters(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		deployment := only(t, render(t, chart, "biz",
+			"--set", "SERVICE_NAME=rl",
+			"--set", "IMAGE_REPOSITORY=registry.example/rl",
+			"--set", "TAG=1.2.3",
+			"--set", "APPLICATION_NAME=app",
+			"--set", "MANAGED_BY=platform",
+			"--set", "ARTIFACT_DESCRIPTOR_VERSION=1.2.3-ad",
+			"--set", "DEPLOYMENT_SESSION_ID=session",
+			"--set", "LOG_LEVEL=DEBUG",
+			"--set", "DEPLOYMENT_STRATEGY_TYPE=recreate"), "Deployment")
+		assert.Equal(t, "rl", deployment.name(), chart)
+		labels := deployment.at("metadata", "labels")
+		assert.Equal(t, "app", labels.at("app.kubernetes.io/part-of").str2(), chart)
+		assert.Equal(t, "platform", labels.at("app.kubernetes.io/managed-by").str2(), chart)
+		assert.Equal(t, "1.2.3-ad", labels.at("app.kubernetes.io/version").str2(), chart)
+		assert.Equal(t, "session", labels.at("deployment.netcracker.com/sessionId").str2(), chart)
+		assert.Nil(t, deployment.at("spec", "template", "metadata", "labels", "deployment.netcracker.com/sessionId").v,
+			"%s restarts its pods on every deployment", chart)
+		assert.Equal(t, map[string]any{"name": "rl"}, deployment.at("spec", "selector", "matchLabels").v, chart)
+		assert.Equal(t, "rl-biz", labels.at("app.kubernetes.io/instance").str2(), chart)
+		assert.Equal(t, "Recreate", deployment.at("spec", "strategy", "type").str2(), chart)
+
+		container := deployment.at("spec", "template", "spec", "containers").list()[0]
+		assert.Equal(t, "registry.example/rl:1.2.3", container.at("image").str2(), chart)
+		env := map[string]string{}
+		for _, variable := range container.at("env").list() {
+			env[variable.at("name").str2()] = variable.at("value").str2()
+		}
+		assert.Equal(t, "debug", env["LOGGING_LEVEL_ROOT"], chart)
+		version := map[string]string{operatorChart: "OPERATOR_VERSION", serviceChart: "SERVICE_VERSION"}[chart]
+		assert.Equal(t, "1.2.3", env[version], "%s reports a version other than its image tag", chart)
+
+		security := container.at("securityContext")
+		assert.Equal(t, true, security.at("readOnlyRootFilesystem").v, chart)
+		assert.EqualValues(t, 10001, security.at("runAsGroup").v, chart)
+		container = only(t, render(t, chart, "biz", "--set", "PAAS_PLATFORM=OPENSHIFT"), "Deployment").
+			at("spec", "template", "spec", "containers").list()[0]
+		assert.Equal(t, false, container.at("securityContext", "readOnlyRootFilesystem").v, chart)
+		assert.Nil(t, container.at("securityContext", "runAsGroup").v, "%s pins a group on OpenShift", chart)
+	}
+}
+
+// Without the platform parameters the chart's appVersion is the image tag
+// and the version label, and the rollout keeps every pod until its
+// replacement is Ready.
+func TestCharts_defaultToTheChartsOwnRelease(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "helm-templates", chart, "Chart.yaml"))
+		require.NoError(t, err)
+		var meta struct {
+			AppVersion string `json:"appVersion"`
+		}
+		require.NoError(t, yaml.Unmarshal(raw, &meta))
+		require.NotEmpty(t, meta.AppVersion, chart)
+
+		deployment := only(t, render(t, chart, "biz"), "Deployment")
+		container := deployment.at("spec", "template", "spec", "containers").list()[0]
+		assert.Equal(t, "ghcr.io/netcracker/qubership-"+chart+":"+meta.AppVersion, container.at("image").str2(), chart)
+		assert.Equal(t, meta.AppVersion, deployment.at("metadata", "labels", "app.kubernetes.io/version").str2(), chart)
+		assert.Equal(t, "Helm", deployment.at("metadata", "labels", "app.kubernetes.io/managed-by").str2(), chart)
+		assert.Equal(t, "RollingUpdate", deployment.at("spec", "strategy", "type").str2(), chart)
+		assert.EqualValues(t, 1, deployment.at("spec", "strategy", "rollingUpdate", "maxSurge").v, chart)
+		assert.EqualValues(t, 0, deployment.at("spec", "strategy", "rollingUpdate", "maxUnavailable").v, chart)
+	}
+}
+
+// NAMESPACE, the platform parameter, places every object of both charts,
+// and the namespace-scoped references inside them follow it: the instance
+// label, the scrape, the rules, and the satellite guard.
+func TestCharts_placeEveryObjectInThePlatformsNamespace(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		objects := render(t, chart, "release-ns", "--set", "NAMESPACE=biz", "--set", "MONITORING_ENABLED=true",
+			"--set", "management.enabled=true")
+		for _, o := range objects {
+			if o.kind() == "CustomResourceDefinition" {
+				continue
+			}
+			assert.Equal(t, "biz", o.at("metadata", "namespace").str2(), "%s %s %s", chart, o.kind(), o.name())
+		}
+		deployment := only(t, objects, "Deployment")
+		assert.Equal(t, "biz", strings.TrimPrefix(
+			deployment.at("metadata", "labels", "app.kubernetes.io/instance").str2(), chart+"-"), chart)
+		assert.Equal(t, []string{"biz"},
+			strs(only(t, objects, "PodMonitor").at("spec", "namespaceSelector", "matchNames")), chart)
+		rules, err := json.Marshal(only(t, objects, "PrometheusRule"))
+		require.NoError(t, err)
+		assert.NotContains(t, string(rules), "release-ns", "%s scopes a rule to the release namespace", chart)
+
+		out, err := renderErr(chart, "release-ns", "--set", "NAMESPACE=biz", "--set", "BASELINE_ORIGIN=biz")
+		require.Error(t, err, "%s rendered NAMESPACE as a satellite of itself", chart)
+		assert.Contains(t, string(out), "is this release's own namespace", chart)
+	}
+}
+
+// The service chart renders the autoscaler the platform's other services
+// render: disabled in both directions without HPA_ENABLED, so REPLICAS alone
+// sizes the Deployment, and between HPA_MIN_REPLICAS and HPA_MAX_REPLICAS
+// with it, at a CPU target that is a share of the limit. The operator has
+// none: its replicas beyond the Lease holder add no capacity.
+func TestServiceChart_scalesWithTheAutoscalerParameters(t *testing.T) {
+	hpa := only(t, render(t, serviceChart, "biz"), "HorizontalPodAutoscaler")
+	assert.Equal(t, serviceChart, hpa.at("spec", "scaleTargetRef", "name").str2())
+	assert.Equal(t, "Disabled", hpa.at("spec", "behavior", "scaleUp", "selectPolicy").str2())
+	assert.Equal(t, "Disabled", hpa.at("spec", "behavior", "scaleDown", "selectPolicy").str2())
+
+	hpa = only(t, render(t, serviceChart, "biz", "--set", "HPA_ENABLED=true", "--set", "HPA_MIN_REPLICAS=2",
+		"--set", "HPA_MAX_REPLICAS=4", "--set", "CPU_REQUEST=100m", "--set", "CPU_LIMIT=1"), "HorizontalPodAutoscaler")
+	assert.EqualValues(t, 2, hpa.at("spec", "minReplicas").v)
+	assert.EqualValues(t, 4, hpa.at("spec", "maxReplicas").v)
+	assert.Equal(t, "Max", hpa.at("spec", "behavior", "scaleUp", "selectPolicy").str2())
+	metric := hpa.at("spec", "metrics").list()[0]
+	assert.EqualValues(t, 750, metric.at("resource", "target", "averageUtilization").v,
+		"75% of a 1-CPU limit is 750% of a 100m request")
+
+	assert.NotContains(t, kinds(render(t, operatorChart, "biz")), "HorizontalPodAutoscaler")
+	assert.NotContains(t, kinds(render(t, serviceChart, "biz", "--set", "BASELINE_ORIGIN=base")),
+		"HorizontalPodAutoscaler")
+}
+
+// The operator reads REPLICAS like the service: the HA profiles run a
+// standby beside the Lease holder, the others run the holder alone.
+func TestOperatorChart_readsReplicasFromTheProfile(t *testing.T) {
+	for profile, replicas := range map[string]int{"dev": 1, "dev-ha": 2, "prod-nonha": 1, "prod": 2} {
+		dir := filepath.Join("..", "..", "helm-templates", operatorChart, "resource-profiles", profile+".yaml")
+		deployment := only(t, render(t, operatorChart, "biz", "-f", dir), "Deployment")
+		assert.EqualValues(t, replicas, deployment.at("spec", "replicas").v, profile)
+	}
+}
+
+// SERVICE_NAME names every object and every reference to one, not only the
+// Deployment: a flag that differs from the claim's classifier leaves the
+// service without its database, an autoscaler aimed at another name scales
+// nothing, and an operator started with another --deployment owns nothing.
+func TestCharts_nameEveryReferenceAfterServiceName(t *testing.T) {
+	objects := render(t, serviceChart, "biz", "-f",
+		filepath.Join("..", "..", "helm-templates", serviceChart, "resource-profiles", "prod.yaml"),
+		"--set", "SERVICE_NAME=rl", "--set", "management.enabled=true")
+	deployment := only(t, objects, "Deployment")
+	pod := deployment.at("spec", "template", "spec")
+	assert.Equal(t, "rl", only(t, objects, "ServiceAccount").name())
+	assert.Equal(t, "rl", pod.at("serviceAccountName").str2())
+	assert.Contains(t, argsOf(pod.at("containers").list()[0]), "--redis-dbaas-microservice=rl")
+	for _, kind := range []string{"InternalDatabase", "DatabaseSecretClaim"} {
+		claim := only(t, objects, kind)
+		assert.Equal(t, "rl-redis", claim.name(), kind)
+		assert.Equal(t, "rl", claim.at("spec", "classifier", "microserviceName").str2(), kind)
+	}
+	assert.Equal(t, "rl-redis", only(t, objects, "DatabaseSecretClaim").at("spec", "secretName").str2())
+	var mounted []string
+	for _, volume := range pod.at("volumes").list() {
+		if name := volume.at("secret", "secretName").str2(); name != "" {
+			mounted = append(mounted, name)
+		}
+	}
+	assert.Equal(t, []string{"rl-redis"}, mounted, "the Deployment mounts a Secret the claim does not name")
+	hpa := only(t, objects, "HorizontalPodAutoscaler")
+	assert.Equal(t, "rl", hpa.name())
+	assert.Equal(t, "rl", hpa.at("spec", "scaleTargetRef", "name").str2(), "the autoscaler targets another Deployment")
+
+	objects = render(t, operatorChart, "biz", "--set", "SERVICE_NAME=rl")
+	deployment = only(t, objects, "Deployment")
+	pod = deployment.at("spec", "template", "spec")
+	assert.Equal(t, "rl", only(t, objects, "ServiceAccount").name())
+	assert.Equal(t, "rl", pod.at("serviceAccountName").str2())
+	assert.Contains(t, argsOf(pod.at("containers").list()[0]), "--deployment=rl")
+	assert.Equal(t, "rl", only(t, objects, "Role").name())
+	binding := only(t, objects, "RoleBinding")
+	assert.Equal(t, "rl", binding.name())
+	assert.Equal(t, "rl", binding.at("roleRef", "name").str2())
+	assert.Equal(t, "rl", binding.at("subjects").list()[0].at("name").str2())
+	var owner []string
+	for _, rule := range only(t, objects, "Role").at("rules").list() {
+		if slices.Contains(strs(rule.at("resources")), "deployments") {
+			owner = strs(rule.at("resourceNames"))
+		}
+	}
+	assert.Equal(t, []string{"rl"}, owner, "the operator may not read the Deployment it is told to adopt")
+
+	// The instance label is the name and the namespace, cut to a label's 63.
+	long := strings.Repeat("n", 50)
+	labels := only(t, render(t, serviceChart, strings.Repeat("s", 40), "--set", "SERVICE_NAME="+long),
+		"Deployment").at("metadata", "labels")
+	instance := labels.at("app.kubernetes.io/instance").str2()
+	assert.Len(t, instance, 63)
+	assert.True(t, strings.HasPrefix(instance, long+"-"))
+}
+
+// DEPLOYMENT_STRATEGY_TYPE is read the way the platform's other services read
+// it, with this chart's own rollout when it is unset.
+func TestCharts_rollOutByTheStrategyType(t *testing.T) {
+	type rollout struct{ kind, surge, unavailable string }
+	cases := map[string]struct {
+		args []string
+		want rollout
+	}{
+		"unset":                          {nil, rollout{"RollingUpdate", "1", "0"}},
+		"ramped_slow_rollout":            {nil, rollout{"RollingUpdate", "1", "0"}},
+		"recreate":                       {nil, rollout{"Recreate", "", ""}},
+		"best_effort_controlled_rollout": {nil, rollout{"RollingUpdate", "0", "80%"}},
+		"custom_rollout": {[]string{"--set", "DEPLOYMENT_STRATEGY_MAXSURGE=2",
+			"--set-string", "DEPLOYMENT_STRATEGY_MAXUNAVAILABLE=50%"}, rollout{"RollingUpdate", "2", "50%"}},
+	}
+	for _, chart := range []string{operatorChart, serviceChart} {
+		for name, c := range cases {
+			args := c.args
+			if name != "unset" {
+				args = append([]string{"--set", "DEPLOYMENT_STRATEGY_TYPE=" + name}, args...)
+			}
+			strategy := only(t, render(t, chart, "biz", args...), "Deployment").at("spec", "strategy")
+			got := rollout{
+				strategy.at("type").str2(),
+				fmt.Sprint(strategy.at("rollingUpdate", "maxSurge").v),
+				fmt.Sprint(strategy.at("rollingUpdate", "maxUnavailable").v),
+			}
+			if got.surge == "<nil>" {
+				got.surge, got.unavailable = "", ""
+			}
+			assert.Equal(t, c.want, got, "%s: %s", chart, name)
+		}
+		strategy := only(t, render(t, chart, "biz", "--set", "DEPLOYMENT_STRATEGY_TYPE=custom_rollout"),
+			"Deployment").at("spec", "strategy", "rollingUpdate")
+		assert.Equal(t, "25%", strategy.at("maxSurge").str2(), chart)
+		assert.Equal(t, "25%", strategy.at("maxUnavailable").str2(), chart)
+	}
+}
+
+// The container's own platform parameters: a writable root filesystem when
+// READONLY_CONTAINER_FILE_SYSTEM_ENABLED is off, and the liveness delay.
+func TestCharts_readTheContainerParameters(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
+		container := only(t, render(t, chart, "biz", "--set", "READONLY_CONTAINER_FILE_SYSTEM_ENABLED=false",
+			"--set", "LIVENESS_PROBE_INITIAL_DELAY_SECONDS=42"), "Deployment").
+			at("spec", "template", "spec", "containers").list()[0]
+		assert.Equal(t, false, container.at("securityContext", "readOnlyRootFilesystem").v, chart)
+		assert.EqualValues(t, 42, container.at("livenessProbe", "initialDelaySeconds").v, chart)
+	}
+}
+
+// Each service profile sizes the autoscaler, and the Deployment leaves the
+// count to it whenever it is on: a rendered count would conflict with the
+// autoscaler's under server-side apply, or undo its scaling on an upgrade.
+func TestServiceChart_profilesSizeTheAutoscaler(t *testing.T) {
+	type sizing struct {
+		enabled          bool
+		replicas         any
+		minimum, maximum float64
+	}
+	for profile, want := range map[string]sizing{
+		"dev":        {false, float64(1), 1, 9999},
+		"dev-ha":     {true, nil, 2, 5},
+		"prod-nonha": {true, nil, 1, 5},
+		"prod":       {true, nil, 2, 5},
+	} {
+		objects := render(t, serviceChart, "biz", "-f",
+			filepath.Join("..", "..", "helm-templates", serviceChart, "resource-profiles", profile+".yaml"))
+		assert.Equal(t, want.replicas, only(t, objects, "Deployment").at("spec", "replicas").v, profile)
+		spec := only(t, objects, "HorizontalPodAutoscaler").at("spec")
+		assert.Equal(t, want.minimum, spec.at("minReplicas").v, profile)
+		assert.Equal(t, want.maximum, spec.at("maxReplicas").v, profile)
+		policy := "Disabled"
+		if want.enabled {
+			policy = "Max"
+		}
+		assert.Equal(t, policy, spec.at("behavior", "scaleUp", "selectPolicy").str2(), profile)
+		assert.EqualValues(t, 60, spec.at("behavior", "scaleUp", "stabilizationWindowSeconds").v, profile)
+		assert.EqualValues(t, 300, spec.at("behavior", "scaleDown", "stabilizationWindowSeconds").v, profile)
+		for _, direction := range []string{"scaleUp", "scaleDown"} {
+			assert.Equal(t, []any{map[string]any{"type": "Pods", "value": float64(1), "periodSeconds": float64(60)}},
+				spec.at("behavior", direction, "policies").v, "%s %s", profile, direction)
+		}
+	}
+
+	spec := only(t, render(t, serviceChart, "biz", "--set", "HPA_ENABLED=true", "--set", "HPA_MAX_REPLICAS=3",
+		"--set", "HPA_AVG_CPU_UTILIZATION_TARGET_PERCENT=50", "--set", "HPA_SCALING_UP_PERCENT_VALUE=100",
+		"--set", "HPA_SCALING_UP_PERCENT_PERIOD_SECONDS=30"), "HorizontalPodAutoscaler").at("spec")
+	assert.EqualValues(t, 2500, spec.at("metrics").list()[0].at("resource", "target", "averageUtilization").v,
+		"50% of the dev profile's 500m limit is 2500% of its 10m request")
+	assert.Contains(t, spec.at("behavior", "scaleUp", "policies").v,
+		map[string]any{"type": "Percent", "value": float64(100), "periodSeconds": float64(30)})
+}
+
+// Every object of both charts reads NAMESPACE and SERVICE_NAME, and the
+// platform's labels, from the platform parameters; no place keeps the release
+// namespace or the chart's own name. A reference that drifted would leave an
+// installation that does not work once a parameter differs from its default:
+// a classifier in another namespace, a policy principal or a RoleBinding
+// subject that matches nothing, a selector that selects no pod. The two
+// places that keep the chart's name by design are skipped: the binary's path
+// in the container's arguments, and the alert rules' text.
+func TestCharts_readTheParametersInEveryObject(t *testing.T) {
+	topologies := []string{"--set", "CLOUD_TOPOLOGIES[0].topologyKey=topology.kubernetes.io/zone"}
+	for _, chart := range []string{operatorChart, serviceChart} {
+		args := append([]string{"-f", filepath.Join("..", "..", "helm-templates", chart, "resource-profiles", "prod.yaml"),
+			"--set", "NAMESPACE=biz", "--set", "SERVICE_NAME=rl", "--set", "IMAGE_REPOSITORY=registry.example/rl",
+			"--set", "MANAGED_BY=platform", "--set", "DEPLOYMENT_SESSION_ID=session",
+			"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true"}, topologies...)
+		objects := render(t, chart, "release-ns", args...)
+		require.NotEmpty(t, objects, chart)
+		for _, o := range objects {
+			if o.kind() == "CustomResourceDefinition" {
+				continue
+			}
+			what := chart + " " + o.kind() + " " + o.name()
+			labels := o.at("metadata", "labels")
+			assert.Equal(t, "platform", labels.at("app.kubernetes.io/managed-by").str2(), what)
+			assert.Equal(t, "session", labels.at("deployment.netcracker.com/sessionId").str2(), what)
+			assert.Equal(t, "rl", labels.at("app.kubernetes.io/name").str2(), what)
+
+			if o.kind() == "PrometheusRule" {
+				continue
+			}
+			for _, container := range o.at("spec", "template", "spec", "containers").list() {
+				kept := []any{}
+				for _, arg := range container.at("args").list() {
+					if !strings.HasPrefix(arg.str2(), "/app/") {
+						kept = append(kept, arg.v)
+					}
+				}
+				container.v.(map[string]any)["args"] = kept
+			}
+			raw, err := json.Marshal(o)
+			require.NoError(t, err)
+			assert.NotContains(t, string(raw), "release-ns", "%s reads the release namespace", what)
+			assert.NotContains(t, string(raw), chart, "%s keeps the chart's own name", what)
+		}
+
+		deployment := only(t, objects, "Deployment")
+		assert.Equal(t, "rl", deployment.at("spec", "template", "metadata", "labels", "name").str2(),
+			"%s: the pods do not carry the label the selector reads", chart)
 	}
 }

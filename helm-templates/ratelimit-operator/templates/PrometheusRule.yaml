@@ -2,7 +2,9 @@
 The alert rules over the policy status. Every expression is scoped to the
 release namespace by the label the scrape adds, and every rule reads a series
 the operator pod holding the Lease publishes: the data plane's series and
-their rules are the service chart's. The hold durations come from
+their rules are the service chart's. RatelimitChecksStopped also reads the
+service's checks, because only the operator's series say which domains a
+policy claims. The hold durations come from
 .Values.alerts, where each one carries its rationale; the shape of each
 expression is fixed here.
 
@@ -11,15 +13,18 @@ syntax passed through Helm's.
 */ -}}
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if and .Values.MONITORING_ENABLED .Values.alerts.enabled }}
-{{- $ns := .Release.Namespace }}
+{{- $ns := .Values.NAMESPACE | default .Release.Namespace }}
 {{- $sel := printf "namespace=%q" $ns }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ printf "%s-alerts" (include "ratelimit.fullname" .) | trunc 63 | trimSuffix "-" }}
+  name: '{{ .Values.SERVICE_NAME }}-alerts'
   namespace: {{ $ns }}
   labels:
-    {{- include "ratelimit.labels" . | nindent 4 }}
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
     app.kubernetes.io/component: monitoring
     app.kubernetes.io/processed-by-operator: victoriametrics-operator
 spec:
@@ -53,6 +58,37 @@ spec:
               Propagating pass within the kubelet's sync period; what stays is an edit held on last-good,
               a fleet that cannot be probed, or a rollout that never completes. The reason is on the
               policy's Ready condition and on the ratelimit_policy_ready series.
+
+        - alert: RatelimitNoReplicas
+          # The verdict, not the count: a fleet the operator never observed
+          # also counts 0 replicas, and its reason is ProbeFailed.
+          expr: max by (namespace, domain) (ratelimit_policy_ready{ {{- $sel -}} , reason="NoReplicas"}) == 0
+          for: {{ .Values.alerts.noReplicasFor }}
+          labels:
+            severity: critical
+          annotations:
+            summary: No ready rate limit service replica; the domain is not limited
+            description: >-
+              Domain {{ "{{" }} $labels.domain {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} has no ready
+              service replica, so every check of it is decided by the gateway's failure mode: unlimited under
+              fail-open, refused under fail-closed. Read the ratelimit-service Deployment and its pods.
+
+        - alert: RatelimitChecksStopped
+          expr: >-
+            max by (namespace, domain) (ratelimit_policy_replicas{ {{- $sel -}} , state="applied"}) > 0
+            unless on (namespace, domain)
+            sum by (namespace, domain) (rate(ratelimit_checks_total{ {{- $sel -}} }[{{ .Values.alerts.checksStoppedWindow }}])) > 0
+          for: {{ .Values.alerts.checksStoppedFor }}
+          labels:
+            severity: warning
+          annotations:
+            summary: Service replicas enforce a policy, but no checks reach them
+            description: >-
+              Domain {{ "{{" }} $labels.domain {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} is enforced by
+              ready replicas, but no check has reached them for {{ .Values.alerts.checksStoppedWindow }}: the
+              gateway's traffic passes unlimited. The gateway filter is off (the ratelimit.<gateway>.enabled
+              runtime key), removed, or its domain does not match; or the path to the Service is broken. A
+              domain whose gateway carries no traffic at all fires as well.
 
         - alert: RatelimitRuleProblems
           expr: max by (namespace, domain) (ratelimit_policy_rule_problems{ {{- $sel -}} , severity="blocking"}) > 0

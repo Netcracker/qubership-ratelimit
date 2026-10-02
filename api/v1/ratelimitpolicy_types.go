@@ -236,7 +236,9 @@ type Rule struct {
 
 	// replacedRules silences rules of the same block, which is how a narrow
 	// rule overrides a broad one. It is available only in an All block, where
-	// the order of the list carries no meaning of its own.
+	// the order of the list carries no meaning of its own. A rule with
+	// behavior Shadow silences nothing, so the rules it names keep enforcing
+	// until it is switched to Enforce.
 	// +optional
 	// +kubebuilder:validation:items:MaxLength=63
 	// +listType=atomic

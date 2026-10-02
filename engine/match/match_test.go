@@ -253,6 +253,29 @@ func TestReplacesSuppressesUnderAll(t *testing.T) {
 	}
 }
 
+// A shadow rule never changes the verdict, so its replacedRules suppresses
+// nothing: the enforcing rule it names stays matched beside it. The shadow
+// used to remove the rule it named, and a trial of a narrower limit switched
+// the live one off.
+func TestReplacesOfAShadowRuleSuppressNothing(t *testing.T) {
+	p := model.Policy{
+		Domain: domain,
+		Blocks: []model.Block{{Name: "b",
+			Rules: []model.Rule{
+				{Name: "base", Counters: []string{model.KeyClient}, Rates: minuteRate()},
+				{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeyClient},
+					Rates: []model.Rate{{Requests: 10, Period: time.Minute}}, ReplacedRules: []string{"base"}},
+			}}},
+	}
+	snap := mustCompile(t, p)
+
+	got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET",
+		Keys: map[string][]string{model.KeyClient: {"alice"}}}))
+	if len(got) != 2 || !slices.Contains(got, "base") || !slices.Contains(got, "trial") {
+		t.Errorf("matched %v, want base and trial: a shadow rule must not suppress the rule it names", got)
+	}
+}
+
 // TestTargetlessBlockMatchesEverything pins the whole-domain form at match
 // time: any path, any method.
 func TestTargetlessBlockMatchesEverything(t *testing.T) {
