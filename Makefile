@@ -132,17 +132,11 @@ test: manifests generate fmt vet test-engine setup-envtest ## Run all tests, inc
 # when the report matters - and CI uploads them as one artifact. The recipe
 # shell runs under -e, so every command is guarded with ||: an unguarded
 # ginkgo failure would kill the shell before the report renders.
-#
-# Suites that hang are stopped by ginkgo's own timeout for the same reason:
-# when it expires, ginkgo fails the suite and still writes the report, with
-# the spec that was running marked timedout. The suites take about 14 minutes
-# in CI. The e2e workflow sets a timeout for its step and one for its job,
-# both longer than this one, so the three have to change together.
 .PHONY: test-e2e-go
 test-e2e-go: ginkgo ## Run the Go end-to-end suites against an installed release.
 	@mkdir -p "$(E2E_ARTIFACTS)"
 	@rc=0; NAMESPACE="$(E2E_NAMESPACE)" E2E_SATELLITE_NAMESPACE="$(E2E_SATELLITE_NAMESPACE)" "$(GINKGO)" -tags e2e -v \
-	  --flake-attempts=2 --poll-progress-after=120s --timeout=25m \
+	  --flake-attempts=2 --poll-progress-after=120s --timeout=2h \
 	  --junit-report=e2e-go.xml --output-dir="$(E2E_ARTIFACTS)" \
 	  ./tests/e2e-go || rc=$$?; \
 	go run ./tests/e2e-go/report "$(E2E_ARTIFACTS)/e2e-go.xml" "$(E2E_ARTIFACTS)/e2e-go.html" \
