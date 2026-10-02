@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"os"
 
+	// The client-go auth plugins (OIDC and the cloud providers), for a
+	// kubeconfig that names one when the operator runs outside a pod.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	// Sets GOMEMLIMIT from the container's memory limit at start.
 	_ "github.com/netcracker/qubership-core-lib-go/v3/memlimit"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"

@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	// For the //go:embed of the OpenAPI document below.
 	_ "embed"
 	"encoding/json"
 	"strconv"

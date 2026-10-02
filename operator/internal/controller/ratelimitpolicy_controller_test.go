@@ -85,7 +85,7 @@ func unanimous(replicas int32) *stubProbe {
 	return &stubProbe{view: FleetView{Total: replicas, Applied: replicas}}
 }
 
-func newReconciler(t *testing.T, probe FleetProbe, objects ...client.Object) (
+func newReconciler(t *testing.T, probe FleetObserver, objects ...client.Object) (
 	*RateLimitPolicyReconciler, client.Client,
 ) {
 	t.Helper()

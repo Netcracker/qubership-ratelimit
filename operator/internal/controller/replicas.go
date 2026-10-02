@@ -78,7 +78,7 @@ type FleetView struct {
 }
 
 // ReplicaProbe reads the enforced generation from every ready endpoint of the
-// component's own Service. It is the production FleetProbe. It is safe for
+// component's own Service. It is the production FleetObserver. It is safe for
 // concurrent use, and concurrent observations share one round of answers.
 type ReplicaProbe struct {
 	// Reader lists the EndpointSlices of the Service.

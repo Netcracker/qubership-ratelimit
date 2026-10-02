@@ -10,7 +10,8 @@ import (
 )
 
 func TestSignalContext_endsOnSIGTERM(t *testing.T) {
-	ctx := SignalContext()
+	ctx, stop := SignalContext()
+	defer stop()
 	select {
 	case <-ctx.Done():
 		t.Fatal("the context ended before any signal")

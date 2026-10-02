@@ -79,7 +79,7 @@ func (m *Memory) Accept(_ context.Context, acceptance Acceptance) (Accepted, err
 	defer m.mu.Unlock()
 
 	now := m.now()
-	if existing := m.record(acceptance.Keys.Record); existing != nil {
+	if m.record(acceptance.Keys.Record) != nil {
 		return Accepted{Existing: m.read(acceptance.Keys)}, nil
 	}
 
