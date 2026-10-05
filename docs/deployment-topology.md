@@ -113,7 +113,7 @@ plane:
   of the service binary and fails when client-go is present.
 - **Contract** is a set of constants in one Go package that both binaries import: the Service `ratelimit`, its gRPC
   port 9000 named `grpc`, the probe port published on the Service under the name `metrics` (the service's metrics
-  port, 8080 by default), the ConfigMap `ratelimit-config`, the mode rule, and the one namespace for both charts.
+  port, 8080), the ConfigMap `ratelimit-config`, the mode rule, and the one namespace for both charts.
   Satellites compute the RLS address from the Service name, `ratelimit.<BASELINE_ORIGIN>.svc.cluster.local:9000` (or
   `BASELINE_CONTROLLER` when the platform sets it, read for parity with `control-plane`), and the operator reads its
   fleet through the same name. A CI test renders both charts and compares the rendered names and ports with the

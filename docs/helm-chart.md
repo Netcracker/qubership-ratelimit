@@ -82,7 +82,7 @@ both binaries:
 
 - the Service `ratelimit`;
 - its gRPC port 9000, named `grpc`;
-- the probe port, published on the Service under the name `metrics` (the service's metrics port, 8080 by default);
+- the probe port, published on the Service under the name `metrics` (the service's metrics port, 8080);
 - the ConfigMap `ratelimit-config`;
 - the mode rule: satellite iff `BASELINE_ORIGIN` is non-empty;
 - one namespace for both charts.
@@ -227,12 +227,8 @@ redis:                               # DatabaseClaim.yaml; see "The counter stor
     enabled: true                    # render the InternalDatabase and the DatabaseSecretClaim; false = the Secret
                                      #   <SERVICE_NAME>-redis is written by someone else in DBaaS's format (CI)
 
-healthProbe: { port: 8081 }          # Deployment.yaml: the probes port
-metrics:
-  port: 8080                         # Deployment.yaml, Service.yaml (the port named metrics), PodMonitor.yaml:
-                                     #   plain HTTP, cluster-internal; also serves /debug/applied (the operator
-                                     #   probes the applied generation through it) and /debug/snapshot; /debug/* is
-                                     #   read-only diagnostics, not the management API (see "Management API port")
+metrics:                             # (there are no port values: probes 8081, metrics 8080, and management 8082
+                                     #   are fixed in the templates)
   nearLimitRatio: "0.9"              # Deployment.yaml: an allowed request counts as near-limit once this share of
                                      #   the window's capacity is used up: the burst of a GCRA window, the requests
                                      #   of a fixed one; goes out as METRICS_NEAR_LIMIT_RATIO. A ratio in (0, 1),
@@ -243,7 +239,7 @@ metrics:
 
 management:                          # Deployment.yaml, Service.yaml, AuthorizationPolicy.yaml: the interface for
   enabled: false                     #   human operators (management-api.md), off by default: the port can lift a
-  port: 8082                         #   limit; on, it is a port on the pod and the Service plus
+                                     #   limit; on, it is port 8082 on the pod and the Service plus
                                      #   --management-bind-address
   authorizationPolicy:               # DENY on that port for every source but the listed service accounts; ztunnel
     enabled: true                    #   enforces it, so it holds only while the pod is in the mesh
@@ -325,6 +321,7 @@ What is **deliberately absent** from values:
 | the Lease | always on, in the operator | the Lease holder alone writes the status and `ratelimit-config`, a standby takes over when it goes, and the Lease covers the overlap of two pods during a rollout |
 | the ConfigMap `ratelimit-config` | written by the operator | Helm and Argo CD overwrite what a chart renders on every sync; the channel to the service cannot come from a chart |
 | the Service name and port | contract constants (`ratelimit`, 9000) | fixed in the templates of both charts and checked against the Go constants by the CI render test; there is no `rls.port` value |
+| `healthProbe.port`, `metrics.port`, `management.port` | fixed in the service chart's templates: probes 8081, metrics 8080, management 8082 | the operator chart and the charts of the qubership-core services fix their container ports too, and the gateway's `HTTPRoute` to the management API names port 8082 |
 | sanity bounds (token size and the like) | constants in the binaries | not knobs: nobody tunes them |
 | `replicaCount`, `resources` | resource profiles (`REPLICAS`, `CPU_*`, `MEMORY_*`, and the service's `HPA_*`) | one source of truth with the platform |
 | `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | pod placement: the topology spread constraints built from `CLOUD_TOPOLOGY_KEY` or `CLOUD_TOPOLOGIES`; pod annotations: none | the charts of the qubership-core services declare none of these keys either |
@@ -474,11 +471,11 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 - on the `..data` symlink swap the process decodes the manifest strictly, compiles every domain with the engine module,
   and swaps the snapshot atomically; a change reaches the replicas within the kubelet sync period, one minute by
   default;
-- args: the bind addresses `--rls-bind-address=:9000` (the contract constant), `--health-probe-bind-address`,
-  `--metrics-bind-address` (and `--management-bind-address` when `management.enabled`); the configuration flags stay at
-  their defaults, `--config-dir=/etc/ratelimit/config` (the contract constant, the mount point of the volume above) and
-  `--config-resync=10s` (the timer that re-reads the directory when the watch missed a swap, or when the directory did
-  not exist at start); no `--service-name`: the service reads no EndpointSlice;
+- args: the bind addresses `--rls-bind-address=:9000` (the contract constant), `--health-probe-bind-address=:8081`,
+  `--metrics-bind-address=:8080` (and `--management-bind-address=:8082` when `management.enabled`); the configuration
+  flags stay at their defaults, `--config-dir=/etc/ratelimit/config` (the contract constant, the mount point of the
+  volume above) and `--config-resync=10s` (the timer that re-reads the directory when the watch missed a swap, or when
+  the directory did not exist at start); no `--service-name`: the service reads no EndpointSlice;
 - env: `LOGGING_LEVEL_ROOT` (not `--zap-log-level`), `CLOUD_NAMESPACE` and `POD_NAME` from fieldRefs (the Downward API;
   the namespace is the installation scope and the namespace segment in counter keys), `SERVICE_VERSION` (the image tag,
   reported as `ratelimit_build_info`; the pipeline passes no build argument to the image, so without it every scrape
@@ -494,8 +491,9 @@ delivery that a Role is bound to; the service pod mounts no token at all:
   the first manifest is applied, without a timeout; an explicitly empty manifest counts as applied, and after the first
   apply the replica stays Ready on its in-memory snapshot when the files vanish or a later manifest is refused; the
   probes do not use the gRPC health service, which serves direct consumers;
-- metrics on 8080, where `/debug/applied` reports the applied generation per domain, the format versions the replica
-  reads, and a refusal with its reason, and `/debug/snapshot` renders what the replica enforces;
+- metrics on 8080, plain HTTP and cluster-internal, where `/debug/applied` reports the applied generation per domain,
+  the format versions the replica reads, and a refusal with its reason, and `/debug/snapshot` renders what the replica
+  enforces; `/debug/*` is read-only diagnostics, not the management API (see "Management API port");
 - resources come from the profile; `ephemeral-storage` is limited in the template itself (the process writes no files).
 
 ### Observability: PodMonitor and Dashboard

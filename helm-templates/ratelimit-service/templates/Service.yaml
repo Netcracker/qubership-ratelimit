@@ -24,13 +24,13 @@ spec:
     # statement about every ready replica.
     - name: metrics
       appProtocol: http
-      port: {{ .Values.metrics.port }}
+      port: 8080
       targetPort: metrics
       protocol: TCP
     {{- if .Values.management.enabled }}
     - name: management
       appProtocol: http
-      port: {{ .Values.management.port }}
+      port: 8082
       targetPort: management
       protocol: TCP
     {{- end }}

@@ -242,6 +242,41 @@ func TestServiceChart_rendersTheServiceOfTheContract(t *testing.T) {
 	assert.Equal(t, false, only(t, objects, "ServiceAccount")["automountServiceAccountToken"])
 }
 
+// The probes, the PodMonitors, the Service, and the operator reach a listener
+// through the container port named after it, so a flag that binds any other
+// port leaves them calling a port nothing listens on.
+func TestCharts_bindEachListenerToItsDeclaredPort(t *testing.T) {
+	for chart, listeners := range map[string]map[string]string{
+		operatorChart: {
+			"probes":                 "--health-probe-bind-address",
+			contract.MetricsPortName: "--metrics-bind-address",
+		},
+		serviceChart: {
+			contract.GRPCPortName:    "--rls-bind-address",
+			"probes":                 "--health-probe-bind-address",
+			contract.MetricsPortName: "--metrics-bind-address",
+			"management":             "--management-bind-address",
+		},
+	} {
+		t.Run(chart, func(t *testing.T) {
+			objects := render(t, chart, "biz", "--set", "management.enabled=true")
+			container := only(t, objects, "Deployment").at("spec", "template", "spec", "containers").list()[0]
+			args := argsOf(container)
+			declared := map[string]float64{}
+			for _, port := range container.at("ports").list() {
+				declared[port.at("name").str2()] = port.at("containerPort").num()
+			}
+
+			for name, flag := range listeners {
+				t.Run(name, func(t *testing.T) {
+					require.Contains(t, declared, name)
+					assert.Contains(t, args, fmt.Sprintf("%s=:%d", flag, int(declared[name])))
+				})
+			}
+		})
+	}
+}
+
 // The service chart's filters address the Service by the contract's name
 // and port, in NAMESPACE or in the baseline's: one filter per enabled
 // gateway, named after the chart.
@@ -411,7 +446,11 @@ func TestServiceChart_managementPolicyDeniesAllButThePrivateGateway(t *testing.T
 	require.Len(t, rules, 1)
 	to := rules[0].at("to").list()
 	require.Len(t, to, 1)
-	assert.Equal(t, []string{"8082"}, strs(to[0].at("operation", "ports")), "the policy covers another port")
+	ports := strs(to[0].at("operation", "ports"))
+	require.Len(t, ports, 1)
+	container := deployment.at("spec", "template", "spec", "containers").list()[0]
+	assert.Contains(t, argsOf(container), "--management-bind-address=:"+ports[0],
+		"the policy covers a port other than the one the management listener binds")
 
 	from := rules[0].at("from").list()
 	require.Len(t, from, 1)
