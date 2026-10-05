@@ -67,13 +67,24 @@ func TestCharts_shipTheAlertRulesBehindMonitoring(t *testing.T) {
 	}
 }
 
+// Each chart's rules stay on when the other chart's switch is off: the
+// platform passes both switches to both charts, and each chart reads its own.
+func TestCharts_keepTheirAlertRulesWhenTheOtherChartsSwitchIsOff(t *testing.T) {
+	otherOff := map[string]string{operatorChart: "alerts.enabled=false", serviceChart: "policyAlerts.enabled=false"}
+	for chart, off := range otherOff {
+		objects := render(t, chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", off)
+		assert.Contains(t, kinds(objects), "PrometheusRule", "%s with %s", chart, off)
+	}
+}
+
 // The rules are off with the platform parameter, and off on their own
 // switch with the PodMonitor still on.
 func TestCharts_renderNoAlertRulesWhenOff(t *testing.T) {
 	for chart := range alertsOf {
 		assert.NotContains(t, kinds(render(t, chart, "biz")), "PrometheusRule", "%s without MONITORING_ENABLED", chart)
-		objects := render(t, chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", "alerts.enabled=false")
-		assert.NotContains(t, kinds(objects), "PrometheusRule", "%s with alerts.enabled=false", chart)
+		off := map[string]string{operatorChart: "policyAlerts", serviceChart: "alerts"}[chart] + ".enabled=false"
+		objects := render(t, chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", off)
+		assert.NotContains(t, kinds(objects), "PrometheusRule", "%s with %s", chart, off)
 		assert.Contains(t, kinds(objects), "PodMonitor", "%s keeps its scrape with the alerts off", chart)
 	}
 }
@@ -215,9 +226,9 @@ func TestCharts_refuseAlertValuesThatBreakTheRules(t *testing.T) {
 		{serviceChart, "alerts.keyNotExtractedWindow=0m"},
 		{serviceChart, "alerts.storeErrorsFor=abc"},
 		{serviceChart, "alerts.configAbsentFor=5"},
-		{operatorChart, "alerts.stalledFor=0s"},
-		{operatorChart, "alerts.configWriteErrorsWindow=0m"},
-		{operatorChart, "alerts.checksStoppedWindow=10"},
+		{operatorChart, "policyAlerts.stalledFor=0s"},
+		{operatorChart, "policyAlerts.configWriteErrorsWindow=0m"},
+		{operatorChart, "policyAlerts.checksStoppedWindow=10"},
 	} {
 		_, err := renderErr(bad.chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", bad.set)
 		assert.Error(t, err, "%s accepts %s", bad.chart, bad.set)
