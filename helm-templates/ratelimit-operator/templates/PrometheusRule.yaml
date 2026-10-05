@@ -5,14 +5,14 @@ the operator pod holding the Lease publishes: the data plane's series and
 their rules are the service chart's. RatelimitChecksStopped also reads the
 service's checks, because only the operator's series say which domains a
 policy claims. The hold durations come from
-.Values.alerts, where each one carries its rationale; the shape of each
+.Values.policyAlerts, where each one carries its rationale; the shape of each
 expression is fixed here.
 
 A label written as {{ "{{" }} $labels.x {{ "}}" }} is Prometheus's template
 syntax passed through Helm's.
 */ -}}
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
-{{- if and .Values.MONITORING_ENABLED .Values.alerts.enabled }}
+{{- if and .Values.MONITORING_ENABLED .Values.policyAlerts.enabled }}
 {{- $ns := .Values.NAMESPACE }}
 {{- $sel := printf "namespace=%q" $ns }}
 apiVersion: monitoring.coreos.com/v1
@@ -33,7 +33,7 @@ spec:
       rules:
         - alert: RatelimitStalled
           expr: max by (namespace, domain, reason) (ratelimit_policy_stalled{ {{- $sel -}} }) == 1
-          for: {{ .Values.alerts.stalledFor }}
+          for: {{ .Values.policyAlerts.stalledFor }}
           labels:
             severity: critical
           annotations:
@@ -47,14 +47,14 @@ spec:
 
         - alert: RatelimitNotReadyLong
           expr: min by (namespace, domain) (ratelimit_policy_ready{ {{- $sel -}} }) == 0
-          for: {{ .Values.alerts.notReadyFor }}
+          for: {{ .Values.policyAlerts.notReadyFor }}
           labels:
             severity: warning
           annotations:
             summary: The latest generation of a policy has not been enforced for long
             description: >-
               Domain {{ "{{" }} $labels.domain {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} has not
-              had its latest generation enforced for {{ .Values.alerts.notReadyFor }}. Reconciling and
+              had its latest generation enforced for {{ .Values.policyAlerts.notReadyFor }}. Reconciling and
               Propagating pass within the kubelet's sync period; what stays is an edit held on last-good,
               a fleet that cannot be probed, or a rollout that never completes. The reason is on the
               policy's Ready condition and on the ratelimit_policy_ready series.
@@ -63,7 +63,7 @@ spec:
           # The verdict, not the count: a fleet the operator never observed
           # also counts 0 replicas, and its reason is ProbeFailed.
           expr: max by (namespace, domain) (ratelimit_policy_ready{ {{- $sel -}} , reason="NoReplicas"}) == 0
-          for: {{ .Values.alerts.noReplicasFor }}
+          for: {{ .Values.policyAlerts.noReplicasFor }}
           labels:
             severity: critical
           annotations:
@@ -77,22 +77,22 @@ spec:
           expr: >-
             max by (namespace, domain) (ratelimit_policy_replicas{ {{- $sel -}} , state="applied"}) > 0
             unless on (namespace, domain)
-            sum by (namespace, domain) (rate(ratelimit_checks_total{ {{- $sel -}} }[{{ .Values.alerts.checksStoppedWindow }}])) > 0
-          for: {{ .Values.alerts.checksStoppedFor }}
+            sum by (namespace, domain) (rate(ratelimit_checks_total{ {{- $sel -}} }[{{ .Values.policyAlerts.checksStoppedWindow }}])) > 0
+          for: {{ .Values.policyAlerts.checksStoppedFor }}
           labels:
             severity: warning
           annotations:
             summary: Service replicas enforce a policy, but no checks reach them
             description: >-
               Domain {{ "{{" }} $labels.domain {{ "}}" }} in {{ "{{" }} $labels.namespace {{ "}}" }} is enforced by
-              ready replicas, but no check has reached them for {{ .Values.alerts.checksStoppedWindow }}: the
+              ready replicas, but no check has reached them for {{ .Values.policyAlerts.checksStoppedWindow }}: the
               gateway's traffic passes unlimited. The gateway filter is off (the ratelimit.<gateway>.enabled
               runtime key), removed, or its domain does not match; or the path to the Service is broken. A
               domain whose gateway carries no traffic at all fires as well.
 
         - alert: RatelimitRuleProblems
           expr: max by (namespace, domain) (ratelimit_policy_rule_problems{ {{- $sel -}} , severity="blocking"}) > 0
-          for: {{ .Values.alerts.ruleProblemsFor }}
+          for: {{ .Values.policyAlerts.ruleProblemsFor }}
           labels:
             severity: warning
           annotations:
@@ -104,7 +104,7 @@ spec:
               in the policy's status.
 
         - alert: RatelimitConfigWriteErrors
-          expr: sum by (namespace, reason) (increase(ratelimit_config_write_errors_total{ {{- $sel -}} }[{{ .Values.alerts.configWriteErrorsWindow }}])) > 0
+          expr: sum by (namespace, reason) (increase(ratelimit_config_write_errors_total{ {{- $sel -}} }[{{ .Values.policyAlerts.configWriteErrorsWindow }}])) > 0
           labels:
             severity: critical
           annotations:
@@ -112,14 +112,14 @@ spec:
             description: >-
               The operator in {{ "{{" }} $labels.namespace {{ "}}" }} failed
               {{ "{{" }} $value | printf "%.0f" {{ "}}" }} writes of the ratelimit-config ConfigMap in
-              {{ .Values.alerts.configWriteErrorsWindow }} with reason {{ "{{" }} $labels.reason {{ "}}" }}.
+              {{ .Values.policyAlerts.configWriteErrorsWindow }} with reason {{ "{{" }} $labels.reason {{ "}}" }}.
               The replicas keep the previous configuration and the last-good fallback a restart would need
               is not being saved. size is a state the object cannot hold, api an answer of the API server,
               other the rest; the operator log has the error.
 
         - alert: RatelimitNoOperatorLeader
           expr: absent(ratelimit_leader{ {{- $sel -}} } == 1)
-          for: {{ .Values.alerts.noLeaderFor }}
+          for: {{ .Values.policyAlerts.noLeaderFor }}
           labels:
             severity: critical
             namespace: {{ $ns }}

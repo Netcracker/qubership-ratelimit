@@ -196,9 +196,9 @@
         false
       ]
     },
-    "alerts": {
+    "policyAlerts": {
       "type": "object",
-      "title": "Alert rules",
+      "title": "Alert rules over the policy status",
       "description": "The PrometheusRule of the chart, rendered with MONITORING_ENABLED; the thresholds and hold durations the expressions read.",
       "properties": {
         "enabled": {

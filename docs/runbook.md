@@ -531,7 +531,7 @@ ratelimit_policy_replicas{domain="gateway.public",state="applied"} 1
 ratelimit_policy_replicas{domain="gateway.public",state="total"} 3
 ```
 
-The alert is the operator chart's `RatelimitStalled`, `ratelimit_policy_stalled == 1` held for `alerts.stalledFor`
+The alert is the operator chart's `RatelimitStalled`, `ratelimit_policy_stalled == 1` held for `policyAlerts.stalledFor`
 ([Helm doc](helm-chart.md)); the
 generation each service pod enforces stays readable per pod:
 

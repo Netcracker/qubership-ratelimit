@@ -197,10 +197,10 @@ well: the Lease holder and a standby.
 so it governs when the Go heap starts collecting.
 
 `ratelimit-operator` renders the CRD, the operator replicas with the only `Role` of the delivery, a `PodMonitor`, and a
-`PrometheusRule`. Its values are `alerts.*` and the resource sizes with `REPLICAS`, 2 in the `-ha` and `prod` profiles.
-It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap `ratelimit-config` and the
-operator's own Deployment by name, and nothing else in the namespace beyond the policies, the Lease, the Events, and the
-EndpointSlices.
+`PrometheusRule`. Its values are `policyAlerts.*` and the resource sizes with `REPLICAS`, 2 in the `-ha` and `prod`
+profiles. It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap `ratelimit-config`
+and the operator's own Deployment by name, and nothing else in the namespace beyond the policies, the Lease, the Events,
+and the EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
 `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
@@ -212,16 +212,16 @@ the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way:
 service chart and nothing from the operator chart, so the platform installs the same pair in every namespace.
 
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
-`MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the
-way the series are: the service chart alerts on the data plane (`RatelimitUnknownDomain`, `RatelimitStoreErrors`,
+`MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the way
+the series are: the service chart alerts on the data plane (`RatelimitUnknownDomain`, `RatelimitStoreErrors`,
 `RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`,
-`RatelimitConfigurationAbsent`) and the
-operator chart on the policy status and the fleet (`RatelimitStalled`, `RatelimitNotReadyLong`,
-`RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`, `RatelimitConfigWriteErrors`,
-`RatelimitNoOperatorLeader`). Every expression is scoped to `NAMESPACE`. The
-thresholds and hold durations are under `alerts.*` of each chart, each with its rationale beside it in `values.yaml`;
-`alerts.enabled=false` keeps the scrape and drops the rules. `tests/charts` renders both rule sets and runs
-`promtool check rules` over them (`make promtool` fetches the binary from the Prometheus release the Makefile pins).
+`RatelimitConfigurationAbsent`) and the operator chart on the policy status and the fleet (`RatelimitStalled`,
+`RatelimitNotReadyLong`, `RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`,
+`RatelimitConfigWriteErrors`, `RatelimitNoOperatorLeader`). Every expression is scoped to `NAMESPACE`. The thresholds
+and hold durations are under `policyAlerts.*` in the operator chart and `alerts.*` in the service chart, each with its
+rationale beside it in `values.yaml`; `enabled: false` in either block keeps the scrape and drops that chart's rules.
+`tests/charts` renders both rule sets and runs `promtool check rules` over them (`make promtool` fetches the binary from
+the Prometheus release the Makefile pins).
 
 The `Service` is named `ratelimit` whatever the release is called, and `SERVICE_NAME` does not rename it. A
 satellite computes the RLS address from that name and the baseline's namespace, so the name cannot depend on how the

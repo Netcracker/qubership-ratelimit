@@ -32,7 +32,7 @@ helm-templates/ratelimit-operator/templates/
 ├── RoleBinding.yaml
 ├── PodMonitor.yaml                # behind MONITORING_ENABLED
 └── PrometheusRule.yaml            # the alert rules over the policy status, behind MONITORING_ENABLED and
-                                   #   alerts.enabled
+                                   #   policyAlerts.enabled
 ```
 
 The service chart:
@@ -179,7 +179,7 @@ LOG_LEVEL: info                      # Deployment.yaml: goes out as LOGGING_LEVE
 
 MONITORING_ENABLED: false            # PodMonitor.yaml, PrometheusRule.yaml; see "Platform parameters"
 
-alerts:                              # PrometheusRule.yaml: the rules over the policy status; see "Alerts"
+policyAlerts:                        # PrometheusRule.yaml: the rules over the policy status; see "Alerts"
   enabled: true                      # read only with MONITORING_ENABLED; false keeps the scrape, drops the rules
   stalledFor: 5m                     # RatelimitStalled: above the propagation deadline, so a late rollout is quiet
   notReadyFor: 30m                   # RatelimitNotReadyLong: longer than any rollout, shorter than a shift
@@ -341,14 +341,15 @@ the cluster. Key points:
 - `filter.rateLimitedStatus` is 400..599 (Envoy ignores anything below 400); `runtime.*Percent` is 0..100;
 - the profile's resource parameters are required in both charts (see above);
 - `NAMESPACE` and `TAG` are required and non-empty in both charts (see above);
-- every `alerts.*` duration is a positive Prometheus duration (`^[1-9][0-9]*(ms|s|m|h|d|w|y)$`) and
+- every `alerts.*` and `policyAlerts.*` duration is a positive Prometheus duration (`^[1-9][0-9]*(ms|s|m|h|d|w|y)$`) and
   `alerts.latencyBudgetSeconds` is a number above zero: a zero duration renders `[0m]` or `for: 0m`, which Prometheus
   refuses to load, taking the chart's other rules with it, and a budget at or below zero renders a comparison every
   check satisfies;
 - the root of each schema stays **open**, and each chart closes its own blocks, the ones its templates read. The
   platform distributes common installation parameters to the charts and passes one parameter set to every chart of
   the application. The service's `redis` and `filter` blocks therefore reach the operator chart. A closed root would
-  fail on every new parameter and on the other chart's blocks.
+  fail on every new parameter and on the other chart's blocks. For the same reason no two charts close a block under
+  one name: the operator's alert values are `policyAlerts`, beside the service's `alerts`.
   A typo inside a block fails the render; the price of the open root is that a typo at the root is silently ignored.
 
 The schema cannot express domain uniqueness; the `validateDomains` helper of the service chart holds it (see the
@@ -661,10 +662,10 @@ satellite holds the service chart's two filters and no component of either chart
 
 ## Alerts
 
-Each chart ships its alert rules as one `PrometheusRule` in `NAMESPACE`, rendered with
-`MONITORING_ENABLED` and `alerts.enabled`; a satellite renders neither. The split follows the series: the service
-chart alerts on the data plane, the operator chart on the policy status, and every expression carries
-`namespace="<NAMESPACE>"`, so a namespace's rules judge its own pods.
+Each chart ships its alert rules as one `PrometheusRule` in `NAMESPACE`, rendered with `MONITORING_ENABLED` and the
+chart's own switch (`policyAlerts.enabled` in the operator chart, `alerts.enabled` in the service chart); a satellite
+renders neither. The split follows the series: the service chart alerts on the data plane, the operator chart on the
+policy status, and every expression carries `namespace="<NAMESPACE>"`, so a namespace's rules judge its own pods.
 
 The service chart, group `ratelimit-service`:
 
@@ -692,13 +693,13 @@ The operator chart, group `ratelimit-operator`:
 Every rule carries a `summary` and a `description`; the description names the number, what it means for traffic, and
 where to look next, which is the sentence the [runbook](runbook.md) expands.
 
-The thresholds and hold durations are the `alerts.*` values of each chart, listed with their defaults in "Values
-reference" and bounded by the schema. Two pairings are load-bearing rather than taste: `unknownDomainFor` and
-`storeErrorsFor` are each at least the 5 m window of their expression, because `increase(...[5m]) > 0` stays true for
-five minutes after a single increment and a shorter hold would fire inside that window, paging on one stray check or
-one retried timeout; and both halves of `RatelimitKeyDeclaredNotExtracted` are summed by `domain`, so a domain with
-no traffic is never judged by a busy neighbour's tokens. Lower a hold below its window only where every single event
-must page.
+The thresholds and hold durations are the `policyAlerts.*` values of the operator chart and the `alerts.*` values of the
+service chart, listed with their defaults in "Values reference" and bounded by the schema. Two pairings are load-bearing
+rather than taste: `unknownDomainFor` and `storeErrorsFor` are each at least the 5 m window of their expression, because
+`increase(...[5m]) > 0` stays true for five minutes after a single increment and a shorter hold would fire inside that
+window, paging on one stray check or one retried timeout; and both halves of `RatelimitKeyDeclaredNotExtracted` are
+summed by `domain`, so a domain with no traffic is never judged by a busy neighbour's tokens. Lower a hold below its
+window only where every single event must page.
 
 `tests/charts` replays these rules through `promtool test rules` against the fixtures in
 `tests/charts/testdata/*.rules.test.yaml`: the negative cases (a lone store error, a stray unknown-domain check, an

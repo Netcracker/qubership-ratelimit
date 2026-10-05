@@ -533,6 +533,18 @@ func TestCharts_refuseAnInstallationWithoutNamespaceOrTag(t *testing.T) {
 	}
 }
 
+// The platform passes one parameter set to both charts, so a value meant for
+// one chart reaches the other. Each chart renders here with the other chart's
+// values.yaml in place of that set; a block both charts closed under one name
+// would refuse the keys only the other chart declares.
+func TestCharts_acceptTheOtherChartsValues(t *testing.T) {
+	for chart, other := range map[string]string{operatorChart: serviceChart, serviceChart: operatorChart} {
+		values := filepath.Join("..", "..", "helm-templates", other, "values.yaml")
+		_, err := renderErr(chart, "biz", "-f", values, "--set", "MONITORING_ENABLED=true")
+		assert.NoError(t, err, "%s with the values.yaml of %s", chart, other)
+	}
+}
+
 // Without the optional platform parameters, the Deployment runs the chart's
 // own image from ghcr.io, carries an empty version label and Helm as its
 // manager, and rolls out keeping every pod until its replacement is Ready.

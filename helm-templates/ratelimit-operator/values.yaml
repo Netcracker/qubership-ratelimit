@@ -69,8 +69,11 @@ MONITORING_ENABLED: false
 # NAMESPACE. Every rule reads the operator's own series, the ones the
 # pod holding the Lease publishes; the service chart ships the rules over the
 # data plane. The durations below are the ones an installation may need to
-# move; the expressions stay in the template.
-alerts:
+# move; the expressions stay in the template. The block is policyAlerts rather
+# than alerts because the platform passes one parameter set to both charts,
+# the service chart's alerts block holds other keys, and each schema refuses a
+# key its block does not declare.
+policyAlerts:
   enabled: true
 
   # RatelimitStalled: the operator judged a domain stuck rather than
