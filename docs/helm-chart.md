@@ -221,7 +221,6 @@ gateways:                            # EnvoyFilter.yaml and validateDomains: two
     domain: gateway.private
 
 serviceAccount: { create: true, name: "" }   # ServiceAccount.yaml, RoleBinding.yaml, Deployment.yaml
-podAnnotations: {}                   # Deployment.yaml; plus nodeSelector / tolerations / affinity
 CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname   # Deployment.yaml: topologySpreadConstraints, maxSkew 1, ScheduleAnyway;
                                      #   CLOUD_TOPOLOGIES, the platform parameter, replaces it with one constraint
                                      #   per {topologyKey, maxSkew, whenUnsatisfiable} entry
@@ -303,7 +302,6 @@ BASELINE_CONTROLLER: ""              #   parameters": BASELINE_ORIGIN empty = th
                                      #   of this chart
 
 serviceAccount: { create: true, name: "" }   # ServiceAccount.yaml, Deployment.yaml; no token is mounted
-podAnnotations: {}                   # Deployment.yaml; plus nodeSelector / tolerations / affinity
 CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname   # Deployment.yaml: topologySpreadConstraints, maxSkew 1, ScheduleAnyway;
                                      #   CLOUD_TOPOLOGIES, the platform parameter, replaces it with one constraint
                                      #   per {topologyKey, maxSkew, whenUnsatisfiable} entry
@@ -323,6 +321,7 @@ What is **deliberately absent** from values:
 | the Service name and port | contract constants (`ratelimit`, 9000) | fixed in the templates of both charts and checked against the Go constants by the CI render test; there is no `rls.port` value |
 | sanity bounds (token size and the like) | constants in the binaries | not knobs: nobody tunes them |
 | `replicaCount`, `resources` | resource profiles (`REPLICAS`, `CPU_*`, `MEMORY_*`, and the service's `HPA_*`) | one source of truth with the platform |
+| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | pod placement: the topology spread constraints built from `CLOUD_TOPOLOGY_KEY` or `CLOUD_TOPOLOGIES`; pod annotations: none | the charts of the qubership-core services declare none of these keys either |
 | the RLS address for a satellite | computed from `BASELINE_ORIGIN` | the Service name and port are fixed by contract |
 | `DestinationRule` for the service cluster | none | see "What the charts do not install" |
 

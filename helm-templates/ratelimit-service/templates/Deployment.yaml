@@ -61,10 +61,6 @@ spec:
         app.kubernetes.io/component: 'rls'
         app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
         app.kubernetes.io/technology: 'go'
-      {{- with .Values.podAnnotations }}
-      annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
     spec:
       serviceAccountName: '{{ .Values.serviceAccount.name | default .Values.SERVICE_NAME }}'
       # The process that parses tokens from the internet reaches no API
@@ -222,18 +218,6 @@ spec:
               cpu: '{{ .Values.CPU_LIMIT }}'
               memory: '{{ .Values.MEMORY_LIMIT }}'
               ephemeral-storage: 256Mi
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       topologySpreadConstraints:
         {{- if .Values.CLOUD_TOPOLOGIES }}
         {{- range $v := .Values.CLOUD_TOPOLOGIES }}

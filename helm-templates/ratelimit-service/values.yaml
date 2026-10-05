@@ -264,11 +264,6 @@ serviceAccount:
   # Defaults to SERVICE_NAME when empty.
   name: ""
 
-podAnnotations: {}
-nodeSelector: {}
-tolerations: []
-affinity: {}
-
 # The node label the pods spread over: one topology spread constraint,
 # maxSkew 1, whenUnsatisfiable ScheduleAnyway, selecting this Deployment's
 # own pods. CLOUD_TOPOLOGIES, the platform parameter, replaces it with one

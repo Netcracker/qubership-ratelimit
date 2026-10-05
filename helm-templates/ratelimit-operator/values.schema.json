@@ -458,22 +458,6 @@
       },
       "additionalProperties": false
     },
-    "podAnnotations": {
-      "type": "object",
-      "title": "Extra pod annotations"
-    },
-    "nodeSelector": {
-      "type": "object",
-      "title": "Node selector"
-    },
-    "tolerations": {
-      "type": "array",
-      "title": "Tolerations"
-    },
-    "affinity": {
-      "type": "object",
-      "title": "Affinity"
-    },
     "CLOUD_TOPOLOGY_KEY": {
       "$id": "#/properties/CLOUD_TOPOLOGY_KEY",
       "type": "string",
