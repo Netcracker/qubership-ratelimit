@@ -132,7 +132,7 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.metadata.ownerReferences
 # Deployment/ratelimit-operator
 ```
 
-`/debug/applied` on the metrics port of a service pod, 8080 by default, reports what the replica applied: the
+`/debug/applied` on the metrics port of a service pod, 8080, reports what the replica applied: the
 generation per domain, the manifest format versions the replica reads, after a refused manifest the refusal with its
 reason, and `"configAbsent": true` while the mounted directory holds no manifest (section 9). The operator reads the
 same endpoint once per probe cycle, and the `REPLICAS` column counts what it read.

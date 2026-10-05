@@ -208,7 +208,7 @@ and the EndpointSlices.
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
 `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
 `grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`,
-a `PrometheusRule`, the dashboard, and one `EnvoyFilter` per enabled gateway. Its values are `redis.*`, `healthProbe.*`,
+a `PrometheusRule`, the dashboard, and one `EnvoyFilter` per enabled gateway. Its values are `redis.*`,
 `metrics.*`, `management.*`, `alerts.*`, the filter's (`filter.*`; the port the filters send checks to is the contract's
 9000 and not a value), `runtime.*`, `gateways.*`, the gateway names, and the five resource keys. Neither chart renders
 the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way: a satellite gets the filters from the

@@ -85,10 +85,10 @@ spec:
             # The gRPC port is the contract's: the gateway filters of every
             # namespace of the composite compute the address from it.
             - --rls-bind-address=:{{ include "ratelimit.grpcPort" . }}
-            - --health-probe-bind-address=:{{ .Values.healthProbe.port }}
-            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            - --health-probe-bind-address=:8081
+            - --metrics-bind-address=:8080
             {{- if .Values.management.enabled }}
-            - --management-bind-address=:{{ .Values.management.port }}
+            - --management-bind-address=:8082
             {{- end }}
             # The mounted ConfigMap. The binary's default is the same path;
             # it is spelled out so the volume mount below and the flag are
@@ -150,14 +150,14 @@ spec:
               containerPort: {{ include "ratelimit.grpcPort" . }}
               protocol: TCP
             - name: probes
-              containerPort: {{ .Values.healthProbe.port }}
+              containerPort: 8081
               protocol: TCP
             - name: metrics
-              containerPort: {{ .Values.metrics.port }}
+              containerPort: 8080
               protocol: TCP
             {{- if .Values.management.enabled }}
             - name: management
-              containerPort: {{ .Values.management.port }}
+              containerPort: 8082
               protocol: TCP
             {{- end }}
           # On delete the pod leaves the Endpoints at once, but the gateways

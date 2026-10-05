@@ -89,17 +89,13 @@ redis:
 # assigns its DBaaS objects to the dbaas-operator running there.
 API_DBAAS_ADDRESS: http://dbaas-aggregator.dbaas:8080
 
-healthProbe:
-  port: 8081
-
 # ============== METRICS ============================
 # The Prometheus endpoint: decisions and their latencies, budget headroom,
-# extraction health, and the applied generation per domain. Plain HTTP,
-# cluster-internal. The Service publishes it under the name metrics, and the
-# operator reads /debug/applied on it to learn which generation each replica
-# enforces.
+# extraction health, and the applied generation per domain. Plain HTTP on port
+# 8080, cluster-internal. The Service publishes it under the name metrics, and
+# the operator reads /debug/applied on it to learn which generation each
+# replica enforces.
 metrics:
-  port: 8080
   # An admission counts as near-limit once the rule has consumed this share of
   # the capacity of its window: the burst of a GCRA window, the requests of a
   # fixed one. Quoted so YAML cannot reshape the number before the service
@@ -122,11 +118,10 @@ metrics:
 # Service of its own. What keeps the port safe is the AuthorizationPolicy,
 # and that is enforced by ztunnel at the pod: a second Service would change
 # nothing about who can reach the port, and would add a second name for the
-# platform's HTTPRoute to get right. The gateway's route names the port on
+# platform's HTTPRoute to get right. The gateway's route names port 8082 on
 # the one Service, which is what backendRefs.port is for.
 management:
   enabled: false
-  port: 8082
 
   # Where the identity is read from in the bearer token. Both are claim
   # names, and both accept a dotted path for a nested claim: Keycloak issues

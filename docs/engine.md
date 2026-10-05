@@ -41,8 +41,8 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
 - Direct gRPC consumers get the same contract. They may send pre-extracted descriptor entries and no token; the engine
   matches on whatever keys are present.
 - The standard gRPC health service is exposed for direct gRPC consumers. Deployment readiness and liveness use HTTP
-  `readyz` and `healthz` on the service chart's `healthProbe.port` (8081 by default), and `readyz` opens after the first
-  manifest is applied from the ConfigMap volume; the probes do not use the gRPC health service.
+  `readyz` and `healthz` on port 8081, and `readyz` opens after the first manifest is applied from the ConfigMap volume;
+  the probes do not use the gRPC health service.
 
 ## The configuration channel
 
@@ -91,7 +91,7 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   binary and fails when client-go is present.
 - **The contract between the two components** is constants in one Go package under `api/` that both binaries import: the
   Service `ratelimit`, its gRPC port 9000 named `grpc`, the probe port published on the Service under the name `metrics`
-  (the service's metrics port, 8080 by default), the ConfigMap `ratelimit-config`, the mode rule, and one namespace for
+  (the service's metrics port, 8080), the ConfigMap `ratelimit-config`, the mode rule, and one namespace for
   both charts. The mode rule: satellite if and only if `BASELINE_ORIGIN` is non-empty, otherwise the whole stack;
   `BASELINE_CONTROLLER`, when set in a satellite, replaces `BASELINE_ORIGIN` as the namespace half of the RLS address
   `ratelimit.<namespace>.svc.cluster.local:9000`; in a satellite the service chart renders the EnvoyFilters only and
