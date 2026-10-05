@@ -10,7 +10,10 @@
     "NAMESPACE",
     "TAG",
     "redis",
+    "filter",
+    "ISTIO_PUBLIC_GATEWAY_NAME",
     "ISTIO_PRIVATE_GATEWAY_NAME",
+    "gateways",
     "REPLICAS",
     "CPU_REQUEST",
     "MEMORY_REQUEST",
@@ -255,6 +258,71 @@
       },
       "additionalProperties": false
     },
+    "filter": {
+      "type": "object",
+      "title": "Gateway filter",
+      "properties": {
+        "timeout": {
+          "type": "string",
+          "title": "Check timeout",
+          "description": "Envoy-side timeout for a rate limit check, as a protobuf duration: seconds with an optional fraction, e.g. 0.05s. Go-style values such as 50ms are rejected by Envoy.",
+          "pattern": "^[0-9]+(\\.[0-9]+)?s$",
+          "default": "0.05s"
+        },
+        "failClosed": {
+          "type": "boolean",
+          "title": "Fail closed",
+          "description": "true rejects traffic with a 503 when the rate limit service is unreachable, times out, or answers UNAVAILABLE because its counter store failed (failure_mode_deny); false lets it flow unlimited.",
+          "default": false
+        },
+        "rateLimitedStatus": {
+          "type": "integer",
+          "title": "Refusal status",
+          "description": "Status the client sees on a refused request. Envoy ignores values below 400.",
+          "minimum": 400,
+          "maximum": 599,
+          "default": 429
+        },
+        "grpcAsResourceExhausted": {
+          "type": "boolean",
+          "title": "gRPC refusal code",
+          "description": "true maps a refusal to RESOURCE_EXHAUSTED for gRPC callers behind the gateway \u2014 the code their clients back off and retry on \u2014 instead of UNAVAILABLE.",
+          "default": false
+        },
+        "xRateLimitHeaders": {
+          "type": "string",
+          "title": "x-ratelimit response headers",
+          "description": "The service supplies the x-ratelimit-* and retry-after headers itself. DRAFT_VERSION_03 additionally lets Envoy render X-RateLimit-* from per-descriptor statuses, which the service does not populate, so OFF is the default.",
+          "enum": [
+            "OFF",
+            "DRAFT_VERSION_03"
+          ],
+          "default": "OFF"
+        }
+      },
+      "description": "The install-wide defaults of the rate limit filter on each gateway; gateways.<role> overrides them per gateway. The port the filters send checks to is the contract's 9000 and is not a value.",
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "title": "Filter switches",
+      "description": "Share of requests the filter checks (enabledPercent) and enforces on (enforcedPercent). Emergency controls independent of behavior: Shadow in the rules; rendered as Envoy runtime fractions, so a runtime override flips them without a redeploy.",
+      "properties": {
+        "enabledPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 100
+        },
+        "enforcedPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 100
+        }
+      },
+      "additionalProperties": false
+    },
     "MONITORING_ENABLED": {
       "$id": "#/properties/MONITORING_ENABLED",
       "type": "boolean",
@@ -327,6 +395,15 @@
       },
       "additionalProperties": false
     },
+    "ISTIO_PUBLIC_GATEWAY_NAME": {
+      "$id": "#/properties/ISTIO_PUBLIC_GATEWAY_NAME",
+      "type": "string",
+      "title": "The ISTIO_PUBLIC_GATEWAY_NAME schema",
+      "description": "Name of the public Istio gateway.",
+      "minLength": 1,
+      "default": "public-gateway",
+      "internal": true
+    },
     "ISTIO_PRIVATE_GATEWAY_NAME": {
       "$id": "#/properties/ISTIO_PRIVATE_GATEWAY_NAME",
       "type": "string",
@@ -335,6 +412,108 @@
       "minLength": 1,
       "default": "private-gateway",
       "internal": true
+    },
+    "gateways": {
+      "type": "object",
+      "title": "Rate limited gateways",
+      "description": "One EnvoyFilter is rendered per enabled gateway. The gateway names come from the ISTIO_*_GATEWAY_NAME parameters, not from here.",
+      "properties": {
+        "public": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render an EnvoyFilter for this gateway.",
+              "default": true
+            },
+            "domain": {
+              "type": "string",
+              "title": "Rate limit domain",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the service log. The pattern is the CRD's spec.domain pattern, so a value the policy side cannot ever carry is refused here too.",
+              "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+              "minLength": 1,
+              "maxLength": 63
+            },
+            "namespace": {
+              "type": "string",
+              "title": "Gateway namespace",
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to NAMESPACE, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+            },
+            "timeout": {
+              "type": "string",
+              "title": "Check timeout override",
+              "description": "Overrides filter.timeout for this gateway. Same format: a protobuf duration such as 0.05s.",
+              "pattern": "^[0-9]+(\\.[0-9]+)?s$"
+            },
+            "failClosed": {
+              "type": "boolean",
+              "title": "Fail closed override",
+              "description": "Overrides filter.failClosed for this gateway. An explicit false wins over a true default."
+            },
+            "rateLimitedStatus": {
+              "type": "integer",
+              "title": "Refusal status override",
+              "description": "Overrides filter.rateLimitedStatus for this gateway. Envoy ignores values below 400.",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "grpcAsResourceExhausted": {
+              "type": "boolean",
+              "title": "gRPC refusal code override",
+              "description": "Overrides filter.grpcAsResourceExhausted for this gateway."
+            }
+          },
+          "additionalProperties": false
+        },
+        "private": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render an EnvoyFilter for this gateway.",
+              "default": true
+            },
+            "domain": {
+              "type": "string",
+              "title": "Rate limit domain",
+              "description": "Binding key between this gateway and a RateLimitPolicy. Must equal spec.domain of the policy that carries the gateway's rules; a mismatch is silent apart from an unknown-rate-limit-domain line in the service log. The pattern is the CRD's spec.domain pattern, so a value the policy side cannot ever carry is refused here too.",
+              "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",
+              "minLength": 1,
+              "maxLength": 63
+            },
+            "namespace": {
+              "type": "string",
+              "title": "Gateway namespace",
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to NAMESPACE, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+            },
+            "timeout": {
+              "type": "string",
+              "title": "Check timeout override",
+              "description": "Overrides filter.timeout for this gateway. Same format: a protobuf duration such as 0.05s.",
+              "pattern": "^[0-9]+(\\.[0-9]+)?s$"
+            },
+            "failClosed": {
+              "type": "boolean",
+              "title": "Fail closed override",
+              "description": "Overrides filter.failClosed for this gateway. An explicit false wins over a true default."
+            },
+            "rateLimitedStatus": {
+              "type": "integer",
+              "title": "Refusal status override",
+              "description": "Overrides filter.rateLimitedStatus for this gateway. Envoy ignores values below 400.",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "grpcAsResourceExhausted": {
+              "type": "boolean",
+              "title": "gRPC refusal code override",
+              "description": "Overrides filter.grpcAsResourceExhausted for this gateway."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "CLOUD_TOPOLOGY_KEY": {
       "$id": "#/properties/CLOUD_TOPOLOGY_KEY",
@@ -648,7 +827,7 @@
         "gatewayDomains": {
           "type": "array",
           "title": "Gateway domains",
-          "description": "The rate limit domains of the gateways that route to the management API. A request under /ratelimit/v1 in one of them is admitted without reading the rules or the counter store, so the API stays reachable through a gateway that fails closed while the store is down. Each entry has to equal gateways.<role>.domain of the operator chart; the pattern is the CRD's spec.domain pattern. Empty rate limits the API's requests like any others.",
+          "description": "The rate limit domains of the gateways that route to the management API. A request under /ratelimit/v1 in one of them is admitted without reading the rules or the counter store, so the API stays reachable through a gateway that fails closed while the store is down. Each entry has to equal gateways.<role>.domain of this chart; the pattern is the CRD's spec.domain pattern. Empty rate limits the API's requests like any others.",
           "items": {
             "type": "string",
             "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$",

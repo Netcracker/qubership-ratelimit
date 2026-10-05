@@ -280,8 +280,8 @@ jobs:
           done
 
           # The same pair of charts as a satellite: BASELINE_ORIGIN names the
-          # baseline, and that alone turns the operator chart's render into
-          # the gateway filters and the service chart's into nothing. No
+          # baseline, and that alone turns the service chart's render into
+          # the gateway filters and the operator chart's into nothing. No
           # store, no image: there is no Deployment for either to matter to,
           # and TAG is set only because both schemas require it.
           helm upgrade --install ratelimit-operator-satellite helm-templates/ratelimit-operator \

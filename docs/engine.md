@@ -94,8 +94,8 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   (the service's metrics port, 8080 by default), the ConfigMap `ratelimit-config`, the mode rule, and one namespace for
   both charts. The mode rule: satellite if and only if `BASELINE_ORIGIN` is non-empty, otherwise the whole stack;
   `BASELINE_CONTROLLER`, when set in a satellite, replaces `BASELINE_ORIGIN` as the namespace half of the RLS address
-  `ratelimit.<namespace>.svc.cluster.local:9000`; in a satellite the operator chart renders the EnvoyFilters only and
-  the service chart renders nothing. A CI test renders both charts and compares the rendered names and ports with the
+  `ratelimit.<namespace>.svc.cluster.local:9000`; in a satellite the service chart renders the EnvoyFilters only and
+  the operator chart renders nothing. A CI test renders both charts and compares the rendered names and ports with the
   constants, the [chart document](helm-chart.md) lists the contract, and `rls.port` exists in neither chart.
 
 ## Rule model and matching
@@ -273,7 +273,7 @@ The full contract, the interfaces, and the implementations are in the [store con
   affect decisions.
 - **A storage failure or timeout is decided by the gateway**: the service answers the check with gRPC `UNAVAILABLE`,
   counts it as `verdict="unavailable"`, and the gateway filter applies its failure mode, the same one it applies when
-  the service itself is unreachable (`failure_mode_deny`, the operator chart's `filter.failClosed` and
+  the service itself is unreachable (`failure_mode_deny`, the service chart's `filter.failClosed` and
   `gateways.<role>.failClosed`). With `failClosed: false`, the default, the request passes unlimited; with `true`, the
   gateway answers 503. One exception: a check that a rule already refused before the store failed answers
   `OVER_LIMIT` whatever the setting, so a refusal never turns into unlimited traffic. A request to the management API
@@ -370,4 +370,4 @@ four. These numbers guard against regressions.
 - **Token signature verification, key management, JWKS**: the gateway's job.
 - **Billing-grade usage accounting**: counter state answers "may this request proceed", not "how many requests did this
   tenant make last month".
-- **Generating or mutating Envoy configuration**: the operator chart owns the gateway filters.
+- **Generating or mutating Envoy configuration**: the service chart owns the gateway filters.

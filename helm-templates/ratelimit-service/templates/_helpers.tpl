@@ -6,12 +6,13 @@ baseline or a standalone installation, which render the same objects. A
 BASELINE_ORIGIN naming the release's own namespace fails the render, as it
 does in the operator chart.
 
-A satellite runs no service. Its gateway filters, rendered by the operator
-chart, send checks to the baseline's Service; a service installed there
-would wait for an operator that never comes, stay NotReady, and fail the
-readiness gate of the deployment. Every template of this chart is wrapped in
-this check, so a satellite release is empty, and the platform installs the
-same pair of charts in every namespace without a rule of its own.
+A satellite runs no service: one installed there would wait for an operator
+that never comes, stay NotReady, and fail the readiness gate of the
+deployment. Every template of this chart but EnvoyFilter.yaml is wrapped in
+this check, so a satellite release holds the gateway filters alone, and the
+platform installs the same pair of charts in every namespace without a rule
+of its own. The filters send the satellite's checks to the baseline's
+Service.
 */}}
 {{- define "ratelimit.mode" -}}
 {{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN .Values.NAMESPACE) -}}
@@ -23,7 +24,7 @@ same pair of charts in every namespace without a rule of its own.
 {{/*
 The Service is named ratelimit whatever the release is called, and its gRPC
 port is 9000: both are contract constants (api/contract), the same in both
-charts and both binaries, and a CI test compares this render with the Go
+binaries, and a CI test compares this render with the Go
 constants. A satellite namespace of a composite runs no component of its own:
 its gateway filters send checks to this Service by that name, and the address
 they compute has only the baseline's namespace to go on. The operator reads
@@ -35,6 +36,66 @@ ratelimit
 
 {{- define "ratelimit.grpcPort" -}}
 9000
+{{- end -}}
+
+{{/*
+The namespace whose Service the gateway filters send checks to: this one, or
+the baseline's for a satellite.
+
+BASELINE_CONTROLLER is a hedge, not a supported topology. On this platform
+the baseline is never blue-green'd, so the platform never sets it for this
+chart and the coalesce below always resolves to BASELINE_ORIGIN. It is read
+anyway because control-plane reads it the same way, and two charts that would
+disagree about where the baseline is, should the variable ever appear, is a
+worse outcome than one line here.
+*/}}
+{{- define "ratelimit.serviceNamespace" -}}
+{{- if .Values.BASELINE_ORIGIN -}}
+{{- coalesce .Values.BASELINE_CONTROLLER .Values.BASELINE_ORIGIN -}}
+{{- else -}}
+{{- .Values.NAMESPACE -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "ratelimit.rlsCluster" -}}
+{{- printf "outbound|%s||%s" (include "ratelimit.grpcPort" .) (include "ratelimit.rlsAuthority" .) -}}
+{{- end -}}
+
+{{/*
+Envoy stat_prefix from a gateway name: dashes become underscores, so the
+filter's stats land under one clean prefix per gateway.
+*/}}
+{{- define "ratelimit.statPrefix" -}}
+{{- . | replace "-" "_" -}}
+{{- end -}}
+
+{{/*
+FQDN of the RLS Service: the :authority the gateway's gRPC calls carry, and
+the host half of the rlsCluster name.
+*/}}
+{{- define "ratelimit.rlsAuthority" -}}
+{{- printf "%s.%s.svc.cluster.local" (include "ratelimit.serviceName" .) (include "ratelimit.serviceNamespace" .) -}}
+{{- end -}}
+
+{{/*
+Fails the render when an enabled gateway has no domain, or when two enabled
+gateways share one: their filters would send the same domain and every counter
+of both gateways would merge into the same buckets.
+*/}}
+{{- define "ratelimit.validateDomains" -}}
+{{- $seen := dict -}}
+{{- range $role, $config := (dict "public" .Values.gateways.public "private" .Values.gateways.private) -}}
+{{- $config := $config | default dict -}}
+{{- if $config.enabled -}}
+{{- if not $config.domain -}}
+{{- fail (printf "gateways.%s is enabled and needs a domain" $role) -}}
+{{- end -}}
+{{- if hasKey $seen $config.domain -}}
+{{- fail (printf "gateways: %s and %s share domain %q; the counters of both gateways would merge into the same buckets" (get $seen $config.domain) $role $config.domain) -}}
+{{- end -}}
+{{- $_ := set $seen $config.domain $role -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

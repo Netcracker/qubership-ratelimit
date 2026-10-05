@@ -172,7 +172,8 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes, the engin
 # the chart reads nothing that tells them apart, and the baseline pass sets a
 # variable the chart does not read, so that the three passes the ticket asks
 # for exist by name. The satellite pass sets BASELINE_ORIGIN, which is the one
-# variable that changes the render, down to the filters alone.
+# variable that changes the render: the service chart down to the filters
+# alone, the operator chart to nothing.
 .PHONY: helm-lint
 helm-lint: ## Lint every chart against every resource profile, in every mode.
 	@for chart in $(CHART_DIRS); do \
