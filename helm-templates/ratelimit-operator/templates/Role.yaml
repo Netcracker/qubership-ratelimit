@@ -14,7 +14,7 @@ metadata:
     app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
     app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
     app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
-    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID }}'
 rules:
   # Leader election. The lease is always in the operator's own namespace and
   # keeps one writer while two pods overlap during a rollout. Three verbs are

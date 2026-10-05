@@ -9,6 +9,7 @@
     "IMAGE_REPOSITORY",
     "NAMESPACE",
     "TAG",
+    "DEPLOYMENT_SESSION_ID",
     "redis",
     "filter",
     "ISTIO_PUBLIC_GATEWAY_NAME",
@@ -77,11 +78,11 @@
       "type": "string",
       "title": "The DEPLOYMENT_SESSION_ID schema",
       "description": "Unique identifier of deployment session used to track e2e deploy activity",
-      "default": "",
       "examples": [
         "516736bf-d4b7-4900-beab-9599573ac8a8"
       ],
-      "internal": true
+      "internal": true,
+      "minLength": 1
     },
     "PAAS_PLATFORM": {
       "$id": "#/properties/PAAS_PLATFORM",

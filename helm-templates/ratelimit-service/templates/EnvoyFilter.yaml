@@ -26,7 +26,7 @@ metadata:
     app.kubernetes.io/name: '{{ $root.Values.SERVICE_NAME }}'
     app.kubernetes.io/part-of: '{{ $root.Values.APPLICATION_NAME }}'
     app.kubernetes.io/managed-by: '{{ $root.Values.MANAGED_BY }}'
-    deployment.netcracker.com/sessionId: '{{ $root.Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
+    deployment.netcracker.com/sessionId: '{{ $root.Values.DEPLOYMENT_SESSION_ID }}'
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io

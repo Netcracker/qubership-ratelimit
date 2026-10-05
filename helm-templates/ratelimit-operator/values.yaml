@@ -1,7 +1,8 @@
 # ============== PLATFORM ============================
 # The parameters the platform sets on every one of its services, read the way
 # its other services read them. The defaults are for an installation without
-# them, except NAMESPACE and TAG, which every installation sets.
+# them, except NAMESPACE, TAG, and DEPLOYMENT_SESSION_ID, which every
+# installation sets.
 #
 # The name of the Deployment, the ServiceAccount and the RBAC pair, and the
 # app.kubernetes.io/name and name labels. The service chart's Service keeps
@@ -18,7 +19,8 @@ IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-operator
 TAG: ""
 # Labels: app.kubernetes.io/part-of, app.kubernetes.io/managed-by,
 # app.kubernetes.io/version (empty renders an empty label), and
-# deployment.netcracker.com/sessionId (empty is unimplemented).
+# deployment.netcracker.com/sessionId (required, with no default: the platform
+# sets it to the deployment session).
 APPLICATION_NAME: ratelimit
 MANAGED_BY: Helm
 ARTIFACT_DESCRIPTOR_VERSION: ""

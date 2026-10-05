@@ -131,7 +131,8 @@ only the keys its templates read:
 | `NAMESPACE` | both | the namespace every object lands in, as on the platform's other services; required, and the schema refuses an empty one. The pods read their namespace back through the Downward API, so the installation's scope, the counter key prefix, and the DBaaS classifier follow it |
 | `IMAGE_REPOSITORY`, `TAG` | both | the image; `TAG` is required, and the schema refuses an empty one |
 | `LOG_LEVEL` | both | the root level of the platform logger, passed as `LOGGING_LEVEL_ROOT` in lower case |
-| `APPLICATION_NAME`, `MANAGED_BY`, `ARTIFACT_DESCRIPTOR_VERSION`, `DEPLOYMENT_SESSION_ID` | both | `app.kubernetes.io/part-of` and `managed-by` on every object (`MANAGED_BY` is `Helm` in `values.yaml`, and empty renders empty); `version` on the Deployment and its pods (empty renders empty); `deployment.netcracker.com/sessionId` on every object but the pods |
+| `APPLICATION_NAME`, `MANAGED_BY`, `ARTIFACT_DESCRIPTOR_VERSION` | both | `app.kubernetes.io/part-of` and `managed-by` on every object but the CRD (`MANAGED_BY` is `Helm` in `values.yaml`, and empty renders empty); `version` on the Deployment and its pods (empty renders empty) |
+| `DEPLOYMENT_SESSION_ID` | both | `deployment.netcracker.com/sessionId` on every object but the pods and the CRD; required, and the schema refuses an empty one |
 | `PAAS_PLATFORM`, `READONLY_CONTAINER_FILE_SYSTEM_ENABLED` | both | on `KUBERNETES` the container runs as group 10001 and, with the flag set (the default), on a read-only root filesystem; on `OPENSHIFT` the platform assigns both and the root filesystem is writable |
 | `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; unset and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`, `recreate` and `best_effort_controlled_rollout` stop the old pods first, which leaves the gateways without an RLS endpoint during a service rollout |
 | `LIVENESS_PROBE_INITIAL_DELAY_SECONDS` | both | the delay before the first liveness probe, 15 by default |
@@ -148,9 +149,11 @@ fails with a clear error instead of rendering a Deployment with empty resources.
 cannot drift apart from the profiles because there are no defaults. `GOMEMLIMIT` is derived from `MEMORY_LIMIT`
 automatically (the memlimit import in the binaries), so the limit governs the Go heap, not only the cgroup ceiling.
 
-`NAMESPACE` and `TAG` are required in both schemas as well, and the platform passes both. A manual install passes
-`--set NAMESPACE=<namespace>` with the same namespace as `-n`, and `--set TAG=<tag>`. An install that leaves either
-one empty fails with `at '/NAMESPACE': minLength: got 0, want 1`, or the same line for `/TAG`.
+`NAMESPACE`, `TAG`, and `DEPLOYMENT_SESSION_ID` are required in both schemas as well, and the platform passes all three.
+A manual install passes `--set NAMESPACE=<namespace>` with the same namespace as `-n`, `--set TAG=<tag>`, and
+`--set-string DEPLOYMENT_SESSION_ID=<session>`; with `--set`, a numeric session becomes a number, and the schema refuses
+it with `at '/DEPLOYMENT_SESSION_ID': got number, want string`. An install that leaves any of them empty fails with
+`at '/NAMESPACE': minLength: got 0, want 1`, or the same line for the parameter it left out.
 
 ## Values reference
 
@@ -165,9 +168,9 @@ NAMESPACE: ""                         # every template; required, the schema ref
 IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-operator   # Deployment.yaml
 TAG: ""                              # required, the schema refuses it empty; do not use floating tags
 APPLICATION_NAME: ratelimit          # every template's labels; an empty ARTIFACT_DESCRIPTOR_VERSION
-MANAGED_BY: Helm                     #   renders an empty version label, and an empty
-ARTIFACT_DESCRIPTOR_VERSION: ""      #   DEPLOYMENT_SESSION_ID is unimplemented
-DEPLOYMENT_SESSION_ID: ""
+MANAGED_BY: Helm                     #   renders an empty version label
+ARTIFACT_DESCRIPTOR_VERSION: ""
+DEPLOYMENT_SESSION_ID: ""            # required, the schema refuses it empty
 PAAS_PLATFORM: KUBERNETES            # Deployment.yaml: the container's security context
 READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
 LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15   # Deployment.yaml; DEPLOYMENT_STRATEGY_TYPE is not set here:
@@ -209,7 +212,7 @@ TAG: ""                              # required, the schema refuses it empty; do
 APPLICATION_NAME: ratelimit          # every template's labels, as in the operator chart
 MANAGED_BY: Helm
 ARTIFACT_DESCRIPTOR_VERSION: ""
-DEPLOYMENT_SESSION_ID: ""
+DEPLOYMENT_SESSION_ID: ""            # required, the schema refuses it empty
 PAAS_PLATFORM: KUBERNETES            # Deployment.yaml: the container's security context
 READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
 LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15   # Deployment.yaml; DEPLOYMENT_STRATEGY_TYPE is not set here: recreate
@@ -340,7 +343,7 @@ the cluster. Key points:
 - `filter.timeout` is a protobuf duration (`^[0-9]+(\.[0-9]+)?s$`): Envoy rejects Go forms like `50ms`;
 - `filter.rateLimitedStatus` is 400..599 (Envoy ignores anything below 400); `runtime.*Percent` is 0..100;
 - the profile's resource parameters are required in both charts (see above);
-- `NAMESPACE` and `TAG` are required and non-empty in both charts (see above);
+- `NAMESPACE`, `TAG`, and `DEPLOYMENT_SESSION_ID` are required and non-empty in both charts (see above);
 - every `alerts.*` duration is a positive Prometheus duration (`^[1-9][0-9]*(ms|s|m|h|d|w|y)$`) and
   `alerts.latencyBudgetSeconds` is a number above zero: a zero duration renders `[0m]` or `for: 0m`, which Prometheus
   refuses to load, taking the chart's other rules with it, and a budget at or below zero renders a comparison every
@@ -632,9 +635,10 @@ including `Propagating` while the kubelet projects an update and `Ready: Unknown
 ## Installation and upgrade
 
 `helm upgrade --install <release> <chart> -f resource-profiles/<profile>.yaml --set NAMESPACE=<namespace>
---set TAG=<tag> …` is idempotent for either chart; the profile, `NAMESPACE`, and `TAG` are mandatory (the schema); the
-set of rendered objects is derived from `BASELINE_ORIGIN`; both charts go into one namespace. An upgrade installs the
-service chart before the operator chart, and a rollback reverses the order.
+--set TAG=<tag> --set-string DEPLOYMENT_SESSION_ID=<session> …` is idempotent for either chart; the profile,
+`NAMESPACE`, `TAG`, and `DEPLOYMENT_SESSION_ID` are mandatory (the schema); the set of rendered objects is derived from
+`BASELINE_ORIGIN`; both charts go into one namespace. An upgrade installs the service chart before the operator chart,
+and a rollback reverses the order.
 The service reads the current and the previous manifest format version, and the operator writes the current one. In
 that order the service reads what the operator writes at either end of the pair's rollout. A fresh installation needs
 no order: the service waits NotReady until the operator writes; the e2e workflow installs the operator first. The CRD
