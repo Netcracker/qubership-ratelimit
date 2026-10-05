@@ -13,7 +13,7 @@ metadata:
     app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
     app.kubernetes.io/component: 'rls'
     app.kubernetes.io/technology: 'go'
-    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID }}'
 spec:
   # With HPA_ENABLED the autoscaler owns the count, and the field is left out:
   # a rendered count would conflict with the autoscaler's under server-side

@@ -13,7 +13,7 @@ metadata:
     app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
     app.kubernetes.io/component: 'operator'
     app.kubernetes.io/technology: 'go'
-    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID | default "unimplemented" }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID }}'
 spec:
   # REPLICAS from the resource profile: 2 in dev-ha and prod, 1 in the
   # others. Only the pod that holds the Lease reconciles, writes the policy
