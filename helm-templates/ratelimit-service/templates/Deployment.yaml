@@ -62,7 +62,7 @@ spec:
         app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
         app.kubernetes.io/technology: 'go'
     spec:
-      serviceAccountName: '{{ .Values.serviceAccount.name | default .Values.SERVICE_NAME }}'
+      serviceAccountName: '{{ .Values.SERVICE_NAME }}'
       # The process that parses tokens from the internet reaches no API
       # server object: no Role, and no token in the pod to try one with. What
       # it knows of the cluster is the mounted directory below and the

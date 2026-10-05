@@ -336,20 +336,6 @@
       "default": "private-gateway",
       "internal": true
     },
-    "serviceAccount": {
-      "type": "object",
-      "properties": {
-        "create": {
-          "type": "boolean",
-          "default": true
-        },
-        "name": {
-          "type": "string",
-          "description": "Defaults to SERVICE_NAME when empty."
-        }
-      },
-      "additionalProperties": false
-    },
     "CLOUD_TOPOLOGY_KEY": {
       "$id": "#/properties/CLOUD_TOPOLOGY_KEY",
       "type": "string",

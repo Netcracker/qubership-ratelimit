@@ -15,6 +15,6 @@ roleRef:
   name: '{{ .Values.SERVICE_NAME }}'
 subjects:
   - kind: ServiceAccount
-    name: '{{ .Values.serviceAccount.name | default .Values.SERVICE_NAME }}'
+    name: '{{ .Values.SERVICE_NAME }}'
     namespace: '{{ .Values.NAMESPACE }}'
 {{- end }}
