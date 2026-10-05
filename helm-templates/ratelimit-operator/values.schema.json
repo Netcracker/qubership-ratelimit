@@ -352,16 +352,6 @@
         "baseline-origin"
       ]
     },
-    "BASELINE_CONTROLLER": {
-      "$id": "#/properties/BASELINE_CONTROLLER",
-      "type": "string",
-      "title": "The BASELINE_CONTROLLER schema",
-      "description": "Baseline Blue-Green Controller namespace name",
-      "default": "",
-      "examples": [
-        "baseline-controller"
-      ]
-    },
     "image": {
       "description": "Removed: the image is IMAGE_REPOSITORY and TAG.",
       "not": {}

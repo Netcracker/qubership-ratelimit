@@ -118,15 +118,12 @@ alerts:
   noLeaderFor: 5m
 
 # ============== COMPOSITE ============================
-# The platform's composite variables, the same ones core-operator and the
-# service chart render by. Both empty is a standalone installation or the
-# baseline of a composite: the whole chart renders. BASELINE_ORIGIN set is a
-# satellite: this chart renders nothing, because a satellite runs no operator
-# and its gateway filters come from the service chart. BASELINE_CONTROLLER is
-# declared for parity with control-plane and the service chart; no template of
-# this chart reads it.
+# The platform's composite variable, the same one core-operator and the service
+# chart render by. Empty is a standalone installation or the baseline of a
+# composite: the whole chart renders. Set is a satellite: this chart renders
+# nothing, because a satellite runs no operator and its gateway filters come
+# from the service chart.
 BASELINE_ORIGIN: ""
-BASELINE_CONTROLLER: ""
 
 # ============== KUBERNETES ============================
 # The node label the pods spread over: one topology spread constraint,

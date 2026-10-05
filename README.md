@@ -269,16 +269,17 @@ A business application is installed either into one namespace or as a composite:
 satellites, each with its own gateway. Every gateway of the composite sends the same domains, the component runs in the
 baseline alone, and a satellite gets the gateway filters and nothing else.
 
-Both charts read the platform's composite variables, the same ones `core-operator` renders by:
+Both charts read `BASELINE_ORIGIN`, the platform's composite variable that `core-operator` renders by:
 
 | `BASELINE_ORIGIN` | Operator chart renders | Service chart renders          | Filters send checks to             |
 |-------------------|------------------------|--------------------------------|------------------------------------|
 | empty             | everything             | everything                     | `ratelimit.<own namespace>:9000`   |
 | set               | nothing                | the `EnvoyFilter` objects only | `ratelimit.<BASELINE_ORIGIN>:9000` |
 
-`BASELINE_CONTROLLER` is read for parity with `control-plane`, which resolves the baseline the same way, and takes
-precedence over `BASELINE_ORIGIN` as the target namespace when set. On this platform the baseline is never blue-green'd,
-so the platform leaves it empty. The e2e workflow and the local install above run in the first row.
+The service chart also reads `BASELINE_CONTROLLER`, for parity with `control-plane`, which resolves the baseline the
+same way; when set in a satellite, it takes precedence over `BASELINE_ORIGIN` as the target namespace. On this platform
+the baseline is never blue-green'd, so the platform leaves it empty. The e2e workflow and the local install above run in
+the first row.
 
 The gateway names are not the service chart's to choose. They are deployment parameters shared with
 `qubership-core-mesh-config`, the chart that creates the `Gateway` objects, and the platform injects the same set into

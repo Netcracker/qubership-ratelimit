@@ -125,7 +125,7 @@ only the keys its templates read:
 | `ISTIO_PUBLIC_GATEWAY_NAME` | the service chart | the name of the public Gateway object the filter targets; it must match the parameters of qubership-core-mesh-config, which creates the Gateways |
 | `ISTIO_PRIVATE_GATEWAY_NAME` | the service chart | the name of the private Gateway object: the filter target, and the default principal of the management AuthorizationPolicy; it must match qubership-core-mesh-config the same way |
 | `BASELINE_ORIGIN` | both | the baseline namespace, set only in a satellite; empty renders the whole stack of each chart, non-empty renders only the service chart's filters, targeting `ratelimit.<BASELINE_ORIGIN>.svc:9000`, and nothing from the operator chart; the release's own namespace fails both renders with `BASELINE_ORIGIN "<ns>" is this release's own namespace` |
-| `BASELINE_CONTROLLER` | the service chart; the operator chart declares it for parity and reads nothing from it | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the service chart; on this platform the baseline is never blue-green'd, so it stays empty |
+| `BASELINE_CONTROLLER` | the service chart | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the service chart; on this platform the baseline is never blue-green'd, so it stays empty |
 | `CLOUD_TOPOLOGY_KEY` | both | the node label each Deployment spreads its pods over, `kubernetes.io/hostname` by default: one topology spread constraint with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`, selecting the Deployment's own pods |
 | `SERVICE_NAME` | both | the name of each chart's Deployment and ServiceAccount (and the operator's RBAC pair), its `app.kubernetes.io/name` and `name` labels, and in the service chart the DBaaS classifier's `microserviceName`; `ratelimit-operator` and `ratelimit-service` by default; the Service stays `ratelimit`; a DNS label of at most 63 characters, which the schema checks |
 | `NAMESPACE` | both | the namespace every object lands in, as on the platform's other services; required, and the schema refuses an empty one. The pods read their namespace back through the Downward API, so the installation's scope, the counter key prefix, and the DBaaS classifier follow it |
@@ -190,10 +190,9 @@ alerts:                              # PrometheusRule.yaml: the rules over the p
   configWriteErrorsWindow: 15m       # RatelimitConfigWriteErrors: any write error in the window fires
   noLeaderFor: 5m                    # RatelimitNoOperatorLeader: past the Lease's own handover
 
-BASELINE_ORIGIN: ""                  # _helpers.tpl (mode): the platform's composite variables, see "Platform
-BASELINE_CONTROLLER: ""              #   parameters": BASELINE_ORIGIN empty = the whole stack (single namespace or
-                                     #   baseline), set = an empty release; BASELINE_CONTROLLER changes no object
-                                     #   of this chart
+BASELINE_ORIGIN: ""                  # _helpers.tpl (mode): the platform's composite variable, see "Platform
+                                     #   parameters": empty = the whole stack (single namespace or baseline),
+                                     #   set = an empty release
 
 CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname   # Deployment.yaml: topologySpreadConstraints, maxSkew 1, ScheduleAnyway;
                                      #   CLOUD_TOPOLOGIES, the platform parameter, replaces it with one constraint
