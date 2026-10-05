@@ -289,7 +289,7 @@ jobs:
           set -o pipefail
           for chart in ratelimit-service; do
             rendered=$(helm template t helm-templates/$chart -n satellite \
-              --set NAMESPACE=satellite --set TAG=ci \
+              --set NAMESPACE=satellite --set TAG=ci --set DEPLOYMENT_SESSION_ID=ci \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set MONITORING_ENABLED=true --set management.enabled=true \
               --set BASELINE_ORIGIN=baseline)
@@ -301,14 +301,14 @@ jobs:
             # A blue-green baseline runs its shared components in the controller
             # namespace, and that is where the filters must point.
             helm template t helm-templates/$chart -n satellite \
-              --set NAMESPACE=satellite --set TAG=ci \
+              --set NAMESPACE=satellite --set TAG=ci --set DEPLOYMENT_SESSION_ID=ci \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set BASELINE_ORIGIN=baseline --set BASELINE_CONTROLLER=baseline-ctl \
               | grep -q 'ratelimit\.baseline-ctl\.svc\.cluster\.local' || {
               echo "::error::the satellite filters of $chart ignore BASELINE_CONTROLLER"; exit 1; }
           done
           rendered=$(helm template t helm-templates/ratelimit-operator -n satellite \
-            --set NAMESPACE=satellite --set TAG=ci \
+            --set NAMESPACE=satellite --set TAG=ci --set DEPLOYMENT_SESSION_ID=ci \
             -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
             --set MONITORING_ENABLED=true \
             --set BASELINE_ORIGIN=baseline)
@@ -325,7 +325,8 @@ jobs:
           for chart in ratelimit-service; do
             manifests=$(helm template t helm-templates/$chart \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
-              --set NAMESPACE=ci --set TAG=ci --set management.enabled=true)
+              --set NAMESPACE=ci --set TAG=ci --set DEPLOYMENT_SESSION_ID=ci \
+              --set management.enabled=true)
             echo "$manifests" | grep -q 'management-bind-address' || {
               echo "::error::management.enabled did not render the port in $chart"; exit 1; }
             echo "$manifests" | grep -q 'kind: AuthorizationPolicy' || {
@@ -347,6 +348,7 @@ jobs:
             render() {
               helm template t helm-templates/$chart \
                 -f helm-templates/$chart/resource-profiles/dev.yaml --set NAMESPACE=ci --set TAG=ci \
+                --set DEPLOYMENT_SESSION_ID=ci \
                 "${identity[@]}" "$@"
             }
             for mode in single baseline; do

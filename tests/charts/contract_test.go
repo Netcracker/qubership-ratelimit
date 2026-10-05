@@ -31,6 +31,9 @@ const (
 	// imageTag is the TAG of every render unless a --set in its arguments
 	// overrides it.
 	imageTag = "test"
+	// deploymentSession is the DEPLOYMENT_SESSION_ID of every render unless a
+	// --set in its arguments overrides it.
+	deploymentSession = "test-session"
 
 	envoyFilterKind = "EnvoyFilter"
 )
@@ -84,10 +87,11 @@ func (n node) num() float64 {
 
 // render runs helm template on a chart with the dev profile and the given
 // extra arguments, and parses every document it produced. NAMESPACE is the
-// release namespace and TAG is imageTag unless a --set in the extra arguments
-// overrides them; a values file there cannot, because helm applies every --set
-// after the files. The platform sets both on every installation, and both
-// schemas require them.
+// release namespace, TAG is imageTag, and DEPLOYMENT_SESSION_ID is
+// deploymentSession unless a --set in the extra arguments overrides them; a
+// values file there cannot, because helm applies every --set after the files.
+// The platform sets all three on every installation, and both schemas require
+// them.
 func render(t *testing.T, chart, namespace string, extra ...string) []object {
 	t.Helper()
 	out, err := renderErr(chart, namespace, extra...)
@@ -110,12 +114,14 @@ func render(t *testing.T, chart, namespace string, extra ...string) []object {
 // renderErr is render without the expectation that it succeeds: the schema
 // tests assert that a value is refused, and a refusal is helm's exit code.
 func renderErr(chart, namespace string, extra ...string) ([]byte, error) {
-	platform := []string{"--set", "NAMESPACE=" + namespace, "--set", "TAG=" + imageTag}
+	platform := []string{"--set", "NAMESPACE=" + namespace, "--set", "TAG=" + imageTag,
+		"--set", "DEPLOYMENT_SESSION_ID=" + deploymentSession}
 	return helmTemplate(chart, namespace, append(platform, extra...)...)
 }
 
-// helmTemplate is renderErr without NAMESPACE and TAG, for the tests of what
-// the schemas do with an installation that leaves them out.
+// helmTemplate is renderErr without the platform parameters renderErr sets,
+// for the tests of what the schemas do with an installation that leaves them
+// out.
 func helmTemplate(chart, namespace string, extra ...string) ([]byte, error) {
 	dir := filepath.Join("..", "..", "helm-templates", chart)
 	args := append([]string{"template", "t", dir, "-n", namespace,
@@ -478,7 +484,7 @@ func TestCharts_readThePlatformParameters(t *testing.T) {
 			"--set", "APPLICATION_NAME=app",
 			"--set", "MANAGED_BY=platform",
 			"--set", "ARTIFACT_DESCRIPTOR_VERSION=1.2.3-ad",
-			"--set", "DEPLOYMENT_SESSION_ID=session",
+			"--set", "DEPLOYMENT_SESSION_ID=s",
 			"--set", "LOG_LEVEL=DEBUG",
 			"--set", "DEPLOYMENT_STRATEGY_TYPE=recreate"), "Deployment")
 		assert.Equal(t, "rl", deployment.name(), chart)
@@ -486,7 +492,7 @@ func TestCharts_readThePlatformParameters(t *testing.T) {
 		assert.Equal(t, "app", labels.at("app.kubernetes.io/part-of").str2(), chart)
 		assert.Equal(t, "platform", labels.at("app.kubernetes.io/managed-by").str2(), chart)
 		assert.Equal(t, "1.2.3-ad", labels.at("app.kubernetes.io/version").str2(), chart)
-		assert.Equal(t, "session", labels.at("deployment.netcracker.com/sessionId").str2(), chart)
+		assert.Equal(t, "s", labels.at("deployment.netcracker.com/sessionId").str2(), chart)
 		assert.Nil(t, deployment.at("spec", "template", "metadata", "labels", "deployment.netcracker.com/sessionId").v,
 			"%s restarts its pods on every deployment", chart)
 		assert.Equal(t, map[string]any{"name": "rl"}, deployment.at("spec", "selector", "matchLabels").v, chart)
@@ -513,16 +519,20 @@ func TestCharts_readThePlatformParameters(t *testing.T) {
 	}
 }
 
-// Both schemas refuse an installation that leaves NAMESPACE or TAG at its
-// empty default or removes it: the namespace goes into the RLS address and the
-// policy principals, and the tag into the image reference. Each case leaves
-// one of the two out and sets the other.
-func TestCharts_refuseAnInstallationWithoutNamespaceOrTag(t *testing.T) {
+// Both schemas refuse an installation that leaves NAMESPACE, TAG, or
+// DEPLOYMENT_SESSION_ID at its empty default or removes it: the namespace goes
+// into the RLS address and the policy principals, the tag into the image
+// reference, and the session into the sessionId label of every object. Each
+// case leaves one of the three out and sets the other two.
+func TestCharts_refuseAnInstallationWithoutARequiredPlatformParameter(t *testing.T) {
 	cases := map[string]struct{ set, key string }{
-		"NAMESPACE at its default": {"TAG=1.2.3", "NAMESPACE"},
-		"NAMESPACE removed":        {"TAG=1.2.3,NAMESPACE=null", "NAMESPACE"},
-		"TAG at its default":       {"NAMESPACE=biz", "TAG"},
-		"TAG removed":              {"NAMESPACE=biz,TAG=null", "TAG"},
+		"NAMESPACE at its default":             {"TAG=1.2.3,DEPLOYMENT_SESSION_ID=s1", "NAMESPACE"},
+		"NAMESPACE removed":                    {"TAG=1.2.3,DEPLOYMENT_SESSION_ID=s1,NAMESPACE=null", "NAMESPACE"},
+		"TAG at its default":                   {"NAMESPACE=biz,DEPLOYMENT_SESSION_ID=s1", "TAG"},
+		"TAG removed":                          {"NAMESPACE=biz,DEPLOYMENT_SESSION_ID=s1,TAG=null", "TAG"},
+		"DEPLOYMENT_SESSION_ID at its default": {"NAMESPACE=biz,TAG=1.2.3", "DEPLOYMENT_SESSION_ID"},
+		"DEPLOYMENT_SESSION_ID removed": {
+			"NAMESPACE=biz,TAG=1.2.3,DEPLOYMENT_SESSION_ID=null", "DEPLOYMENT_SESSION_ID"},
 	}
 	for _, chart := range []string{operatorChart, serviceChart} {
 		for name, c := range cases {

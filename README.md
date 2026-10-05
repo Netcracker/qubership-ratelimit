@@ -174,16 +174,19 @@ helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
   --set NAMESPACE=<business-namespace> \
+  --set-string DEPLOYMENT_SESSION_ID=<session> \
   --set TAG=<tag>
 helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
   --set NAMESPACE=<business-namespace> \
+  --set-string DEPLOYMENT_SESSION_ID=<session> \
   --set TAG=<tag>
 ```
 
-`NAMESPACE` repeats the `--namespace` value, because the charts read the namespace from it alone. Both schemas refuse
-an install that leaves `NAMESPACE` or `TAG` empty.
+`NAMESPACE` repeats the `--namespace` value, because the charts read the namespace from it alone. Both schemas refuse an
+install that leaves `NAMESPACE`, `DEPLOYMENT_SESSION_ID`, or `TAG` empty. The platform sets `DEPLOYMENT_SESSION_ID` to
+the deployment session; a manual install passes any valid label value, such as `manual`.
 
 The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`, `dev-ha`,
 `prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT`, and,
