@@ -20,6 +20,12 @@ import (
 // before the listener is closed the hard way.
 const DefaultDrainTimeout = 10 * time.Second
 
+// maxCheckBytes bounds one received check. A gateway's check carries the
+// path, the method, the Authorization header, and a request id, bounded by
+// Envoy's header limit of 60 KiB by default; gRPC's own default of 4 MiB would
+// let a direct caller send a counter key of megabytes.
+const maxCheckBytes = 128 << 10
+
 // Runner serves the RLS gRPC endpoint on its own listener until its context
 // ends.
 type Runner struct {
@@ -55,7 +61,7 @@ func (r *Runner) Start(ctx context.Context) error {
 		return fmt.Errorf("listen on %s: %w", r.Addr, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.MaxRecvMsgSize(maxCheckBytes))
 	envoyratelimit.RegisterRateLimitServiceServer(grpcServer, r.Server)
 
 	healthServer := health.NewServer()

@@ -24,6 +24,7 @@ import (
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
+	"github.com/netcracker/qubership-ratelimit/engine/identity"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 	counters "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
@@ -993,4 +994,57 @@ func TestShouldRateLimit_decidesTheDescriptorBesideAnExemptOne(t *testing.T) {
 
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check(), "the first check")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check(), "the second check")
+}
+
+// The bound on a check's cost covers the check as a whole: spreading the
+// largest cost over several descriptors does not multiply it. A request-level
+// hits_addend past the bound is refused the same way.
+func TestShouldRateLimit_theCostBoundCoversTheWholeCheck(t *testing.T) {
+	const domain = "gateway.public"
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
+		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
+			Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
+	log, logged := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	split := requestWith(map[string]string{"path": "/a"}, map[string]string{"path": "/b"})
+	split.Descriptors[0].HitsAddend = wrapperspb.UInt64(600_000_000)
+	split.Descriptors[1].HitsAddend = wrapperspb.UInt64(600_000_000)
+	resp, err := server.ShouldRateLimit(context.Background(), split)
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, logged(), "a total cost of 1200000000, over the limit of 1000000000")
+
+	wide := requestWith(map[string]string{"path": "/a"})
+	wide.HitsAddend = 2_000_000_000
+	resp, err = server.ShouldRateLimit(context.Background(), wide)
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, logged(), "a total cost of 2000000000")
+
+	resp, err = server.ShouldRateLimit(context.Background(),
+		requestWith(map[string]string{"path": "/a"}, map[string]string{"path": "/b"}))
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "two checks of cost one were refused")
+}
+
+// A descriptor identity value takes the bounds a value read from a token
+// takes: one longer than identity.MaxValueBytes, or past identity.MaxArrayItems
+// values of one key, is absent. Without them a direct caller chooses the length
+// of a counter key.
+func TestEngineRequests_boundsADescriptorsIdentityValues(t *testing.T) {
+	req := requestWith(map[string]string{"client": strings.Repeat("x", identity.MaxValueBytes+1), "plan": "gold"})
+	keys := engineRequests(req)[0].Keys
+	assert.NotContains(t, keys, "client", "a value past the bound became a counter key")
+	assert.Equal(t, []string{"gold"}, keys["plan"])
+
+	descriptor := &envoycommon.RateLimitDescriptor{}
+	for i := range identity.MaxArrayItems + 5 {
+		descriptor.Entries = append(descriptor.Entries,
+			&envoycommon.RateLimitDescriptor_Entry{Key: "roles", Value: fmt.Sprintf("role-%d", i)})
+	}
+	keys = engineRequests(&envoyratelimit.RateLimitRequest{Domain: "d",
+		Descriptors: []*envoycommon.RateLimitDescriptor{descriptor}})[0].Keys
+	assert.Len(t, keys["roles"], identity.MaxArrayItems)
 }

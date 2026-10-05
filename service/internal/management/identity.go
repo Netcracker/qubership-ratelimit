@@ -61,18 +61,24 @@ var DefaultClaimNames = ClaimNames{Subject: "sub", Roles: "roles"}
 // ratelimit-operator gets 403 on every call with nothing in the service able to
 // change it.
 //
-// Empty lists keep the canonical names, which is what a deployment that already
-// issues them wants. A role held on neither list is dropped rather than passed
-// through: authorizing against a name nobody configured is how a role from
-// another system becomes a grant here.
+// The zero mapping keeps the canonical names, which is what a deployment that
+// already issues them wants. A role held on neither list is dropped rather than
+// passed through: authorizing against a name nobody configured is how a role
+// from another system becomes a grant here.
 type RoleMapping struct {
 	Viewer   []string
 	Operator []string
+
+	// Explicit says the lists are the whole mapping, as configuration set them:
+	// an empty list maps nothing onto its role, so a deployment that leaves
+	// operator empty grants no mutation. Without it, two empty lists pass the
+	// canonical names through.
+	Explicit bool
 }
 
 // canonical maps the roles a token carries onto the ones this API knows.
 func (m RoleMapping) canonical(issued []string) []string {
-	if len(m.Viewer) == 0 && len(m.Operator) == 0 {
+	if !m.Explicit && len(m.Viewer) == 0 && len(m.Operator) == 0 {
 		return issued
 	}
 	var out []string

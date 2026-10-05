@@ -47,6 +47,10 @@ func (a *API) handleBulkReset(c *fiber.Ctx) error {
 	if apiErr != nil {
 		return apiErr
 	}
+	if apiErr := unnormalized(snapshot, command.Selector.Axes,
+		func(string) string { return fieldSelectorAxes }); apiErr != nil {
+		return apiErr
+	}
 
 	ctx := c.UserContext()
 	subject := subjectOf(c)

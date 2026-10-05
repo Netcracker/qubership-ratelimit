@@ -93,8 +93,10 @@ func TestAudit_cannotBeForgedThroughAnAxisValue(t *testing.T) {
 	log := &recordingLogger{}
 	h.api.Log = log
 
-	planted := "crawler\nmanagement mutation subject=someone-else idempotencyKey=k domain=" + testDomain +
-		" endpoint=counters ruleId=orders/per-client axes=map[] dryRun=false outcome=reset count=9"
+	// Lower case, because the client key is lowercased and a value in another
+	// case addresses no counter; the forged line is what the test is about.
+	planted := strings.ToLower("crawler\nmanagement mutation subject=someone-else idempotencyKey=k domain=" +
+		testDomain + " endpoint=counters ruleId=orders/per-client axes=map[] dryRun=false outcome=reset count=9")
 	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {planted}}, 3)
 	require.Equal(t, http.StatusOK, h.reset(t,
 		"ruleId=orders/per-client&axis.client="+url.QueryEscape(planted), "key-1", operatorRoles()).Code)

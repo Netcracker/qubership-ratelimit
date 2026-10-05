@@ -3,6 +3,7 @@ package identity
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -192,4 +193,44 @@ func FuzzExtract(f *testing.F) {
 			}
 		}
 	})
+}
+
+// nested builds a payload claim that nests depth levels deep.
+func nested(depth int) any {
+	var v any = "x"
+	for range depth {
+		v = map[string]any{"n": v}
+	}
+	return v
+}
+
+// A payload past the shape bounds is undecodable whatever its size: the
+// bound on its size alone left the decode free to cost many times a realistic
+// token's. A string that only looks like structure counts for nothing.
+func TestShapeLimits(t *testing.T) {
+	p := plan(t)
+	ok := func(claims map[string]any) bool {
+		_, skips := Extract(p, token(t, claims))
+		return skipsOf(skips)["client"] != SkipDecodeFailed
+	}
+
+	// The payload object itself is the first level.
+	if !ok(map[string]any{"sub": "alice", "deep": nested(MaxPayloadDepth - 1)}) {
+		t.Error("a payload at the depth bound was refused")
+	}
+	if ok(map[string]any{"sub": "alice", "deep": nested(MaxPayloadDepth)}) {
+		t.Error("a payload past the depth bound was decoded")
+	}
+
+	wide := map[string]any{"sub": "alice"}
+	for i := 0; len(wide)*2-1 <= MaxPayloadSeparators; i++ {
+		wide[fmt.Sprintf("c%04d", i)] = 1
+	}
+	if ok(wide) {
+		t.Errorf("a payload of %d claims, past the separator bound, was decoded", len(wide))
+	}
+
+	if !ok(map[string]any{"sub": "alice", "note": strings.Repeat(`{[,:]}"\`, 400)}) {
+		t.Error("structure inside a string counted toward the bounds")
+	}
 }

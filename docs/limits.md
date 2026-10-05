@@ -17,6 +17,9 @@ no list needs `maxItems`.
 | **Namespace** | the compressed configuration of all domains, the ConfigMap `ratelimit-config` | ≤ 1 MiB compressed total | the Kubernetes object size limit of a ConfigMap | the operator before the write, `ConfigMapTooLarge`; last-good stays enforced |
 | **Call** | descriptors of one gRPC check | ≤ 16 | every descriptor is its own decision and its own store trip; a gateway sends one | the adapter, `too_many_descriptors` → `OVER_LIMIT` |
 | | cost of one descriptor (`hits_addend`) | ≤ 1 000 000 000, not negative | Envoy's own ceiling; the engine gives no budget back | the adapter, `invalid_cost` → `OVER_LIMIT` |
+| | cost of the whole check, summed over its descriptors | ≤ 1 000 000 000 | spreading the largest cost over descriptors would multiply it | the adapter, `invalid_cost` → `OVER_LIMIT` |
+| | size of one gRPC check | ≤ 128 KiB | a gateway's check is bounded by Envoy's 60 KiB header limit; gRPC's default of 4 MiB would let a direct caller choose a counter key of megabytes | the gRPC server, `RESOURCE_EXHAUSTED` |
+| | identity value of a descriptor, values of one key | ≤ 256 bytes, ≤ 64 values | the token's sanitary limits, applied to the direct form too | the adapter; a value past them is absent |
 | **Block** | rules, routes | unbounded | object size only | — |
 | | route methods | enum: the 8 RFC 9110 methods + `PATCH` (RFC 5789) | closed set; a method outside the enum matches only routes without `methods` | enum, `listType: set` |
 | | route path | ≤ 2048 characters | the conventional URL length limit | `maxLength` |
@@ -144,7 +147,12 @@ the rule; last-good holds the traffic.
   the domain is ≤ 63, axis values are escaped; the raw token never enters the key.
 - **Token sanitary limits** are engine constants, not configuration fields: an extracted value ≤ 256 bytes
   (`MaxValueBytes`; longer values are skipped with reason `too_long`), an array claim ≤ 64 items (`MaxArrayItems`),
-  and the token size. The token is untrusted input; the limits protect key length and store memory.
+  the token ≤ 16 KiB (`MaxTokenBytes`), and the payload's shape: nesting ≤ 8 levels (`MaxPayloadDepth`) and ≤ 1024
+  commas and colons (`MaxPayloadSeparators`), past which the token is undecodable (`decode_failed`). The token is
+  untrusted input; the size and value limits protect key length and store memory, and the shape limits the work of
+  decoding it, which the size alone left at tens of times a realistic token's.
+- **Token cache**: 10 000 extractions per domain, and an extraction over 1 KiB of keys and values is not cached, so
+  a stream of distinct tokens with large array claims holds no memory past the count.
 
 ## What is checked by what
 
@@ -157,7 +165,7 @@ the rule; last-good holds the traffic.
 | the operator before the ConfigMap write (`ConfigMapTooLarge`, last-good) | the compressed total of the namespace's domains against the 1 MiB of a ConfigMap |
 | the service before the JSON decode (a refusal on `/debug/applied`, the snapshot stays) | the decompressed size of a payload against 8 MiB |
 | the engine on the decision | the 128-bucket backstop per decision, token sanity limits |
-| the adapter on the check | at most 16 descriptors per gRPC check |
+| the adapter on the check | at most 16 descriptors and a total cost of 1 000 000 000 per gRPC check, descriptor identity values within the token's sanitary limits, at most 128 KiB per message |
 
 There is one rule: the narrowest binds, the bucket budget, the object size, or the compressed total of the namespace.
 For `All` policies it is the buckets; for large `FirstMatch` domains it is the object size under client-side apply; for

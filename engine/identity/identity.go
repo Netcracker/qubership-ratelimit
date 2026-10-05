@@ -20,6 +20,16 @@ const (
 
 	// MaxArrayItems bounds an array claim.
 	MaxArrayItems = 64
+
+	// MaxPayloadDepth bounds how deeply the payload's objects and arrays nest.
+	// A realistic token nests two or three levels (realm_access.roles,
+	// resource_access.<client>.roles); a payload past the bound is undecodable.
+	MaxPayloadDepth = 8
+
+	// MaxPayloadSeparators bounds the commas and colons of the payload, about
+	// two for each claim and one for each array item. A realistic token carries
+	// a few dozen claims; a payload past the bound is undecodable.
+	MaxPayloadSeparators = 1024
 )
 
 // SkipReason labels why a declared key extracted nothing, in the exact
@@ -95,11 +105,56 @@ func payload(token string) (map[string]any, bool) {
 			return nil, false
 		}
 	}
+	if !withinShape(raw) {
+		return nil, false
+	}
 	var claims map[string]any
 	if json.Unmarshal(raw, &claims) != nil {
 		return nil, false
 	}
 	return claims, true
+}
+
+// withinShape reports whether the payload nests no deeper than
+// MaxPayloadDepth and holds no more than MaxPayloadSeparators separators. The
+// token is unsigned input, and MaxTokenBytes bounds its size but not the work
+// json.Unmarshal does on it: a deeply nested or densely packed payload of the
+// same size costs many times a realistic one, and no cache helps when every
+// token is new. The scan is one linear pass over the bytes, far cheaper than
+// the decode it guards; it skips strings, so their content counts for nothing.
+func withinShape(raw []byte) bool {
+	depth, separators := 0, 0
+	inString, escaped := false, false
+	for _, b := range raw {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case b == '\\':
+				escaped = true
+			case b == '"':
+				inString = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > MaxPayloadDepth {
+				return false
+			}
+		case '}', ']':
+			depth--
+		case ',', ':':
+			separators++
+			if separators > MaxPayloadSeparators {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // extractKey tries the primary path, then the fallbacks, and returns the

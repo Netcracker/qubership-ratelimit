@@ -21,6 +21,28 @@ import (
 // rotation through promotion on hit. Distinct tokens minted freely by an
 // attacker churn the generations; the worst case that buys is the uncached
 // extraction cost per request, never an error.
+// maxCachedEntryBytes bounds the extracted keys and values one cache entry
+// may hold. The capacity bounds the entries, not their size, and a token can
+// carry up to identity.MaxArrayItems values of identity.MaxValueBytes each for
+// every declared key: a stream of distinct tokens with a large array claim
+// would hold the cache at its capacity times that, past a replica's memory
+// limit. A realistic extraction, a subject and a few roles, is a few hundred
+// bytes; a larger one is extracted every time instead of being cached, which
+// costs only the work the identity layer's shape bounds already cap.
+const maxCachedEntryBytes = 1 << 10
+
+// entryBytes is the size of an extraction's keys and values.
+func entryBytes(keys map[string][]string) int {
+	n := 0
+	for key, values := range keys {
+		n += len(key)
+		for _, v := range values {
+			n += len(v)
+		}
+	}
+	return n
+}
+
 type tokenCache struct {
 	mu     sync.RWMutex
 	half   int  // per-generation bound: half of the configured capacity
@@ -100,6 +122,8 @@ func (e *Engine) cachedExtract(token string) (map[string][]string, []identity.Sk
 		e.stats.misses.Add(1)
 	}
 	keys, skips := identity.Extract(e.snap.Extraction, token)
-	e.cache.store(h, cacheEntry{keys: maps.Clone(keys), skips: slices.Clone(skips)})
+	if entryBytes(keys) <= maxCachedEntryBytes {
+		e.cache.store(h, cacheEntry{keys: maps.Clone(keys), skips: slices.Clone(skips)})
+	}
 	return keys, skips
 }
