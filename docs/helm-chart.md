@@ -126,10 +126,10 @@ only the keys its templates read:
 | `BASELINE_CONTROLLER` | both | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the operator chart; on this platform the baseline is never blue-green'd, so it stays empty |
 | `CLOUD_TOPOLOGY_KEY` | both | the node label each Deployment spreads its pods over, `kubernetes.io/hostname` by default: one topology spread constraint with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`, selecting the Deployment's own pods |
 | `SERVICE_NAME` | both | the name of each chart's Deployment and ServiceAccount (and the operator's RBAC pair), its `app.kubernetes.io/name` and `name` labels, and in the service chart the DBaaS classifier's `microserviceName`; `ratelimit-operator` and `ratelimit-service` by default; the Service stays `ratelimit`; a DNS label of at most 63 characters, which the schema checks |
-| `NAMESPACE` | both | the namespace every object lands in, as on the platform's other services; empty is the release namespace. The pods read their namespace back through the Downward API, so the installation's scope, the counter key prefix, and the DBaaS classifier follow it |
-| `IMAGE_REPOSITORY`, `TAG` | both | the image; an empty `TAG` takes the chart's `appVersion` |
+| `NAMESPACE` | both | the namespace every object lands in, as on the platform's other services; required, and the schema refuses an empty one. The pods read their namespace back through the Downward API, so the installation's scope, the counter key prefix, and the DBaaS classifier follow it |
+| `IMAGE_REPOSITORY`, `TAG` | both | the image; `TAG` is required, and the schema refuses an empty one |
 | `LOG_LEVEL` | both | the root level of the platform logger, passed as `LOGGING_LEVEL_ROOT` in lower case |
-| `APPLICATION_NAME`, `MANAGED_BY`, `ARTIFACT_DESCRIPTOR_VERSION`, `DEPLOYMENT_SESSION_ID` | both | `app.kubernetes.io/part-of` and `managed-by` on every object (`MANAGED_BY` is `Helm` in `values.yaml`, and empty renders empty); `version` on the Deployment and its pods (empty is `appVersion`); `deployment.netcracker.com/sessionId` on every object but the pods |
+| `APPLICATION_NAME`, `MANAGED_BY`, `ARTIFACT_DESCRIPTOR_VERSION`, `DEPLOYMENT_SESSION_ID` | both | `app.kubernetes.io/part-of` and `managed-by` on every object (`MANAGED_BY` is `Helm` in `values.yaml`, and empty renders empty); `version` on the Deployment and its pods (empty renders empty); `deployment.netcracker.com/sessionId` on every object but the pods |
 | `PAAS_PLATFORM`, `READONLY_CONTAINER_FILE_SYSTEM_ENABLED` | both | on `KUBERNETES` the container runs as group 10001 and, with the flag set (the default), on a read-only root filesystem; on `OPENSHIFT` the platform assigns both and the root filesystem is writable |
 | `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; unset and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`, `recreate` and `best_effort_controlled_rollout` stop the old pods first, which leaves the gateways without an RLS endpoint during a service rollout |
 | `LIVENESS_PROBE_INITIAL_DELAY_SECONDS` | both | the delay before the first liveness probe, 15 by default |
@@ -146,6 +146,10 @@ fails with a clear error instead of rendering a Deployment with empty resources.
 cannot drift apart from the profiles because there are no defaults. `GOMEMLIMIT` is derived from `MEMORY_LIMIT`
 automatically (the memlimit import in the binaries), so the limit governs the Go heap, not only the cgroup ceiling.
 
+`NAMESPACE` and `TAG` are required in both schemas as well, and the platform passes both. A manual install passes
+`--set NAMESPACE=<namespace>` with the same namespace as `-n`, and `--set TAG=<tag>`. An install that leaves either
+one empty fails with `at '/NAMESPACE': minLength: got 0, want 1`, or the same line for `/TAG`.
+
 ## Values reference
 
 The full file of each chart, with comments, is the values contract; this is the map. Each key is listed with the
@@ -155,12 +159,12 @@ The operator chart, `helm-templates/ratelimit-operator/values.yaml`:
 
 ```yaml
 SERVICE_NAME: ratelimit-operator     # every template: the platform's parameters, see "Platform parameters"
-NAMESPACE: ""                         # every template: empty = the release namespace
+NAMESPACE: ""                         # every template; required, the schema refuses it empty
 IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-operator   # Deployment.yaml
-TAG: ""                              # empty = .Chart.AppVersion; do not use floating tags
-APPLICATION_NAME: ratelimit          # every template's labels; ARTIFACT_DESCRIPTOR_VERSION and
-MANAGED_BY: Helm                     #   DEPLOYMENT_SESSION_ID empty fall back to .Chart.AppVersion and
-ARTIFACT_DESCRIPTOR_VERSION: ""      #   unimplemented
+TAG: ""                              # required, the schema refuses it empty; do not use floating tags
+APPLICATION_NAME: ratelimit          # every template's labels; an empty ARTIFACT_DESCRIPTOR_VERSION
+MANAGED_BY: Helm                     #   renders an empty version label, and an empty
+ARTIFACT_DESCRIPTOR_VERSION: ""      #   DEPLOYMENT_SESSION_ID is unimplemented
 DEPLOYMENT_SESSION_ID: ""
 PAAS_PLATFORM: KUBERNETES            # Deployment.yaml: the container's security context
 READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
@@ -230,9 +234,9 @@ The service chart, `helm-templates/ratelimit-service/values.yaml`:
 
 ```yaml
 SERVICE_NAME: ratelimit-service      # every template; also the DBaaS classifier's microserviceName
-NAMESPACE: ""                         # every template: empty = the release namespace
+NAMESPACE: ""                         # every template; required, the schema refuses it empty
 IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-service    # Deployment.yaml
-TAG: ""                              # empty = .Chart.AppVersion; do not use floating tags
+TAG: ""                              # required, the schema refuses it empty; do not use floating tags
 APPLICATION_NAME: ratelimit          # every template's labels, as in the operator chart
 MANAGED_BY: Helm
 ARTIFACT_DESCRIPTOR_VERSION: ""
@@ -336,6 +340,7 @@ the cluster. Key points:
 - `filter.timeout` is a protobuf duration (`^[0-9]+(\.[0-9]+)?s$`): Envoy rejects Go forms like `50ms`;
 - `filter.rateLimitedStatus` is 400..599 (Envoy ignores anything below 400); `runtime.*Percent` is 0..100;
 - the profile's resource parameters are required in both charts (see above);
+- `NAMESPACE` and `TAG` are required and non-empty in both charts (see above);
 - every `alerts.*` duration is a positive Prometheus duration (`^[1-9][0-9]*(ms|s|m|h|d|w|y)$`) and
   `alerts.latencyBudgetSeconds` is a number above zero: a zero duration renders `[0m]` or `for: 0m`, which Prometheus
   refuses to load, taking the chart's other rules with it, and a budget at or below zero renders a comparison every
@@ -366,7 +371,7 @@ The operator discovers the service replicas through the EndpointSlice of the sam
 templates write their names, namespaces, and labels inline, the way the platform's other services do: every object
 carries `app.kubernetes.io/name`, `part-of`, `managed-by`, and the deployment session; the Deployment and its pods add
 `name`, `app.kubernetes.io/instance` (the name and the namespace), the version, the component, and the technology, and
-`name: <SERVICE_NAME>` alone is the selector. The operator chart also holds `serviceNamespace`: the release namespace,
+`name: <SERVICE_NAME>` alone is the selector. The operator chart also holds `serviceNamespace`: `NAMESPACE`,
 or in a satellite `BASELINE_CONTROLLER` when set and `BASELINE_ORIGIN` otherwise; `rlsAuthority`:
 `<serviceName>.<serviceNamespace>.svc.cluster.local`; `rlsCluster`: `outbound|9000||<fqdn>`; `statPrefix`: the gateway
 name with `-` replaced by `_`; and `validateDomains`, described above. The service chart holds `dbaasNamespace`, the
@@ -504,7 +509,7 @@ incident tampers with the evidence.
 
 The counters live in a Redis database that DBaaS provisions for the release. `DatabaseClaim.yaml` renders two
 objects of dbaas-operator with the same classifier, `{microserviceName: ratelimit-service, scope: service, namespace:
-<release namespace>}` and type `redis`:
+<NAMESPACE>}` and type `redis`:
 
 - the `InternalDatabase` asks dbaas-aggregator to provision the database through the DBaaS Redis adapter. The adapter
   runs each database as a single Redis instance: a Deployment and a Service `<database>.<adapter namespace>`, no
@@ -627,9 +632,10 @@ including `Propagating` while the kubelet projects an update and `Ready: Unknown
 
 ## Installation and upgrade
 
-`helm upgrade --install <release> <chart> -f resource-profiles/<profile>.yaml …` is idempotent for either chart; the
-profile is mandatory (the schema); the set of rendered objects is derived from `BASELINE_ORIGIN`; both charts go into
-one namespace. An upgrade installs the service chart before the operator chart, and a rollback reverses the order.
+`helm upgrade --install <release> <chart> -f resource-profiles/<profile>.yaml --set NAMESPACE=<namespace>
+--set TAG=<tag> …` is idempotent for either chart; the profile, `NAMESPACE`, and `TAG` are mandatory (the schema); the
+set of rendered objects is derived from `BASELINE_ORIGIN`; both charts go into one namespace. An upgrade installs the
+service chart before the operator chart, and a rollback reverses the order.
 The service reads the current and the previous manifest format version, and the operator writes the current one. In
 that order the service reads what the operator writes at either end of the pair's rollout. A fresh installation needs
 no order: the service waits NotReady until the operator writes; the e2e workflow installs the operator first. The CRD
@@ -656,10 +662,10 @@ chart rendered nothing.
 
 ## Alerts
 
-Each chart ships its alert rules as one `PrometheusRule` in the release namespace, rendered with
+Each chart ships its alert rules as one `PrometheusRule` in `NAMESPACE`, rendered with
 `MONITORING_ENABLED` and `alerts.enabled`; a satellite renders neither. The split follows the series: the service
 chart alerts on the data plane, the operator chart on the policy status, and every expression carries
-`namespace="<release namespace>"`, so a namespace's rules judge its own pods.
+`namespace="<NAMESPACE>"`, so a namespace's rules judge its own pods.
 
 The service chart, group `ratelimit-service`:
 

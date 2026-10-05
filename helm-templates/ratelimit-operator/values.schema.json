@@ -7,6 +7,8 @@
   "required": [
     "SERVICE_NAME",
     "IMAGE_REPOSITORY",
+    "NAMESPACE",
+    "TAG",
     "filter",
     "ISTIO_PUBLIC_GATEWAY_NAME",
     "ISTIO_PRIVATE_GATEWAY_NAME",
@@ -34,8 +36,8 @@
       "type": "string",
       "title": "The NAMESPACE schema",
       "description": "The namespace it is going to be deployed.",
-      "default": "",
-      "internal": true
+      "internal": true,
+      "minLength": 1
     },
     "APPLICATION_NAME": {
       "$id": "#/properties/APPLICATION_NAME",
@@ -162,8 +164,8 @@
       "$id": "#/properties/TAG",
       "type": "string",
       "title": "The TAG schema",
-      "default": "",
-      "internal": true
+      "internal": true,
+      "minLength": 1
     },
     "LOG_LEVEL": {
       "$id": "#/properties/LOG_LEVEL",
@@ -366,7 +368,7 @@
             "namespace": {
               "type": "string",
               "title": "Gateway namespace",
-              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to the release namespace, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to NAMESPACE, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
             },
             "timeout": {
               "type": "string",
@@ -413,7 +415,7 @@
             "namespace": {
               "type": "string",
               "title": "Gateway namespace",
-              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to the release namespace, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
+              "description": "Namespace of the Gateway. The EnvoyFilter is created there, because Istio resolves targetRefs within the EnvoyFilter's own namespace. Defaults to NAMESPACE, which is where qubership-core-mesh-config puts the gateways; set it only if they live elsewhere."
             },
             "timeout": {
               "type": "string",

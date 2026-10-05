@@ -289,6 +289,7 @@ jobs:
           set -o pipefail
           for chart in ratelimit-operator; do
             rendered=$(helm template t helm-templates/$chart -n satellite \
+              --set NAMESPACE=satellite --set TAG=ci \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set MONITORING_ENABLED=true --set management.enabled=true \
               --set BASELINE_ORIGIN=baseline)
@@ -300,12 +301,14 @@ jobs:
             # A blue-green baseline runs its shared components in the controller
             # namespace, and that is where the filters must point.
             helm template t helm-templates/$chart -n satellite \
+              --set NAMESPACE=satellite --set TAG=ci \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set BASELINE_ORIGIN=baseline --set BASELINE_CONTROLLER=baseline-ctl \
               | grep -q 'ratelimit\.baseline-ctl\.svc\.cluster\.local' || {
               echo "::error::the satellite filters of $chart ignore BASELINE_CONTROLLER"; exit 1; }
           done
           rendered=$(helm template t helm-templates/ratelimit-service -n satellite \
+            --set NAMESPACE=satellite --set TAG=ci \
             -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
             --set MONITORING_ENABLED=true --set management.enabled=true \
             --set BASELINE_ORIGIN=baseline)
@@ -322,7 +325,7 @@ jobs:
           for chart in ratelimit-service; do
             manifests=$(helm template t helm-templates/$chart \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
-              --set management.enabled=true)
+              --set NAMESPACE=ci --set TAG=ci --set management.enabled=true)
             echo "$manifests" | grep -q 'management-bind-address' || {
               echo "::error::management.enabled did not render the port in $chart"; exit 1; }
             echo "$manifests" | grep -q 'kind: AuthorizationPolicy' || {
@@ -343,7 +346,8 @@ jobs:
           for chart in ratelimit-service; do
             render() {
               helm template t helm-templates/$chart \
-                -f helm-templates/$chart/resource-profiles/dev.yaml "${identity[@]}" "$@"
+                -f helm-templates/$chart/resource-profiles/dev.yaml --set NAMESPACE=ci --set TAG=ci \
+                "${identity[@]}" "$@"
             }
             for mode in single baseline; do
               extra=(); [ "$mode" = baseline ] && extra=(--set ORIGIN_NAMESPACE=baseline)
@@ -354,7 +358,7 @@ jobs:
                   echo "::error::$chart in mode $mode did not render: $want"; exit 1; }
               done
             done
-            satellite=$(render -n satellite --set BASELINE_ORIGIN=baseline)
+            satellite=$(render -n satellite --set NAMESPACE=satellite --set BASELINE_ORIGIN=baseline)
             for forbidden in 'management-bind-address' 'kind: AuthorizationPolicy' 'MANAGEMENT_'; do
               if echo "$satellite" | grep -qF -- "$forbidden"; then
                 echo "::error::a satellite of $chart rendered $forbidden"; exit 1

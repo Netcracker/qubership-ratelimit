@@ -14,7 +14,7 @@ this check, so a satellite release is empty, and the platform installs the
 same pair of charts in every namespace without a rule of its own.
 */}}
 {{- define "ratelimit.mode" -}}
-{{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN (.Values.NAMESPACE | default .Release.Namespace)) -}}
+{{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN .Values.NAMESPACE) -}}
 {{- fail (printf "BASELINE_ORIGIN %q is this release's own namespace. Leave it unset in the baseline namespace; in a satellite, set it to the baseline's namespace." .Values.BASELINE_ORIGIN) -}}
 {{- end -}}
 {{- if .Values.BASELINE_ORIGIN -}}satellite{{- else -}}baseline{{- end -}}

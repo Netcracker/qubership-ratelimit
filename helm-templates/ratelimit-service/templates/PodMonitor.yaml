@@ -4,7 +4,7 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: '{{ .Values.SERVICE_NAME }}-pod-monitor'
-  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+  namespace: '{{ .Values.NAMESPACE }}'
   labels:
     app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
     app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
@@ -20,7 +20,7 @@ spec:
       path: /metrics
   namespaceSelector:
     matchNames:
-      - '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+      - '{{ .Values.NAMESPACE }}'
   selector:
     matchLabels:
       name: '{{ .Values.SERVICE_NAME }}'

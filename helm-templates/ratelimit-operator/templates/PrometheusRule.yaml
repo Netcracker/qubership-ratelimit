@@ -1,6 +1,6 @@
 {{- /*
-The alert rules over the policy status. Every expression is scoped to the
-release namespace by the label the scrape adds, and every rule reads a series
+The alert rules over the policy status. Every expression is scoped to
+NAMESPACE by the label the scrape adds, and every rule reads a series
 the operator pod holding the Lease publishes: the data plane's series and
 their rules are the service chart's. RatelimitChecksStopped also reads the
 service's checks, because only the operator's series say which domains a
@@ -13,7 +13,7 @@ syntax passed through Helm's.
 */ -}}
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if and .Values.MONITORING_ENABLED .Values.alerts.enabled }}
-{{- $ns := .Values.NAMESPACE | default .Release.Namespace }}
+{{- $ns := .Values.NAMESPACE }}
 {{- $sel := printf "namespace=%q" $ns }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule

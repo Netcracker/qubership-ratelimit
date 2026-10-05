@@ -164,7 +164,8 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes, the engin
 # one: the profile supplies REPLICAS and the resource requests and limits, and
 # values.schema.json requires them. Linting values.yaml alone would fail, and a
 # schema loose enough to pass would let a missing profile through to a
-# Deployment with empty resources.
+# Deployment with empty resources. Every pass also sets NAMESPACE and TAG,
+# which the schema requires and the platform passes to every installation.
 #
 # Every profile is linted in each of the composite's modes. The ticket names
 # three; the chart renders two. Standalone and baseline are the same render:
@@ -183,7 +184,7 @@ helm-lint: ## Lint every chart against every resource profile, in every mode.
 				baseline) extra="--set ORIGIN_NAMESPACE=lint-ns" ;; \
 				satellite) extra="--set BASELINE_ORIGIN=lint-baseline" ;; \
 			esac; \
-			helm lint $$chart -f "$$profile" $$extra || exit 1; \
+			helm lint $$chart -f "$$profile" --set NAMESPACE=lint-ns --set TAG=lint $$extra || exit 1; \
 		done; \
 	done; \
 	done

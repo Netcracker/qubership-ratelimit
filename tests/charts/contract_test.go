@@ -28,6 +28,9 @@ import (
 const (
 	operatorChart = "ratelimit-operator"
 	serviceChart  = "ratelimit-service"
+	// imageTag is the TAG of every render unless a --set in its arguments
+	// overrides it.
+	imageTag = "test"
 )
 
 // object is one rendered manifest, read as a generic map.
@@ -78,7 +81,11 @@ func (n node) num() float64 {
 }
 
 // render runs helm template on a chart with the dev profile and the given
-// extra arguments, and parses every document it produced.
+// extra arguments, and parses every document it produced. NAMESPACE is the
+// release namespace and TAG is imageTag unless a --set in the extra arguments
+// overrides them; a values file there cannot, because helm applies every --set
+// after the files. The platform sets both on every installation, and both
+// schemas require them.
 func render(t *testing.T, chart, namespace string, extra ...string) []object {
 	t.Helper()
 	out, err := renderErr(chart, namespace, extra...)
@@ -101,6 +108,13 @@ func render(t *testing.T, chart, namespace string, extra ...string) []object {
 // renderErr is render without the expectation that it succeeds: the schema
 // tests assert that a value is refused, and a refusal is helm's exit code.
 func renderErr(chart, namespace string, extra ...string) ([]byte, error) {
+	platform := []string{"--set", "NAMESPACE=" + namespace, "--set", "TAG=" + imageTag}
+	return helmTemplate(chart, namespace, append(platform, extra...)...)
+}
+
+// helmTemplate is renderErr without NAMESPACE and TAG, for the tests of what
+// the schemas do with an installation that leaves them out.
+func helmTemplate(chart, namespace string, extra ...string) ([]byte, error) {
 	dir := filepath.Join("..", "..", "helm-templates", chart)
 	args := append([]string{"template", "t", dir, "-n", namespace,
 		"-f", filepath.Join(dir, "resource-profiles", "dev.yaml")}, extra...)
@@ -221,7 +235,7 @@ func TestServiceChart_rendersTheServiceOfTheContract(t *testing.T) {
 }
 
 // The operator chart's filters address the Service by the contract's name
-// and port, in the release namespace or in the baseline's.
+// and port, in NAMESPACE or in the baseline's.
 func TestOperatorChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
 	authority := func(namespace string) string {
 		return fmt.Sprintf("%s.%s.svc.cluster.local", contract.ServiceName, namespace)
@@ -456,23 +470,35 @@ func TestCharts_readThePlatformParameters(t *testing.T) {
 	}
 }
 
-// Without the platform parameters the chart's appVersion is the image tag
-// and the version label, and the rollout keeps every pod until its
-// replacement is Ready.
-func TestCharts_defaultToTheChartsOwnRelease(t *testing.T) {
+// Both schemas refuse an installation that leaves NAMESPACE or TAG at its
+// empty default or removes it: the namespace goes into the RLS address and the
+// policy principals, and the tag into the image reference. Each case leaves
+// one of the two out and sets the other.
+func TestCharts_refuseAnInstallationWithoutNamespaceOrTag(t *testing.T) {
+	cases := map[string]struct{ set, key string }{
+		"NAMESPACE at its default": {"TAG=1.2.3", "NAMESPACE"},
+		"NAMESPACE removed":        {"TAG=1.2.3,NAMESPACE=null", "NAMESPACE"},
+		"TAG at its default":       {"NAMESPACE=biz", "TAG"},
+		"TAG removed":              {"NAMESPACE=biz,TAG=null", "TAG"},
+	}
 	for _, chart := range []string{operatorChart, serviceChart} {
-		raw, err := os.ReadFile(filepath.Join("..", "..", "helm-templates", chart, "Chart.yaml"))
-		require.NoError(t, err)
-		var meta struct {
-			AppVersion string `json:"appVersion"`
+		for name, c := range cases {
+			out, err := helmTemplate(chart, "biz", "--set", c.set)
+			assert.Error(t, err, "%s with %s rendered", chart, name)
+			assert.Contains(t, string(out), c.key, "%s with %s", chart, name)
 		}
-		require.NoError(t, yaml.Unmarshal(raw, &meta))
-		require.NotEmpty(t, meta.AppVersion, chart)
+	}
+}
 
+// Without the optional platform parameters, the Deployment runs the chart's
+// own image from ghcr.io, carries an empty version label and Helm as its
+// manager, and rolls out keeping every pod until its replacement is Ready.
+func TestCharts_defaultTheOptionalPlatformParameters(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
 		deployment := only(t, render(t, chart, "biz"), "Deployment")
 		container := deployment.at("spec", "template", "spec", "containers").list()[0]
-		assert.Equal(t, "ghcr.io/netcracker/qubership-"+chart+":"+meta.AppVersion, container.at("image").str2(), chart)
-		assert.Equal(t, meta.AppVersion, deployment.at("metadata", "labels", "app.kubernetes.io/version").str2(), chart)
+		assert.Equal(t, "ghcr.io/netcracker/qubership-"+chart+":"+imageTag, container.at("image").str2(), chart)
+		assert.Equal(t, "", deployment.at("metadata", "labels", "app.kubernetes.io/version").v, chart)
 		assert.Equal(t, "Helm", deployment.at("metadata", "labels", "app.kubernetes.io/managed-by").str2(), chart)
 		assert.Equal(t, "RollingUpdate", deployment.at("spec", "strategy", "type").str2(), chart)
 		assert.EqualValues(t, 1, deployment.at("spec", "strategy", "rollingUpdate", "maxSurge").v, chart)

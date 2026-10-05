@@ -3,7 +3,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: '{{ .Values.SERVICE_NAME }}'
-  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+  namespace: '{{ .Values.NAMESPACE }}'
   labels:
     app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
     app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
@@ -16,5 +16,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: '{{ .Values.serviceAccount.name | default .Values.SERVICE_NAME }}'
-    namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+    namespace: '{{ .Values.NAMESPACE }}'
 {{- end }}

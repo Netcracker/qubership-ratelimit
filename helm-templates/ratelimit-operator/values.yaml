@@ -1,22 +1,23 @@
 # ============== PLATFORM ============================
 # The parameters the platform sets on every one of its services, read the way
 # its other services read them. The defaults are for an installation without
-# them.
+# them, except NAMESPACE and TAG, which every installation sets.
 #
 # The name of the Deployment, the ServiceAccount and the RBAC pair, and the
 # app.kubernetes.io/name and name labels. The service chart's Service keeps
 # its fixed name, ratelimit, whatever this is.
 SERVICE_NAME: ratelimit-operator
-# The namespace every object lands in; empty is the release namespace. The
-# platform sets it to the namespace it installs into.
+# The namespace every object lands in. Required, with no default: the platform
+# sets it to the namespace it installs into, and a manual helm install sets it
+# to the namespace it passes as -n.
 NAMESPACE: ""
-# The image. An empty TAG takes the chart's appVersion, which is a fixed
-# release. A floating tag such as "latest" moves under a running workload, so
-# two pods of one rollout can end up on different builds.
+# The image. TAG is required, with no default. A floating tag such as "latest"
+# moves under a running workload, so two pods of one rollout can end up on
+# different builds.
 IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-operator
 TAG: ""
 # Labels: app.kubernetes.io/part-of, app.kubernetes.io/managed-by,
-# app.kubernetes.io/version (empty is the chart's appVersion), and
+# app.kubernetes.io/version (empty renders an empty label), and
 # deployment.netcracker.com/sessionId (empty is unimplemented).
 APPLICATION_NAME: ratelimit
 MANAGED_BY: Helm
@@ -104,8 +105,8 @@ runtime:
 # monitoring fails the release.
 MONITORING_ENABLED: false
 
-# The alert rules over the policy status, one PrometheusRule scoped to the
-# release namespace. Every rule reads the operator's own series, the ones the
+# The alert rules over the policy status, one PrometheusRule scoped to
+# NAMESPACE. Every rule reads the operator's own series, the ones the
 # pod holding the Lease publishes; the service chart ships the rules over the
 # data plane. The durations below are the ones an installation may need to
 # move; the expressions stay in the template.
@@ -177,7 +178,7 @@ BASELINE_CONTROLLER: ""
 # match; a typo shows up only as an "unknown rate limit domain" line in the
 # service log.
 #
-# namespace is optional and defaults to the release namespace. timeout,
+# namespace is optional and defaults to NAMESPACE. timeout,
 # failClosed, rateLimitedStatus and grpcAsResourceExhausted may be set here to
 # override the filter.* defaults for one gateway; the usual case is a private
 # gateway that fails closed while the public one keeps flowing.

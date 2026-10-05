@@ -173,12 +173,17 @@ The delivery is two charts under `helm-templates/`, installed into one namespace
 helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
+  --set NAMESPACE=<business-namespace> \
   --set TAG=<tag>
 helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
+  --set NAMESPACE=<business-namespace> \
   --set TAG=<tag>
 ```
+
+`NAMESPACE` repeats the `--namespace` value, because the charts read the namespace from it alone. Both schemas refuse
+an install that leaves `NAMESPACE` or `TAG` empty.
 
 The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`, `dev-ha`,
 `prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT`, and,
@@ -213,7 +218,7 @@ way the series are: the service chart alerts on the data plane (`RatelimitUnknow
 `RatelimitConfigurationAbsent`) and the
 operator chart on the policy status and the fleet (`RatelimitStalled`, `RatelimitNotReadyLong`,
 `RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`, `RatelimitConfigWriteErrors`,
-`RatelimitNoOperatorLeader`). Every expression is scoped to the release namespace. The
+`RatelimitNoOperatorLeader`). Every expression is scoped to `NAMESPACE`. The
 thresholds and hold durations are under `alerts.*` of each chart, each with its rationale beside it in `values.yaml`;
 `alerts.enabled=false` keeps the scrape and drops the rules. `tests/charts` renders both rule sets and runs
 `promtool check rules` over them (`make promtool` fetches the binary from the Prometheus release the Makefile pins).
@@ -299,7 +304,7 @@ gateways:
     domain: gateway.private
 ```
 
-`namespace` is accepted per gateway and defaults to the release namespace. `qubership-core-mesh-config` sets no
+`namespace` is accepted per gateway and defaults to `NAMESPACE`. `qubership-core-mesh-config` sets no
 `metadata.namespace` on its Gateways, so they land in the business namespace next to this release and the default is
 right. Set it only if they move — Istio resolves `targetRefs` within the `EnvoyFilter`'s own namespace, so the filter
 has to follow the gateway.

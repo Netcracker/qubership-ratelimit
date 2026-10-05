@@ -7,6 +7,8 @@
   "required": [
     "SERVICE_NAME",
     "IMAGE_REPOSITORY",
+    "NAMESPACE",
+    "TAG",
     "redis",
     "ISTIO_PRIVATE_GATEWAY_NAME",
     "REPLICAS",
@@ -32,8 +34,8 @@
       "type": "string",
       "title": "The NAMESPACE schema",
       "description": "The namespace it is going to be deployed.",
-      "default": "",
-      "internal": true
+      "internal": true,
+      "minLength": 1
     },
     "APPLICATION_NAME": {
       "$id": "#/properties/APPLICATION_NAME",
@@ -160,8 +162,8 @@
       "$id": "#/properties/TAG",
       "type": "string",
       "title": "The TAG schema",
-      "default": "",
-      "internal": true
+      "internal": true,
+      "minLength": 1
     },
     "LOG_LEVEL": {
       "$id": "#/properties/LOG_LEVEL",
@@ -651,7 +653,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Service accounts allowed to reach the port, in the release namespace. Empty means the private gateway alone.",
+              "description": "Service accounts allowed to reach the port, in NAMESPACE. Empty means the private gateway alone.",
               "default": []
             }
           },

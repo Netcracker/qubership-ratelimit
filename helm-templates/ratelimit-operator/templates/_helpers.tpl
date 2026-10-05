@@ -24,7 +24,7 @@ disagree about where the baseline is, should the variable ever appear, is a
 worse outcome than one line here.
 */}}
 {{- define "ratelimit.mode" -}}
-{{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN (.Values.NAMESPACE | default .Release.Namespace)) -}}
+{{- if and .Values.BASELINE_ORIGIN (eq .Values.BASELINE_ORIGIN .Values.NAMESPACE) -}}
 {{- fail (printf "BASELINE_ORIGIN %q is this release's own namespace. Leave it unset in the baseline namespace; in a satellite, set it to the baseline's namespace." .Values.BASELINE_ORIGIN) -}}
 {{- end -}}
 {{- if .Values.BASELINE_ORIGIN -}}satellite{{- else -}}baseline{{- end -}}
@@ -38,7 +38,7 @@ the baseline's for a satellite.
 {{- if .Values.BASELINE_ORIGIN -}}
 {{- coalesce .Values.BASELINE_CONTROLLER .Values.BASELINE_ORIGIN -}}
 {{- else -}}
-{{- .Values.NAMESPACE | default .Release.Namespace -}}
+{{- .Values.NAMESPACE -}}
 {{- end -}}
 {{- end -}}
 
