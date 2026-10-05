@@ -28,6 +28,11 @@ import (
 const (
 	operatorChart = "ratelimit-operator"
 	serviceChart  = "ratelimit-service"
+	// imageTag is the TAG of every render unless a --set in its arguments
+	// overrides it.
+	imageTag = "test"
+
+	envoyFilterKind = "EnvoyFilter"
 )
 
 // object is one rendered manifest, read as a generic map.
@@ -78,7 +83,11 @@ func (n node) num() float64 {
 }
 
 // render runs helm template on a chart with the dev profile and the given
-// extra arguments, and parses every document it produced.
+// extra arguments, and parses every document it produced. NAMESPACE is the
+// release namespace and TAG is imageTag unless a --set in the extra arguments
+// overrides them; a values file there cannot, because helm applies every --set
+// after the files. The platform sets both on every installation, and both
+// schemas require them.
 func render(t *testing.T, chart, namespace string, extra ...string) []object {
 	t.Helper()
 	out, err := renderErr(chart, namespace, extra...)
@@ -101,6 +110,13 @@ func render(t *testing.T, chart, namespace string, extra ...string) []object {
 // renderErr is render without the expectation that it succeeds: the schema
 // tests assert that a value is refused, and a refusal is helm's exit code.
 func renderErr(chart, namespace string, extra ...string) ([]byte, error) {
+	platform := []string{"--set", "NAMESPACE=" + namespace, "--set", "TAG=" + imageTag}
+	return helmTemplate(chart, namespace, append(platform, extra...)...)
+}
+
+// helmTemplate is renderErr without NAMESPACE and TAG, for the tests of what
+// the schemas do with an installation that leaves them out.
+func helmTemplate(chart, namespace string, extra ...string) ([]byte, error) {
 	dir := filepath.Join("..", "..", "helm-templates", chart)
 	args := append([]string{"template", "t", dir, "-n", namespace,
 		"-f", filepath.Join(dir, "resource-profiles", "dev.yaml")}, extra...)
@@ -160,8 +176,8 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// The Service of the service chart: the name and the two ports the operator
-// chart's filters and the operator binary address it by.
+// The Service of the service chart: the name and the two ports the chart's
+// filters and the operator binary address it by.
 func TestServiceChart_rendersTheServiceOfTheContract(t *testing.T) {
 	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true")
 	service := only(t, objects, "Service")
@@ -220,9 +236,10 @@ func TestServiceChart_rendersTheServiceOfTheContract(t *testing.T) {
 	assert.Equal(t, false, only(t, objects, "ServiceAccount")["automountServiceAccountToken"])
 }
 
-// The operator chart's filters address the Service by the contract's name
-// and port, in the release namespace or in the baseline's.
-func TestOperatorChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
+// The service chart's filters address the Service by the contract's name
+// and port, in NAMESPACE or in the baseline's: one filter per enabled
+// gateway, named after the chart.
+func TestServiceChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
 	authority := func(namespace string) string {
 		return fmt.Sprintf("%s.%s.svc.cluster.local", contract.ServiceName, namespace)
 	}
@@ -231,58 +248,98 @@ func TestOperatorChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
 	}
 	check := func(t *testing.T, objects []object, namespace string) {
 		t.Helper()
-		var filters int
+		var names []string
 		for _, o := range objects {
-			if o.kind() != "EnvoyFilter" {
+			if o.kind() != envoyFilterKind {
 				continue
 			}
-			filters++
+			names = append(names, o.name())
+			assert.Equal(t, serviceChart, o.at("metadata", "labels", "app.kubernetes.io/name").str2(), o.name())
 			raw, err := yaml.Marshal(o)
 			require.NoError(t, err)
 			assert.Contains(t, string(raw), "authority: "+authority(namespace))
 			assert.Contains(t, string(raw), "cluster_name: "+cluster(namespace))
 		}
-		assert.Equal(t, 2, filters, "one filter per enabled gateway")
+		assert.ElementsMatch(t, []string{serviceChart + "-public-gateway", serviceChart + "-private-gateway"}, names,
+			"one filter per enabled gateway")
 	}
 
 	t.Run("baseline", func(t *testing.T) {
-		objects := render(t, operatorChart, "biz")
-		check(t, objects, "biz")
-		// The operator adopts its own Deployment by the name the chart gives it.
-		deployment := only(t, objects, "Deployment")
-		containers := deployment.at("spec", "template", "spec", "containers").list()
-		require.Len(t, containers, 1)
-		assert.Contains(t, argsOf(containers[0]), "--deployment="+deployment.name())
-		// The Role reaches one ConfigMap and one Deployment by name: create
-		// is the only verb granted on ConfigMaps in general, since RBAC
-		// cannot narrow it. Anything wider would let a compromised operator
-		// pod read or overwrite the configuration of the other applications
-		// in the namespace. There is no ClusterRole.
-		assert.NotContains(t, kinds(objects), "ClusterRole")
-		for _, rule := range only(t, objects, "Role").at("rules").list() {
-			resources := strs(rule.at("resources"))
-			verbs := strs(rule.at("verbs"))
-			names := strs(rule.at("resourceNames"))
-			switch {
-			case slices.Contains(resources, "configmaps") && len(names) == 0:
-				assert.Equal(t, []string{"create"}, verbs, "an unnamed ConfigMap rule grants create and nothing else")
-			case slices.Contains(resources, "configmaps"):
-				assert.Equal(t, []string{contract.ConfigMapName}, names)
-				assert.NotContains(t, verbs, "delete")
-				assert.NotContains(t, verbs, "patch")
-			case slices.Contains(resources, "deployments"):
-				assert.Equal(t, []string{deployment.name()}, names)
-				assert.Equal(t, []string{"get"}, verbs)
-			case slices.Contains(resources, "ratelimitpolicies/status"):
-				assert.Equal(t, []string{"update"}, verbs, "the status is written with Update, never patched")
-			}
-		}
+		check(t, render(t, serviceChart, "biz"), "biz")
 	})
 	t.Run("satellite", func(t *testing.T) {
-		objects := render(t, operatorChart, "sat", "--set", "BASELINE_ORIGIN=base", "--set", "MONITORING_ENABLED=true")
-		assert.Equal(t, []string{"EnvoyFilter"}, kinds(objects), "a satellite gets the filters and nothing else")
+		objects := render(t, serviceChart, "sat", "--set", "BASELINE_ORIGIN=base", "--set", "MONITORING_ENABLED=true",
+			"--set", "management.enabled=true")
+		assert.Equal(t, []string{envoyFilterKind}, kinds(objects), "a satellite gets the filters and nothing else")
 		check(t, objects, "base")
 	})
+}
+
+// The operator chart renders no gateway filter: a second set beside the
+// service chart's would check every request twice.
+func TestOperatorChart_rendersNoFilter(t *testing.T) {
+	assert.NotContains(t, kinds(render(t, operatorChart, "biz", "--set", "MONITORING_ENABLED=true")), envoyFilterKind)
+}
+
+// A dial of the filter, runtime.enforcedPercent, runtime.enabledPercent, or
+// filter.failClosed, changes the EnvoyFilters and no other object of the
+// release, so a brake pulled through Helm leaves the service pods running.
+func TestServiceChart_aDialChangesTheFiltersAlone(t *testing.T) {
+	split := func(objects []object) (filters, rest map[string]string) {
+		filters, rest = map[string]string{}, map[string]string{}
+		for _, o := range objects {
+			raw, err := json.Marshal(o)
+			require.NoError(t, err)
+			if o.kind() == envoyFilterKind {
+				filters[o.name()] = string(raw)
+			} else {
+				rest[o.kind()+"/"+o.name()] = string(raw)
+			}
+		}
+		return filters, rest
+	}
+	all := []string{"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true"}
+	defaultFilters, defaultRest := split(render(t, serviceChart, "biz", all...))
+	require.Len(t, defaultFilters, 2, "one filter per enabled gateway")
+	for _, dial := range []string{"runtime.enforcedPercent=0", "runtime.enabledPercent=0", "filter.failClosed=true"} {
+		filters, rest := split(render(t, serviceChart, "biz", append(all, "--set", dial)...))
+		assert.Equal(t, defaultRest, rest, "%s changed an object other than the filters", dial)
+		assert.NotEqual(t, defaultFilters, filters, "%s left the filters as they were", dial)
+	}
+}
+
+// The operator adopts its own Deployment by the name the chart gives it, and
+// its Role names that Deployment and the ConfigMap.
+func TestOperatorChart_reachesItsOwnObjectsByName(t *testing.T) {
+	objects := render(t, operatorChart, "biz")
+	deployment := only(t, objects, "Deployment")
+	containers := deployment.at("spec", "template", "spec", "containers").list()
+	require.Len(t, containers, 1)
+	assert.Contains(t, argsOf(containers[0]), "--deployment="+deployment.name())
+	// The Role reaches one ConfigMap and one Deployment by name: create
+	// is the only verb granted on ConfigMaps in general, since RBAC
+	// cannot narrow it. Anything wider would let a compromised operator
+	// pod read or overwrite the configuration of the other applications
+	// in the namespace. There is no ClusterRole.
+	assert.NotContains(t, kinds(objects), "ClusterRole")
+	for _, rule := range only(t, objects, "Role").at("rules").list() {
+		resources := strs(rule.at("resources"))
+		verbs := strs(rule.at("verbs"))
+		names := strs(rule.at("resourceNames"))
+		switch {
+		case slices.Contains(resources, "configmaps") && len(names) == 0:
+			assert.Equal(t, []string{"create"}, verbs, "an unnamed ConfigMap rule grants create and nothing else")
+		case slices.Contains(resources, "configmaps"):
+			assert.Equal(t, []string{contract.ConfigMapName}, names)
+			assert.NotContains(t, verbs, "delete")
+			assert.NotContains(t, verbs, "patch")
+		case slices.Contains(resources, "deployments"):
+			assert.Equal(t, []string{deployment.name()}, names)
+			assert.Equal(t, []string{"get"}, verbs)
+		case slices.Contains(resources, "ratelimitpolicies/status"):
+			assert.Equal(t, []string{"update"}, verbs, "the status is written with Update, never patched")
+		}
+	}
 }
 
 // A BASELINE_ORIGIN naming the release's own namespace is refused by both
@@ -385,10 +442,10 @@ func TestServiceChart_dashboardOpensOnItsOwnNamespace(t *testing.T) {
 	t.Fatal("the dashboard has no namespace variable")
 }
 
-// The service chart renders nothing in a satellite, whatever the values say.
-func TestServiceChart_rendersNothingInASatellite(t *testing.T) {
-	objects := render(t, serviceChart, "sat", "--set", "BASELINE_ORIGIN=base",
-		"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true")
+// The operator chart renders nothing in a satellite, whatever the values say:
+// a satellite runs no operator, and its filters come from the service chart.
+func TestOperatorChart_rendersNothingInASatellite(t *testing.T) {
+	objects := render(t, operatorChart, "sat", "--set", "BASELINE_ORIGIN=base", "--set", "MONITORING_ENABLED=true")
 	assert.Empty(t, objects)
 }
 
@@ -456,23 +513,35 @@ func TestCharts_readThePlatformParameters(t *testing.T) {
 	}
 }
 
-// Without the platform parameters the chart's appVersion is the image tag
-// and the version label, and the rollout keeps every pod until its
-// replacement is Ready.
-func TestCharts_defaultToTheChartsOwnRelease(t *testing.T) {
+// Both schemas refuse an installation that leaves NAMESPACE or TAG at its
+// empty default or removes it: the namespace goes into the RLS address and the
+// policy principals, and the tag into the image reference. Each case leaves
+// one of the two out and sets the other.
+func TestCharts_refuseAnInstallationWithoutNamespaceOrTag(t *testing.T) {
+	cases := map[string]struct{ set, key string }{
+		"NAMESPACE at its default": {"TAG=1.2.3", "NAMESPACE"},
+		"NAMESPACE removed":        {"TAG=1.2.3,NAMESPACE=null", "NAMESPACE"},
+		"TAG at its default":       {"NAMESPACE=biz", "TAG"},
+		"TAG removed":              {"NAMESPACE=biz,TAG=null", "TAG"},
+	}
 	for _, chart := range []string{operatorChart, serviceChart} {
-		raw, err := os.ReadFile(filepath.Join("..", "..", "helm-templates", chart, "Chart.yaml"))
-		require.NoError(t, err)
-		var meta struct {
-			AppVersion string `json:"appVersion"`
+		for name, c := range cases {
+			out, err := helmTemplate(chart, "biz", "--set", c.set)
+			assert.Error(t, err, "%s with %s rendered", chart, name)
+			assert.Contains(t, string(out), c.key, "%s with %s", chart, name)
 		}
-		require.NoError(t, yaml.Unmarshal(raw, &meta))
-		require.NotEmpty(t, meta.AppVersion, chart)
+	}
+}
 
+// Without the optional platform parameters, the Deployment runs the chart's
+// own image from ghcr.io, carries an empty version label and Helm as its
+// manager, and rolls out keeping every pod until its replacement is Ready.
+func TestCharts_defaultTheOptionalPlatformParameters(t *testing.T) {
+	for _, chart := range []string{operatorChart, serviceChart} {
 		deployment := only(t, render(t, chart, "biz"), "Deployment")
 		container := deployment.at("spec", "template", "spec", "containers").list()[0]
-		assert.Equal(t, "ghcr.io/netcracker/qubership-"+chart+":"+meta.AppVersion, container.at("image").str2(), chart)
-		assert.Equal(t, meta.AppVersion, deployment.at("metadata", "labels", "app.kubernetes.io/version").str2(), chart)
+		assert.Equal(t, "ghcr.io/netcracker/qubership-"+chart+":"+imageTag, container.at("image").str2(), chart)
+		assert.Equal(t, "", deployment.at("metadata", "labels", "app.kubernetes.io/version").v, chart)
 		assert.Equal(t, "Helm", deployment.at("metadata", "labels", "app.kubernetes.io/managed-by").str2(), chart)
 		assert.Equal(t, "RollingUpdate", deployment.at("spec", "strategy", "type").str2(), chart)
 		assert.EqualValues(t, 1, deployment.at("spec", "strategy", "rollingUpdate", "maxSurge").v, chart)

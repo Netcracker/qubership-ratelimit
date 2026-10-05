@@ -3,12 +3,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: '{{ .Values.SERVICE_NAME }}'
-  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+  namespace: '{{ .Values.NAMESPACE }}'
   labels:
     name: '{{ .Values.SERVICE_NAME }}'
     app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
-    app.kubernetes.io/instance: '{{ cat .Values.SERVICE_NAME "-" (.Values.NAMESPACE | default .Release.Namespace) | nospace | trunc 63 | trimSuffix "-" }}'
-    app.kubernetes.io/version: '{{ .Values.ARTIFACT_DESCRIPTOR_VERSION | default .Chart.AppVersion }}'
+    app.kubernetes.io/instance: '{{ cat .Values.SERVICE_NAME "-" .Values.NAMESPACE | nospace | trunc 63 | trimSuffix "-" }}'
+    app.kubernetes.io/version: '{{ .Values.ARTIFACT_DESCRIPTOR_VERSION }}'
     app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
     app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
     app.kubernetes.io/component: 'operator'
@@ -52,24 +52,20 @@ spec:
         app: '{{ .Values.SERVICE_NAME }}'
         name: '{{ .Values.SERVICE_NAME }}'
         app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
-        app.kubernetes.io/instance: '{{ cat .Values.SERVICE_NAME "-" (.Values.NAMESPACE | default .Release.Namespace) | nospace | trunc 63 | trimSuffix "-" }}'
-        app.kubernetes.io/version: '{{ .Values.ARTIFACT_DESCRIPTOR_VERSION | default .Chart.AppVersion }}'
+        app.kubernetes.io/instance: '{{ cat .Values.SERVICE_NAME "-" .Values.NAMESPACE | nospace | trunc 63 | trimSuffix "-" }}'
+        app.kubernetes.io/version: '{{ .Values.ARTIFACT_DESCRIPTOR_VERSION }}'
         app.kubernetes.io/component: 'operator'
         app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
         app.kubernetes.io/technology: 'go'
-      {{- with .Values.podAnnotations }}
-      annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
     spec:
-      serviceAccountName: '{{ .Values.serviceAccount.name | default .Values.SERVICE_NAME }}'
+      serviceAccountName: '{{ .Values.SERVICE_NAME }}'
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: operator
-          image: '{{ .Values.IMAGE_REPOSITORY }}:{{ .Values.TAG | default .Chart.AppVersion }}'
+          image: '{{ .Values.IMAGE_REPOSITORY }}:{{ .Values.TAG }}'
           imagePullPolicy: IfNotPresent
           # The base image's entrypoint runs its arguments as the command, so
           # the binary is the first argument.
@@ -103,7 +99,7 @@ spec:
             # pipeline passes no build arguments to the image, so without this
             # every manifest would say "dev".
             - name: OPERATOR_VERSION
-              value: '{{ .Values.TAG | default .Chart.AppVersion }}'
+              value: '{{ .Values.TAG }}'
           ports:
             - name: probes
               containerPort: 8081
@@ -145,18 +141,6 @@ spec:
               cpu: '{{ .Values.CPU_LIMIT }}'
               memory: '{{ .Values.MEMORY_LIMIT }}'
               ephemeral-storage: 256Mi
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       topologySpreadConstraints:
         {{- if .Values.CLOUD_TOPOLOGIES }}
         {{- range $v := .Values.CLOUD_TOPOLOGIES }}

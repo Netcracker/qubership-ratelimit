@@ -26,7 +26,7 @@ apiVersion: dbaas.netcracker.com/v1
 kind: InternalDatabase
 metadata:
   name: '{{ .Values.SERVICE_NAME }}-redis'
-  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+  namespace: '{{ .Values.NAMESPACE }}'
   labels:
     app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
     app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
@@ -37,14 +37,14 @@ spec:
   classifier:
     microserviceName: '{{ .Values.SERVICE_NAME }}'
     scope: service
-    namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+    namespace: '{{ .Values.NAMESPACE }}'
   type: redis
 ---
 apiVersion: dbaas.netcracker.com/v1
 kind: DatabaseSecretClaim
 metadata:
   name: '{{ .Values.SERVICE_NAME }}-redis'
-  namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+  namespace: '{{ .Values.NAMESPACE }}'
   labels:
     app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
     app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
@@ -55,7 +55,7 @@ spec:
   classifier:
     microserviceName: '{{ .Values.SERVICE_NAME }}'
     scope: service
-    namespace: '{{ .Values.NAMESPACE | default .Release.Namespace }}'
+    namespace: '{{ .Values.NAMESPACE }}'
   type: redis
   secretName: '{{ .Values.SERVICE_NAME }}-redis'
 {{- end }}

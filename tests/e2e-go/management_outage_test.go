@@ -67,10 +67,10 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 		// does not keep the others from running. They run in reverse order
 		// once the container ends, and a retry of the container starts from
 		// the state it found the first time.
-		release := helmRelease(operatorDeployment())
+		release := helmRelease(serviceDeployment())
 		failClosed := "gateways.private.failClosed=" + strconv.FormatBool(gatewayFailsClosed(gateway))
-		DeferCleanup(func() { helmSet(operatorChart, release, failClosed) })
-		helmSet(operatorChart, release, "gateways.private.failClosed=true")
+		DeferCleanup(func() { helmSet(serviceChart, release, failClosed) })
+		helmSet(serviceChart, release, "gateways.private.failClosed=true")
 
 		// One block without a target: every path of the gateway is under a
 		// rule that reads the store, the API's own paths included. The limit
@@ -146,13 +146,13 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 })
 
 // gatewayFailsClosed reads failure_mode_deny from the rate limit filter the
-// operator chart rendered for the gateway.
+// service chart rendered for the gateway.
 func gatewayFailsClosed(gateway string) bool {
 	filters := &unstructured.UnstructuredList{}
 	filters.SetGroupVersionKind(schema.GroupVersionKind{
 		Group: "networking.istio.io", Version: "v1alpha3", Kind: "EnvoyFilterList"})
 	Expect(k8s.List(ctx, filters, client.InNamespace(namespace),
-		client.MatchingLabels{"app.kubernetes.io/name": operatorChart})).To(Succeed())
+		client.MatchingLabels{"app.kubernetes.io/name": serviceChart})).To(Succeed())
 	for _, filter := range filters.Items {
 		refs := list(walk(filter.Object, "spec"), "targetRefs")
 		if len(refs) != 1 || str(refs[0], "name") != gateway {

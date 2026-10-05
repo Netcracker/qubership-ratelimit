@@ -22,7 +22,7 @@ ambient gateways (and any other consumers) over the Envoy RLS protocol (`envoy.s
    and reads nothing from the API server.
 4. For every request, the gateway sends the service one flat descriptor: `path`, `method`, `token` (the value of the
    `authorization` header), and `request_id`. The gateway takes the request's domain from the configuration of its
-   `envoy.filters.http.ratelimit` filter (the operator chart installs it).
+   `envoy.filters.http.ratelimit` filter (the service chart installs it).
 5. The service decodes the JWT payload from `token`, **without verifying the signature**: the `jwt_authn` filter on
    the gateway has already verified it. Identity keys are assembled from the claims: the built-in `client` (the `sub`
    claim) and the keys declared in `spec.mappings` (for example `roles`, `tenant`).

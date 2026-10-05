@@ -27,7 +27,7 @@ nothing on the rate-limiting side.
 The operator sees only its own namespace. A policy placed in a satellite is processed by nobody: it never gets a
 status and does not affect traffic. Both charts read `BASELINE_ORIGIN`, so the pair installed in a satellite renders
 the EnvoyFilters and nothing else. A service installed there would wait for an operator that never comes, stay
-NotReady, and fail the readiness gate of the deployment; the empty render protects against that mistake.
+NotReady, and fail the readiness gate of the deployment; rendering no service there protects against that mistake.
 
 ## Composite: one rate-limiting realm
 
@@ -59,7 +59,7 @@ team ── kubectl apply ──► RateLimitPolicy <domain>                    
                                    ▲            └── atomic Lua ──► Redis from DBaaS (one instance, adapter ns)
                                    │  gRPC ShouldRateLimit
                                    │
-gateways (baseline and satellites) with EnvoyFilter ◄── operator chart at install of each ns
+gateways (baseline and satellites) with EnvoyFilter ◄── service chart at install of each ns
 ```
 
 Two flows cross the picture. On the request path a gateway calls `ShouldRateLimit` on the Service `ratelimit`, and every
@@ -91,7 +91,7 @@ plane:
   and `prod` profiles; the Lease also covers the overlap of two pods during a rollout. An informer on the
   `RateLimitPolicy` of its own namespace: event → strict decode → compile → size check → a write of the ConfigMap
   `ratelimit-config` and of the policy status. It is the only writer of both. Its chart ships the CRD, its
-  ServiceAccount with the only Role of the delivery, the EnvoyFilters in every mode, and its own PodMonitor.
+  ServiceAccount with the only Role of the delivery, and its own PodMonitor.
 - **Service** `ratelimit-service`: a Deployment with `REPLICAS` replicas. gRPC `ShouldRateLimit` on all replicas, with
   no coordination; the counter store is a single Redis instance that the DBaaS Redis adapter provisions for the
   release and runs in its own namespace. Every replica mounts the ConfigMap as a whole
@@ -100,7 +100,8 @@ plane:
   compile independently and deterministically; there is no shared state between them. Pod name and namespace come
   from the Downward API. Its chart ships the Service `ratelimit`, a ServiceAccount without a mounted token
   (`automountServiceAccountToken: false`), the AuthorizationPolicy of the management port, the `InternalDatabase` and
-  the `DatabaseSecretClaim` of its counter store, its own PodMonitor, and the Grafana dashboard.
+  the `DatabaseSecretClaim` of its counter store, its own PodMonitor, the Grafana dashboard, and the EnvoyFilters in
+  every mode.
 - **Ready of a replica.** A replica that has never applied a manifest is NotReady and out of Endpoints, without a
   timeout. An explicitly empty manifest is a configuration: the replica is Ready, and every request is an unknown
   domain. After the first apply the replica keeps its snapshot in memory and stays Ready if the files vanish or a
@@ -221,12 +222,12 @@ every namespace, and both derive their contents from `BASELINE_ORIGIN`:
 
 | Scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | CRD, Deployment (`REPLICAS` replicas, one active), ServiceAccount, Role/RoleBinding, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
+| single namespace | CRD, Deployment (`REPLICAS` replicas, one active), ServiceAccount, Role/RoleBinding; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
 | composite, baseline | the same | the same |
-| composite, satellite | only EnvoyFilters that target the baseline RLS; no ServiceAccount, no RBAC | nothing: an empty release |
+| composite, satellite | nothing: an empty release | only EnvoyFilters that target the baseline RLS; no Deployment, no Service, no ServiceAccount |
 
 Each chart declares only the values its templates read, and shared platform parameters keep identical key names in both.
-`REPLICAS` comes from the resource profile of each chart, the filter settings move to the operator chart under `filter`,
+`REPLICAS` comes from the resource profile of each chart, the filter settings live in the service chart under `filter`,
 and `rls.port` exists in neither: the port is a contract constant. The values are listed in [helm](helm-chart.md).
 
 The repository holds one root Go module plus the engine module: `operator/cmd`, `operator/internal`, and
@@ -264,8 +265,8 @@ The e2e workflow builds both images from the components list and creates a kind 
 namespace, the operator first. The composite scenario runs in CI too: the workflow creates a second, satellite
 namespace with its own gateways (a second mesh-config release) and installs both charts there with
 `BASELINE_ORIGIN`; the `satellite` suite finds it through `E2E_SATELLITE_NAMESPACE` and skips without it, so a run
-against a plain stand still passes. Four specs: the satellite namespace holds the two EnvoyFilters of the operator
-chart and no Deployment, Service, ServiceAccount, or Role, and the service chart's release is empty; the satellite
+against a plain stand still passes. Four specs: the satellite namespace holds the two EnvoyFilters of the service
+chart and no Deployment, Service, ServiceAccount, or Role, and the operator chart's release is empty; the satellite
 gateway's own Envoy config dump, read instead of the EnvoyFilter object, names
 `outbound|9000||ratelimit.<baseline>.svc.cluster.local` as the RLS cluster, so the spec sees what the gateway calls and
 not what the chart wrote; a `2/1h` policy (GCRA, so no calendar boundary inside a run) in the baseline admits one

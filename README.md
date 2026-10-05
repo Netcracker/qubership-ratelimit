@@ -173,12 +173,17 @@ The delivery is two charts under `helm-templates/`, installed into one namespace
 helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
+  --set NAMESPACE=<business-namespace> \
   --set TAG=<tag>
 helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
   --namespace <business-namespace> \
   -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
+  --set NAMESPACE=<business-namespace> \
   --set TAG=<tag>
 ```
+
+`NAMESPACE` repeats the `--namespace` value, because the charts read the namespace from it alone. Both schemas refuse
+an install that leaves `NAMESPACE` or `TAG` empty.
 
 The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`, `dev-ha`,
 `prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT`, and,
@@ -191,20 +196,20 @@ well: the Lease holder and a standby.
 `MEMORY_LIMIT` is not only a cgroup ceiling: the platform's `memlimit` package derives `GOMEMLIMIT` from it at startup,
 so it governs when the Go heap starts collecting.
 
-`ratelimit-operator` renders the CRD, the operator replicas with the only `Role` of the delivery, one `EnvoyFilter` per
-enabled gateway, a `PodMonitor`, and a `PrometheusRule`. Its values are the filter's (`filter.*`; the port the filters
-send checks to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`, `alerts.*`, the gateway names, and
-the resource sizes with `REPLICAS`, 2 in the `-ha` and `prod` profiles. It installs no `ClusterRole` and no
-`ClusterRoleBinding`; the `Role` reaches the ConfigMap `ratelimit-config` and the operator's own Deployment by name, and
-nothing else in the namespace beyond the policies, the Lease, the Events, and the EndpointSlices.
+`ratelimit-operator` renders the CRD, the operator replicas with the only `Role` of the delivery, a `PodMonitor`, and a
+`PrometheusRule`. Its values are `alerts.*` and the resource sizes with `REPLICAS`, 2 in the `-ha` and `prod` profiles.
+It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap `ratelimit-config` and the
+operator's own Deployment by name, and nothing else in the namespace beyond the policies, the Lease, the Events, and the
+EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
 `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
 `grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`,
-a `PrometheusRule`, and the dashboard. Its values are `redis.*`, `healthProbe.*`, `metrics.*`, `management.*`,
-`alerts.*`, and the five resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read
-`BASELINE_ORIGIN` the same way: a satellite gets the filters from the operator chart and nothing from the service chart,
-so the platform installs the same pair in every namespace.
+a `PrometheusRule`, the dashboard, and one `EnvoyFilter` per enabled gateway. Its values are `redis.*`, `healthProbe.*`,
+`metrics.*`, `management.*`, `alerts.*`, the filter's (`filter.*`; the port the filters send checks to is the contract's
+9000 and not a value), `runtime.*`, `gateways.*`, the gateway names, and the five resource keys. Neither chart renders
+the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way: a satellite gets the filters from the
+service chart and nothing from the operator chart, so the platform installs the same pair in every namespace.
 
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
 `MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the
@@ -213,7 +218,7 @@ way the series are: the service chart alerts on the data plane (`RatelimitUnknow
 `RatelimitConfigurationAbsent`) and the
 operator chart on the policy status and the fleet (`RatelimitStalled`, `RatelimitNotReadyLong`,
 `RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`, `RatelimitConfigWriteErrors`,
-`RatelimitNoOperatorLeader`). Every expression is scoped to the release namespace. The
+`RatelimitNoOperatorLeader`). Every expression is scoped to `NAMESPACE`. The
 thresholds and hold durations are under `alerts.*` of each chart, each with its rationale beside it in `values.yaml`;
 `alerts.enabled=false` keeps the scrape and drops the rules. `tests/charts` renders both rule sets and runs
 `promtool check rules` over them (`make promtool` fetches the binary from the Prometheus release the Makefile pins).
@@ -264,18 +269,19 @@ A business application is installed either into one namespace or as a composite:
 satellites, each with its own gateway. Every gateway of the composite sends the same domains, the component runs in the
 baseline alone, and a satellite gets the gateway filters and nothing else.
 
-Both charts read the platform's composite variables, the same ones `core-operator` renders by:
+Both charts read `BASELINE_ORIGIN`, the platform's composite variable that `core-operator` renders by:
 
-| `BASELINE_ORIGIN` | Operator chart renders            | Service chart renders | Filters send checks to             |
-|-------------------|-----------------------------------|-----------------------|------------------------------------|
-| empty             | everything                        | everything            | `ratelimit.<own namespace>:9000`   |
-| set               | the `EnvoyFilter` objects only    | nothing               | `ratelimit.<BASELINE_ORIGIN>:9000` |
+| `BASELINE_ORIGIN` | Operator chart renders | Service chart renders          | Filters send checks to             |
+|-------------------|------------------------|--------------------------------|------------------------------------|
+| empty             | everything             | everything                     | `ratelimit.<own namespace>:9000`   |
+| set               | nothing                | the `EnvoyFilter` objects only | `ratelimit.<BASELINE_ORIGIN>:9000` |
 
-`BASELINE_CONTROLLER` is read for parity with `control-plane`, which resolves the baseline the same way, and takes
-precedence over `BASELINE_ORIGIN` as the target namespace when set. On this platform the baseline is never blue-green'd,
-so the platform leaves it empty. The e2e workflow and the local install above run in the first row.
+The service chart also reads `BASELINE_CONTROLLER`, for parity with `control-plane`, which resolves the baseline the
+same way; when set in a satellite, it takes precedence over `BASELINE_ORIGIN` as the target namespace. On this platform
+the baseline is never blue-green'd, so the platform leaves it empty. The e2e workflow and the local install above run in
+the first row.
 
-The gateway names are not this chart's to choose. They are deployment parameters shared with
+The gateway names are not the service chart's to choose. They are deployment parameters shared with
 `qubership-core-mesh-config`, the chart that creates the `Gateway` objects, and the platform injects the same set into
 every chart of the application:
 
@@ -287,7 +293,7 @@ ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
 Override them in one chart and not the other, and the `EnvoyFilter` attaches to a gateway that does not exist — with no
 error, because a `targetRefs` pointing at a missing `Gateway` is simply inert.
 
-What this chart owns per gateway is whether to rate limit it and under which domain:
+What the service chart owns per gateway is whether to rate limit it and under which domain:
 
 ```yaml
 gateways:
@@ -299,9 +305,9 @@ gateways:
     domain: gateway.private
 ```
 
-`namespace` is accepted per gateway and defaults to the release namespace. `qubership-core-mesh-config` sets no
-`metadata.namespace` on its Gateways, so they land in the business namespace next to this release and the default is
-right. Set it only if they move — Istio resolves `targetRefs` within the `EnvoyFilter`'s own namespace, so the filter
+`namespace` is accepted per gateway and defaults to `NAMESPACE`. `qubership-core-mesh-config` sets no
+`metadata.namespace` on its Gateways, so they land in the business namespace next to the service release and the default
+is right. Set it only if they move — Istio resolves `targetRefs` within the `EnvoyFilter`'s own namespace, so the filter
 has to follow the gateway.
 
 ### The CRDs are shared

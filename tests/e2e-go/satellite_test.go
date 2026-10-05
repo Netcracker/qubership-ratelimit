@@ -85,14 +85,14 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 	})
 
 	It("renders the gateway filters in the satellite and nothing else", func() {
-		// The operator chart renders the filters, and only them; the service
+		// The service chart renders the filters, and only them; the operator
 		// chart renders nothing. The objects are listed by each chart's
 		// label, since that is what each chart puts on what it renders.
 		filters := &unstructured.UnstructuredList{}
 		filters.SetGroupVersionKind(schema.GroupVersionKind{
 			Group: "networking.istio.io", Version: "v1alpha3", Kind: "EnvoyFilterList"})
 		Expect(k8s.List(ctx, filters, client.InNamespace(satellite),
-			client.MatchingLabels{"app.kubernetes.io/name": operatorChart})).To(Succeed())
+			client.MatchingLabels{"app.kubernetes.io/name": serviceChart})).To(Succeed())
 		Expect(filters.Items).To(HaveLen(2), "one filter per enabled gateway")
 
 		// No component: a satellite that rendered a Deployment would run a

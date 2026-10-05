@@ -169,7 +169,7 @@ because the bridge in `internal/process/logr_adapter.go` caps the verbosity at 4
 
 The counter store is a Redis database from DBaaS, a single Redis instance the DBaaS Redis adapter runs in its own
 namespace. Without it the service cannot count, and what it does then is decided by the gateway
-filter: with `filter.failClosed: false` of the operator chart, the default, requests pass without limits; with `true`,
+filter: with `filter.failClosed: false` of the service chart, the default, requests pass without limits; with `true`,
 the gateway refuses them. Either way the service keeps answering, and the window of unlimited traffic is measurable.
 
 **Signal.** Checks answered as unavailable, and store errors:
@@ -267,7 +267,7 @@ is tracked as [Netcracker/qubership-dbaas#778](https://github.com/Netcracker/qub
 watches Secrets, this paragraph no longer applies.
 
 **Act.** Restore the store; the service reconnects on its own, there is nothing to restart. If an unlimited window
-is not acceptable for a domain, `filter.failClosed: true` in the operator chart's values turns the window into refusals
+is not acceptable for a domain, `filter.failClosed: true` in the service chart's values turns the window into refusals
 instead; that is a deployment decision, not an incident action.
 
 **Verify.** The `unavailable` rate returns to zero and the listing answers again. The counters start from empty: keys
@@ -758,10 +758,10 @@ api "$BASE/domains/$DOMAIN/counters?limited=true&ruleId=api/exports-per-client-t
 shadow limit of five all answered `200` and left three `shadow_over_limit` decisions. When the numbers match the
 intent, switch `behavior` to `Enforce`; the counters carry over, the keys do not depend on the behavior.
 
-**The emergency brakes on the gateway.** Two values of the operator chart on the filter, independent of any policy:
+**The emergency brakes on the gateway.** Two values of the service chart on the filter, independent of any policy:
 `runtime.enforcedPercent` at `0` turns every limit of the gateway into a dry run, `runtime.enabledPercent` at `0` takes
 the filter out of the request path. They are Envoy runtime fractions `ratelimit.<gateway>.enabled` and `.enforced`, so
-a runtime override flips them without a redeploy; a values change on the operator release is the durable form, and it
+a runtime override flips them without a redeploy; a values change on the service release is the durable form, and it
 lasts only while the release's values carry it. An upgrade with `-f` and `--set` and no `--reuse-values` drops it and
 restores enforcement at once; keep the brake in the installation's values file or the Argo CD application, and check it
 after every upgrade ([rollout procedure](rollout-procedure.md), section 4).

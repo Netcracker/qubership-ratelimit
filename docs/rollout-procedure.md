@@ -5,7 +5,7 @@ mistake. The procedure has three stages, shadow, validation, and staged enableme
 step. It is written against the one-object architecture of the [topology](deployment-topology.md), an operator and a
 service per namespace: one `RateLimitPolicy` per domain, the [resource specification](ratelimitpolicy-cr-spec.md) for
 the fields, the [management API](management-api.md) for the readouts, the [charts](helm-chart.md) for the metric names
-and for the gateway values, which belong to the operator chart. Diagnosis of a component that misbehaves is the
+and for the gateway values, which belong to the service chart. Diagnosis of a component that misbehaves is the
 [runbook](runbook.md); this document is about a policy that behaves and has to be introduced.
 
 Every command and every output below was run on a kind stand against
@@ -21,11 +21,11 @@ A limit is turned on and off in two places, and they do different things:
 | --- | --- | --- | --- | --- |
 | `behavior: Shadow` on a rule | the policy | yes, per the rule's own verdict | `200`, no headers from this rule | `ratelimit_decisions_total{outcome="shadow_over_limit"}`; no near-limit |
 | `behavior: Enforce` on a rule | the policy | yes | `429` with `x-ratelimit-*` and `retry-after` | `outcome="over_limit"`, `ratelimit_near_limit_total` |
-| `runtime.enforcedPercent: 0` | the gateway filter, a value of the operator chart | yes: the service judges and charges | `200` | `ratelimit_checks_total{verdict="over_limit"}` keeps growing |
-| `runtime.enabledPercent: 0` | the gateway filter, a value of the operator chart | no: the filter never calls | `200` | nothing moves; the service sees no traffic |
+| `runtime.enforcedPercent: 0` | the gateway filter, a value of the service chart | yes: the service judges and charges | `200` | `ratelimit_checks_total{verdict="over_limit"}` keeps growing |
+| `runtime.enabledPercent: 0` | the gateway filter, a value of the service chart | no: the filter never calls | `200` | nothing moves; the service sees no traffic |
 
 `behavior` is per rule, durable, and travels with the policy through Git and Argo CD. The two fractions are values of
-the operator chart, `runtime.enabledPercent` and `runtime.enforcedPercent`; they are per gateway, cover every domain
+the service chart, `runtime.enabledPercent` and `runtime.enforcedPercent`; they are per gateway, cover every domain
 behind it, and exist as brakes: section 4 shows both forms of pulling them. The whole procedure is edits of `behavior`
 on one rule at a time, with the brakes untouched unless something goes wrong.
 
@@ -305,7 +305,7 @@ bucket drains.
 
 **The brakes.** When the policy edit is slower than the incident, the gateway fractions stop the refusals for the whole
 gateway. The runtime override takes effect at once and lives only as long as the gateway pod; the values change on the
-operator release is the durable form and needs no pod restart. On the stand, with `bob` over his limit:
+service release is the durable form and needs no pod restart. On the stand, with `bob` over his limit:
 
 ```bash
 GW=$(kubectl get pod -n "$NS" -l gateway.networking.k8s.io/gateway-name=public-gateway \
@@ -332,41 +332,42 @@ so the metrics kept telling the truth; with `enabled=0` the filter never called,
 `enforced`; `enabled` is for a service that itself is the problem. An empty value removes an override:
 `runtime_modify?ratelimit.public-gateway.enforced=`.
 
-The durable form is the value in the operator chart, and it lasts only as long as the values it lives in. Put it where
-the next upgrade reads it: the installation's values file, or the parameters of the operator's Argo CD application. Set
+The durable form is the value in the service chart, and it lasts only as long as the values it lives in. Put it where
+the next upgrade reads it: the installation's values file, or the parameters of the service's Argo CD application. Set
 on the command line, the brake is part of the release's values until an upgrade that does not reuse them. The install
 command of the README passes `-f` and `--set` without `--reuse-values`, so such an upgrade renders
 `runtime.enforcedPercent` back to `100`, and istiod pushes the filter to the gateway at once: `429` returns to live
-traffic in the middle of the incident that turned it off, with no condition or metric to say so. The service release is
+traffic in the middle of the incident that turned it off, with no condition or metric to say so. The operator release is
 not touched either way.
 
 For an emergency from the command line, carry the release's values into the upgrade:
 
 ```bash
-helm upgrade ratelimit-operator <operator chart> -n "$NS" --reset-then-reuse-values --set runtime.enforcedPercent=0
-kubectl get envoyfilter -n "$NS" ratelimit-public-gateway -o json \
+helm upgrade ratelimit-service <service chart> -n "$NS" --reset-then-reuse-values --set runtime.enforcedPercent=0
+kubectl get envoyfilter -n "$NS" ratelimit-service-public-gateway -o json \
   | jq -c '[.. | objects | select(has("runtime_key")) | {runtime_key, numerator: .default_value.numerator}]'
 # [{"runtime_key": "ratelimit.public-gateway.enabled", "numerator": 100},
 #  {"runtime_key": "ratelimit.public-gateway.enforced", "numerator": 0}]
 ```
 
 Three requests from `bob` answered `200` a few seconds after the upgrade, and `429` again after the value went back
-to `100`; the component pod was the same before and after (the operator pod, after the split), the change is an
-`EnvoyFilter` that istiod pushes to the gateway. A runtime override wins over the rendered value while it exists, so
+to `100`; the service pods were the same before and after, because the change is an `EnvoyFilter` that istiod pushes
+to the gateway. A runtime override wins over the rendered value while it exists, so
 remove it before relying on the value.
 
-While a brake is on, every upgrade of the operator release has to carry it in its values. After each one, check that it
+While a brake is on, every upgrade of the service release has to carry it in its values. After each one, check that it
 survived:
 
 ```bash
-helm get values ratelimit-operator -n "$NS" | grep -E 'enforcedPercent|enabledPercent'
+helm get values ratelimit-service -n "$NS" | grep -E 'enforcedPercent|enabledPercent'
 #   enforcedPercent: 0
 # no line, or 100: the brake is off and the gateway enforces again
 ```
 
-**A dial change is a change of the operator release only.** The values edit above, or a rollback of that release to the
-revision before the edit, renders the EnvoyFilters again and touches no other object. The service release, its pods,
-and the policy stay as they are, and no order applies between the two releases.
+**A dial change is a change of the service release only.** The values edit above, or a rollback of that release to the
+revision before the edit, renders the EnvoyFilters again and leaves the release's other objects as they were, so its
+pods keep running. The operator release and the policy stay as they are, and no order applies between the two
+releases.
 
 **A version rollback of the pair.** Where the two versions differ in the manifest format version, the order matters:
 roll the operator back first, then the service. The service reads the format versions N and N-1 and the operator writes
@@ -407,7 +408,7 @@ effect without the new name. Renaming a block renames every rule in it.
 | 3 | a shadow rule on top of the `orders` cascade | 8 | the rule below still decides; 5 x `200` |
 | 3 | `Enforce` on the cascade rule | 9 | the rule decides alone; `200 200 200 429 429`; the rule below stops growing |
 | 4 | `enforced=0`, `enabled=0` at runtime, then removed | 9 | `200` under both; the service counts only under the first |
-| 4 | `runtime.enforcedPercent` 0 and back through Helm on the operator release | 9 | `200`, then `429`; no pod restart |
+| 4 | `runtime.enforcedPercent` 0 and back through Helm on the service release | 9 | `200`, then `429`; no pod restart |
 | 4 | the trial back to `Shadow` | 10 | `200`, same key and `remaining` |
 | 4 | the trial renamed | 11 | fresh bucket, old key left with its TTL, old series gone |
 | end | the example policy again | 12 | `Ready: True`, 12 rules, the original rule set version |
@@ -429,4 +430,4 @@ writes the status.
 | consumption per identity | `GET /counters`: `limit`, `remaining`, `retryAfterSeconds`, `mode` | as named |
 | which rules a request applies | `POST /simulations`: `rules[].mode`, `rules[].allowed`; `GET /rules?path=&method=&axis.<name>=`: `applicability` | as named |
 | the generation enforced | `status.activeGeneration`, `Ready`, `ratelimit_policy_ready` | the gauge is on the operator pod, labelled `domain` and `reason` |
-| the brakes' state | `EnvoyFilter` `default_value.numerator`, the gateway's `/runtime` entries | as named; the `EnvoyFilter` is rendered by the operator chart |
+| the brakes' state | `EnvoyFilter` `default_value.numerator`, the gateway's `/runtime` entries | as named; the `EnvoyFilter` is rendered by the service chart |

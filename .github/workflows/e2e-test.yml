@@ -183,6 +183,7 @@ jobs:
           # derived one.
           helm upgrade --install ratelimit-operator-baseline helm-templates/ratelimit-operator \
             --namespace "${E2E_NAMESPACE}" \
+            --set NAMESPACE="${E2E_NAMESPACE}" \
             -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
             --set LOG_LEVEL=debug \
             --set IMAGE_REPOSITORY=ratelimit-operator \
@@ -197,6 +198,7 @@ jobs:
           # run passes whether the values are read or not.
           helm upgrade --install ratelimit-service-baseline helm-templates/ratelimit-service \
             --namespace "${E2E_NAMESPACE}" \
+            --set NAMESPACE="${E2E_NAMESPACE}" \
             -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
             --set LOG_LEVEL=debug \
             --set IMAGE_REPOSITORY=ratelimit-service \
@@ -278,16 +280,21 @@ jobs:
           done
 
           # The same pair of charts as a satellite: BASELINE_ORIGIN names the
-          # baseline, and that alone turns the operator chart's render into
-          # the gateway filters and the service chart's into nothing. No
-          # store, no image: there is no Deployment for either to matter to.
+          # baseline, and that alone turns the service chart's render into
+          # the gateway filters and the operator chart's into nothing. No
+          # store, no image: there is no Deployment for either to matter to,
+          # and TAG is set only because both schemas require it.
           helm upgrade --install ratelimit-operator-satellite helm-templates/ratelimit-operator \
             --namespace "${E2E_SATELLITE_NAMESPACE}" \
+            --set NAMESPACE="${E2E_SATELLITE_NAMESPACE}" \
+            --set TAG=e2e \
             -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
             --set BASELINE_ORIGIN="${E2E_NAMESPACE}" \
             --wait --timeout 2m
           helm upgrade --install ratelimit-service-satellite helm-templates/ratelimit-service \
             --namespace "${E2E_SATELLITE_NAMESPACE}" \
+            --set NAMESPACE="${E2E_SATELLITE_NAMESPACE}" \
+            --set TAG=e2e \
             -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
             --set BASELINE_ORIGIN="${E2E_NAMESPACE}" \
             --wait --timeout 2m

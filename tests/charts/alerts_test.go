@@ -17,7 +17,7 @@ import (
 )
 
 // The alert rules each chart ships behind MONITORING_ENABLED: the set of
-// alerts, every rule scoped to the release namespace and carrying a
+// alerts, every rule scoped to NAMESPACE and carrying a
 // severity and both annotations, and the rendered groups accepted by
 // promtool check rules. promtool is looked up in PROMTOOL, then in bin/,
 // then on PATH; without it the syntax check is skipped, unless
@@ -54,7 +54,7 @@ func TestCharts_shipTheAlertRulesBehindMonitoring(t *testing.T) {
 					name := r.at("alert").str2()
 					names = append(names, name)
 					assert.Contains(t, r.at("expr").str2(), `namespace="biz"`,
-						"%s is not scoped to the release namespace", name)
+						"%s is not scoped to NAMESPACE", name)
 					assert.NotEmpty(t, r.at("labels", "severity").str2(), "%s carries no severity", name)
 					assert.NotEmpty(t, r.at("annotations", "summary").str2(), "%s carries no summary", name)
 					assert.NotEmpty(t, r.at("annotations", "description").str2(), "%s carries no description", name)

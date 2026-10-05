@@ -65,14 +65,14 @@ func TestServiceChart_refusesAGatewayDomainOffTheDomainPattern(t *testing.T) {
 	assert.Contains(t, string(out), "gatewayDomains")
 }
 
-// The two charts are installed side by side with their defaults, and the
-// service exempts the API's paths only in a domain a gateway's filter sends.
-// So the default of management.gatewayDomains has to be the domain the
-// operator chart gives the private gateway's filter.
-func TestCharts_theDefaultGatewayDomainIsThePrivateGatewaysDomain(t *testing.T) {
+// The service exempts the API's paths only in a domain a gateway's filter
+// sends, so the default of management.gatewayDomains has to be the domain the
+// chart gives the private gateway's filter.
+func TestServiceChart_theDefaultGatewayDomainIsThePrivateGatewaysDomain(t *testing.T) {
+	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true")
 	var filterDomain string
-	for _, o := range render(t, operatorChart, "biz") {
-		if o.kind() != "EnvoyFilter" {
+	for _, o := range objects {
+		if o.kind() != envoyFilterKind {
 			continue
 		}
 		targets := o.at("spec", "targetRefs").list()
@@ -86,9 +86,9 @@ func TestCharts_theDefaultGatewayDomainIsThePrivateGatewaysDomain(t *testing.T) 
 			}
 		}
 	}
-	require.NotEmpty(t, filterDomain, "the operator chart renders a filter for private-gateway with a domain")
+	require.NotEmpty(t, filterDomain, "the chart renders a filter for private-gateway with a domain")
 
-	value, _ := gatewayDomainsOf(t, render(t, serviceChart, "biz", "--set", "management.enabled=true"))
+	value, _ := gatewayDomainsOf(t, objects)
 
 	assert.Equal(t, filterDomain, value, gatewayDomainsEnv)
 }

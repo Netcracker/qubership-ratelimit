@@ -9,7 +9,7 @@
 {{- $config := $entry.config | default dict }}
 {{- if $config.enabled }}
 {{- $gatewayName := required (printf "gateways.%s is enabled, so ISTIO_%s_GATEWAY_NAME must be set" $role (upper $role)) $entry.gatewayName }}
-{{- $namespace := $config.namespace | default ($root.Values.NAMESPACE | default $root.Release.Namespace) }}
+{{- $namespace := $config.namespace | default $root.Values.NAMESPACE }}
 {{- /* Per-gateway overrides of the filter.* defaults. Booleans go through hasKey
        because `default` would swallow an explicit false. */}}
 {{- $timeout := $config.timeout | default $root.Values.filter.timeout }}

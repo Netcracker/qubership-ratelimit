@@ -1,7 +1,7 @@
 # ============== PLATFORM ============================
 # The parameters the platform sets on every one of its services, read the way
 # its other services read them. The defaults are for an installation without
-# them.
+# them, except NAMESPACE and TAG, which every installation sets.
 #
 # The name of the Deployment and the ServiceAccount, the app.kubernetes.io/name
 # and name labels, and the microserviceName of the counter store's DBaaS
@@ -9,16 +9,17 @@
 # filters compute the RLS address from it and cannot know how the baseline was
 # named.
 SERVICE_NAME: ratelimit-service
-# The namespace every object lands in; empty is the release namespace. The
-# platform sets it to the namespace it installs into.
+# The namespace every object lands in. Required, with no default: the platform
+# sets it to the namespace it installs into, and a manual helm install sets it
+# to the namespace it passes as -n.
 NAMESPACE: ""
-# The image. An empty TAG takes the chart's appVersion, which is a fixed
-# release. A floating tag such as "latest" moves under a running workload, so
-# two pods of one rollout can end up on different builds.
+# The image. TAG is required, with no default. A floating tag such as "latest"
+# moves under a running workload, so two pods of one rollout can end up on
+# different builds.
 IMAGE_REPOSITORY: ghcr.io/netcracker/qubership-ratelimit-service
 TAG: ""
 # Labels: app.kubernetes.io/part-of, app.kubernetes.io/managed-by,
-# app.kubernetes.io/version (empty is the chart's appVersion), and
+# app.kubernetes.io/version (empty renders an empty label), and
 # deployment.netcracker.com/sessionId (empty is unimplemented).
 APPLICATION_NAME: ratelimit
 MANAGED_BY: Helm
@@ -151,7 +152,7 @@ management:
   authorizationPolicy:
     enabled: true
 
-    # Service accounts allowed to reach the port, in the release namespace.
+    # Service accounts allowed to reach the port, in NAMESPACE.
     # Empty means the private gateway alone: the management endpoints belong
     # behind an internal gateway, never on the path public traffic takes.
     #
@@ -171,13 +172,53 @@ management:
   # the counter store is down, and a policy of these domains has no effect on
   # the API's paths. The same path in any other domain is checked as usual.
   #
-  # Each entry has to equal gateways.<role>.domain of the operator chart for
-  # that gateway. Nothing validates the match, and an entry that is no
+  # Each entry has to equal gateways.<role>.domain of this chart for that
+  # gateway. Nothing validates the match, and an entry that is no
   # gateway's domain exempts nothing. Change the list when the private
   # gateway's domain is not the default, or when another gateway from
   # authorizationPolicy.allowedServiceAccounts routes to the API. An empty
   # list rate limits the API's requests like any others.
   gatewayDomains: [gateway.private]
+
+# ============== GATEWAY FILTER ============================
+# The install-wide defaults of the rate limit filter on each gateway; each
+# gateway may override any of them under gateways.<role>. The port the filters
+# send checks to is the contract's 9000 and is not a value: a satellite
+# computes the baseline's address from the constant alone.
+filter:
+  timeout: 0.05s
+  # What an unavailable limiter means for the traffic of a gateway: the
+  # service unreachable or timing out, and the service answering UNAVAILABLE
+  # because its counter store failed. It is a gateway decision rather than a
+  # service one, which is why it renders on the filter: false keeps the traffic
+  # flowing unlimited, true rejects it with a 503. A public gateway usually prefers flowing, a private one may prefer
+  # rejecting; that is what the per-gateway override is for.
+  failClosed: false
+  # Status the client sees on a refused request. Envoy ignores values below
+  # 400, and 429 is what retry-aware clients expect.
+  rateLimitedStatus: 429
+  # true answers gRPC callers behind the gateway with RESOURCE_EXHAUSTED
+  # instead of UNAVAILABLE, which is the retryable code gRPC clients back off
+  # on.
+  grpcAsResourceExhausted: false
+  # The service supplies x-ratelimit-limit, x-ratelimit-remaining,
+  # x-ratelimit-reset and retry-after itself, as ready response headers.
+  # DRAFT_VERSION_03 would additionally let Envoy render X-RateLimit-* from
+  # per-descriptor statuses, which the service does not populate, so OFF is
+  # the honest default: the flag changes nothing today, and the headers keep
+  # coming from the one place that computes them.
+  xRateLimitHeaders: "OFF"
+
+# Gateway-side switches of the filter itself: the share of requests the filter
+# checks at all, and the share it enforces on. Both are emergency controls,
+# independent of behavior: Shadow in the rules. Dropping enforcedPercent to 0
+# turns every limit into a dry run without touching a single policy, and
+# enabledPercent: 0 takes the filter out of the request path entirely. Wired
+# as Envoy runtime fractions (ratelimit.<gateway>.enabled / .enforced), so a
+# runtime override can flip them without a redeploy.
+runtime:
+  enabledPercent: 100
+  enforcedPercent: 100
 
 # ============== MONITORING DELIVERY ============================
 # The scrape target, the alert rules, and the Grafana dashboard, delivered as
@@ -240,35 +281,46 @@ alerts:
   # recreated ConfigMap.
   configAbsentFor: 5m
 
-# The gateway whose identity the management AuthorizationPolicy allows by
-# default. The filters on the gateways are the operator chart's; this chart
-# reads the private gateway's name and nothing of the public one.
+# The Gateway objects the filters target, by name. They must match the
+# parameters of qubership-core-mesh-config, which creates the Gateways. The
+# private gateway's identity is also what the management AuthorizationPolicy
+# allows by default.
+ISTIO_PUBLIC_GATEWAY_NAME: public-gateway
 ISTIO_PRIVATE_GATEWAY_NAME: private-gateway
 
 # ============== COMPOSITE ============================
-# The platform's composite variables, the same ones core-operator and the
-# operator chart render by. BASELINE_ORIGIN empty is a standalone installation
-# or the baseline of a composite: the whole chart renders. BASELINE_ORIGIN set
-# is a satellite: this chart renders nothing, because a satellite runs no
-# service and its gateway filters send checks to the baseline's. The platform
-# installs the same pair of charts in every namespace, and the empty render is
-# what keeps a satellite from waiting NotReady for an operator that never
-# comes. BASELINE_CONTROLLER is read for parity with control-plane and the
-# operator chart; it changes no object of this chart.
+# The platform's composite variables, the same ones core-operator renders by.
+# BASELINE_ORIGIN empty is a standalone installation or the baseline of a
+# composite: the whole chart renders. BASELINE_ORIGIN set is a satellite: only
+# the gateway filters render, and they send checks to the baseline's Service at
+# ratelimit.<baseline namespace>:9000, which is why that Service has a fixed
+# name. The platform installs the same pair of charts in every namespace, and
+# rendering no service there is what keeps a satellite from waiting NotReady
+# for an operator that never comes. BASELINE_CONTROLLER is read for parity with
+# control-plane, which resolves the baseline the same way; on this platform the
+# baseline is never blue-green'd, so the platform leaves it empty.
 BASELINE_ORIGIN: ""
 BASELINE_CONTROLLER: ""
 
+# What this chart owns per gateway: whether to rate limit it, and under which
+# domain. The domain is the binding key: it must equal spec.domain of the
+# RateLimitPolicy that carries this gateway's rules. Nothing validates the
+# match; a typo shows up only as an "unknown rate limit domain" line in the
+# service log.
+#
+# namespace is optional and defaults to NAMESPACE. timeout,
+# failClosed, rateLimitedStatus and grpcAsResourceExhausted may be set here to
+# override the filter.* defaults for one gateway; the usual case is a private
+# gateway that fails closed while the public one keeps flowing.
+gateways:
+  public:
+    enabled: true
+    domain: gateway.public
+  private:
+    enabled: true
+    domain: gateway.private
+
 # ============== KUBERNETES ============================
-serviceAccount:
-  create: true
-  # Defaults to SERVICE_NAME when empty.
-  name: ""
-
-podAnnotations: {}
-nodeSelector: {}
-tolerations: []
-affinity: {}
-
 # The node label the pods spread over: one topology spread constraint,
 # maxSkew 1, whenUnsatisfiable ScheduleAnyway, selecting this Deployment's
 # own pods. CLOUD_TOPOLOGIES, the platform parameter, replaces it with one
