@@ -90,8 +90,8 @@ plane:
 - **Operator** `ratelimit-operator`: a Deployment whose Lease holder alone does the work, with a standby in the `-ha`
   and `prod` profiles; the Lease also covers the overlap of two pods during a rollout. An informer on the
   `RateLimitPolicy` of its own namespace: event → strict decode → compile → size check → a write of the ConfigMap
-  `ratelimit-config` and of the policy status. It is the only writer of both. Its chart ships the CRD, its
-  ServiceAccount with the only Role of the delivery, and its own PodMonitor.
+  `ratelimit-config` and of the policy status. It is the only writer of both. Its chart ships its ServiceAccount
+  with the only Role of the delivery and its own PodMonitor; the CRD has a chart of its own, `ratelimit-crds`.
 - **Service** `ratelimit-service`: a Deployment with `REPLICAS` replicas. gRPC `ShouldRateLimit` on all replicas, with
   no coordination; the counter store is a single Redis instance that the DBaaS Redis adapter provisions for the
   release and runs in its own namespace. Every replica mounts the ConfigMap as a whole
@@ -222,7 +222,7 @@ every namespace, and both derive their contents from `BASELINE_ORIGIN`:
 
 | Scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | CRD, Deployment (`REPLICAS` replicas, one active), ServiceAccount, Role/RoleBinding; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
+| single namespace | Deployment (`REPLICAS` replicas, one active), ServiceAccount, Role/RoleBinding; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | nothing: an empty release | only EnvoyFilters that target the baseline RLS; no Deployment, no Service, no ServiceAccount |
 
@@ -242,8 +242,9 @@ what the operator writes, a field added to the spec included, increments the ver
 first, then the operator, and a rollback reverses the order. A fresh installation needs no order: the service waits
 NotReady until the operator writes.
 
-**The CRD ships in the operator's chart** with `helm.sh/resource-policy: keep`: the first release in the cluster
-installs the type, and deleting a release does not remove the type. Schema changes stay additive. Schema version skew
+**The CRD ships in a chart of its own**, `ratelimit-crds`, installed by one release per cluster before the namespace
+charts and upgraded first, to the newest operator version in the cluster. It carries `helm.sh/resource-policy: keep`,
+so deleting the release does not remove the type. Schema changes stay additive. Schema version skew
 between namespaces is a normal scenario and is held together by schema compatibility: changes are additive, the API
 server's ratcheting lets unchanged fields of old objects through, and an older operator rejects a generation that
 carries an unknown field (`InvalidSpec` through strict decoding) and keeps last-good enforced; there is no partial

@@ -704,13 +704,13 @@ refuses a manifest stays Ready on the last configuration it applied. A replica t
 snapshot to keep, so it stays NotReady and out of Endpoints until a manifest it reads arrives.
 
 **Act.** The CRD skew: either upgrade the operator in that namespace to the version the schema belongs to, or take the
-new field out of the object until the upgrade. Do not downgrade the CRD: schema changes are additive, and an older CRD
-would refuse every object that already uses the field. The manifest skew: bring the two Deployments to one version, in
-the order the format versions allow. An upgrade installs the service first, then the operator. The new service reads N
-and N-1, so it reads what the old operator writes and the new operator's N once it arrives. A rollback reverses the
-order, the operator first, then the service: the old operator's N-1 is read by both service versions. A service rolled
-back first refuses the new operator's N and starts its fresh pods NotReady. A fresh installation needs no order: the
-service waits NotReady until the operator writes.
+new field out of the object until the upgrade. Do not downgrade the CRD, the `ratelimit-crds` release: schema changes
+are additive, and an older CRD would refuse every object that already uses the field. The manifest skew: bring the two
+Deployments to one version, in the order the format versions allow. An upgrade installs the service first, then the
+operator. The new service reads N and N-1, so it reads what the old operator writes and the new operator's N once it
+arrives. A rollback reverses the order, the operator first, then the service: the old operator's N-1 is read by both
+service versions. A service rolled back first refuses the new operator's N and starts its fresh pods NotReady. A fresh
+installation needs no order: the service waits NotReady until the operator writes.
 
 A rollback of the operator across a format increment starts it without last-good: the older operator does not read
 the newer manifest, writes the namespace again from the live objects, and a domain whose latest generation does not
