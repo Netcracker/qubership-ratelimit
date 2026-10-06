@@ -551,7 +551,15 @@ var _ = Describe("the manager's cache", Ordered, func() {
 		DeferCleanup(func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(context.Background(), cached))).To(Succeed())
 		})
-		Eventually(policyCount).Should(BeNumerically(">", 0), "the informer never saw the policy")
+		// The wait reads the manager's cache, which the specs read, and not the
+		// API server: a policy the API server already returns can still be on
+		// its way to the informer, and a spec that lists the cache then finds
+		// nothing.
+		Eventually(func(g Gomega) {
+			list := policy.ObjectList()
+			g.Expect(mgr.GetCache().List(started, list, client.InNamespace(envtestNamespace))).To(Succeed())
+			g.Expect(list.Items).NotTo(BeEmpty())
+		}).Should(Succeed(), "the informer never saw the policy")
 
 		DeferCleanup(func() { cancel() })
 		managerUnderTest = mgr
