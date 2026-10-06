@@ -3,6 +3,7 @@ package identity
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,7 +15,7 @@ import (
 
 // plan compiles the extraction plan the way production gets it, so these
 // tests exercise the real compile output, not a hand-built lookalike.
-func plan(t *testing.T) []compile.KeyExtraction {
+func plan(t testing.TB) []compile.KeyExtraction {
 	t.Helper()
 	snap, problems := compile.Compile("core-1-core", "gateway.public", &model.Policy{
 		Domain: "gateway.public",
@@ -33,7 +34,7 @@ func plan(t *testing.T) []compile.KeyExtraction {
 	return snap.Extraction
 }
 
-func token(t *testing.T, claims map[string]any) string {
+func token(t testing.TB, claims map[string]any) string {
 	t.Helper()
 	raw, err := json.Marshal(claims)
 	if err != nil {
@@ -192,4 +193,98 @@ func FuzzExtract(f *testing.F) {
 			}
 		}
 	})
+}
+
+// nested builds a payload claim that nests depth levels deep.
+func nested(depth int) any {
+	var v any = "x"
+	for range depth {
+		v = map[string]any{"n": v}
+	}
+	return v
+}
+
+// A payload past the shape bounds is undecodable whatever its size: the
+// bound on its size alone left the decode free to cost many times a realistic
+// token's. A string that only looks like structure counts for nothing.
+func TestShapeLimits(t *testing.T) {
+	p := plan(t)
+	ok := func(claims map[string]any) bool {
+		_, skips := Extract(p, token(t, claims))
+		return skipsOf(skips)["client"] != SkipDecodeFailed
+	}
+
+	// The payload object itself is the first level.
+	if !ok(map[string]any{"sub": "alice", "deep": nested(MaxPayloadDepth - 1)}) {
+		t.Error("a payload at the depth bound was refused")
+	}
+	if ok(map[string]any{"sub": "alice", "deep": nested(MaxPayloadDepth)}) {
+		t.Error("a payload past the depth bound was decoded")
+	}
+
+	// The object's claims take 2n-1 separators and the pair's comma one more,
+	// so n claims reach the bound exactly at 2n.
+	wide := map[string]any{"sub": "alice", "pair": []int{1, 1}}
+	for i := 0; len(wide)*2 < MaxPayloadSeparators; i++ {
+		wide[fmt.Sprintf("c%04d", i)] = 1
+	}
+	if !ok(wide) {
+		t.Errorf("a payload of %d claims, at the separator bound, was refused", len(wide))
+	}
+	wide["past"] = 1
+	if ok(wide) {
+		t.Errorf("a payload of %d claims, past the separator bound, was decoded", len(wide))
+	}
+
+	if !ok(map[string]any{"sub": "alice", "note": strings.Repeat(`{[,:]}"\`, 400)}) {
+		t.Error("structure inside a string counted toward the bounds")
+	}
+}
+
+// Explicit holds a direct caller's values to the rules a token's values
+// meet: both sides of the value and the array bound, the declared key's
+// normalization, and a skip for a declared key only.
+func TestExplicit_appliesTheTokensRules(t *testing.T) {
+	p := plan(t)
+	many := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("r%d", i)
+		}
+		return out
+	}
+	long := strings.Repeat("x", MaxValueBytes)
+
+	keys, skips := Explicit(p, map[string][]string{
+		"client": {long}, "roles": many(MaxArrayItems), "tenant": {"Acme", ""}, "own": {"Kept"}})
+	want := map[string][]string{"client": {long}, "roles": many(MaxArrayItems), "tenant": {"acme"}, "own": {"Kept"}}
+	if !reflect.DeepEqual(keys, want) || len(skips) != 0 {
+		t.Errorf("values within the bounds: keys %v, skips %v; want %v and no skips", keys, skips, want)
+	}
+
+	keys, skips = Explicit(p, map[string][]string{
+		"client": {long + "x"}, "roles": many(MaxArrayItems + 1), "own": {long + "x"}})
+	if len(keys) != 0 {
+		t.Errorf("a key past a bound was kept: %v", keys)
+	}
+	wantSkips := map[string]SkipReason{"client": SkipTooLong, "roles": SkipTooManyItems}
+	if got := skipsOf(skips); !reflect.DeepEqual(got, wantSkips) {
+		t.Errorf("skips %v, want %v: an undeclared key reports none", got, wantSkips)
+	}
+}
+
+// A token that carries none of the plan's claims allocates no map, whatever
+// the size of the plan: a map sized by a plan of hundreds of mappings would
+// be kilobytes of garbage on every such request.
+func TestExtract_allocatesNoMapForATokenWithoutTheClaims(t *testing.T) {
+	plan := make([]compile.KeyExtraction, 400)
+	for i := range plan {
+		plan[i] = compile.KeyExtraction{Key: fmt.Sprintf("k%d", i), Path: []string{fmt.Sprintf("c%d", i)},
+			Type: model.ValueString}
+	}
+	tok := token(t, map[string]any{"nonce": 1})
+	keys, skips := Extract(plan, tok)
+	if keys != nil || len(skips) != 0 {
+		t.Errorf("a token without the claims extracted %v with skips %v", keys, skips)
+	}
 }

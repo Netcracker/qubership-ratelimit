@@ -304,8 +304,12 @@ func (s *Server) ShouldRateLimit(
 //
 // Within a descriptor, path, method, and token feed the built-in keys,
 // request_id stays a log correlation field, and any other entry arrives as a
-// pre-extracted identity key — the direct-consumer form of the protocol. An
-// empty value means absence, mirroring the identity layer.
+// pre-extracted identity key — the direct-consumer form of the protocol. The
+// engine holds these values to the identity layer's rules, as it holds a
+// token's: a key with a value longer than identity.MaxValueBytes, or with more
+// than identity.MaxArrayItems values, is absent and counted as a skip, and a
+// key the domain lowercases is lowercased. Without the bounds a direct caller
+// would choose the length of a counter key, up to the size of the message.
 //
 // The request's hits_addend is the cost of every decision, and an unset
 // value, which a uint32 cannot tell from zero, is the protocol default of
@@ -341,10 +345,11 @@ func engineRequests(req *envoyratelimit.RateLimitRequest) []check {
 				er.Token = value
 			case descriptorKeyRequestID:
 			default:
+				key := entry.GetKey()
 				if er.Keys == nil {
 					er.Keys = map[string][]string{}
 				}
-				er.Keys[entry.GetKey()] = append(er.Keys[entry.GetKey()], value)
+				er.Keys[key] = append(er.Keys[key], value)
 			}
 		}
 		out = append(out, check{Request: er, free: free})
@@ -363,15 +368,34 @@ type check struct {
 // empty when every descriptor's cost is one it does. is_negative_hits asks to
 // give budget back, which the engine has no way to do and which would let any
 // caller of the port refill its own counters; a hits_addend past
-// maxHitsAddend is past what Envoy itself sends.
+// maxHitsAddend is past what Envoy itself sends. The same bound holds for the
+// whole check: the costs of its descriptors add up to at most maxHitsAddend,
+// so a caller cannot multiply the largest cost by spreading it over
+// descriptors.
 func costViolation(req *envoyratelimit.RateLimitRequest) string {
+	requestCost := uint64(req.GetHitsAddend())
+	if requestCost == 0 {
+		requestCost = 1
+	}
+	var total uint64
 	for i, descriptor := range req.GetDescriptors() {
 		if descriptor.GetIsNegativeHits() {
 			return fmt.Sprintf("is_negative_hits on descriptor %d", i)
 		}
-		if addend := descriptor.GetHitsAddend(); addend != nil && addend.GetValue() > maxHitsAddend {
-			return fmt.Sprintf("hits_addend %d on descriptor %d, over the limit of %d", addend.GetValue(), i, maxHitsAddend)
+		cost := requestCost
+		if addend := descriptor.GetHitsAddend(); addend != nil {
+			if addend.GetValue() > maxHitsAddend {
+				return fmt.Sprintf("hits_addend %d on descriptor %d, over the limit of %d", addend.GetValue(), i, maxHitsAddend)
+			}
+			cost = addend.GetValue()
 		}
+		total += cost
+	}
+	if len(req.GetDescriptors()) == 0 {
+		total = requestCost
+	}
+	if total > maxHitsAddend {
+		return fmt.Sprintf("a total cost of %d, over the limit of %d", total, maxHitsAddend)
 	}
 	return ""
 }

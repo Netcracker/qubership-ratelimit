@@ -189,13 +189,17 @@ func Build(namespace string, options Options) (*Service, error) {
 			platform.Warnf("management API is serving over the in-process counter store; " +
 				"it is correct at one replica only, like the limits themselves")
 		}
+		// The mapping decides who may mutate counters, and an installation
+		// left read-only by an empty operator list shows nowhere else.
+		roles := settings.ManagementRoles()
+		platform.Infof("management API role mapping viewer=%v operator=%v", roles.Viewer, roles.Operator)
 		api := &management.API{
 			Rules:          rules,
 			Counters:       backend.Store,
 			Records:        backend.Records,
 			Namespace:      namespace,
 			Claims:         settings.ManagementClaims(),
-			Roles:          settings.ManagementRoles(),
+			Roles:          roles,
 			Replica:        options.Replica,
 			CounterBackend: backend.Description,
 			Log:            platform,

@@ -196,3 +196,12 @@ func TestSubjectFromToken_aPathThatDoesNotResolveGrantsNothing(t *testing.T) {
 	require.Empty(t, subject.Roles)
 	require.False(t, subject.Can(RoleViewer))
 }
+
+// An explicit mapping with empty lists grants nothing: the deployment chose to
+// map no IdP role, which is not the same as leaving the mapping unset.
+func TestRoleMapping_anExplicitEmptyMappingGrantsNothing(t *testing.T) {
+	require.Empty(t, RoleMapping{Explicit: true}.canonical([]string{RoleOperator, RoleViewer}))
+	require.Equal(t, []string{RoleViewer},
+		RoleMapping{Viewer: []string{RoleViewer}, Explicit: true}.canonical([]string{RoleOperator, RoleViewer}),
+		"an empty operator list maps the operator role onto nothing")
+}

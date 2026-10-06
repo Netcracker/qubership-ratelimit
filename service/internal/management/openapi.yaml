@@ -162,7 +162,7 @@ paths:
           e.g. ?axis.client=alice&axis.roles=support&axis.roles=operator. Unnamed
           keys stay unknown. Every rule then carries applicability and, when conditional,
           conditionalOn. Valid names are the domain''s effectiveKeys and the blocks''
-          captures; an unknown name is refused (RLS-0400), never ignored. With
+          captures; an unknown name is refused (RLS-0400), never ignored. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use. With
           path, the matched route decides the blocks'' captures before the
           annotation: a capture it produces is known with its value, one it does
           not produce is known-absent, without method a capture the routes
@@ -882,7 +882,7 @@ paths:
           cannot declare wildcard names). Listings accept partial selections: repeating
           one name ORs its values, different names AND together, and a counter whose
           rule lacks a named axis never matches - e.g. ?axis.client=alice answers
-          what alice has accumulated anywhere in the domain.'
+          what alice has accumulated anywhere in the domain. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use.'
         schema:
           type: string
         example: alice
@@ -1123,7 +1123,7 @@ paths:
           cannot declare wildcard names): one parameter per declared axis
           of the rule, single value each, all of them required when the
           rule declares any. See the operation description for the exact
-          contract and an example.
+          contract and an example. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use.
         schema:
           type: string
         example: alice
@@ -2631,7 +2631,7 @@ components:
         minItems: 1
         items:
           type: string
-      description: Pre-extracted identity values, the direct-consumer form.
+      description: Pre-extracted identity values, the direct-consumer form. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase - and a value that normalization would change is refused (RLS-0400, field keys) with the form to use.
       example:
         client:
         - alice
@@ -3402,7 +3402,7 @@ components:
               description: One axis value.
             description: The values of one axis; OR within the list.
           description: OR within one axis name, AND across names. Needs the rule's
-            axis-name mapping, so it matches only counters of enforced rules.
+            axis-name mapping, so it matches only counters of enforced rules. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400, field selector.axes) with the form to use.
           example:
             client:
             - u1

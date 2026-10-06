@@ -159,14 +159,28 @@ func ManagementClaims() management.ClaimNames {
 }
 
 // ManagementRoles maps the role names the IdP issues onto the two this API
-// authorizes against. Both properties are comma-separated lists, and both
-// default to the canonical name, which is what a deployment issuing "viewer"
-// and "operator" already has.
+// authorizes against. Both properties are comma-separated lists. An unset
+// property is the canonical name, which is what a deployment issuing "viewer"
+// and "operator" already has; a property set to an empty list maps no IdP role
+// onto that role, so an installation with operator empty is read-only.
 func ManagementRoles() management.RoleMapping {
 	return management.RoleMapping{
-		Viewer:   csv(configloader.GetOrDefaultString("management.roles.viewer", management.RoleViewer)),
-		Operator: csv(configloader.GetOrDefaultString("management.roles.operator", management.RoleOperator)),
+		Viewer:   csv(stringUnlessUnset("management.roles.viewer", management.RoleViewer)),
+		Operator: csv(stringUnlessUnset("management.roles.operator", management.RoleOperator)),
+		Explicit: true,
 	}
+}
+
+// stringUnlessUnset is the property's value, or def when the property is not
+// set at all. Unlike configloader.GetOrDefaultString it keeps an empty value
+// empty: the chart renders an empty list as an empty variable, and putting the
+// default back would grant the role the list leaves out.
+func stringUnlessUnset(key, def string) string {
+	k := configloader.GetKoanf()
+	if k == nil || !k.Exists(key) {
+		return def
+	}
+	return k.String(key)
 }
 
 // ManagementGatewayDomains lists the rate limit domains of the gateways that

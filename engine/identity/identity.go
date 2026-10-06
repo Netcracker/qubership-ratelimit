@@ -20,6 +20,17 @@ const (
 
 	// MaxArrayItems bounds an array claim.
 	MaxArrayItems = 64
+
+	// MaxPayloadDepth bounds how deeply the payload's objects and arrays nest.
+	// A realistic token nests two or three levels (realm_access.roles,
+	// resource_access.<client>.roles); a payload past the bound is undecodable.
+	MaxPayloadDepth = 8
+
+	// MaxPayloadSeparators bounds the commas and colons of the payload, about
+	// two for each claim and one for each array item. A realistic token has a
+	// few dozen; a heavy one, 150 realm roles, ten clients of eight roles, and
+	// thirty flat claims, has 312. A payload past the bound is undecodable.
+	MaxPayloadSeparators = 512
 )
 
 // SkipReason labels why a declared key extracted nothing, in the exact
@@ -65,7 +76,10 @@ func Extract(plan []compile.KeyExtraction, token string) (map[string][]string, [
 		return nil, skips
 	}
 
-	keys := make(map[string][]string, len(plan))
+	// The map is made for the first value found, not sized by the plan: a
+	// policy of a few hundred mappings would otherwise allocate kilobytes for
+	// every token that carries none of their claims.
+	var keys map[string][]string
 	var skips []Skip
 	for _, e := range plan {
 		values, reason := extractKey(claims, e)
@@ -73,10 +87,76 @@ func Extract(plan []compile.KeyExtraction, token string) (map[string][]string, [
 			skips = append(skips, Skip{Key: e.Key, Reason: reason})
 		}
 		if len(values) > 0 {
+			if keys == nil {
+				keys = make(map[string][]string)
+			}
 			keys[e.Key] = values
 		}
 	}
 	return keys, skips
+}
+
+// Explicit applies the rules of extraction to pre-extracted values, the
+// direct form of the protocol, so that a value counts the same whichever form
+// carried it. A key with more than MaxArrayItems values, or with a value
+// longer than MaxValueBytes, is absent, empty values are dropped, and the
+// values of a key the plan lowercases are lowercased. A skip is reported for a
+// key the plan declares; the others are the caller's own names, and a skip
+// carrying them would hand the caller the cardinality of a metric.
+func Explicit(plan []compile.KeyExtraction, keys map[string][]string) (map[string][]string, []Skip) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	out := make(map[string][]string, len(keys))
+	var skips []Skip
+	for key, values := range keys {
+		extraction, declared := planned(plan, key)
+		kept, reason := explicitValues(values)
+		if reason != "" {
+			if declared {
+				skips = append(skips, Skip{Key: key, Reason: reason})
+			}
+			continue
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		if declared && extraction.Normalization == model.NormalizeLowercase {
+			for i := range kept {
+				kept[i] = strings.ToLower(kept[i])
+			}
+		}
+		out[key] = kept
+	}
+	return out, skips
+}
+
+// planned finds the plan's extraction of key.
+func planned(plan []compile.KeyExtraction, key string) (compile.KeyExtraction, bool) {
+	for _, e := range plan {
+		if e.Key == key {
+			return e, true
+		}
+	}
+	return compile.KeyExtraction{}, false
+}
+
+// explicitValues is coerceArray for values that arrive as strings: the
+// non-empty ones, or a reason when the key is out of bounds.
+func explicitValues(values []string) ([]string, SkipReason) {
+	if len(values) > MaxArrayItems {
+		return nil, SkipTooManyItems
+	}
+	kept := make([]string, 0, len(values))
+	for _, v := range values {
+		if len(v) > MaxValueBytes {
+			return nil, SkipTooLong
+		}
+		if v != "" {
+			kept = append(kept, v)
+		}
+	}
+	return kept, ""
 }
 
 // payload decodes the JWT payload segment. Both unpadded (the standard) and
@@ -95,11 +175,56 @@ func payload(token string) (map[string]any, bool) {
 			return nil, false
 		}
 	}
+	if !withinShape(raw) {
+		return nil, false
+	}
 	var claims map[string]any
 	if json.Unmarshal(raw, &claims) != nil {
 		return nil, false
 	}
 	return claims, true
+}
+
+// withinShape reports whether the payload nests no deeper than
+// MaxPayloadDepth and holds no more than MaxPayloadSeparators separators. The
+// token is unsigned input, and MaxTokenBytes bounds its size but not the work
+// json.Unmarshal does on it: a deeply nested or densely packed payload of the
+// same size costs many times a realistic one, and no cache helps when every
+// token is new. The scan is one linear pass over the bytes, far cheaper than
+// the decode it guards; it skips strings, so their content counts for nothing.
+func withinShape(raw []byte) bool {
+	depth, separators := 0, 0
+	inString, escaped := false, false
+	for _, b := range raw {
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case b == '\\':
+				escaped = true
+			case b == '"':
+				inString = false
+			}
+			continue
+		}
+		switch b {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > MaxPayloadDepth {
+				return false
+			}
+		case '}', ']':
+			depth--
+		case ',', ':':
+			separators++
+			if separators > MaxPayloadSeparators {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // extractKey tries the primary path, then the fallbacks, and returns the

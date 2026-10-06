@@ -117,3 +117,35 @@ func TestManagementGatewayDomains_unsetIsNoDomain(t *testing.T) {
 
 	assert.Empty(t, ManagementGatewayDomains())
 }
+
+// An installation that leaves the operator list empty is read-only. The chart
+// renders the empty list as an empty variable, and reading it back as the
+// default "operator" would grant every mutation to a token carrying that role.
+func TestManagementRoles_anEmptyListGrantsNothing(t *testing.T) {
+	t.Setenv("MANAGEMENT_ROLES_VIEWER", "rl-viewer")
+	t.Setenv("MANAGEMENT_ROLES_OPERATOR", "")
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+
+	roles := ManagementRoles()
+	assert.Empty(t, roles.Operator)
+	assert.Equal(t, []string{"rl-viewer"}, roles.Viewer)
+
+	t.Setenv("MANAGEMENT_ROLES_VIEWER", "")
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	roles = ManagementRoles()
+	assert.Empty(t, roles.Viewer)
+	assert.Empty(t, roles.Operator)
+	// Two empty lists, which the schema refuses and the environment can still
+	// produce, grant nothing only because the mapping is explicit: a mapping
+	// that is not passes the token's roles through as the canonical names.
+	assert.True(t, roles.Explicit, "two empty lists would pass the token's roles through")
+}
+
+// An unset list is the canonical name, which is what a deployment that issues
+// viewer and operator verbatim relies on.
+func TestManagementRoles_unsetIsTheCanonicalName(t *testing.T) {
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	roles := ManagementRoles()
+	assert.Equal(t, []string{management.RoleViewer}, roles.Viewer)
+	assert.Equal(t, []string{management.RoleOperator}, roles.Operator)
+}

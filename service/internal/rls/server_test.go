@@ -994,3 +994,36 @@ func TestShouldRateLimit_decidesTheDescriptorBesideAnExemptOne(t *testing.T) {
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check(), "the first check")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check(), "the second check")
 }
+
+// The bound on a check's cost covers the check as a whole: spreading the
+// largest cost over several descriptors does not multiply it. A request-level
+// hits_addend past the bound is refused the same way.
+func TestShouldRateLimit_theCostBoundCoversTheWholeCheck(t *testing.T) {
+	const domain = "gateway.public"
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
+		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
+			Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
+	log, logged := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	split := requestWith(map[string]string{"path": "/a"}, map[string]string{"path": "/b"})
+	split.Descriptors[0].HitsAddend = wrapperspb.UInt64(600_000_000)
+	split.Descriptors[1].HitsAddend = wrapperspb.UInt64(600_000_000)
+	resp, err := server.ShouldRateLimit(context.Background(), split)
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, logged(), "a total cost of 1200000000, over the limit of 1000000000")
+
+	wide := requestWith(map[string]string{"path": "/a"})
+	wide.HitsAddend = 2_000_000_000
+	resp, err = server.ShouldRateLimit(context.Background(), wide)
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, logged(), "a total cost of 2000000000")
+
+	resp, err = server.ShouldRateLimit(context.Background(),
+		requestWith(map[string]string{"path": "/a"}, map[string]string{"path": "/b"}))
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "two checks of cost one were refused")
+}

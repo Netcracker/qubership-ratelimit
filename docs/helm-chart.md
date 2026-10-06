@@ -280,9 +280,9 @@ management:                          # Deployment.yaml, Service.yaml, Authorizat
   claims:                            # where the identity is read from in the bearer token; a dotted path for a
     subject: sub                     #   nested claim (Keycloak issues the roles under realm_access.roles)
     roles: roles
-  roles:                             # the IdP's role names mapped onto viewer and operator; lists, at least one of
-    viewer: [viewer]                 #   them non-empty (both empty would switch the mapping off, so the schema
-    operator: [operator]             #   refuses it); a read-only deployment sets viewer alone
+  roles:                             # the IdP's role names mapped onto viewer and operator; an empty list grants
+    viewer: [viewer]                 #   its role to nobody, and the schema refuses both empty. A read-only
+    operator: [operator]             #   deployment sets operator: [] (left out, it keeps the default [operator])
   gatewayDomains: [gateway.private]  # the rate limit domains of the gateways that route to the API: its paths are
                                      #   exempt from the checks of these domains (see "Management API port")
 

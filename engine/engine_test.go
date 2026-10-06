@@ -686,3 +686,68 @@ func TestRuleOutcomeCarriesTheCapacityOfItsWindow(t *testing.T) {
 		}
 	}
 }
+
+// An extraction larger than the cache's entry bound is not cached: a stream
+// of distinct tokens with a large array claim would otherwise hold the cache
+// at its capacity times the claim, past a replica's memory limit. A small
+// extraction is cached as before.
+func TestTokenCacheSkipsALargeExtraction(t *testing.T) {
+	p := model.Policy{Domain: domain,
+		Mappings: []model.KeyMapping{{Key: "roles", Claim: "roles", Type: model.ValueStringArray}},
+		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "admins",
+			Matches: []model.Predicate{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
+			Rates:   []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	stats := &engine.CacheStats{}
+	e := engine.New(snap, memory.New(), engine.WithCacheStats(stats))
+
+	roles := make([]string, identity.MaxArrayItems)
+	for i := range roles {
+		roles[i] = fmt.Sprintf("role-%02d-%s", i, strings.Repeat("r", 54))
+	}
+	raw, err := json.Marshal(map[string]any{"sub": "alice", "roles": append(roles, "admin")[1:]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	large := engine.Request{Path: "/x", Method: "GET", Token: "h." + base64.RawURLEncoding.EncodeToString(raw) + ".s"}
+	decide(t, e, large)
+	d := decide(t, e, large)
+	if hits := stats.Hits(); hits != 0 {
+		t.Errorf("a large extraction was cached: %d hits", hits)
+	}
+	if len(d.Rules) != 1 {
+		t.Errorf("an uncached extraction decided differently: rules %v", d.Rules)
+	}
+
+	small := engine.Request{Path: "/x", Method: "GET", Token: token(t, "bob")}
+	decide(t, e, small)
+	decide(t, e, small)
+	if hits := stats.Hits(); hits != 1 {
+		t.Errorf("a small extraction was not cached: %d hits", hits)
+	}
+}
+
+// The direct form's values are normalized as a token's are, so a direct
+// caller's client Alice and a token whose sub is Alice charge one counter:
+// the overlay of unnormalized values was what made a counter the management
+// API could not address.
+func TestDecide_theDirectFormIsNormalizedLikeTheToken(t *testing.T) {
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "each",
+		Counters: []string{model.KeyClient}, Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}}}}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	e := engine.New(snap, memory.New())
+
+	if d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: token(t, "Alice")}); !d.Allowed {
+		t.Fatal("the first request was refused")
+	}
+	direct := engine.Request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"Alice"}}}
+	if d := decide(t, e, direct); d.Allowed {
+		t.Error("the direct form's Alice was counted apart from the token's")
+	}
+}

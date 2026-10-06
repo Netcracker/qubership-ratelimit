@@ -18,6 +18,7 @@ import (
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
+	"github.com/netcracker/qubership-ratelimit/engine/identity"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
@@ -275,6 +276,41 @@ func TestShouldRateLimit_countsExtractionsAndSkips(t *testing.T) {
 			request(domain, map[string]string{"path": "/api", "token": "garbage"}))
 		require.NoError(t, err)
 	}), "an undecodable token counts as a skip for the planned key")
+}
+
+// A direct caller's value past the identity layer's bounds is absent and
+// counted as the token's would be: a client of MaxValueBytes+1 bytes is a
+// too_long skip, and the check is decided without a client.
+func TestShouldRateLimit_countsTheDirectFormsSkips(t *testing.T) {
+	const domain = "gateway.public"
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "b",
+		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
+			Rates: []model.Rate{{Requests: 10, Period: time.Hour}}}},
+	}}}
+	ruleStore := store.New()
+	ruleStore.Replace(ruleSetWith(t, p))
+	log, _ := recordingLogger()
+	server := NewServer(ruleStore, log)
+
+	skips := func() float64 {
+		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(domain, model.KeyClient, "too_long"))
+	}
+	extractions := func() float64 {
+		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(domain, model.KeyClient))
+	}
+	check := func(client string) {
+		_, err := server.ShouldRateLimit(context.Background(),
+			request(domain, map[string]string{"path": "/api", "client": client}))
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 1.0, delta(skips, func() { check(strings.Repeat("x", identity.MaxValueBytes+1)) }),
+		"a direct value past the length bound was not counted as a skip")
+	assert.Equal(t, 0.0, delta(extractions, func() { check(strings.Repeat("x", identity.MaxValueBytes+1)) }),
+		"a direct value past the length bound reached the decision")
+	assert.Equal(t, 1.0, delta(extractions, func() { check(strings.Repeat("x", identity.MaxValueBytes)) }),
+		"a direct value at the length bound was dropped")
 }
 
 // failingRuleSet compiles the one-per-hour policy over a store that refuses
