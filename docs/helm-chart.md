@@ -173,10 +173,6 @@ only the keys its templates read:
 | `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`. While it is on, the Deployment renders no `replicas`, so an upgrade keeps the scaled count; off, both directions are `Disabled` and `REPLICAS` sizes the service |
 | `CLOUD_TOPOLOGIES` | both | the platform's list of topologies; when set, it replaces `CLOUD_TOPOLOGY_KEY` with one constraint per entry, each with its `topologyKey` and optional `maxSkew` and `whenUnsatisfiable` |
 
-The keys the charts read before the platform parameters, `image.*`, `logLevel`, `nameOverride`, and `fullnameOverride`,
-are refused by both schemas rather than ignored: an installation that still sets one fails the render at that key
-instead of running the default image at the default level.
-
 The resource parameters are required in the schema of each chart: the four sizes and `REPLICAS` in both, and the
 service's profiles also carry the `HPA_*` parameters. An installation without `-f resource-profiles/<profile>.yaml`
 fails with a clear error instead of rendering a Deployment with empty resources. One source of truth: the defaults
@@ -358,6 +354,7 @@ What is **deliberately absent** from values:
 | `healthProbe.port`, `metrics.port`, `management.port` | fixed in the service chart's templates: probes 8081, metrics 8080, management 8082 | the operator chart and the charts of the qubership-core services fix their container ports too, and the gateway's `HTTPRoute` to the management API names port 8082 |
 | sanity bounds (token size and the like) | constants in the binaries | not knobs: nobody tunes them |
 | `replicaCount`, `resources` | resource profiles (`REPLICAS`, `CPU_*`, `MEMORY_*`, and the service's `HPA_*`) | one source of truth with the platform |
+| `image.*`, `logLevel`, `nameOverride`, `fullnameOverride` | the platform parameters `IMAGE_REPOSITORY` and `TAG`, `LOG_LEVEL`, and `SERVICE_NAME` | the charts of the qubership-core services declare none of these keys either |
 | `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | pod placement: the topology spread constraints built from `CLOUD_TOPOLOGY_KEY` or `CLOUD_TOPOLOGIES`; pod annotations: none | the charts of the qubership-core services declare none of these keys either |
 | `serviceAccount.create`, `serviceAccount.name` | the ServiceAccount each chart renders outside a satellite, named `<SERVICE_NAME>` | the charts of the qubership-core services declare none of these keys either |
 | the RLS address for a satellite | computed from `BASELINE_ORIGIN` | the Service name and port are fixed by contract |
