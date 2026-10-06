@@ -272,3 +272,19 @@ func TestExplicit_appliesTheTokensRules(t *testing.T) {
 		t.Errorf("skips %v, want %v: an undeclared key reports none", got, wantSkips)
 	}
 }
+
+// A token that carries none of the plan's claims allocates no map, whatever
+// the size of the plan: a map sized by a plan of hundreds of mappings would
+// be kilobytes of garbage on every such request.
+func TestExtract_allocatesNoMapForATokenWithoutTheClaims(t *testing.T) {
+	plan := make([]compile.KeyExtraction, 400)
+	for i := range plan {
+		plan[i] = compile.KeyExtraction{Key: fmt.Sprintf("k%d", i), Path: []string{fmt.Sprintf("c%d", i)},
+			Type: model.ValueString}
+	}
+	tok := token(t, map[string]any{"nonce": 1})
+	keys, skips := Extract(plan, tok)
+	if keys != nil || len(skips) != 0 {
+		t.Errorf("a token without the claims extracted %v with skips %v", keys, skips)
+	}
+}

@@ -91,6 +91,11 @@ func TestManagement_comparesACapturedValueAsGiven(t *testing.T) {
 	}{
 		"listing by a mapped rule": {h.call(t, http.MethodGet, counters+"?ruleId=other/per-plan&axis.plan=Gold",
 			viewerRoles(), nil), "axis.plan"},
+		"reset of a mapped rule": {h.reset(t, "ruleId=other/per-plan&axis.plan=Gold", "key-reset-other",
+			operatorRoles()), "axis.plan"},
+		"bulk reset of a mapped rule": {h.bulk(t, map[string]any{"selector": map[string]any{
+			"ruleIds": []string{"other/per-plan"}, "axes": map[string][]string{"plan": {"Gold"}}}, "dryRun": true},
+			"key-bulk-other", operatorRoles()), "selector.axes"},
 		"simulation": {h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
 			Domain: testDomain, Path: "/other", Method: "GET", Keys: map[string][]string{"plan": {"Gold"}},
 		}), "keys"},

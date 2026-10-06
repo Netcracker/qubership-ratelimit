@@ -9,7 +9,7 @@ import (
 // The cost of extraction for a realistic token, for the worst shapes the size
 // bound admits, deeply nested and densely packed, which the shape bound
 // refuses after its linear scan, and for the worst shape the shape bound
-// still admits, which is the residual: about eight times the realistic token,
+// still admits, which is the residual: under ten times the realistic token,
 // where the size alone left the worst at about a hundred times.
 func BenchmarkExtractShapes(b *testing.B) {
 	p := plan(b)

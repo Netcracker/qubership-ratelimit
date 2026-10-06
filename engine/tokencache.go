@@ -44,47 +44,55 @@ type cacheEntry struct {
 	size  int // the estimate of entrySize, counted against the byte bounds
 }
 
-// tokenCacheBytes bounds the memory one domain's cache holds, by the estimate
-// of entrySize: about the size of the default capacity's worth of realistic
-// extractions, a subject and a few roles each.
+// tokenCacheBytes bounds the heap one domain's cache retains, by the estimate
+// of entrySize. A realistic extraction, a subject, a plan, and twenty roles,
+// retains about 1.3 KiB, so the budget holds about 5 600 of them.
 const tokenCacheBytes = 8 << 20
 
-// maxCachedEntryBytes bounds one entry. A realistic extraction is a few
-// hundred bytes; a larger one is extracted every time instead of being
-// cached, which costs only the work the identity layer's shape bounds
-// already cap, and leaves the budget to the tokens that repeat.
-const maxCachedEntryBytes = 1 << 10
+// maxCachedEntryBytes bounds one entry. It admits a realistic extraction with
+// room to spare, forty roles of 24 bytes estimate to about 2.8 KiB; a larger
+// one is extracted every time instead of being cached, which costs only the
+// work the identity layer's shape bounds already cap, and leaves the budget
+// to the tokens that repeat.
+const maxCachedEntryBytes = 4 << 10
 
-// The overheads entrySize adds to the bytes of the keys and values: the
-// entry's slot in a generation with its hash, the keys map's header, a key's
-// slot with its string and slice headers, a value's string header, and one
-// skip. They are estimates of the runtime's layout on a 64-bit platform, not
-// measurements, and err on the large side.
+// The overheads entrySize adds to the bytes of the keys and values, fitted to
+// the heap an entry retains on a 64-bit platform: the entry's slot in a
+// generation with its hash, the keys map, which costs about 400 bytes as soon
+// as it holds one key, a key's slot with its slice of values, a value's string
+// header, and one skip. A value's bytes are rounded up to valueAlign, the
+// allocator's smallest size-class step. Measured against the heap after the
+// garbage collector, the estimate is 3 to 22 percent over it for every shape
+// from an empty entry to 64 values; see TestEntrySize_isNeverUnderTheHeap.
 const (
 	entryOverhead = 160
+	mapOverhead   = 384
 	keyOverhead   = 64
 	valueOverhead = 16
+	valueAlign    = 16
 	skipOverhead  = int(unsafe.Sizeof(identity.Skip{}))
 )
 
-// entrySize estimates the memory an entry holding keys and skips retains,
-// the map and the skips included: an extraction that found nothing for a
-// policy of many mappings still carries a skip per mapping.
+// entrySize estimates the heap an entry holding keys and skips retains, the
+// map and the skips included: an extraction that found nothing for a policy
+// of many mappings still carries a skip per mapping.
 func entrySize(keys map[string][]string, skips []identity.Skip) int {
 	n := entryOverhead + len(skips)*skipOverhead
+	if len(keys) > 0 {
+		n += mapOverhead
+	}
 	for key, values := range keys {
 		n += keyOverhead + len(key)
 		for _, v := range values {
-			n += valueOverhead + len(v)
+			n += valueOverhead + (len(v)+valueAlign-1)/valueAlign*valueAlign
 		}
 	}
 	return n
 }
 
-// newCacheEntry copies an extraction into an entry sized for what it holds.
-// identity.Extract sizes its map for every key of the plan, and maps.Clone
-// keeps that capacity, so a clone of an empty extraction under a policy of
-// a few hundred mappings would retain kilobytes that entrySize does not see.
+// newCacheEntry copies an extraction into an entry sized for what it holds,
+// and shares no map or slice with it. maps.Clone would keep the capacity the
+// extraction's map grew to, which entrySize does not see.
 func newCacheEntry(keys map[string][]string, skips []identity.Skip, size int) cacheEntry {
 	e := cacheEntry{size: size}
 	if len(keys) > 0 {

@@ -76,7 +76,10 @@ func Extract(plan []compile.KeyExtraction, token string) (map[string][]string, [
 		return nil, skips
 	}
 
-	keys := make(map[string][]string, len(plan))
+	// The map is made for the first value found, not sized by the plan: a
+	// policy of a few hundred mappings would otherwise allocate kilobytes for
+	// every token that carries none of their claims.
+	var keys map[string][]string
 	var skips []Skip
 	for _, e := range plan {
 		values, reason := extractKey(claims, e)
@@ -84,6 +87,9 @@ func Extract(plan []compile.KeyExtraction, token string) (map[string][]string, [
 			skips = append(skips, Skip{Key: e.Key, Reason: reason})
 		}
 		if len(values) > 0 {
+			if keys == nil {
+				keys = make(map[string][]string)
+			}
 			keys[e.Key] = values
 		}
 	}

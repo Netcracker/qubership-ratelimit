@@ -706,7 +706,7 @@ func TestTokenCacheSkipsALargeExtraction(t *testing.T) {
 
 	roles := make([]string, identity.MaxArrayItems)
 	for i := range roles {
-		roles[i] = fmt.Sprintf("role-%02d-%s", i, strings.Repeat("r", 24))
+		roles[i] = fmt.Sprintf("role-%02d-%s", i, strings.Repeat("r", 54))
 	}
 	raw, err := json.Marshal(map[string]any{"sub": "alice", "roles": append(roles, "admin")[1:]})
 	if err != nil {
