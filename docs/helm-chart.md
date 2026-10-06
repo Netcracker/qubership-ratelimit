@@ -49,8 +49,9 @@ helm-templates/ratelimit-service/templates/
 │                                  #   Secret under /etc/secrets/dbaas-secrets without it; no token mounted
 ├── HorizontalPodAutoscaler.yaml   # autoscaling/v2 on CPU, from the HPA_* parameters; both directions Disabled
 │                                  #   without HPA_ENABLED
-├── DatabaseClaim.yaml             # the InternalDatabase and the DatabaseSecretClaim of the counter store,
-│                                  #   behind redis.dbaas.enabled
+├── InternalDatabase.yaml          # the counter store's Redis database, behind redis.dbaas.enabled
+├── DatabaseSecretClaim.yaml       # the claim on the database's connection properties, which dbaas-operator
+│                                  #   writes into the Secret <SERVICE_NAME>-redis; behind redis.dbaas.enabled
 ├── Service.yaml                   # FIXED name ratelimit; grpc 9000 (appProtocol: grpc is mandatory), metrics (the
 │                                  #   operator's probe port), management behind management.enabled
 ├── ServiceAccount.yaml            # automountServiceAccountToken: false; no Role
@@ -255,8 +256,8 @@ LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15   # Deployment.yaml; DEPLOYMENT_STRATEG
 LOG_LEVEL: info                      # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
                                      # NOT --zap-log-level: LOG_LEVEL only applies until configloader initializes
 
-redis:                               # DatabaseClaim.yaml; see "The counter store from DBaaS"
-  dbaas:
+redis:                               # InternalDatabase.yaml, DatabaseSecretClaim.yaml; see "The counter store
+  dbaas:                             #   from DBaaS"
     enabled: true                    # render the InternalDatabase and the DatabaseSecretClaim; false = the Secret
                                      #   <SERVICE_NAME>-redis is written by someone else in DBaaS's format (CI)
 
@@ -541,9 +542,9 @@ incident tampers with the evidence.
 
 ### The counter store from DBaaS
 
-The counters live in a Redis database that DBaaS provisions for the release. `DatabaseClaim.yaml` renders two
-objects of dbaas-operator with the same classifier, `{microserviceName: ratelimit-service, scope: service, namespace:
-<NAMESPACE>}` and type `redis`:
+The counters live in a Redis database that DBaaS provisions for the release. `InternalDatabase.yaml` and
+`DatabaseSecretClaim.yaml` render one object of dbaas-operator each, with the same classifier,
+`{microserviceName: <SERVICE_NAME>, scope: service, namespace: <NAMESPACE>}` and type `redis`:
 
 - the `InternalDatabase` asks dbaas-aggregator to provision the database through the DBaaS Redis adapter. The adapter
   runs each database as a single Redis instance: a Deployment and a Service `<database>.<adapter namespace>`, no
@@ -556,7 +557,7 @@ objects of dbaas-operator with the same classifier, `{microserviceName: ratelimi
   `microserviceName`, so the service is the owner of the database it reads.
 
 The Deployment mounts the Secret at `/etc/secrets/dbaas-secrets/<SERVICE_NAME>-redis` without `optional`, the platform's
-path for DBaaS Secrets, and passes `--redis-dbaas-microservice=ratelimit-service` with `MICROSERVICE_NAMESPACE` from
+path for DBaaS Secrets, and passes `--redis-dbaas-microservice=<SERVICE_NAME>` with `MICROSERVICE_NAMESPACE` from
 the pod's namespace. The service resolves its database through the platform's Go DBaaS client
 (`qubership-core-lib-go-dbaas-base-client`), which matches the mounted `metadata.json` to that classifier and type
 `redis`. Until dbaas-operator has written the Secret, the pod waits in `ContainerCreating`; a replica never starts
