@@ -209,13 +209,14 @@ func wholeDomainBlocks() []model.Block {
 }
 
 // testPolicy is the singleton of the domain: the blocks under test plus the
-// identity keys the fixtures read, a scalar plan and an array-valued roles.
+// identity keys the fixtures read, a scalar plan, lowercased, and an
+// array-valued roles.
 // Extraction and rules live in one object now, so they compile as one unit.
 func testPolicy(blocks []model.Block) model.Policy {
 	return model.Policy{
 		Domain: testDomain,
 		Mappings: []model.KeyMapping{
-			{Key: "plan", Claim: "plan"},
+			{Key: "plan", Claim: "plan", Normalization: model.NormalizeLowercase},
 			{Key: "roles", Claim: "roles", Type: model.ValueStringArray},
 		},
 		Blocks: blocks,

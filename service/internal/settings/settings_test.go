@@ -135,6 +135,10 @@ func TestManagementRoles_anEmptyListGrantsNothing(t *testing.T) {
 	roles = ManagementRoles()
 	assert.Empty(t, roles.Viewer)
 	assert.Empty(t, roles.Operator)
+	// Two empty lists, which the schema refuses and the environment can still
+	// produce, grant nothing only because the mapping is explicit: a mapping
+	// that is not passes the token's roles through as the canonical names.
+	assert.True(t, roles.Explicit, "two empty lists would pass the token's roles through")
 }
 
 // An unset list is the canonical name, which is what a deployment that issues

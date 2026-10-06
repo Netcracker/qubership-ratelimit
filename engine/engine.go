@@ -89,7 +89,7 @@ func New(snap *compile.Snapshot, s store.Store, opts ...Option) *Engine {
 	}
 	e := &Engine{snap: snap, store: s, stats: o.stats}
 	if o.tokenCache > 0 {
-		e.cache = newTokenCache(o.tokenCache)
+		e.cache = newTokenCache(o.tokenCache, tokenCacheBytes)
 	}
 	return e
 }
@@ -122,6 +122,8 @@ type Request struct {
 	Token string
 
 	// Keys are pre-extracted identity values, overriding extraction per key.
+	// They pass the same bounds and normalization as a token's values; see
+	// identity.Explicit.
 	Keys map[string][]string
 
 	// Cost is the protocol's hits_addend; zero means the default of one.
@@ -294,16 +296,23 @@ func (e *Engine) keyNames(keys map[string][]string) []string {
 }
 
 // extractKeys resolves identity: extraction from the token first, explicit
-// keys layered on top.
+// keys layered on top. The explicit keys pass the identity layer's bounds and
+// normalization first, so a direct caller's Alice counts as the token's
+// alice, and a key they leave absent leaves the token's value in place.
 func (e *Engine) extractKeys(req Request) (map[string][]string, []identity.Skip) {
 	extracted, skips := e.cachedExtract(req.Token)
 	if len(req.Keys) == 0 {
 		return extracted, skips
 	}
-	if extracted == nil {
-		extracted = make(map[string][]string, len(req.Keys))
+	explicit, explicitSkips := identity.Explicit(e.snap.Extraction, req.Keys)
+	skips = append(skips, explicitSkips...)
+	if len(explicit) == 0 {
+		return extracted, skips
 	}
-	maps.Copy(extracted, req.Keys)
+	if extracted == nil {
+		extracted = make(map[string][]string, len(explicit))
+	}
+	maps.Copy(extracted, explicit)
 	return extracted, skips
 }
 

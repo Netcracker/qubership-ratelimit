@@ -17,7 +17,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
-	"github.com/netcracker/qubership-ratelimit/engine/identity"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/service/internal/store"
 )
@@ -305,11 +304,12 @@ func (s *Server) ShouldRateLimit(
 //
 // Within a descriptor, path, method, and token feed the built-in keys,
 // request_id stays a log correlation field, and any other entry arrives as a
-// pre-extracted identity key — the direct-consumer form of the protocol. An
-// empty value means absence, mirroring the identity layer, and so does a value
-// past the identity layer's bounds: one longer than identity.MaxValueBytes, or
-// one past identity.MaxArrayItems values of the same key. Without them a direct
-// caller chooses the length of a counter key, up to the size of the message.
+// pre-extracted identity key — the direct-consumer form of the protocol. The
+// engine holds these values to the identity layer's rules, as it holds a
+// token's: a key with a value longer than identity.MaxValueBytes, or with more
+// than identity.MaxArrayItems values, is absent and counted as a skip, and a
+// key the domain lowercases is lowercased. Without the bounds a direct caller
+// would choose the length of a counter key, up to the size of the message.
 //
 // The request's hits_addend is the cost of every decision, and an unset
 // value, which a uint32 cannot tell from zero, is the protocol default of
@@ -346,9 +346,6 @@ func engineRequests(req *envoyratelimit.RateLimitRequest) []check {
 			case descriptorKeyRequestID:
 			default:
 				key := entry.GetKey()
-				if len(value) > identity.MaxValueBytes || len(er.Keys[key]) >= identity.MaxArrayItems {
-					continue
-				}
 				if er.Keys == nil {
 					er.Keys = map[string][]string{}
 				}

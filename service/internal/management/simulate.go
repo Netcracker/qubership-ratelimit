@@ -185,7 +185,9 @@ func (a *API) simulate(ctx context.Context, request SimulationRequest) (Simulati
 		return SimulationResponse{}, notFound("domain " + logSafe(request.Domain) +
 			" is not in the enforced rule set")
 	}
-	if apiErr := unnormalized(rules.Snapshot(request.Domain), request.Keys,
+	// A simulation's keys are identity values, never a path segment: a capture
+	// takes its value from the simulated path, so no key is skipped here.
+	if apiErr := unnormalized(rules.Snapshot(request.Domain), request.Keys, nil,
 		func(string) string { return "keys" }); apiErr != nil {
 		return SimulationResponse{}, apiErr
 	}

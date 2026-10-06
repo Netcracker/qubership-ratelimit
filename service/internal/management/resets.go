@@ -47,7 +47,7 @@ func (a *API) handleBulkReset(c *fiber.Ctx) error {
 	if apiErr != nil {
 		return apiErr
 	}
-	if apiErr := unnormalized(snapshot, command.Selector.Axes,
+	if apiErr := unnormalized(snapshot, command.Selector.Axes, capturedKeys(snapshot, command.Selector.RuleIDs),
 		func(string) string { return fieldSelectorAxes }); apiErr != nil {
 		return apiErr
 	}

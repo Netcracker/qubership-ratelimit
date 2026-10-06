@@ -174,7 +174,7 @@ func (a *API) handleRules(c *fiber.Ctx) error {
 	if apiErr != nil {
 		return apiErr
 	}
-	if apiErr := unnormalized(snapshot, sc.values, axisField); apiErr != nil {
+	if apiErr := unnormalized(snapshot, sc.values, capturedKeys(snapshot, nil), axisField); apiErr != nil {
 		return apiErr
 	}
 
@@ -244,7 +244,7 @@ func (a *API) handleCounters(c *fiber.Ctx) error {
 	if apiErr != nil {
 		return apiErr
 	}
-	if apiErr := unnormalized(snapshot, sel.Axes, axisField); apiErr != nil {
+	if apiErr := unnormalized(snapshot, sel.Axes, capturedKeys(snapshot, sel.RuleIDs), axisField); apiErr != nil {
 		return apiErr
 	}
 	pageSize, apiErr := parsePageSize(query.Get("pageSize"))
@@ -309,7 +309,8 @@ func (a *API) handleReset(c *fiber.Ctx) error {
 	if apiErr != nil {
 		return apiErr
 	}
-	if apiErr := unnormalized(snapshot, singleValues(command.AxesByName), axisField); apiErr != nil {
+	if apiErr := unnormalized(snapshot, singleValues(command.AxesByName),
+		capturedKeys(snapshot, []string{command.block.Name}), axisField); apiErr != nil {
 		return apiErr
 	}
 	if command.ExpectedVersion != "" && command.ExpectedVersion != version {

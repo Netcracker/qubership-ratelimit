@@ -135,8 +135,8 @@ management:
 
   # The role names the IdP issues, mapped onto the two this API authorizes
   # against. Each is a list, and a role on neither grants nothing; an empty
-  # list grants its role to nobody. A read-only deployment sets viewer and
-  # leaves operator empty. Both lists empty would let nobody in, and the schema
+  # list grants its role to nobody. A read-only deployment sets operator: [];
+  # left out, operator keeps its default. Both lists empty would let nobody in, and the schema
   # refuses that as a mistake. The defaults are the canonical names, so a
   # deployment whose IdP already issues viewer and operator configures nothing
   # here.

@@ -19,7 +19,7 @@ no list needs `maxItems`.
 | | cost of one descriptor (`hits_addend`) | ≤ 1 000 000 000, not negative | Envoy's own ceiling; the engine gives no budget back | the adapter, `invalid_cost` → `OVER_LIMIT` |
 | | cost of the whole check, summed over its descriptors | ≤ 1 000 000 000 | spreading the largest cost over descriptors would multiply it | the adapter, `invalid_cost` → `OVER_LIMIT` |
 | | size of one gRPC check | ≤ 128 KiB | a gateway's check is bounded by Envoy's 60 KiB header limit; gRPC's default of 4 MiB would let a direct caller choose a counter key of megabytes | the gRPC server, `RESOURCE_EXHAUSTED` |
-| | identity value of a descriptor, values of one key | ≤ 256 bytes, ≤ 64 values | the token's sanitary limits, applied to the direct form too | the adapter; a value past them is absent |
+| | identity value of a descriptor, values of one key | ≤ 256 bytes, ≤ 64 values | the token's sanitary limits, applied to the direct form too | the engine; a key past them is absent and counted in `ratelimit_extraction_skips_total`, and a key the domain lowercases is lowercased |
 | **Block** | rules, routes | unbounded | object size only | — |
 | | route methods | enum: the 8 RFC 9110 methods + `PATCH` (RFC 5789) | closed set; a method outside the enum matches only routes without `methods` | enum, `listType: set` |
 | | route path | ≤ 2048 characters | the conventional URL length limit | `maxLength` |
@@ -147,12 +147,14 @@ the rule; last-good holds the traffic.
   the domain is ≤ 63, axis values are escaped; the raw token never enters the key.
 - **Token sanitary limits** are engine constants, not configuration fields: an extracted value ≤ 256 bytes
   (`MaxValueBytes`; longer values are skipped with reason `too_long`), an array claim ≤ 64 items (`MaxArrayItems`),
-  the token ≤ 16 KiB (`MaxTokenBytes`), and the payload's shape: nesting ≤ 8 levels (`MaxPayloadDepth`) and ≤ 1024
+  the token ≤ 16 KiB (`MaxTokenBytes`), and the payload's shape: nesting ≤ 8 levels (`MaxPayloadDepth`) and ≤ 512
   commas and colons (`MaxPayloadSeparators`), past which the token is undecodable (`decode_failed`). The token is
   untrusted input; the size and value limits protect key length and store memory, and the shape limits the work of
-  decoding it, which the size alone left at tens of times a realistic token's.
-- **Token cache**: 10 000 extractions per domain, and an extraction over 1 KiB of keys and values is not cached, so
-  a stream of distinct tokens with large array claims holds no memory past the count.
+  decoding it to about 8 times a realistic token's, where the size alone left it at about 100 times. A heavy token,
+  150 realm roles, ten clients of eight roles, and thirty flat claims, has 312 separators.
+- **Token cache**: per domain, 10 000 extractions and 8 MiB, the size estimated from the keys, the values, the skips,
+  and the map overhead; an extraction over 1 KiB by that estimate is not cached. A stream of distinct tokens holds the
+  cache near 8 MiB of heap whatever the claims and the number of mappings.
 
 ## What is checked by what
 
@@ -164,8 +166,10 @@ the rule; last-good holds the traffic.
 | the operator's compiler (`status.ruleProblems`, last-good) | references to keys, groups, and rules; types against operators and axes; predicate arity and other structure; window math; 128 buckets; schema version skew |
 | the operator before the ConfigMap write (`ConfigMapTooLarge`, last-good) | the compressed total of the namespace's domains against the 1 MiB of a ConfigMap |
 | the service before the JSON decode (a refusal on `/debug/applied`, the snapshot stays) | the decompressed size of a payload against 8 MiB |
-| the engine on the decision | the 128-bucket backstop per decision, token sanity limits |
-| the adapter on the check | at most 16 descriptors and a total cost of 1 000 000 000 per gRPC check, descriptor identity values within the token's sanitary limits, at most 128 KiB per message |
+| the engine on the decision | the 128-bucket backstop per decision, token sanity limits, the token cache's 8 MiB |
+| the adapter on the check | at most 16 descriptors and a total cost of 1 000 000 000 per gRPC check |
+| the gRPC server before the adapter | at most 128 KiB per message, refused with `RESOURCE_EXHAUSTED` before any handler runs, so no metric of the service counts it; only the caller sees it |
+| the engine on the direct form | descriptor identity values within the token's sanitary limits, counted as extraction skips |
 
 There is one rule: the narrowest binds, the bucket budget, the object size, or the compressed total of the namespace.
 For `All` policies it is the buckets; for large `FirstMatch` domains it is the object size under client-side apply; for

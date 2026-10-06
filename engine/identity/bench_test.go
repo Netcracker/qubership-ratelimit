@@ -1,30 +1,23 @@
 package identity
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 )
 
-// benchPayload encodes claims as a token without the test helper's *testing.T.
-func benchPayload(claims map[string]any) string {
-	raw, _ := json.Marshal(claims)
-	return "h." + base64.RawURLEncoding.EncodeToString(raw) + ".sig"
-}
-
-// The cost of extraction for a realistic token and for the worst shapes the
-// size bound admits: deeply nested, and densely packed. Before the shape
-// bound the worst cost tens of times the realistic one; a payload past the
-// bound now stops at the linear scan.
+// The cost of extraction for a realistic token, for the worst shapes the size
+// bound admits, deeply nested and densely packed, which the shape bound
+// refuses after its linear scan, and for the worst shape the shape bound
+// still admits, which is the residual: about eight times the realistic token,
+// where the size alone left the worst at about a hundred times.
 func BenchmarkExtractShapes(b *testing.B) {
-	p := plan(&testing.T{})
+	p := plan(b)
 	roles := make([]any, 20)
 	for i := range roles {
 		roles[i] = "role-" + strings.Repeat("r", 10)
 	}
-	realistic := benchPayload(map[string]any{
+	realistic := token(b, map[string]any{
 		"sub": "00000000-0000-4000-8000-000000000001", "iss": "https://idp.example/realms/core",
 		"aud": "gateway", "exp": 4102444800, "iat": 1700000000, "azp": "web", "scope": "openid profile",
 		"preferred_username": "alice", "email": "alice@example.com", "realm_access": map[string]any{"roles": roles},
@@ -33,26 +26,26 @@ func BenchmarkExtractShapes(b *testing.B) {
 	for range 1500 {
 		deep = []any{deep}
 	}
-	deepToken := benchPayload(map[string]any{"sub": "alice", "d": deep})
+	deepToken := token(b, map[string]any{"sub": "alice", "d": deep})
 	dense := map[string]any{"sub": "alice"}
-	for i := 0; len(benchPayload(dense)) < MaxTokenBytes-64; i++ {
+	for i := 0; len(token(b, dense)) < MaxTokenBytes-64; i++ {
 		dense[fmt.Sprintf("k%d", i)] = 0
 	}
-	denseToken := benchPayload(dense)
+	denseToken := token(b, dense)
 	// The worst admitted: as many claims as the separators allow, one of them
 	// nested to the depth bound.
 	admitted := map[string]any{"sub": "alice", "d": nestedArray(MaxPayloadDepth - 2)}
 	for i := 0; len(admitted)*2 < MaxPayloadSeparators-8; i++ {
 		admitted[fmt.Sprintf("k%d", i)] = 0
 	}
-	admittedToken := benchPayload(admitted)
+	admittedToken := token(b, admitted)
 
-	for name, tok := range map[string]string{"realistic": realistic, "deep": deepToken, "dense": denseToken,
-		"admitted": admittedToken} {
-		b.Run(name, func(b *testing.B) {
+	for _, shape := range []struct{ name, token string }{{"realistic", realistic}, {"deep", deepToken},
+		{"dense", denseToken}, {"admitted", admittedToken}} {
+		b.Run(shape.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				Extract(p, tok)
+				Extract(p, shape.token)
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"unsafe"
 
 	"github.com/netcracker/qubership-ratelimit/engine/identity"
 )
@@ -21,34 +22,18 @@ import (
 // rotation through promotion on hit. Distinct tokens minted freely by an
 // attacker churn the generations; the worst case that buys is the uncached
 // extraction cost per request, never an error.
-// maxCachedEntryBytes bounds the extracted keys and values one cache entry
-// may hold. The capacity bounds the entries, not their size, and a token can
-// carry up to identity.MaxArrayItems values of identity.MaxValueBytes each for
-// every declared key: a stream of distinct tokens with a large array claim
-// would hold the cache at its capacity times that, past a replica's memory
-// limit. A realistic extraction, a subject and a few roles, is a few hundred
-// bytes; a larger one is extracted every time instead of being cached, which
-// costs only the work the identity layer's shape bounds already cap.
-const maxCachedEntryBytes = 1 << 10
-
-// entryBytes is the size of an extraction's keys and values.
-func entryBytes(keys map[string][]string) int {
-	n := 0
-	for key, values := range keys {
-		n += len(key)
-		for _, v := range values {
-			n += len(v)
-		}
-	}
-	return n
-}
-
+//
+// The capacity bounds the entries and tokenCacheBytes bounds their size, so
+// neither a stream of distinct tokens with large claims nor a policy with
+// many mappings can hold the cache past a replica's memory limit.
 type tokenCache struct {
-	mu     sync.RWMutex
-	half   int  // per-generation bound: half of the configured capacity
-	single bool // capacity 1: one generation, rotation drops instead of aging
-	cur    map[[sha256.Size]byte]cacheEntry
-	prev   map[[sha256.Size]byte]cacheEntry
+	mu        sync.RWMutex
+	half      int  // per-generation bound: half of the configured capacity
+	halfBytes int  // per-generation bound: half of tokenCacheBytes
+	single    bool // capacity 1: one generation, rotation drops instead of aging
+	cur       map[[sha256.Size]byte]cacheEntry
+	prev      map[[sha256.Size]byte]cacheEntry
+	curBytes  int // the size of the entries in cur
 }
 
 // cacheEntry is one extraction result. The map inside is owned by the cache
@@ -56,12 +41,68 @@ type tokenCache struct {
 type cacheEntry struct {
 	keys  map[string][]string
 	skips []identity.Skip
+	size  int // the estimate of entrySize, counted against the byte bounds
 }
 
-func newTokenCache(capacity int) *tokenCache {
-	c := &tokenCache{half: capacity / 2}
+// tokenCacheBytes bounds the memory one domain's cache holds, by the estimate
+// of entrySize: about the size of the default capacity's worth of realistic
+// extractions, a subject and a few roles each.
+const tokenCacheBytes = 8 << 20
+
+// maxCachedEntryBytes bounds one entry. A realistic extraction is a few
+// hundred bytes; a larger one is extracted every time instead of being
+// cached, which costs only the work the identity layer's shape bounds
+// already cap, and leaves the budget to the tokens that repeat.
+const maxCachedEntryBytes = 1 << 10
+
+// The overheads entrySize adds to the bytes of the keys and values: the
+// entry's slot in a generation with its hash, the keys map's header, a key's
+// slot with its string and slice headers, a value's string header, and one
+// skip. They are estimates of the runtime's layout on a 64-bit platform, not
+// measurements, and err on the large side.
+const (
+	entryOverhead = 160
+	keyOverhead   = 64
+	valueOverhead = 16
+	skipOverhead  = int(unsafe.Sizeof(identity.Skip{}))
+)
+
+// entrySize estimates the memory an entry holding keys and skips retains,
+// the map and the skips included: an extraction that found nothing for a
+// policy of many mappings still carries a skip per mapping.
+func entrySize(keys map[string][]string, skips []identity.Skip) int {
+	n := entryOverhead + len(skips)*skipOverhead
+	for key, values := range keys {
+		n += keyOverhead + len(key)
+		for _, v := range values {
+			n += valueOverhead + len(v)
+		}
+	}
+	return n
+}
+
+// newCacheEntry copies an extraction into an entry sized for what it holds.
+// identity.Extract sizes its map for every key of the plan, and maps.Clone
+// keeps that capacity, so a clone of an empty extraction under a policy of
+// a few hundred mappings would retain kilobytes that entrySize does not see.
+func newCacheEntry(keys map[string][]string, skips []identity.Skip, size int) cacheEntry {
+	e := cacheEntry{size: size}
+	if len(keys) > 0 {
+		e.keys = make(map[string][]string, len(keys))
+		for key, values := range keys {
+			e.keys[key] = slices.Clone(values)
+		}
+	}
+	if len(skips) > 0 {
+		e.skips = slices.Clone(skips)
+	}
+	return e
+}
+
+func newTokenCache(capacity, budget int) *tokenCache {
+	c := &tokenCache{half: capacity / 2, halfBytes: budget / 2}
 	if capacity < 2 {
-		c.half, c.single = 1, true
+		c.half, c.halfBytes, c.single = 1, budget, true
 	}
 	c.cur = make(map[[sha256.Size]byte]cacheEntry, c.half)
 	return c
@@ -85,14 +126,19 @@ func (c *tokenCache) lookup(h [sha256.Size]byte) (cacheEntry, bool) {
 	return e, true
 }
 
-// store inserts an entry, rotating generations when the current one is full.
+// store inserts an entry, rotating generations when the current one is full
+// by its entries or by its bytes.
 func (c *tokenCache) store(h [sha256.Size]byte, e cacheEntry) {
 	c.mu.Lock()
-	if _, exists := c.cur[h]; !exists && len(c.cur) >= c.half {
-		if !c.single {
-			c.prev = c.cur
+	if _, exists := c.cur[h]; !exists {
+		if len(c.cur) >= c.half || c.curBytes+e.size > c.halfBytes {
+			if !c.single {
+				c.prev = c.cur
+			}
+			c.cur = make(map[[sha256.Size]byte]cacheEntry, c.half)
+			c.curBytes = 0
 		}
-		c.cur = make(map[[sha256.Size]byte]cacheEntry, c.half)
+		c.curBytes += e.size
 	}
 	c.cur[h] = e
 	c.mu.Unlock()
@@ -122,8 +168,8 @@ func (e *Engine) cachedExtract(token string) (map[string][]string, []identity.Sk
 		e.stats.misses.Add(1)
 	}
 	keys, skips := identity.Extract(e.snap.Extraction, token)
-	if entryBytes(keys) <= maxCachedEntryBytes {
-		e.cache.store(h, cacheEntry{keys: maps.Clone(keys), skips: slices.Clone(skips)})
+	if size := entrySize(keys, skips); size <= maxCachedEntryBytes {
+		e.cache.store(h, newCacheEntry(keys, skips, size))
 	}
 	return keys, skips
 }

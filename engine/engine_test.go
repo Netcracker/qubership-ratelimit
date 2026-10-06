@@ -729,3 +729,25 @@ func TestTokenCacheSkipsALargeExtraction(t *testing.T) {
 		t.Errorf("a small extraction was not cached: %d hits", hits)
 	}
 }
+
+// The direct form's values are normalized as a token's are, so a direct
+// caller's client Alice and a token whose sub is Alice charge one counter:
+// the overlay of unnormalized values was what made a counter the management
+// API could not address.
+func TestDecide_theDirectFormIsNormalizedLikeTheToken(t *testing.T) {
+	p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "each",
+		Counters: []string{model.KeyClient}, Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}}}}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	e := engine.New(snap, memory.New())
+
+	if d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: token(t, "Alice")}); !d.Allowed {
+		t.Fatal("the first request was refused")
+	}
+	direct := engine.Request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"Alice"}}}
+	if d := decide(t, e, direct); d.Allowed {
+		t.Error("the direct form's Alice was counted apart from the token's")
+	}
+}

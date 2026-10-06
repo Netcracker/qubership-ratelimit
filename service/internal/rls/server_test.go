@@ -24,7 +24,6 @@ import (
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
-	"github.com/netcracker/qubership-ratelimit/engine/identity"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 	counters "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
@@ -1027,24 +1026,4 @@ func TestShouldRateLimit_theCostBoundCoversTheWholeCheck(t *testing.T) {
 		requestWith(map[string]string{"path": "/a"}, map[string]string{"path": "/b"}))
 	require.NoError(t, err)
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "two checks of cost one were refused")
-}
-
-// A descriptor identity value takes the bounds a value read from a token
-// takes: one longer than identity.MaxValueBytes, or past identity.MaxArrayItems
-// values of one key, is absent. Without them a direct caller chooses the length
-// of a counter key.
-func TestEngineRequests_boundsADescriptorsIdentityValues(t *testing.T) {
-	req := requestWith(map[string]string{"client": strings.Repeat("x", identity.MaxValueBytes+1), "plan": "gold"})
-	keys := engineRequests(req)[0].Keys
-	assert.NotContains(t, keys, "client", "a value past the bound became a counter key")
-	assert.Equal(t, []string{"gold"}, keys["plan"])
-
-	descriptor := &envoycommon.RateLimitDescriptor{}
-	for i := range identity.MaxArrayItems + 5 {
-		descriptor.Entries = append(descriptor.Entries,
-			&envoycommon.RateLimitDescriptor_Entry{Key: "roles", Value: fmt.Sprintf("role-%d", i)})
-	}
-	keys = engineRequests(&envoyratelimit.RateLimitRequest{Domain: "d",
-		Descriptors: []*envoycommon.RateLimitDescriptor{descriptor}})[0].Keys
-	assert.Len(t, keys["roles"], identity.MaxArrayItems)
 }

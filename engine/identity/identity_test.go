@@ -15,7 +15,7 @@ import (
 
 // plan compiles the extraction plan the way production gets it, so these
 // tests exercise the real compile output, not a hand-built lookalike.
-func plan(t *testing.T) []compile.KeyExtraction {
+func plan(t testing.TB) []compile.KeyExtraction {
 	t.Helper()
 	snap, problems := compile.Compile("core-1-core", "gateway.public", &model.Policy{
 		Domain: "gateway.public",
@@ -34,7 +34,7 @@ func plan(t *testing.T) []compile.KeyExtraction {
 	return snap.Extraction
 }
 
-func token(t *testing.T, claims map[string]any) string {
+func token(t testing.TB, claims map[string]any) string {
 	t.Helper()
 	raw, err := json.Marshal(claims)
 	if err != nil {
@@ -222,15 +222,53 @@ func TestShapeLimits(t *testing.T) {
 		t.Error("a payload past the depth bound was decoded")
 	}
 
-	wide := map[string]any{"sub": "alice"}
-	for i := 0; len(wide)*2-1 <= MaxPayloadSeparators; i++ {
+	// The object's claims take 2n-1 separators and the pair's comma one more,
+	// so n claims reach the bound exactly at 2n.
+	wide := map[string]any{"sub": "alice", "pair": []int{1, 1}}
+	for i := 0; len(wide)*2 < MaxPayloadSeparators; i++ {
 		wide[fmt.Sprintf("c%04d", i)] = 1
 	}
+	if !ok(wide) {
+		t.Errorf("a payload of %d claims, at the separator bound, was refused", len(wide))
+	}
+	wide["past"] = 1
 	if ok(wide) {
 		t.Errorf("a payload of %d claims, past the separator bound, was decoded", len(wide))
 	}
 
 	if !ok(map[string]any{"sub": "alice", "note": strings.Repeat(`{[,:]}"\`, 400)}) {
 		t.Error("structure inside a string counted toward the bounds")
+	}
+}
+
+// Explicit holds a direct caller's values to the rules a token's values
+// meet: both sides of the value and the array bound, the declared key's
+// normalization, and a skip for a declared key only.
+func TestExplicit_appliesTheTokensRules(t *testing.T) {
+	p := plan(t)
+	many := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("r%d", i)
+		}
+		return out
+	}
+	long := strings.Repeat("x", MaxValueBytes)
+
+	keys, skips := Explicit(p, map[string][]string{
+		"client": {long}, "roles": many(MaxArrayItems), "tenant": {"Acme", ""}, "own": {"Kept"}})
+	want := map[string][]string{"client": {long}, "roles": many(MaxArrayItems), "tenant": {"acme"}, "own": {"Kept"}}
+	if !reflect.DeepEqual(keys, want) || len(skips) != 0 {
+		t.Errorf("values within the bounds: keys %v, skips %v; want %v and no skips", keys, skips, want)
+	}
+
+	keys, skips = Explicit(p, map[string][]string{
+		"client": {long + "x"}, "roles": many(MaxArrayItems + 1), "own": {long + "x"}})
+	if len(keys) != 0 {
+		t.Errorf("a key past a bound was kept: %v", keys)
+	}
+	wantSkips := map[string]SkipReason{"client": SkipTooLong, "roles": SkipTooManyItems}
+	if got := skipsOf(skips); !reflect.DeepEqual(got, wantSkips) {
+		t.Errorf("skips %v, want %v: an undeclared key reports none", got, wantSkips)
 	}
 }

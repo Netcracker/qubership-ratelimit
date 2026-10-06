@@ -27,8 +27,9 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
 - `hits_addend` is the request cost, defaulting to 1; a descriptor's own `hits_addend` overrides the request's for that
   descriptor, and an explicit zero there checks the descriptor without charging it. A cost that can never be admitted,
   greater than the rule's burst capacity, produces a deterministic `OVER_LIMIT`, never a wait or a loop. A descriptor
-  with `is_negative_hits`, or with a `hits_addend` above 1 000 000 000, is refused as `invalid_cost` and charges
-  nothing: the engine gives no budget back.
+  with `is_negative_hits`, or a check whose descriptors' costs add up to more than 1 000 000 000, is refused as
+  `invalid_cost` and charges nothing: the engine gives no budget back. The other bounds of one check are in
+  [limits](limits.md).
 - The verdict is aggregated: `OVER_LIMIT` if any matched rule is exceeded, `OK` otherwise. `statuses` stays empty: the
   response carries `overall_code` and headers, and per-descriptor detail is not returned, so a caller that needs
   separate verdicts sends separate checks. Per-rule detail (which rule fired, remaining, retry-after) comes back in the
@@ -39,7 +40,9 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
   Key order differs from pair order for names carrying `-` or `.`; that only decides whose name the headers carry on an
   exact tie, and it is the same on every replica, so headers do not jitter.
 - Direct gRPC consumers get the same contract. They may send pre-extracted descriptor entries and no token; the engine
-  matches on whatever keys are present.
+  matches on whatever keys are present. Those values meet the rules a token's values meet: a key past the value length
+  or the array bound is absent and counted as an extraction skip, and a key the domain lowercases is lowercased, so a
+  direct `client=Alice` and a token whose `sub` is `Alice` charge one counter.
 - The standard gRPC health service is exposed for direct gRPC consumers. Deployment readiness and liveness use HTTP
   `readyz` and `healthz` on the service chart's `healthProbe.port` (8081 by default), and `readyz` opens after the first
   manifest is applied from the ConfigMap volume; the probes do not use the gRPC health service.
@@ -293,9 +296,9 @@ The full contract, the interfaces, and the implementations are in the [store con
   containing dots); `type: String | StringArray`; `normalization`; and `fallbacks` (the first non-empty result).
   Array-valued claims are supported, which is the reason extraction lives in the engine at all: Istio's
   claim-to-header cannot export arrays. `sub -> client`, lowercased, is built in and works with an empty `mappings`; an
-  entry with `key: client` overrides it. The sanitary limits (token size, value length, array size) are engine
-  constants, not fields, and axis values are escaped when embedded into counter keys. The mapping is applied atomically
-  with the rules: one object, one generation.
+  entry with `key: client` overrides it. The sanitary limits (token size and shape, value length, array size, and the
+  token cache's bounds) are engine constants, not fields, listed in [limits](limits.md), and axis values are escaped
+  when embedded into counter keys. The mapping is applied atomically with the rules: one object, one generation.
 - **Values are normalized at extraction**, at minimum by configurable lowercasing, which is what preserves
   case-insensitive membership semantics. Group values (`groups[].clients`) are compared after the effective
   normalization of the `client` key; when `client` is overridden by an entry with `normalization: None`, they are

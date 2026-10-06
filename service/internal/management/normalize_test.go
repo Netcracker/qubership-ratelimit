@@ -3,6 +3,7 @@ package management
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -49,4 +50,52 @@ func TestManagement_refusesAnIdentityValueTheNormalizationWouldChange(t *testing
 	listing := h.call(t, http.MethodGet, counters+"?axis.client=alice", viewerRoles(), nil)
 	require.Equal(t, http.StatusOK, listing.Code)
 	require.Contains(t, listing.Body.String(), "alice")
+}
+
+// A path capture counts the segment as sent, so a counter of a block that
+// captures plan can hold Gold although the domain lowercases the mapped plan.
+// An endpoint addressing that block, or every block, compares the value as
+// given; one addressing only blocks where plan comes from the mapping still
+// refuses it, and a simulation's keys never come from a path.
+func TestManagement_comparesACapturedValueAsGiven(t *testing.T) {
+	captured := model.Block{
+		Name:   "plans",
+		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathTemplate, Value: "/plans/{plan}"}}}},
+		Rules:  []model.Rule{{Name: "per-plan", Counters: []string{"plan"}, Rates: []model.Rate{{Requests: 10, Period: time.Minute}}}},
+	}
+	mapped := model.Block{
+		Name:   "other",
+		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/other"}}}},
+		Rules:  []model.Rule{{Name: "per-plan", Counters: []string{"plan"}, Rates: []model.Rate{{Requests: 10, Period: time.Minute}}}},
+	}
+	h := newTestAPI(t, captured, mapped)
+	h.spend(t, "/plans/Gold", nil, 3)
+	counters := BasePath + "/domains/" + testDomain + "/counters"
+
+	for name, response := range map[string]*testResponse{
+		"listing":            h.call(t, http.MethodGet, counters+"?axis.plan=Gold", viewerRoles(), nil),
+		"listing by rule":    h.call(t, http.MethodGet, counters+"?ruleId=plans/per-plan&axis.plan=Gold", viewerRoles(), nil),
+		"applicability":      h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?axis.plan=Gold", viewerRoles(), nil),
+		"bulk reset preview": h.bulk(t, map[string]any{"selector": map[string]any{"axes": map[string][]string{"plan": {"Gold"}}}, "dryRun": true}, "key-bulk", operatorRoles()),
+	} {
+		require.Equal(t, http.StatusOK, response.Code, "%s: %s", name, response.Body.String())
+	}
+	listing := h.call(t, http.MethodGet, counters+"?ruleId=plans/per-plan&axis.plan=Gold", viewerRoles(), nil)
+	require.Contains(t, listing.Body.String(), `"Gold"`, "the captured counter is not listed")
+	reset := h.reset(t, "ruleId=plans/per-plan&axis.plan=Gold", "key-reset", operatorRoles())
+	require.Less(t, reset.Code, 300, "the single reset of the captured counter: %s", reset.Body.String())
+
+	for name, tc := range map[string]struct {
+		response *testResponse
+		field    string
+	}{
+		"listing by a mapped rule": {h.call(t, http.MethodGet, counters+"?ruleId=other/per-plan&axis.plan=Gold",
+			viewerRoles(), nil), "axis.plan"},
+		"simulation": {h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+			Domain: testDomain, Path: "/other", Method: "GET", Keys: map[string][]string{"plan": {"Gold"}},
+		}), "keys"},
+	} {
+		body := requireError(t, tc.response, http.StatusBadRequest, CodeInvalidRequest)
+		require.Equal(t, []string{tc.field}, body.Meta.Fields, name)
+	}
 }
