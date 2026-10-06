@@ -903,22 +903,6 @@
       "examples": [
         "baseline-controller"
       ]
-    },
-    "image": {
-      "description": "Removed: the image is IMAGE_REPOSITORY and TAG.",
-      "not": {}
-    },
-    "logLevel": {
-      "description": "Removed: the log level is LOG_LEVEL.",
-      "not": {}
-    },
-    "nameOverride": {
-      "description": "Removed: the name is SERVICE_NAME.",
-      "not": {}
-    },
-    "fullnameOverride": {
-      "description": "Removed: the name is SERVICE_NAME.",
-      "not": {}
     }
   },
   "definitions": {

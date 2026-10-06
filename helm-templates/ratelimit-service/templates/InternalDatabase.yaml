@@ -1,12 +1,12 @@
 {{- /*
 The counter store, from DBaaS. The InternalDatabase asks dbaas-aggregator to
 provision a Redis database for the release through the DBaaS Redis adapter;
-the DatabaseSecretClaim asks dbaas-operator to look that database up and write
-its connection properties into the Secret the Deployment mounts. Both carry the
-same classifier, the service's own: microserviceName is the chart's name, which
-is also the app.kubernetes.io/name label dbaas-operator sends as the
-originService of the claim, so the database's owner is the service that reads
-it.
+the DatabaseSecretClaim in DatabaseSecretClaim.yaml asks dbaas-operator to look
+that database up and write its connection properties into the Secret the
+Deployment mounts. Both carry the same classifier, the service's own:
+microserviceName is SERVICE_NAME, which is also the claim's
+app.kubernetes.io/name label that dbaas-operator sends as the originService of
+the lookup, so the database's owner is the service that reads it.
 
 The InternalDatabase carries no settings: the Redis adapter builds each
 database's redis.conf from its own installation, maxmemory-policy included,
@@ -39,24 +39,5 @@ spec:
     scope: service
     namespace: '{{ .Values.NAMESPACE }}'
   type: redis
----
-apiVersion: dbaas.netcracker.com/v1
-kind: DatabaseSecretClaim
-metadata:
-  name: '{{ .Values.SERVICE_NAME }}-redis'
-  namespace: '{{ .Values.NAMESPACE }}'
-  labels:
-    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
-    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
-    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
-    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID }}'
-spec:
-  operatorNamespace: {{ include "ratelimit.dbaasNamespace" . | quote }}
-  classifier:
-    microserviceName: '{{ .Values.SERVICE_NAME }}'
-    scope: service
-    namespace: '{{ .Values.NAMESPACE }}'
-  type: redis
-  secretName: '{{ .Values.SERVICE_NAME }}-redis'
 {{- end }}
 {{- end }}
