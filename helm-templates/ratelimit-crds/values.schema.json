@@ -1,0 +1,7 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "$id": "https://netcracker.com/ratelimit-crds/values.schema.json",
+  "type": "object",
+  "title": "The ratelimit-crds schema.",
+  "description": "JSON Schema for the ratelimit-crds chart. The chart takes no values; the root stays open so the platform's parameter set passes through."
+}

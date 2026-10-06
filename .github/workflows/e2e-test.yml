@@ -2,8 +2,9 @@
 #
 # Stands up a kind cluster with the platform's own mesh, qubership-istio for
 # the distribution and qubership-core-mesh-config for the gateways, installs
-# the two charts of the split with images built from the checked-out sources,
-# the operator first, and runs the Ginkgo suites in tests/e2e-go.
+# the CRD chart and then the two namespace charts with images built from the
+# checked-out sources, the operator first, and runs the Ginkgo suites in
+# tests/e2e-go.
 
 name: E2E
 
@@ -171,6 +172,12 @@ jobs:
 
       - name: Install the charts
         run: |
+          # The CRD first, once for the cluster, by the one release that owns
+          # it: the namespace charts carry no copy of it, and the baseline and
+          # the satellite below both rely on this install.
+          helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds \
+            --namespace "${E2E_NAMESPACE}" --wait --timeout 2m
+
           # A profile is mandatory: values.yaml carries no resource keys, so a
           # chart is always installed the way it is in production.
           #

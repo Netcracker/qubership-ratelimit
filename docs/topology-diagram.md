@@ -24,7 +24,7 @@ a policy placed in a satellite is processed by nobody.
 | ConfigMap `ratelimit-config` (`<domain>.json.gz` per domain, `manifest`) | the operator: the whole object on every reconcile, with an `ownerReference` to its own Deployment | the operator's namespace; one per namespace | the service replicas: a volume at `/etc/ratelimit/config`, projected by the kubelet within its sync period → decode → compile → swap; this is also last-good on a restart |
 | `EnvoyFilter` | the service chart at the install of each namespace | its own namespace (the baseline and every satellite) | the gateway (Envoy): sends the domain and one descriptor with four entries to the RLS of the baseline service |
 | counters `rl:v1:{ns/domain}:block/rule:…` | the service (atomic Lua) | the Redis database DBaaS provisions for the release | the service; it substitutes the namespace in the hash tag itself, and the filters take no part in the key shape |
-| CRD, the operator Lease | the operator chart (CRD with `keep`), the operator itself | cluster / namespace | no cluster-level components and no ClusterRole; the service has no Role and no token |
+| CRD, the operator Lease | the cluster chart `ratelimit-crds` (CRD with `keep`), the operator itself | cluster / namespace | no cluster-level components and no ClusterRole; the service has no Role and no token |
 
 A single (non-composite) deployment is the same picture without the satellite columns: the policy, the operator, the
 ConfigMap, the service, and the gateway live in one namespace. For details, see the

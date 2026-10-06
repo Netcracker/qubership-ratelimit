@@ -167,7 +167,17 @@ only once every pod enforces the rules.
 
 ## Install
 
-The delivery is two charts under `helm-templates/`, installed into one namespace in either order:
+The delivery is three charts under `helm-templates/`. `ratelimit-crds` holds the `RateLimitPolicy` CRD and is installed
+once per cluster, before any namespace; the other two are installed into each namespace, in either order:
+
+```bash
+helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds --namespace <platform-namespace>
+```
+
+The order is a requirement: an operator installed before the CRD exits at start with
+`no matches for kind "RateLimitPolicy"` and restarts until the CRD release is installed, and the `--wait` of its
+install times out. The release's name and namespace stay fixed for the cluster's lifetime, see
+[the CRD chart](docs/helm-chart.md#the-crd-chart).
 
 ```bash
 helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
@@ -199,7 +209,7 @@ well: the Lease holder and a standby.
 `MEMORY_LIMIT` is not only a cgroup ceiling: the platform's `memlimit` package derives `GOMEMLIMIT` from it at startup,
 so it governs when the Go heap starts collecting.
 
-`ratelimit-operator` renders the CRD, the operator replicas with the only `Role` of the delivery, a `PodMonitor`, and a
+`ratelimit-operator` renders the operator replicas with the only `Role` of the delivery, a `PodMonitor`, and a
 `PrometheusRule`. Its values are `policyAlerts.*` and the resource sizes with `REPLICAS`, 2 in the `-ha` and `prod`
 profiles. It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap `ratelimit-config`
 and the operator's own Deployment by name, and nothing else in the namespace beyond the policies, the Lease, the Events,
@@ -313,13 +323,15 @@ gateways:
 is right. Set it only if they move — Istio resolves `targetRefs` within the `EnvoyFilter`'s own namespace, so the filter
 has to follow the gateway.
 
-### The CRDs are shared
+### The CRD has one owner
 
 `ratelimitpolicies.ratelimit.netcracker.com` is cluster-scoped, and every namespace installation shares that one
-object. With several per-namespace releases, the releases race for its ownership and version. The chart annotates it
-with `helm.sh/resource-policy: keep` so that uninstalling one release does not take it — and every other namespace's
-policies — with it. Settle CRD upgrade ownership with the platform
-team: this is a deploy-time concern, and the service itself never touches the CRD objects.
+object, so it ships in a chart of its own, `ratelimit-crds`, installed by one release per cluster. The namespace charts
+carry no copy: with one, every namespace's operator release would contend for the object's ownership, and an upgrade of
+an older namespace would put its older schema back for the whole cluster. Upgrade the CRD release first, to the newest
+operator version in the cluster; schema changes are additive, so the newest schema serves every older operator. The
+chart annotates the CRD with `helm.sh/resource-policy: keep`, so uninstalling the release does not take every
+namespace's policies with it.
 
 ## Develop
 
@@ -328,9 +340,9 @@ make build              # compile both binaries, bin/ratelimit-operator and bin/
 make test-unit          # unit tests only; no envtest, no cluster, no network
 make test               # everything, including the envtest controller suite
 make manifests generate # regenerate the CRD, the RBAC, and the DeepCopy methods
-make sync-helm-crds     # copy the generated CRD into the operator chart (alias: make helm-crd)
+make sync-helm-crds     # copy the generated CRD into the ratelimit-crds chart (alias: make helm-crd)
 make lint               # golangci-lint
-make helm-lint          # helm lint of both charts against their values.schema.json
+make helm-lint          # helm lint of every chart against its values.schema.json
 ```
 
 `make test-e2e-go` runs the Ginkgo suites in `tests/e2e-go/` against a cluster that already has Istio ambient, the two
@@ -381,7 +393,7 @@ downloads the envtest binaries into `bin/`, so it needs internet; `make test-uni
 Kubernetes version from `go.mod`, so the test control plane cannot drift from the client libraries the operator is
 built against.
 
-`helm-templates/ratelimit-operator/templates/crd-*.yaml` is generated. Edit the Go types and run `make sync-helm-crds`
+`helm-templates/ratelimit-crds/templates/crd-*.yaml` is generated. Edit the Go types and run `make sync-helm-crds`
 instead of editing them.
 
 The CRD carries CEL rules, and the cost estimator budgets each one against the declared `MaxLength` and `MaxItems`. Two

@@ -32,7 +32,7 @@ Counters live in a shared Redis, so a limit is a limit of the domain rather than
 | Page | What it covers |
 | --- | --- |
 | [Operations runbook](runbook.md) | Diagnosing a component that misbehaves: store degradation, a policy that will not compile, a lagging replica, the ConfigMap channel, and the metric-to-scenario map. |
-| [Helm charts](helm-chart.md) | The two charts: values, schemas, templates, the metric naming contract, the Argo CD health check, installation and upgrade order, and what the charts deliberately do not install. |
+| [Helm charts](helm-chart.md) | The three charts, one cluster chart for the CRD and two namespace charts: values, schemas, templates, the metric naming contract, the Argo CD health check, installation and upgrade order, and what the charts deliberately do not install. |
 
 ## Management API
 

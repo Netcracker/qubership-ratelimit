@@ -1,0 +1,5 @@
+# The chart has no values. It renders the RateLimitPolicy CRD, which is
+# cluster-scoped, so it is installed once per cluster, by one release, ahead of
+# the ratelimit-operator and ratelimit-service releases of every namespace. Its
+# version is the newest operator version in the cluster: schema changes are
+# additive, so the newest schema serves every older operator.

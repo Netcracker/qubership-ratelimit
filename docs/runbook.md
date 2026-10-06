@@ -51,6 +51,23 @@ kubectl logs -n "$NS" deploy/ratelimit-operator --since=10m | tail
 kubectl logs -n "$NS" deploy/ratelimit-service --since=10m | tail
 ```
 
+An operator pod that restarts at start, never turns Ready, and logs the line below runs in a cluster without the CRD:
+the cluster chart `ratelimit-crds` is not installed, or was installed after the operator and the pod has not restarted
+since. `kubectl get rlp` fails the same way, with `the server doesn't have a resource type "rlp"`.
+
+```text
+[ERROR] ... [class=ratelimit-operator] operator exited with an error: create manager: failed to determine if
+  *unstructured.Unstructured is namespaced: failed to get restmapping: no matches for kind "RateLimitPolicy" in
+  version "ratelimit.netcracker.com/v1"
+```
+
+Install the CRD release; the operator starts on its next restart, see
+[the CRD chart](helm-chart.md#the-crd-chart):
+
+```bash
+helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds --namespace <platform-namespace>
+```
+
 The one command to start with:
 
 ```bash
@@ -704,13 +721,13 @@ refuses a manifest stays Ready on the last configuration it applied. A replica t
 snapshot to keep, so it stays NotReady and out of Endpoints until a manifest it reads arrives.
 
 **Act.** The CRD skew: either upgrade the operator in that namespace to the version the schema belongs to, or take the
-new field out of the object until the upgrade. Do not downgrade the CRD: schema changes are additive, and an older CRD
-would refuse every object that already uses the field. The manifest skew: bring the two Deployments to one version, in
-the order the format versions allow. An upgrade installs the service first, then the operator. The new service reads N
-and N-1, so it reads what the old operator writes and the new operator's N once it arrives. A rollback reverses the
-order, the operator first, then the service: the old operator's N-1 is read by both service versions. A service rolled
-back first refuses the new operator's N and starts its fresh pods NotReady. A fresh installation needs no order: the
-service waits NotReady until the operator writes.
+new field out of the object until the upgrade. Do not downgrade the CRD, the `ratelimit-crds` release: schema changes
+are additive, and an older CRD would refuse every object that already uses the field. The manifest skew: bring the two
+Deployments to one version, in the order the format versions allow. An upgrade installs the service first, then the
+operator. The new service reads N and N-1, so it reads what the old operator writes and the new operator's N once it
+arrives. A rollback reverses the order, the operator first, then the service: the old operator's N-1 is read by both
+service versions. A service rolled back first refuses the new operator's N and starts its fresh pods NotReady. A fresh
+installation needs no order: the service waits NotReady until the operator writes.
 
 A rollback of the operator across a format increment starts it without last-good: the older operator does not read
 the newer manifest, writes the namespace again from the live objects, and a domain whose latest generation does not

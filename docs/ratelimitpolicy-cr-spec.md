@@ -484,8 +484,8 @@ forces list bounds for its own sake and a second copy of the compiler's rules ([
 `ratelimitpolicies/status` update/patch, Lease create/update/get (the Lease covers the overlap of two operator pods
 during a rollout), the EndpointSlice of the Service `ratelimit` get/list/watch, the ConfigMap `ratelimit-config`
 get/list/watch/create/update/patch/delete, its own Deployment get (the ConfigMap's owner), `events` create/patch. There
-is no ClusterRole; the operator chart installs the CRD. The service pod carries no Role and mounts no ServiceAccount
-token (`automountServiceAccountToken: false`).
+is no ClusterRole; the CRD comes from the cluster chart `ratelimit-crds`. The service pod carries no Role and mounts
+no ServiceAccount token (`automountServiceAccountToken: false`).
 
 ## Status
 
