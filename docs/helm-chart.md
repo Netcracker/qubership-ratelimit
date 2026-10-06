@@ -1,13 +1,14 @@
 # The ratelimit Helm charts: values, schemas, templates
 
 The delivery contract: a reference for the values variables, their JSON schemas, and the structure of the templates.
-The delivery is **one application** of **two charts** and **two images** ([topology](deployment-topology.md)):
-`ratelimit-operator` under `helm-templates/ratelimit-operator` with the image
+The delivery is **one application** of **three charts** and **two images** ([topology](deployment-topology.md)): one
+cluster chart and two namespace charts. The cluster chart, `ratelimit-crds` under `helm-templates/ratelimit-crds`,
+holds the cluster-scoped `RateLimitPolicy` CRD and is installed once per cluster, see "The CRD chart". The namespace
+charts are `ratelimit-operator` under `helm-templates/ratelimit-operator` with the image
 `qubership-ratelimit-operator`, and `ratelimit-service` under `helm-templates/ratelimit-service` with the image
 `qubership-ratelimit-service`. The platform installs the same pair in every namespace of an application. The set of
-objects each chart renders is derived from the platform's `BASELINE_ORIGIN`: the whole stack where a domain lives, the
-gateway filters alone in a satellite. A third chart, `ratelimit-crds` under `helm-templates/ratelimit-crds`, holds the
-cluster-scoped `RateLimitPolicy` CRD and is installed once per cluster, see "The CRD chart".
+objects each namespace chart renders is derived from the platform's `BASELINE_ORIGIN`: the whole stack where a domain
+lives, the gateway filters alone in a satellite.
 
 The operator chart owns the operator deployment; the service chart owns the service deployment, the Service
 `ratelimit`, and the Envoy configuration (the ratelimit filter on the gateways). The ConfigMap
@@ -109,6 +110,15 @@ helm-templates/ratelimit-crds/templates/
 - one release per cluster owns the CRD, installed before the namespace charts; the namespace charts carry no copy, so
   their releases do not contend for its ownership, and an upgrade of an older namespace cannot put its older schema back
   for the whole cluster. The chart takes no values and renders the same in every namespace scheme;
+- an operator started before the CRD exists exits at manager creation and restarts until the CRD release is installed;
+  it never serves `/readyz`, so the `--wait` of its install times out. Its log ends in
+  `create manager: failed to determine if *unstructured.Unstructured is namespaced: failed to get restmapping: no
+  matches for kind "RateLimitPolicy" in version "ratelimit.netcracker.com/v1"`, and installing `ratelimit-crds`
+  repairs it ([runbook](runbook.md), section 0);
+- the release's name and namespace are fixed for the cluster's lifetime: the CRD that `keep` leaves after
+  `helm uninstall` still carries the `meta.helm.sh/release-name` and `meta.helm.sh/release-namespace` annotations, and
+  an install under another name or namespace fails with `invalid ownership metadata`. Reinstall it under the same name
+  and namespace, or move it with `--take-ownership` as below;
 - the CRD release is upgraded first, to the newest operator version in the cluster, and schema version skew between
   namespaces is a normal scenario: each namespace's operator may be older than the schema;
 - `helm.sh/resource-policy: keep`: uninstalling or reinstalling the release does not remove the type; the policies of
@@ -119,19 +129,20 @@ helm-templates/ratelimit-crds/templates/
   the unstructured object) and leaves `ratelimit-config` on the last-good generation: neither half crashes, and
   nothing enforces the object partially.
 
-A cluster whose CRD an operator release installed moves it to the CRD release once: Helm refuses to install a
-release over an object another release owns (`invalid ownership metadata`), so the object is handed over first. The
-next upgrade of the operator release then drops the CRD from that release, and the `keep` annotation on the live object
-stops Helm from deleting it.
+A cluster that already has the CRD moves it to the CRD release once. Helm refuses to install a release over an
+object another release owns (`invalid ownership metadata`), which is the case after an operator release installed it,
+and over an object without the label `app.kubernetes.io/managed-by: Helm`
+(`label validation error: missing key "app.kubernetes.io/managed-by"`), which is the case after
+`kubectl apply -f config/crd/bases` (`make install`). `--take-ownership` (Helm 3.17 and later) adopts the object in
+both cases; later upgrades of the release run without it:
 
 ```bash
-kubectl annotate crd ratelimitpolicies.ratelimit.netcracker.com --overwrite \
-  meta.helm.sh/release-name=ratelimit-crds meta.helm.sh/release-namespace=<platform-namespace>
+helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds --namespace <platform-namespace> --take-ownership
 ```
 
-```bash
-helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds --namespace <platform-namespace>
-```
+The next upgrade of the operator release then drops the CRD from that release and leaves it in the cluster. Helm
+decides what to keep from the previous release's manifest, not from the live object, and the operator chart's CRD
+template carried `helm.sh/resource-policy: keep`.
 
 ## Platform parameters and resource profiles
 

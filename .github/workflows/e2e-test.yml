@@ -2,8 +2,9 @@
 #
 # Stands up a kind cluster with the platform's own mesh, qubership-istio for
 # the distribution and qubership-core-mesh-config for the gateways, installs
-# the two charts of the split with images built from the checked-out sources,
-# the operator first, and runs the Ginkgo suites in tests/e2e-go.
+# the CRD chart and then the two namespace charts with images built from the
+# checked-out sources, the operator first, and runs the Ginkgo suites in
+# tests/e2e-go.
 
 name: E2E
 

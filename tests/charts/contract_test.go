@@ -1,5 +1,6 @@
-// Package charts renders the two charts of the split and compares what they
-// render with the constants of api/contract. The templates carry the Service
+// Package charts renders the two namespace charts and compares what they
+// render with the constants of api/contract, and checks that the CRD chart
+// alone renders the CRD. The templates carry the Service
 // name, its ports, the ConfigMap name, and the mount path as fixed strings,
 // because a satellite computes the RLS address from the constants alone;
 // this test is what keeps those strings equal to the ones the binaries
@@ -96,7 +97,14 @@ func render(t *testing.T, chart, namespace string, extra ...string) []object {
 	t.Helper()
 	out, err := renderErr(chart, namespace, extra...)
 	require.NoError(t, err, "%s", out)
+	return parse(t, out)
+}
 
+// parse splits the output of helm template into its documents and returns
+// every one that is an object; empty documents and comment-only ones, which
+// a template disabled by a condition leaves, are dropped.
+func parse(t *testing.T, out []byte) []object {
+	t.Helper()
 	var objects []object
 	for doc := range bytes.SplitSeq(out, []byte("\n---")) {
 		if len(bytes.TrimSpace(doc)) == 0 {
@@ -879,14 +887,7 @@ func TestCRDChart_ownsTheCRD(t *testing.T) {
 	out, err := exec.Command("helm", "template", "t", filepath.Join("..", "..", "helm-templates", "ratelimit-crds")).
 		CombinedOutput()
 	require.NoError(t, err, "%s", out)
-	var crds []object
-	for doc := range bytes.SplitSeq(out, []byte("\n---")) {
-		var o object
-		require.NoError(t, yaml.Unmarshal(doc, &o))
-		if o != nil && o.kind() != "" {
-			crds = append(crds, o)
-		}
-	}
+	crds := parse(t, out)
 	require.Len(t, crds, 1, "the CRD chart renders one object")
 	crd := crds[0]
 	assert.Equal(t, "CustomResourceDefinition", crd.kind())

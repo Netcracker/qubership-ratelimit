@@ -215,10 +215,11 @@ freezes, and the age of `lastCheckTime` shows how stale it is. Details and examp
 
 ## Delivery: monorepo, one application
 
-The code lives in a monorepo; the delivery is **one application**, `ratelimit`, made of **two charts** and **two
-images**, `qubership-ratelimit-operator` and `qubership-ratelimit-service`. The charts live under
-`helm-templates/ratelimit-operator` and `helm-templates/ratelimit-service`, the platform installs the same pair in
-every namespace, and both derive their contents from `BASELINE_ORIGIN`:
+The code lives in a monorepo; the delivery is **one application**, `ratelimit`, made of **three charts** and **two
+images**, `qubership-ratelimit-operator` and `qubership-ratelimit-service`: one cluster chart, `ratelimit-crds`, for the
+CRD (see below), and two namespace charts. The namespace charts live under `helm-templates/ratelimit-operator` and
+`helm-templates/ratelimit-service`, the platform installs the same pair in every namespace, and both derive their
+contents from `BASELINE_ORIGIN`:
 
 | Scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
@@ -262,13 +263,13 @@ and last-good stays enforced.
 ## Verification (e2e)
 
 The e2e workflow builds both images from the components list and creates a kind cluster with a lowered kubelet
-`syncFrequency`; the stand's kind configuration carries the same setting. It installs both charts in the baseline
-namespace, the operator first. The composite scenario runs in CI too: the workflow creates a second, satellite
-namespace with its own gateways (a second mesh-config release) and installs both charts there with
-`BASELINE_ORIGIN`; the `satellite` suite finds it through `E2E_SATELLITE_NAMESPACE` and skips without it, so a run
-against a plain stand still passes. Four specs: the satellite namespace holds the two EnvoyFilters of the service
-chart and no Deployment, Service, ServiceAccount, or Role, and the operator chart's release is empty; the satellite
-gateway's own Envoy config dump, read instead of the EnvoyFilter object, names
+`syncFrequency`; the stand's kind configuration carries the same setting. It installs the CRD chart, then both
+namespace charts in the baseline namespace, the operator first. The composite scenario runs in CI too: the workflow
+creates a second, satellite namespace with its own gateways (a second mesh-config release) and installs both charts
+there with `BASELINE_ORIGIN`; the `satellite` suite finds it through `E2E_SATELLITE_NAMESPACE` and skips without it,
+so a run against a plain stand still passes. Four specs: the satellite namespace holds the two EnvoyFilters of the
+service chart and no Deployment, Service, ServiceAccount, or Role, and the operator chart's release is empty; the
+satellite gateway's own Envoy config dump, read instead of the EnvoyFilter object, names
 `outbound|9000||ratelimit.<baseline>.svc.cluster.local` as the RLS cluster, so the spec sees what the gateway calls and
 not what the chart wrote; a `2/1h` policy (GCRA, so no calendar boundary inside a run) in the baseline admits one
 request through each gateway and refuses the third through either, in that order, so the satellite's request has to

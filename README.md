@@ -174,6 +174,11 @@ once per cluster, before any namespace; the other two are installed into each na
 helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds --namespace <platform-namespace>
 ```
 
+The order is a requirement: an operator installed before the CRD exits at start with
+`no matches for kind "RateLimitPolicy"` and restarts until the CRD release is installed, and the `--wait` of its
+install times out. The release's name and namespace stay fixed for the cluster's lifetime, see
+[the CRD chart](docs/helm-chart.md#the-crd-chart).
+
 ```bash
 helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
   --namespace <business-namespace> \

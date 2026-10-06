@@ -3,13 +3,11 @@
 OPERATOR_IMG ?= ratelimit-operator:latest
 SERVICE_IMG ?= ratelimit-service:latest
 
-# The charts that ship the CRD: the operator chart. The service chart ships
-# no CRD.
-CRD_CHART_DIRS ?= helm-templates/ratelimit-crds
-# Every chart the lint covers.
-CHART_DIRS ?= helm-templates/ratelimit-operator helm-templates/ratelimit-service
-# The CRD chart has no resource profiles and no mode: helm-lint lints it once.
+# The chart that ships the CRD; the lint runs it once, since it has no
+# profiles and no mode.
 CRD_CHART ?= helm-templates/ratelimit-crds
+# The namespace charts, linted with every profile in every mode.
+CHART_DIRS ?= helm-templates/ratelimit-operator helm-templates/ratelimit-service
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -57,7 +55,7 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 # the CRD, and every namespace's policies, with it.
 .PHONY: sync-helm-crds
 sync-helm-crds: manifests ## Regenerate the Helm CRD templates from config/crd/bases.
-	@for chart in $(CRD_CHART_DIRS); do \
+	@for chart in $(CRD_CHART); do \
 	rm -f $$chart/templates/crd-*.yaml; \
 	for f in config/crd/bases/*.yaml; do \
 		kind=$$(basename "$$f" .yaml | sed 's/^ratelimit\.netcracker\.com_//'); \

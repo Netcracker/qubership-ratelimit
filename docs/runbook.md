@@ -51,6 +51,23 @@ kubectl logs -n "$NS" deploy/ratelimit-operator --since=10m | tail
 kubectl logs -n "$NS" deploy/ratelimit-service --since=10m | tail
 ```
 
+An operator pod that restarts at start, never turns Ready, and logs the line below runs in a cluster without the CRD:
+the cluster chart `ratelimit-crds` is not installed, or was installed after the operator and the pod has not restarted
+since. `kubectl get rlp` fails the same way, with `the server doesn't have a resource type "rlp"`.
+
+```text
+[ERROR] ... [class=ratelimit-operator] operator exited with an error: create manager: failed to determine if
+  *unstructured.Unstructured is namespaced: failed to get restmapping: no matches for kind "RateLimitPolicy" in
+  version "ratelimit.netcracker.com/v1"
+```
+
+Install the CRD release; the operator starts on its next restart, see
+[the CRD chart](helm-chart.md#the-crd-chart):
+
+```bash
+helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds --namespace <platform-namespace>
+```
+
 The one command to start with:
 
 ```bash

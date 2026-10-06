@@ -1,9 +1,9 @@
 //go:build e2e
 
 // Package e2e drives the two components in a real cluster. It installs
-// nothing and uninstalls nothing: CI installs Istio, the gateways, and the
-// two charts first, the operator and then the service, and then runs this
-// suite.
+// nothing and uninstalls nothing: CI installs Istio, the gateways, the CRD
+// chart, and the two namespace charts first, the operator and then the
+// service, and then runs this suite.
 //
 // Environment:
 //
