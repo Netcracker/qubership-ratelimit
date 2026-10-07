@@ -2995,8 +2995,9 @@ components:
           description: Seconds until the window admits one request more than remaining,
             the t of the ratelimit response field. Absent where the window holds its
             whole capacity, which, since a simulation charges nothing, includes a
-            window the request would be the first to touch; the real answer carries
-            one emission interval there, after its own charge.
+            window the request would be the first to touch. The real answer, after
+            its own charge, carries one emission interval there under GCRA and the
+            time to the boundary under a fixed window.
     HeadersRateLimited:
       type: object
       additionalProperties: false
@@ -3058,8 +3059,9 @@ components:
           description: Seconds until the window admits one request more than remaining,
             the t of the ratelimit response field. Absent where the window holds its
             whole capacity, which, since a simulation charges nothing, includes a
-            window the request would be the first to touch; the real answer carries
-            one emission interval there, after its own charge.
+            window the request would be the first to touch. The real answer, after
+            its own charge, carries one emission interval there under GCRA and the
+            time to the boundary under a fixed window.
     HeadersCapacityExceeded:
       type: object
       additionalProperties: false
@@ -3115,8 +3117,9 @@ components:
           description: Seconds until the window admits one request more than remaining,
             the t of the ratelimit response field. Absent where the window holds its
             whole capacity, which, since a simulation charges nothing, includes a
-            window the request would be the first to touch; the real answer carries
-            one emission interval there, after its own charge.
+            window the request would be the first to touch. The real answer, after
+            its own charge, carries one emission interval there under GCRA and the
+            time to the boundary under a fixed window.
     SimulationRateLimited:
       type: object
       additionalProperties: false

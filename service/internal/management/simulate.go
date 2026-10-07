@@ -100,8 +100,9 @@ type HeadersView struct {
 	// seconds until the window admits one request more than Remaining. It is
 	// absent where the window holds its whole capacity, which, since the
 	// simulation charges nothing, includes a window the request would be the
-	// first to touch; the real answer carries one emission interval there,
-	// after its own charge.
+	// first to touch. The real answer, after its own charge, carries one
+	// emission interval there under GCRA and the time to the boundary under
+	// a fixed window.
 	EffectiveWindowSeconds *float64 `json:"effectiveWindowSeconds,omitempty"`
 }
 

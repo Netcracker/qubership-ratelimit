@@ -227,8 +227,9 @@ the window whose numbers are shown, and Headers also carries the block and rule 
 `ratelimit-policy` and `ratelimit` response fields carry as `<block>/<rule>`, and effectiveWindowSeconds, the `t` of
 `ratelimit`: the seconds until the window admits one request more than remaining. So a simulated answer compares with
 a real one, with one difference: the simulation judges the window before the request's own charge, so a window at its
-whole capacity, an untouched one included, reports no effectiveWindowSeconds where the real answer carries one
-emission interval. The choice is deterministic, in strict priority: windows with capacity_exceeded rank
+whole capacity, an untouched one included, reports no effectiveWindowSeconds where the real answer, after the charge,
+carries one emission interval under GCRA and the time to the boundary under a fixed window. The choice is
+deterministic, in strict priority: windows with capacity_exceeded rank
 above any retryable refusals (a fundamental impossibility binds harder than a wait; retryAfterSeconds is undefined for
 them, so among them the tie-break is immediately lexicographic by key); then retryable refusals by the largest
 retryAfterSeconds; on an admission, the window with the smallest absolute remaining; a tie goes to the lexicographically
