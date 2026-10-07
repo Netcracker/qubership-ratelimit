@@ -27,7 +27,7 @@ const (
 // monopolize the domain's shard.
 //
 // It is the only list-shaped bound in the model. Blocks, rules, axes, windows,
-// groups, and clients carry none: the object size keeps the linear target scan
+// groups, and group values carry none: the object size keeps the linear target scan
 // cheap on its own, and this budget is what actually binds a decision.
 const MaxDomainDecisionBuckets = 128
 
@@ -112,7 +112,7 @@ type Policy struct {
 	// beyond the built-ins.
 	Mappings []KeyMapping
 
-	// Groups are the named client lists the InGroup operator resolves
+	// Groups are the named value lists the InGroup operator resolves
 	// against, visible to every rule of the policy.
 	Groups []Group
 
@@ -120,11 +120,11 @@ type Policy struct {
 	Blocks []Block
 }
 
-// Group is a named client list backing the InGroup operator: one shared
-// bucket over the enumerated set.
+// Group is a named value list backing the InGroup operator. The predicate
+// that names the group decides which key is looked up in it.
 type Group struct {
-	Name    string
-	Clients []string
+	Name   string
+	Values []string
 }
 
 // Block pairs routes written once with the rules that share them.

@@ -20,7 +20,7 @@ spec:
 
   groups:
     - name: mvno-group-1
-      clients: [mvno_acc1, mvno_acc2]
+      values: [mvno_acc1, mvno_acc2]
 
   limits:
     # A cascade: the first matching rule decides, so the order of the list is the

@@ -3573,10 +3573,10 @@ components:
           type: array
           items:
             type: string
-          description: The membership set; client groups are already resolved into
-            it at compile time.
+          description: The membership set; groups are already resolved into it at
+            compile time.
       description: 'Membership: the key''s value set intersects the given set. A
-        client group (InGroup in the custom resource) is already resolved into values
+        group (InGroup in the custom resource) is already resolved into values
         at compile time.'
     PredicateContains:
       type: object

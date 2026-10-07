@@ -19,7 +19,7 @@ import (
 // The snapshot endpoint: what one replica enforces, rendered in full on its
 // metrics port. It is read through a port-forward the way an operator on
 // call would read it, and asserted against the policy it came from: the
-// generation the replica applied, the group resolved into the client list
+// generation the replica applied, the group resolved into its values
 // the engine tests, and the claim path behind a mapped key. The types below
 // are the suite's own reading of the document, since the service's package
 // is internal to its half of the tree.
@@ -28,7 +28,7 @@ var _ = Describe("the snapshot endpoint", Ordered, Label("snapshot"), func() {
 		domain    = "gateway.public"
 		probePath = "/e2e-snapshot"
 	)
-	clients := []string{"zed", "bob", "alice"}
+	members := []string{"zed", "bob", "alice"}
 
 	type snapshotRow struct {
 		Domain         string   `json:"domain"`
@@ -71,7 +71,7 @@ var _ = Describe("the snapshot endpoint", Ordered, Label("snapshot"), func() {
 	BeforeAll(func() {
 		p := newPolicy(domain, prefixLimits(probePath, "everyone", nil, 100, 60))
 		p.Spec.Mappings = []v1.ClaimMapping{{Key: "tenant", Claim: "org_id"}}
-		p.Spec.Groups = []v1.ClientGroup{{Name: "partners", Clients: clients}}
+		p.Spec.Groups = []v1.Group{{Name: "partners", Values: members}}
 		p.Spec.Limits[0].Rules = append(p.Spec.Limits[0].Rules, v1.Rule{
 			Name:     "partners",
 			Matches:  []v1.Predicate{{Key: "sub", Operator: v1.OperatorInGroup, Value: "partners"}},
@@ -131,7 +131,7 @@ var _ = Describe("the snapshot endpoint", Ordered, Label("snapshot"), func() {
 		Expect(partners.Matches).To(HaveLen(1))
 		Expect(partners.Matches[0].Operator).To(Equal("In"), "the group is resolved into the set the engine tests")
 		Expect(partners.Matches[0].Values).To(Equal([]string{"alice", "bob", "zed"}),
-			"the client list is rendered in full, sorted")
+			"the group's values are rendered in full, sorted")
 
 		var tenant *keyView
 		for i := range doc.Keys {

@@ -69,7 +69,7 @@ counts per wall-clock window and resets at the boundary. A rule whose axis the r
 all — there is nothing to key the bucket by, which is what excludes an anonymous caller from a rule counting by
 `sub`.
 
-`spec.mappings` declares how identity is read out of the JWT and `spec.groups` holds the named client lists `InGroup`
+`spec.mappings` declares how identity is read out of the JWT and `spec.groups` holds the named value lists `InGroup`
 resolves against. Both live in the same object as the rules that reference them, which is the point of the singleton:
 they change in one edit and apply as one generation, so a request never sees new rules over old extraction. The
 built-in `sub` key, the `sub` claim lower-cased, works with no mapping at all, and an entry named `sub` overrides it.
@@ -135,7 +135,7 @@ authentication — and compares the generation and UID each replica reports with
 
 The same port answers `/debug/snapshot` for a human: a summary of the domains a replica enforces, with the generation
 each was applied from, and `/debug/snapshot/<domain>` with the compiled domain in full, the identity keys with the
-claim paths behind them, and every group resolved into the client list the engine tests. Add `?format=yaml` for
+claim paths behind them, and every group resolved into the values the engine tests. Add `?format=yaml` for
 YAML. Read it through a port-forward to one pod, and compare pods when a rollout looks skewed:
 
 ```bash

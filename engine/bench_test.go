@@ -34,7 +34,7 @@ func benchSnapshot(b *testing.B) *compile.Snapshot {
 		Mappings: []model.KeyMapping{
 			{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
 		},
-		Groups: []model.Group{{Name: "vip", Clients: []string{"partner-a", "partner-b"}}},
+		Groups: []model.Group{{Name: "vip", Values: []string{"partner-a", "partner-b"}}},
 		Blocks: []model.Block{
 			{
 				Name: "api", Mode: model.ModeFirstMatch,

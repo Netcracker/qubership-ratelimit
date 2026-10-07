@@ -42,7 +42,7 @@ const (
 	// SnapshotPath is where a service replica renders what it enforces, on
 	// the same port and under the same terms as AppliedPath: a summary of
 	// every domain at the path itself, and one domain in full, rules and
-	// resolved client lists included, at SnapshotPath/<domain>. Nothing in
+	// resolved groups included, at SnapshotPath/<domain>. Nothing in
 	// the delivery reads it; it is for a human with a port-forward.
 	SnapshotPath = "/debug/snapshot"
 

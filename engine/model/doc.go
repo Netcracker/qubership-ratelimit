@@ -1,6 +1,6 @@
 // Package model is the rule set as the engine sees it: blocks with their routes
 // and modes, rules with their predicates, counting axes and windows, and the
-// named client groups they draw on.
+// named groups they draw on.
 //
 // These are plain structures with no schema annotations and no knowledge of
 // where the rules came from. The operator converts custom resources into them;

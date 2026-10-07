@@ -46,9 +46,9 @@ spec:
       type: StringArray
   groups:
     - name: partners
-      clients: [p-1, p-2]
+      values: [p-1, p-2]
     - name: trial
-      clients: [trial-1, trial-2]
+      values: [trial-1, trial-2]
   limits:
     # -- FirstMatch cascade: the first match decides; Bypass cuts off,
     #    Shadow counts without deciding

@@ -273,7 +273,7 @@ type LimitBlock struct {
 }
 
 // RateLimitPolicySpec is the whole rate limit configuration of one domain:
-// how identity is read out of a token, which client groups exist, and which
+// how identity is read out of a token, which groups exist, and which
 // rules count the traffic.
 type RateLimitPolicySpec struct {
 	// domain binds this policy to a traffic source. It has to equal, byte for
@@ -297,11 +297,11 @@ type RateLimitPolicySpec struct {
 	// +listMapKey=key
 	Mappings []ClaimMapping `json:"mappings,omitempty"`
 
-	// groups are the named client lists the InGroup operator resolves against.
+	// groups are the named value lists the InGroup operator resolves against.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	Groups []ClientGroup `json:"groups,omitempty"`
+	Groups []Group `json:"groups,omitempty"`
 
 	// limits are the blocks of the policy.
 	// +kubebuilder:validation:MinItems=1

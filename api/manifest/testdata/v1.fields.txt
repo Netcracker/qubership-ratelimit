@@ -1,6 +1,6 @@
 domain
-groups[].clients[]
 groups[].name
+groups[].values[]
 limits[].mode
 limits[].name
 limits[].rules[].behavior

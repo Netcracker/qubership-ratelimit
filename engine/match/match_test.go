@@ -138,7 +138,7 @@ func TestOperators(t *testing.T) {
 		return model.Policy{
 			Domain:   domain,
 			Mappings: mappings,
-			Groups:   []model.Group{{Name: "vip", Clients: []string{"alice", "bob"}}},
+			Groups:   []model.Group{{Name: "vip", Values: []string{"alice", "bob"}}},
 			Blocks: []model.Block{{Name: "b",
 				Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 				Rules:  []model.Rule{{Name: "r", Matches: []model.Predicate{c}, Rates: minuteRate()}}}},
@@ -161,6 +161,8 @@ func TestOperators(t *testing.T) {
 			map[string][]string{model.KeySub: {"bob"}}, true},
 		{"ingroup miss", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
 			map[string][]string{model.KeySub: {"eve"}}, false},
+		{"ingroup on absent key", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
+			map[string][]string{}, false},
 		{"contains on array", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
 			map[string][]string{"roles": {"user", "admin"}}, true},
 		{"contains never substring", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
@@ -228,7 +230,7 @@ func TestAxisRefusesAmbiguity(t *testing.T) {
 func TestReplacesSuppressesUnderAll(t *testing.T) {
 	p := model.Policy{
 		Domain: domain,
-		Groups: []model.Group{{Name: "enterprise", Clients: []string{"corp"}}},
+		Groups: []model.Group{{Name: "enterprise", Values: []string{"corp"}}},
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
@@ -250,6 +252,37 @@ func TestReplacesSuppressesUnderAll(t *testing.T) {
 	plain := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"alice"}}})
 	if got := ruleNames(plain); len(got) != 1 || got[0] != "base" {
 		t.Errorf("plain client matched %v, want [base]: replaces of an unmatched rule must not fire", got)
+	}
+}
+
+// A group is bound to no key: the predicate that names it decides which
+// key's value is looked up in it.
+func TestInGroupMatchesTheKeyOfItsPredicate(t *testing.T) {
+	p := model.Policy{
+		Domain:   domain,
+		Mappings: []model.KeyMapping{{Key: "tenant", Claim: "org_id", Normalization: model.NormalizeLowercase}},
+		Groups:   []model.Group{{Name: "partners", Values: []string{"acme"}}},
+		Blocks: []model.Block{{Name: "b",
+			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
+			Rules: []model.Rule{
+				{Name: "partners",
+					Matches:  []model.Predicate{{Key: "tenant", Operator: model.OperatorInGroup, Value: "partners"}},
+					Counters: []string{model.KeySub},
+					Rates:    minuteRate()},
+			}}},
+	}
+	snap := mustCompile(t, p)
+
+	partner := evaluate(snap, request{Path: "/x", Method: "GET",
+		Keys: map[string][]string{model.KeySub: {"alice"}, "tenant": {"acme"}}})
+	if got := ruleNames(partner); len(got) != 1 || got[0] != "partners" {
+		t.Errorf("tenant acme matched %v, want [partners]", got)
+	}
+
+	outsider := evaluate(snap, request{Path: "/x", Method: "GET",
+		Keys: map[string][]string{model.KeySub: {"acme"}, "tenant": {"globex"}}})
+	if got := ruleNames(outsider); len(got) != 0 {
+		t.Errorf("tenant globex matched %v, want nothing: the group is looked up by tenant, not by sub", got)
 	}
 }
 
@@ -301,7 +334,7 @@ func TestTargetlessBlockMatchesEverything(t *testing.T) {
 func TestBypassUnderAllExemptsNamedRulesOnly(t *testing.T) {
 	p := model.Policy{
 		Domain: domain,
-		Groups: []model.Group{{Name: "vip", Clients: []string{"corp"}}},
+		Groups: []model.Group{{Name: "vip", Values: []string{"corp"}}},
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
@@ -329,7 +362,7 @@ func TestBypassUnderAllExemptsNamedRulesOnly(t *testing.T) {
 func TestFirstMatchCascade(t *testing.T) {
 	p := model.Policy{
 		Domain: domain,
-		Groups: []model.Group{{Name: "trial", Clients: []string{"t1"}}},
+		Groups: []model.Group{{Name: "trial", Values: []string{"t1"}}},
 		Blocks: []model.Block{{Name: "cascade", Mode: model.ModeFirstMatch,
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{

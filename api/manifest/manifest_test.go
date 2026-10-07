@@ -79,7 +79,7 @@ func payloadSample() v1.RateLimitPolicySpec {
 			{Key: "roles", ClaimPath: []string{"realm_access", "roles"}, Type: v1.ClaimTypeStringArray,
 				Normalization: v1.NormalizeNone},
 		},
-		Groups: []v1.ClientGroup{{Name: "partners", Clients: []string{"partner-a"}}},
+		Groups: []v1.Group{{Name: "partners", Values: []string{"partner-a"}}},
 		Limits: []v1.LimitBlock{{
 			Name: "orders",
 			Target: &v1.Target{Routes: []v1.Route{{

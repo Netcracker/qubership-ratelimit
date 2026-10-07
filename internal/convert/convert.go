@@ -122,13 +122,13 @@ func modelMappings(mappings []v1.ClaimMapping) []model.KeyMapping {
 	return out
 }
 
-func modelGroups(groups []v1.ClientGroup) []model.Group {
+func modelGroups(groups []v1.Group) []model.Group {
 	if len(groups) == 0 {
 		return nil
 	}
 	out := make([]model.Group, 0, len(groups))
 	for i := range groups {
-		out = append(out, model.Group{Name: groups[i].Name, Clients: groups[i].Clients})
+		out = append(out, model.Group{Name: groups[i].Name, Values: groups[i].Values})
 	}
 	return out
 }

@@ -278,8 +278,8 @@ var _ = Describe("RateLimitPolicy", func() {
 				Normalization: ratelimitv1.NormalizeLowercase,
 				Fallbacks:     []string{"sub"},
 			}}
-			policy.Spec.Groups = []ratelimitv1.ClientGroup{
-				{Name: "partners", Clients: []string{"p1", "p2"}},
+			policy.Spec.Groups = []ratelimitv1.Group{
+				{Name: "partners", Values: []string{"p1", "p2"}},
 			}
 
 			Expect(create(policy)).To(Succeed())

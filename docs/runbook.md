@@ -88,7 +88,7 @@ ones kept first when the list is cut. Anything other than `True`, `n/n`, and a b
 | What you see | Meaning | Section |
 | --- | --- | --- |
 | `Ready: False`, reason `NotCompiled`, `Stalled: True` | the latest generation does not compile; last-good is enforced | 3, or 5 when `ruleProblems` names an unknown field |
-| `Ready: False`, reason `ConfigMapTooLarge`, `Stalled: True` | the latest generation does not fit the 1 MiB ConfigMap; last-good is enforced | 3 for what traffic sees; the fix is a smaller spec, about 45000 UUIDs of client lists fill the object |
+| `Ready: False`, reason `ConfigMapTooLarge`, `Stalled: True` | the latest generation does not fit the 1 MiB ConfigMap; last-good is enforced | 3 for what traffic sees; the fix is a smaller spec, about 45000 UUIDs of group values fill the object |
 | `Ready: False`, reason `Propagating` or `Reconciling`, `Stalled: False` | a rollout in progress, nothing to do yet | 4 if it lasts |
 | `Ready: False`, reason `ReplicaStale`, `Stalled: True` | a service replica lags past 90 s | 4 |
 | `Ready: False`, reason `ReplicaFormatUnsupported`, `Stalled: True` | a service replica refuses the manifest's format version | 4, and 5 for the order of the fix |
@@ -166,7 +166,7 @@ curl -s http://127.0.0.1:8080/debug/applied | jq -c
 `/debug/snapshot` on the same port answers the other half of the question, what the replica enforces rather than which
 generation it applied: a summary row per domain with its `ruleSetVersion`, block, rule, and worst-case bucket counts,
 and its effective keys, and `/debug/snapshot/{domain}` with the compiled domain in full, every group resolved into the
-client list the engine tests and every identity key next to the claim path it reads. Add `?format=yaml` to read it.
+values the engine tests and every identity key next to the claim path it reads. Add `?format=yaml` to read it.
 Compare two pods this way when a rollout looks skewed.
 
 ```bash

@@ -74,8 +74,8 @@ type DomainSummary struct {
 
 // DomainSnapshot is the body of a GET on contract.SnapshotPath/{domain}: the
 // compiled domain in full. Groups are resolved into the value sets of the
-// rules that name them, so a rule's client list is what the engine tests,
-// however long it is.
+// rules that name them, so a rule shows the list the engine tests, however
+// long it is.
 type DomainSnapshot struct {
 	Domain string `json:"domain"`
 

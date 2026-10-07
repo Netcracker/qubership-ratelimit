@@ -41,7 +41,7 @@ func withKeys(p model.Policy) model.Policy {
 		{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
 		{Key: "tenant", Claim: "org_id", Fallbacks: []string{"sub"}, Normalization: model.NormalizeLowercase},
 	}
-	p.Groups = append(p.Groups, model.Group{Name: "partners", Clients: []string{"a", "b"}})
+	p.Groups = append(p.Groups, model.Group{Name: "partners", Values: []string{"a", "b"}})
 	return p
 }
 
@@ -260,9 +260,9 @@ func TestInvalidSpecFamily(t *testing.T) {
 		{"no rates on a counting rule", func(p *model.Policy) { p.Blocks[0].Rules[0].Rates = nil }},
 		{"unknown algorithm", func(p *model.Policy) { p.Blocks[0].Rules[0].Rates[0].Algorithm = "SlidingLog" }},
 		{"duplicate group", func(p *model.Policy) {
-			p.Groups = []model.Group{{Name: "g", Clients: []string{"a"}}, {Name: "g", Clients: []string{"b"}}}
+			p.Groups = []model.Group{{Name: "g", Values: []string{"a"}}, {Name: "g", Values: []string{"b"}}}
 		}},
-		{"unnamed group", func(p *model.Policy) { p.Groups = []model.Group{{Clients: []string{"a"}}} }},
+		{"unnamed group", func(p *model.Policy) { p.Groups = []model.Group{{Values: []string{"a"}}} }},
 		{"empty In values", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{{Key: model.KeySub, Operator: model.OperatorIn}}
 		}},
@@ -378,8 +378,8 @@ func TestInvalidSpecFamily(t *testing.T) {
 }
 
 // TestNoListIsBounded pins that no list of the policy is capped: 100 blocks
-// and a group of 4096 clients compile, because what binds a generation is the
-// bucket budget and the object size, not a count of blocks or clients.
+// and a group of 4096 values compile, because what binds a generation is the
+// bucket budget and the object size, not a count of blocks or group values.
 func TestNoListIsBounded(t *testing.T) {
 	p := model.Policy{Domain: domain}
 	// 100 blocks without a target and with one bucket each: every decision
@@ -390,9 +390,9 @@ func TestNoListIsBounded(t *testing.T) {
 			Rules: []model.Rule{{Name: "all", Rates: []model.Rate{rate(100, time.Minute)}}},
 		})
 	}
-	p.Groups = []model.Group{{Name: "big", Clients: make([]string, 4096)}}
-	for i := range p.Groups[0].Clients {
-		p.Groups[0].Clients[i] = fmt.Sprintf("c%d", i)
+	p.Groups = []model.Group{{Name: "big", Values: make([]string, 4096)}}
+	for i := range p.Groups[0].Values {
+		p.Groups[0].Values[i] = fmt.Sprintf("c%d", i)
 	}
 
 	snap, problems := compileOne(p)
@@ -557,7 +557,7 @@ func TestGroupsResolveAtCompileTime(t *testing.T) {
 	}
 	got := snap.Blocks[0].Rules[0].Matches[0].Values
 	if len(got) != 2 {
-		t.Errorf("resolved group = %v, want the client list baked in", got)
+		t.Errorf("resolved group = %v, want the group's values baked in", got)
 	}
 }
 
@@ -616,7 +616,7 @@ func TestUndeclaredKeyBlocksTheGeneration(t *testing.T) {
 func TestSpecCascadeCompiles(t *testing.T) {
 	p := model.Policy{
 		Domain: domain,
-		Groups: []model.Group{{Name: "trial", Clients: []string{"t1", "t2"}}},
+		Groups: []model.Group{{Name: "trial", Values: []string{"t1", "t2"}}},
 		Blocks: []model.Block{
 			{
 				Name: "cascade",

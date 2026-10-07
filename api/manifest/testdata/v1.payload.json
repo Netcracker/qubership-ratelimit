@@ -23,7 +23,7 @@
   "groups": [
     {
       "name": "partners",
-      "clients": [
+      "values": [
         "partner-a"
       ]
     }

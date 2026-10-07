@@ -26,13 +26,13 @@ spec:
   # A group is written once and referenced by name from any rule of the policy.
   groups:
     - name: bulk-clients
-      clients:
+      values:
         - 00000000-0000-4000-8000-00000000c001
         - 00000000-0000-4000-8000-00000000c002
         - 00000000-0000-4000-8000-00000000c003
         - 00000000-0000-4000-8000-00000000c004
     - name: trial-clients
-      clients:
+      values:
         - 00000000-0000-4000-8000-00000000d001
 
   limits:

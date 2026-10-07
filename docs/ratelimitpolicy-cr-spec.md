@@ -2,7 +2,7 @@
 
 `RateLimitPolicy` is a namespace-scoped custom resource in the `ratelimit.netcracker.com` group, version `v1`,
 and the only resource of the service. **One object per domain**: it holds the rate-limiting rules, the extraction of
-identity keys from the JWT, and the named client groups. The operator of the same namespace validates it and
+identity keys from the JWT, and the named groups. The operator of the same namespace validates it and
 writes it into the ConfigMap `ratelimit-config`; the service of the same namespace enforces it and serves the Istio
 ambient gateways (and any other consumers) over the Envoy RLS protocol (`envoy.service.ratelimit.v3`).
 
@@ -84,9 +84,9 @@ spec:
   - { key: tenant, claim: org_id, fallbacks: [sub], normalization: Lowercase }
   - { key: entitlements, claimPath: ["https://acme.com/entitlements"], type: StringArray }
 
-  groups:                                    # named client lists; InGroup refers to them
+  groups:                                    # named value lists; InGroup refers to them
   - name: mvno-group-1
-    clients: [mvno_acc1, mvno_acc2]          # sub values in its effective normalization (default Lowercase)
+    values: [mvno_acc1, mvno_acc2]           # compared with the predicate's key after its normalization (sub: Lowercase)
 
   limits:
   # ── Block 1: a cascade of plans ────────────────────────────────────
@@ -158,7 +158,7 @@ spec:
 | --- | --- | --- |
 | `domain` | string, required | binding to the traffic source (see above); equals `metadata.name` |
 | `mappings` | list | extraction of keys from token claims; empty = built-in keys only |
-| `groups` | list | named client lists; the `InGroup` operator refers to a group; values are compared with the `sub` key after its effective normalization |
+| `groups` | list | named value lists; an `InGroup` predicate refers to a group by name and compares its values with the predicate's key after that key's normalization |
 | `limits` | list of blocks | block = `target` + `mode` + `rules`; blocks are always additive with each other |
 
 ### The mappings[] entry
@@ -176,9 +176,11 @@ Sanity limits (token size, axis value length, array size) are constants of the s
 escaped when counter keys are assembled. A semantically broken claim path cannot be caught by static checks at all; the
 runtime detector "key declared, tokens arriving, zero extractions" catches it (extraction metrics, under an alert).
 
-The values of `groups[].clients` are compared with the `sub` key after its effective normalization: `Lowercase` by
-default; when `sub` is overridden by a `mappings` entry with `normalization: None`, group values are stored and
-compared as written, and the exact case is the author's responsibility. The compiler adds no normalization of its own.
+The values of `groups[].values` are compared with the key of the predicate that names the group, after that key's
+effective normalization: `Lowercase` for `sub` unless a `mappings` entry overrides `sub`, whose own `normalization`
+then applies (`None` by default); what the `mappings` entry declares for a mapped key; and a path capture as the
+segment was sent. Group values are stored and compared as written, and the exact case is the author's
+responsibility. The compiler adds no normalization of its own.
 
 ### The limits[] block
 
@@ -452,7 +454,7 @@ ConfigMap ratelimit-config             owner: the operator Deployment; the opera
   replica that has never applied a manifest stays NotReady until the first apply; after it the replica keeps its
   snapshot in memory through vanished files or a refused manifest;
 - the compressed total of all domains is bounded by the 1 MiB of a ConfigMap: rules compress about 20 to 40 times, a
-  client list of UUIDs about 1.8 times ([limits](limits.md)). The operator checks the size before it writes. A
+  group of UUIDs about 1.8 times ([limits](limits.md)). The operator checks the size before it writes. A
   generation that does not fit is `Ready: False`, `Stalled: True` with reason `ConfigMapTooLarge`, distinct from
   `NotCompiled`, and last-good stays enforced. A write error counts in `ratelimit_config_write_errors_total` by
   reason (`size`, `api`, `other`) and leaves a log line; the write is retried with the workqueue's backoff. The
@@ -626,7 +628,7 @@ Schema (OpenAPI):
 - `domain`: format and length, see the binding section; the same pattern on the chart values side;
 - block, rule, group, and key names: a pattern and a length ≤ 63 (they are part of the counter key); every descriptor
   key (`mappings[].key`, `Template` placeholders, `matches[].key`, `counters[]`) uses one pattern,
-  `^[a-z][a-zA-Z0-9_]*$`, camelCase allowed (`{orderId}` in the examples is valid); predicate values, clients, and
+  `^[a-z][a-zA-Z0-9_]*$`, camelCase allowed (`{orderId}` in the examples is valid); predicate values, group values, and
   claim paths ≤ 256, the engine's sanitary limit on an extracted value, so a longer literal can never match; a route
   path ≤ 2048 (the conventional URL limit);
 - uniqueness through list types: `limits`, `rules`, and `groups` are a `map` by `name`, `mappings` a `map` by `key`,
@@ -670,7 +672,7 @@ instead of a status. The measurements are in [limits](limits.md).
 
 List markup for server-side apply: `+listType=map` for `limits`, `rules`, and `groups` by `name`, `mappings` by `key`,
 `rates` by `periodSeconds`, `conditions` by `type`; `methods` is a `set`; the remaining lists (`matches`, `routes`,
-`counters`, `fallbacks`, `clients`, `replacedRules`) are atomic.
+`counters`, `fallbacks`, `values`, `replacedRules`) are atomic.
 
 ## A worked example
 
