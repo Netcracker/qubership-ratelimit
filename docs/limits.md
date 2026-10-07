@@ -13,7 +13,7 @@ no list needs `maxItems`.
 | --- | --- | --- | --- | --- |
 | **Policy** | buckets of one decision, the decision of one descriptor (worst case) | ≤ 128 | depth of one atomic Lua call, `MaxDomainDecisionBuckets` | the compiler, `DomainBudgetExceeded`; runtime backstop |
 | | object size | ~256 KiB under client-side `apply`, 1.5 MiB in etcd | the `last-applied-configuration` annotation, `--max-request-bytes` | the API server |
-| | the resolved policy, presets written into the rules that take them | ≤ 1.5 MiB (1572864 bytes) serialized, estimated from the sizes of the spec as written and of the presets before any preset is written into a rule | the same wall as an authored object | the compiler, `ResolvedPolicyTooLarge`; last-good stays enforced |
+| | the resolved policy, presets written into the blocks and rules that take them | ≤ 1.5 MiB (1572864 bytes) serialized, estimated from the sizes of the spec as written and of the presets before any preset is written into a block or a rule | the same wall as an authored object | the compiler, `ResolvedPolicyTooLarge`; last-good stays enforced |
 | | blocks, rules, groups, group values, mapping keys | unbounded | object size only; the number of blocks is an observed metric | — |
 | **Namespace** | the compressed configuration of all domains, the ConfigMap `ratelimit-config` | ≤ 1 MiB compressed total | the Kubernetes object size limit of a ConfigMap | the operator before the write, `ConfigMapTooLarge`; last-good stays enforced |
 | **Call** | descriptors of one gRPC check | ≤ 16 | every descriptor is its own decision and its own store trip; a gateway sends one | the adapter, `too_many_descriptors` → `OVER_LIMIT` |
@@ -60,16 +60,16 @@ Rule weight was measured on the real types in JSON: **283 bytes** typical (a pre
 A policy that covers one API with a handful of rules and a couple of groups weighs a few kilobytes, so these
 walls are reached only by a domain that collects many APIs behind one gateway.
 
-A preset ([the resource specification](ratelimitpolicy-cr-spec.md), "Presets") is written into every rule that takes
-it before the policy compiles, so the resolved policy can be larger than the object. The operator bounds it at the
-same 1.5 MiB (1572864 bytes), estimated from the serialized size of the spec as written, with the defaults written
-in, plus the size of each preset once per rule that takes it, before any preset is written into a rule; a generation
-above that is `ResolvedPolicyTooLarge`, and the last-good generation stays enforced. The estimate counts a field the
-rule replaces in both layers, so it never falls below the resolved size and can refuse a policy whose resolved size
-is below the wall. Neither the decision budget nor a count of rules bounds this
-case: a `Bypass` preset costs no bucket, a preset of a thousand predicates weighs as much as a thousand rules, and
-the service refuses a payload above 8 MiB only after the operator has resolved and compiled it. The wall keeps that
-payload bound above any spec the operator writes.
+A preset ([the resource specification](ratelimitpolicy-cr-spec.md), "Presets") is written into every block and rule
+that takes it before the policy compiles, so the resolved policy can be larger than the object. The operator bounds
+it at the same 1.5 MiB (1572864 bytes), estimated from the serialized size of the spec as written, with the defaults
+written in, plus the size of each preset once per block or rule that takes it, less the rules that `drop` names,
+before any preset is written into a block or a rule; a generation above that is `ResolvedPolicyTooLarge`, and the
+last-good generation stays enforced. The estimate counts a field a layer replaces in both layers, so it never falls
+below the resolved size and can refuse a policy whose resolved size is below the wall. Neither the decision budget
+nor a count of rules bounds this case: the `Bypass` rules of a preset cost no bucket, a preset of a thousand
+predicates weighs as much as a thousand rules, and the service refuses a payload above 8 MiB only after the operator
+has resolved and compiled it. The wall keeps that payload bound above any spec the operator writes.
 
 ### The compressed configuration of a namespace
 
@@ -104,7 +104,8 @@ the decision's real buckets and is unreachable in normal operation.
 
 The consequence for a domain built out of `All` blocks is that it hits 128 long before the object size. With eight
 counting rules per API, that is roughly 16 APIs behind one gateway with minute windows, and 8 once every rule also
-carries an hour window.
+carries an hour window. A block preset is charged once per block that uses it, so a cascade stamped on five APIs
+costs five times its own worst case.
 
 ## Blocks, axes, windows: why no bounds
 

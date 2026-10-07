@@ -470,17 +470,18 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 | `UnresolvedKeyReference` | a `matches` key or a counter axis that no mapping and no capture of the domain produces |
 | `UnresolvedGroupReference` | `InGroup` names a group the object does not declare |
 | `UnresolvedReplacedRules` | `replacedRules` names a rule outside its own block |
-| `UnresolvedPresetReference` | `preset` names a preset `spec.presets.rules` does not hold; the address is the rule that names it |
+| `UnresolvedPresetReference` | `preset` names a preset `spec.presets` does not hold, `before` names a rule neither in the block preset nor written earlier in the list, or `drop` names a rule the block preset does not hold; the address is the block and the rule that names it |
 | `IncompatibleOperator`, `InvalidCounterAxis` | the key's type does not suit the operator or the axis |
 | `InvalidSpec` | a structural defect the schema cannot see: predicate arity, `Bypass` without `replacedRules` in an `All` block, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, or an empty segment from a slash at the end or two in a row), an unknown field or enum value (section 5) |
-| `InvalidSpec` on presets | a preset body that names a preset, a preset declared twice or without a name |
+| `InvalidSpec` on presets | a preset body that names a preset or carries `before` or `drop`; a preset declared twice or without a name; `before` or `drop` in a block without `preset`; `drop` beside any field other than `name`; `before` on an overridden rule; `preset` on an overriding rule; a block with no rules after resolution |
 | `InvalidWindow` | a window the algorithm cannot enforce |
 | `DomainBudgetExceeded` | the worst case of one decision exceeds 128 buckets |
-| `ResolvedPolicyTooLarge` | the presets written into the rules that take them would make the policy larger than 1.5 MiB (1572864 bytes), by an estimate made before any preset is written into a rule; the address is empty, the policy as a whole |
+| `ResolvedPolicyTooLarge` | the presets written into the blocks and rules that take them would make the policy larger than 1.5 MiB (1572864 bytes), by an estimate made before any preset is written into a block or a rule; the address is empty, the policy as a whole |
 | `CaptureShadowsMappedKey` | informational: inside the block the capture wins over the mapped key of the same name |
 
-A problem at a rule that takes a preset ends with `; the rule takes preset "<name>"`: the defect may be in the body
-of the preset rather than in the fields the rule wrote.
+A problem at a rule that takes a preset ends with `; the rule takes preset "<name>"`, and a problem in a block that
+takes a preset with `; the block takes preset "<name>"`: the defect may be in the body of the preset rather than in
+the fields written at the point of use.
 
 **What traffic sees meanwhile.** `activeGeneration` is enforced, and the management API keeps reporting its rule set:
 `GET /domains` showed `ruleSetVersion 5ff0f5a9e94d` with 12 rules throughout, and the manifest kept generation 1. If
@@ -501,11 +502,12 @@ kubectl logs -n "$NS" -l name=ratelimit-operator --prefix | grep 'dropped a save
 **Act.** Fix the spec at the address and apply it. The compiler judges the whole generation, so fix every listed problem
 in one edit; a second `apply` that fixes one of two does nothing for traffic.
 
-**A preset that does not take effect.** A rule that takes a preset keeps every field it carries itself, and an object
-stored before the schema stopped writing defaults may carry `mode: All`, `behavior: Enforce`, and `algorithm: GCRA`
-where the author left them out ([the resource specification](ratelimitpolicy-cr-spec.md), "Why the defaults of mode,
-behavior, and algorithm leave the schema"). A rule that takes a `Shadow` preset and still enforces is the symptom.
-Read what the stored object carries, then remove with a JSON patch the stored `behavior` where the preset is meant to
+**A preset that does not take effect.** A rule or a block that takes a preset keeps every field it carries itself,
+and an object stored before the schema stopped writing defaults may carry `mode: All`, `behavior: Enforce`, and
+`algorithm: GCRA` where the author left them out ([the resource specification](ratelimitpolicy-cr-spec.md), "Why
+the defaults of mode, behavior, and algorithm leave the schema"). A rule that takes a `Shadow` preset and still
+enforces, or a block that takes a `FirstMatch` preset and still applies every rule, is the symptom. Read what the
+stored object carries, then remove with a JSON patch the stored `mode` or `behavior` where the preset is meant to
 supply it; a stored `algorithm` needs nothing, since a window is taken or replaced with the whole `rates` list. The
 generation that follows is resolved from the preset:
 

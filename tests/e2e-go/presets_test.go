@@ -3,6 +3,9 @@
 package e2e
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -169,3 +172,231 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 			"the orders rule recorded no shadow_over_limit outcome after taking Shadow from the preset")
 	})
 })
+
+// A block preset is a cascade written once and stamped on blocks with
+// targets of their own. The unit suites pin the merge and the equality of the
+// resolved policy with one written out; what a cluster adds is the enforced
+// set the replicas build from each form being one and the same, and the
+// cascade behaving on real traffic: as declared, with a rule overridden by
+// name, and with a rule inserted and one dropped.
+var _ = Describe("block presets", Ordered, Label("presets"), func() {
+	const (
+		domain      = "gateway.public"
+		ordersPath  = "/e2e-presets/cascade/orders"
+		catalogPath = "/e2e-presets/cascade/catalog"
+		exportsPath = "/e2e-presets/cascade/exports"
+		basePath    = "/ratelimit/v1"
+		route       = "e2e-presets-management"
+
+		// Per day and FixedWindow, as the rule presets suite: the counts
+		// carry across the specs.
+		perUser = 2
+	)
+	var (
+		applied bool
+		port    int32
+
+		// What the written-out policy compiled to, read before the preset
+		// form replaces it.
+		writtenRules   int32
+		writtenVersion string
+	)
+
+	dayWindow := func(requests int32) []v1.Rate {
+		return []v1.Rate{{Requests: requests, PeriodSeconds: 86400, Algorithm: v1.AlgorithmFixedWindow}}
+	}
+	prefix := func(path string) *v1.Target {
+		return &v1.Target{Routes: []v1.Route{{Path: v1.PathMatch{Type: v1.PathMatchPrefix, Value: path}}}}
+	}
+	internal := v1.Rule{Name: "internal", Behavior: v1.RuleBehaviorBypass,
+		Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorEquals, Value: "prometheus"}}}
+	perUserRule := v1.Rule{Name: "per-user", Counters: []string{"sub"}, Rates: dayWindow(perUser)}
+	anonymous := v1.Rule{Name: "anonymous", Rates: dayWindow(perUser),
+		Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorDoesNotExist}}}
+	partner := v1.Rule{Name: "partner", Counters: []string{"sub"}, Rates: dayWindow(1),
+		Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorInGroup, Value: "partners"}}}
+	withPolicy := func(blocks []v1.LimitBlock) *v1.RateLimitPolicy {
+		p := newPolicy(domain, blocks)
+		p.Spec.Groups = []v1.Group{{Name: "partners", Values: []string{"partner-a"}}}
+		return p
+	}
+
+	// presetForm is the policy of the suite as the resource specification
+	// writes it: one cascade, three blocks taking it.
+	presetForm := func() *v1.RateLimitPolicy {
+		partnerBefore := partner
+		partnerBefore.Before = "per-user"
+		p := withPolicy([]v1.LimitBlock{
+			{Name: "orders", Preset: "cascade", Target: prefix(ordersPath)},
+			{Name: "catalog", Preset: "cascade", Target: prefix(catalogPath),
+				Rules: []v1.Rule{{Name: "per-user", Rates: dayWindow(perUser + 2)}}},
+			{Name: "exports", Preset: "cascade", Target: prefix(exportsPath),
+				Rules: []v1.Rule{partnerBefore, {Name: "anonymous", Drop: true}}},
+		})
+		p.Spec.Presets = &v1.Presets{
+			Rules: []v1.Rule{
+				{Name: "internal-bypass", Behavior: internal.Behavior, Matches: internal.Matches},
+				{Name: "standard", Counters: perUserRule.Counters, Rates: perUserRule.Rates},
+			},
+			Blocks: []v1.LimitBlock{{Name: "cascade", Mode: v1.BlockModeFirstMatch, Rules: []v1.Rule{
+				{Name: "internal", Preset: "internal-bypass"},
+				{Name: "per-user", Preset: "standard"},
+				anonymous,
+			}}},
+		}
+		return p
+	}
+
+	// writtenOut is the same policy with every block written in full.
+	writtenOut := func() *v1.RateLimitPolicy {
+		perUserCatalog := perUserRule
+		perUserCatalog.Rates = dayWindow(perUser + 2)
+		return withPolicy([]v1.LimitBlock{
+			{Name: "orders", Mode: v1.BlockModeFirstMatch, Target: prefix(ordersPath),
+				Rules: []v1.Rule{internal, perUserRule, anonymous}},
+			{Name: "catalog", Mode: v1.BlockModeFirstMatch, Target: prefix(catalogPath),
+				Rules: []v1.Rule{internal, perUserCatalog, anonymous}},
+			{Name: "exports", Mode: v1.BlockModeFirstMatch, Target: prefix(exportsPath),
+				Rules: []v1.Rule{internal, partner, perUserRule}},
+		})
+	}
+
+	// enforcedSet reads what the replicas enforce for the domain: the rule
+	// count of the status, and the ruleSetVersion of the management API
+	// where the release renders the management port, the empty string
+	// otherwise.
+	enforcedSet := func() (int32, string) {
+		p, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+		if port == 0 {
+			return p.Status.Rules, ""
+		}
+		var version string
+		Eventually(func() string {
+			body, code := gatewayGetBody("private-gateway", basePath+"/domains",
+				map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")})
+			if code != http.StatusOK {
+				return ""
+			}
+			version = listedRuleSetVersion(body, domain)
+			return version
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).ShouldNot(BeEmpty(),
+			"the private gateway never served a listing with %s through %s", domain, basePath)
+		return p.Status.Rules, version
+	}
+
+	BeforeAll(func() {
+		if applied {
+			return
+		}
+		applied = true
+
+		for _, path := range []string{ordersPath, catalogPath, exportsPath} {
+			waitGatewayServes("public-gateway", path)
+		}
+		port = managementPort()
+		if port != 0 {
+			Expect(apply(managementRoute(route, basePath, port))).To(Succeed())
+		}
+
+		Expect(apply(writtenOut())).To(Succeed())
+		waitApplied(domain)
+		writtenRules, writtenVersion = enforcedSet()
+
+		Expect(apply(presetForm())).To(Succeed())
+		waitApplied(domain)
+	})
+	AfterAll(func() {
+		if port != 0 {
+			_ = k8s.Delete(ctx, managementRoute(route, basePath, port))
+		}
+		if applied {
+			deletePolicies(domain)
+		}
+	})
+
+	It("compiles to the rule set of the same policy written out", func() {
+		// The written-out form is the last-good generation, so a refused
+		// preset form would leave the same set enforced: the generation
+		// has to be the preset form's own before the two are compared.
+		p, err := getPolicy(domain)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(p.Status.ActiveGeneration).To(Equal(p.Generation),
+			"the preset form is not the enforced generation; the operator refused it: %v", p.Status.RuleProblems)
+		Expect(policyCondition(domain, v1.ConditionAccepted)()).To(Equal("True"))
+
+		rules, version := enforcedSet()
+		Expect(rules).To(Equal(writtenRules), "the RULES count differs from the written-out policy's")
+		if port == 0 {
+			Skip("the release runs without management.enabled; the ruleSetVersion cannot be compared")
+		}
+		Expect(version).To(Equal(writtenVersion),
+			"the replicas enforce a rule set other than the written-out policy's; a preset reached the engine")
+	})
+
+	It("enforces the cascade as declared", func() {
+		for i, code := range gatewayBurst("public-gateway", ordersPath, 3, bearer(subjectJWT("prometheus"))) {
+			Expect(code).NotTo(Equal(429), "request %d of the internal caller was refused; the Bypass rule did not apply", i+1)
+		}
+		codes := gatewayBurst("public-gateway", ordersPath, perUser+1, bearer(subjectJWT("alice")))
+		Expect(codes[:perUser]).NotTo(ContainElement(429), "alice's budget on orders was refused early: %v", codes)
+		Expect(codes[perUser]).To(Equal(429), "alice's request over the per-user budget of orders was admitted")
+		codes = gatewayBurst("public-gateway", ordersPath, perUser+1, nil)
+		Expect(codes[:perUser]).NotTo(ContainElement(429), "the anonymous budget on orders was refused early: %v", codes)
+		Expect(codes[perUser]).To(Equal(429), "the anonymous request over the budget of orders was admitted")
+	})
+
+	It("applies the window overridden by name", func() {
+		codes := gatewayBurst("public-gateway", catalogPath, perUser+3, bearer(subjectJWT("alice")))
+		Expect(codes[:perUser+2]).NotTo(ContainElement(429),
+			"alice's widened budget on catalog was refused early; the override did not apply: %v", codes)
+		Expect(codes[perUser+2]).To(Equal(429), "alice's request over the widened budget of catalog was admitted")
+	})
+
+	It("applies the rule inserted in front of per-user and leaves the dropped one out", func() {
+		codes := gatewayBurst("public-gateway", exportsPath, 2, bearer(subjectJWT("partner-a")))
+		Expect(codes[0]).NotTo(Equal(429), "the partner's first request on exports was refused")
+		Expect(codes[1]).To(Equal(429),
+			"the partner's second request on exports was admitted; the partner rule is not in front of per-user")
+		for i, code := range gatewayBurst("public-gateway", exportsPath, perUser+1, nil) {
+			Expect(code).NotTo(Equal(429),
+				"anonymous request %d on exports was refused; the dropped anonymous rule still applies", i+1)
+		}
+	})
+})
+
+// subjectJWT builds an alg-none token with one sub claim, which the built-in
+// sub key reads lowercased. The engine decodes the payload and never
+// verifies, so an empty signature segment is a valid fixture.
+func subjectJWT(sub string) string {
+	seg := func(v map[string]string) string {
+		raw, err := json.Marshal(v)
+		Expect(err).NotTo(HaveOccurred())
+		return base64.RawURLEncoding.EncodeToString(raw)
+	}
+	return seg(map[string]string{"alg": "none", "typ": "JWT"}) + "." + seg(map[string]string{"sub": sub}) + "."
+}
+
+func bearer(token string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + token}
+}
+
+// listedRuleSetVersion reads the ruleSetVersion of one domain out of a
+// listing body, the empty string when the listing does not carry it.
+func listedRuleSetVersion(body, domain string) string {
+	var listing struct {
+		Items []struct {
+			Domain         string `json:"domain"`
+			RuleSetVersion string `json:"ruleSetVersion"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(body), &listing); err != nil {
+		return ""
+	}
+	for _, item := range listing.Items {
+		if item.Domain == domain {
+			return item.RuleSetVersion
+		}
+	}
+	return ""
+}
