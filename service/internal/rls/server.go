@@ -552,8 +552,8 @@ func strictestDecision(decisions []engine.Decision, allowed bool) engine.Decisio
 // and ratelimit, the two structured fields of
 // draft-ietf-httpapi-ratelimit-headers-11, which carry the same limit and
 // remaining under the name of the rule they came from. Their t is the effective
-// window, the time until the window admits one request more, which for GCRA is
-// shorter than x-ratelimit-reset and never longer than retry-after; it is left
+// window, the time until the window admits one request more, which is at most
+// x-ratelimit-reset and at most retry-after; it is left
 // out when the window holds its whole capacity. A decision without matched counting
 // rules carries no headers at all, and a refusal no waiting cures carries no
 // retry hint — the engine marks it with a negative RetryAfter. WithIETFHeaders

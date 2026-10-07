@@ -147,8 +147,8 @@ type Headers struct {
 	// than Remaining: the t parameter of the ratelimit field, which
 	// draft-ietf-httpapi-ratelimit-headers-11 defines as the time within
 	// which the client can use no more than Remaining. It is ResetAfter for a
-	// fixed window, which returns its whole quota at once, and shorter for
-	// GCRA, which returns one request per emission interval. Negative when
+	// fixed window, which returns its whole quota at once, and at most that
+	// for GCRA, which returns one request per emission interval. Negative when
 	// the window already holds its whole capacity and nothing returns.
 	EffectiveWindow time.Duration
 
