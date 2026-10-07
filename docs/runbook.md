@@ -356,7 +356,7 @@ api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
 }' | jq -c '{allowed, refusalReason, headers, rules: [.rules[] | {id, mode, allowed, remaining}]}'
 # {"allowed": true, "refusalReason": null,
 #  "headers": {"block": "api", "rule": "per-client", "algorithm": "gcra", "periodSeconds": 60, "limit": 100,
-#              "remaining": 1, "resetAfterSeconds": 11.2},
+#              "remaining": 1, "resetAfterSeconds": 11.2, "effectiveWindowSeconds": 0.4},
 #  "rules": [{"id": "api/per-path", "mode": "enforce", "allowed": true, "remaining": 100},
 #            {"id": "api/per-client", "mode": "enforce", "allowed": true, "remaining": 1},
 #            {"id": "api/total", "mode": "enforce", "allowed": true, "remaining": 571}]}

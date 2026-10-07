@@ -95,6 +95,14 @@ type HeadersView struct {
 	// RetryAfterSeconds is present exactly on refusals that waiting cures.
 	RetryAfterSeconds *float64 `json:"retryAfterSeconds,omitempty"`
 	ResetAfterSeconds *float64 `json:"resetAfterSeconds,omitempty"`
+
+	// EffectiveWindowSeconds is the t of the ratelimit response field: the
+	// seconds until the window admits one request more than Remaining. It is
+	// absent where the window holds its whole capacity, which, since the
+	// simulation charges nothing, includes a window the request would be the
+	// first to touch; the real answer carries one emission interval there,
+	// after its own charge.
+	EffectiveWindowSeconds *float64 `json:"effectiveWindowSeconds,omitempty"`
 }
 
 // RuleOutcomeView is one applied rule's own verdict. A rule may carry several
@@ -254,6 +262,9 @@ func headersView(headers *engine.Headers, allowed, costExceeds bool) *HeadersVie
 	}
 	if headers.ResetAfter > 0 {
 		view.ResetAfterSeconds = seconds(headers.ResetAfter)
+	}
+	if headers.EffectiveWindow >= 0 {
+		view.EffectiveWindowSeconds = seconds(headers.EffectiveWindow)
 	}
 	return view
 }
