@@ -74,8 +74,8 @@ var _ = Describe("the snapshot endpoint", Ordered, Label("snapshot"), func() {
 		p.Spec.Groups = []v1.ClientGroup{{Name: "partners", Clients: clients}}
 		p.Spec.Limits[0].Rules = append(p.Spec.Limits[0].Rules, v1.Rule{
 			Name:     "partners",
-			Matches:  []v1.Predicate{{Key: "client", Operator: v1.OperatorInGroup, Value: "partners"}},
-			Counters: []string{"client"},
+			Matches:  []v1.Predicate{{Key: "sub", Operator: v1.OperatorInGroup, Value: "partners"}},
+			Counters: []string{"sub"},
 			Rates:    []v1.Rate{{Requests: 10, PeriodSeconds: 60}},
 		})
 		Expect(apply(p)).To(Succeed())

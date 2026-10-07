@@ -96,7 +96,7 @@ func (c *blockCompiler) compileTemplate(b model.Block, value string, captures ma
 				"placeholder %q does not match %s or exceeds %d characters", name, keyName, maxKeyLength)
 			continue
 		}
-		if name == model.KeyPath || name == model.KeyMethod || name == model.KeyClient || name == model.KeyToken {
+		if name == model.KeyPath || name == model.KeyMethod || name == model.KeySub || name == model.KeyToken {
 			c.fail(b.Name, "", ReasonInvalidSpec, "placeholder %q collides with a built-in key", name)
 			continue
 		}

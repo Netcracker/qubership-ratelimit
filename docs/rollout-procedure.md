@@ -67,7 +67,7 @@ carol(ROLE_Exporter) x3 GET /api/v1/exports/1: 200 200 200
 ratelimit_checks_total{domain="gateway.public",verdict="ok"} 15
 ratelimit_decisions_total{domain="gateway.public",outcome="ok",rule="api/exports-per-client-trial"} 8
 ratelimit_decisions_total{domain="gateway.public",outcome="shadow_over_limit",rule="api/exports-per-client-trial"} 3
-ratelimit_extractions_total{domain="gateway.public",key="client"} 15
+ratelimit_extractions_total{domain="gateway.public",key="sub"} 15
 ratelimit_extractions_total{domain="gateway.public",key="plan"} 0
 ratelimit_extractions_total{domain="gateway.public",key="roles"} 15
 ratelimit_tokens_seen_total{domain="gateway.public"} 15
@@ -85,10 +85,10 @@ Who is behind the three:
 ```bash
 api "$BASE/domains/$DOMAIN/counters?ruleId=api/exports-per-client-trial" \
   | jq -c '[.items[] | {axes, mode, limit, remaining, limited, retryAfterSeconds}]'
-# [{"axes": {"client": "bob"}, "mode": "shadow", "limit": 5, "remaining": 0, "limited": true, "retryAfterSeconds": 719.5},
-#  {"axes": {"client": "carol"}, "mode": "shadow", "limit": 5, "remaining": 2, "limited": false, "retryAfterSeconds": null}]
+# [{"axes": {"sub": "bob"}, "mode": "shadow", "limit": 5, "remaining": 0, "limited": true, "retryAfterSeconds": 719.5},
+#  {"axes": {"sub": "carol"}, "mode": "shadow", "limit": 5, "remaining": 2, "limited": false, "retryAfterSeconds": null}]
 api "$BASE/domains/$DOMAIN/counters?limited=true" | jq -c '[.items[] | {ruleId, axes, mode}]'
-# [{"ruleId": "api/exports-per-client-trial", "axes": {"client": "bob"}, "mode": "shadow"}]
+# [{"ruleId": "api/exports-per-client-trial", "axes": {"sub": "bob"}, "mode": "shadow"}]
 ```
 
 `limited: true` under `mode: shadow` is a client that would be refused right now; `retryAfterSeconds` is how long
@@ -98,7 +98,7 @@ does not decide:
 ```bash
 api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
   "domain": "'"$DOMAIN"'", "path": "/api/v1/exports/1", "method": "GET",
-  "keys": {"client": ["bob"], "roles": ["ROLE_Exporter"]}
+  "keys": {"sub": ["bob"], "roles": ["ROLE_Exporter"]}
 }' | jq -c '{allowed, headers: {limit: .headers.limit, remaining: .headers.remaining}, rules: [.rules[] | {id, mode, allowed, remaining}]}'
 # {"allowed": true, "headers": {"limit": 100, "remaining": 12},
 #  "rules": [{"id": "api/per-path", "mode": "enforce", "allowed": true, "remaining": 98},
@@ -155,9 +155,9 @@ kubectl apply -f policy.yaml
 api "$BASE/domains/$DOMAIN/counters?ruleId=api/exports-per-client-trial" \
   | jq -c '[.items[] | {key, axes, limit, remaining, limited, retryAfterSeconds}]'
 # [{"key": "rl:v1:{ratelimit-e2e/gateway.public}:api/exports-per-client-trial:gcra:3600:bob:",
-#   "axes": {"client": "bob"}, "limit": 10, "remaining": 0, "limited": true, "retryAfterSeconds": 299.5},
+#   "axes": {"sub": "bob"}, "limit": 10, "remaining": 0, "limited": true, "retryAfterSeconds": 299.5},
 #  {"key": "rl:v1:{ratelimit-e2e/gateway.public}:api/exports-per-client-trial:gcra:3600:carol:",
-#   "axes": {"client": "carol"}, "limit": 10, "remaining": 4, "limited": false, "retryAfterSeconds": null}]
+#   "axes": {"sub": "carol"}, "limit": 10, "remaining": 4, "limited": false, "retryAfterSeconds": null}]
 ```
 
 **A changed limit keeps the bucket.** The counter key carries the algorithm and the period, not the limit, so the same
@@ -213,7 +213,7 @@ starts refusing and the rule below it stops seeing that traffic. On the stand a 
     - name: importers-trial
       matches:
       - { key: roles, operator: Contains, value: ROLE_Importer }
-      counters: [client]
+      counters: [sub]
       behavior: Shadow
       rates:
       - { requests: 3, periodSeconds: 60 }
@@ -224,7 +224,7 @@ starts refusing and the rule below it stops seeing that traffic. On the stand a 
 ```bash
 api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
   "domain": "'"$DOMAIN"'", "path": "/api/v1/orders", "method": "POST",
-  "keys": {"client": ["dave"], "roles": ["ROLE_Importer"]}
+  "keys": {"sub": ["dave"], "roles": ["ROLE_Importer"]}
 }' | jq -c '{allowed, rules: [.rules[] | select(.id | startswith("orders/")) | {id, mode, allowed, remaining}]}'
 # {"allowed": true, "rules": [{"id": "orders/importers-trial", "mode": "shadow", "allowed": true, "remaining": 3},
 #                             {"id": "orders/orders-per-client", "mode": "enforce", "allowed": true, "remaining": 50}]}
@@ -251,7 +251,7 @@ ratelimit_decisions_total{domain="gateway.public",outcome="ok",rule="orders/orde
 
 So before enforcing a cascade rule, know which rule below it loses traffic, and check that its own limit and its
 counters are ready for the change. Two readings answer it. The rule listing scoped by the request and the identity,
-`GET /rules?path=/api/v1/orders&method=POST&axis.client=dave`, marks the rule that decides `always` and the ones it
+`GET /rules?path=/api/v1/orders&method=POST&axis.sub=dave`, marks the rule that decides `always` and the ones it
 preempts `never`; a capture such as `{orderId}` is decided from the route the request matches, so the same query for
 `/api/v1/orders/42/items` names `orders/items-per-order` instead, and without a path the capture stays open and the
 rule keyed on it is `conditional`. The simulation of one request is the second reading, and the two agree.

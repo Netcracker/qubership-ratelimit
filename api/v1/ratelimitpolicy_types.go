@@ -147,7 +147,7 @@ type Target struct {
 // to it, so keeping these checks at admission would mean bounding every list
 // for the estimator's sake and maintaining a second copy of the compiler.
 type Predicate struct {
-	// key names the descriptor key the predicate reads: client, a mappings
+	// key names the descriptor key the predicate reads: sub, a mappings
 	// key, or a capture of the block's own Template routes.
 	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:MinLength=1
@@ -215,7 +215,7 @@ type Rule struct {
 
 	// counters are the axes of the bucket. An empty list gives the rule a
 	// single shared bucket. A rule whose axis the request does not carry, such
-	// as client for an anonymous caller, does not match: there is nothing to
+	// as sub for an anonymous caller, does not match: there is nothing to
 	// key the bucket by.
 	// +optional
 	// +kubebuilder:validation:items:Pattern=`^[a-z][a-zA-Z0-9_]*$`
@@ -291,7 +291,7 @@ type RateLimitPolicySpec struct {
 	Domain string `json:"domain"`
 
 	// mappings declare which token claims become descriptor keys. An empty
-	// list leaves the domain with its built-in keys, client among them.
+	// list leaves the domain with its built-in keys, sub among them.
 	// +optional
 	// +listType=map
 	// +listMapKey=key

@@ -65,9 +65,9 @@ func TestAudit_recordsWhatTheMutationDid(t *testing.T) {
 	log := &recordingLogger{}
 	h.api.Log = log
 
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=orders/per-client&axis.client=crawler", "key-1", operatorRoles()).Code)
+		h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", operatorRoles()).Code)
 
 	line := log.find(t, "management mutation ")
 	for _, part := range []string{
@@ -93,17 +93,17 @@ func TestAudit_cannotBeForgedThroughAnAxisValue(t *testing.T) {
 	log := &recordingLogger{}
 	h.api.Log = log
 
-	// Lower case, because the client key is lowercased and a value in another
+	// Lower case, because the sub key is lowercased and a value in another
 	// case addresses no counter; the forged line is what the test is about.
 	planted := strings.ToLower("crawler\nmanagement mutation subject=someone-else idempotencyKey=k domain=" +
 		testDomain + " endpoint=counters ruleId=orders/per-client axes=map[] dryRun=false outcome=reset count=9")
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {planted}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {planted}}, 3)
 	require.Equal(t, http.StatusOK, h.reset(t,
-		"ruleId=orders/per-client&axis.client="+url.QueryEscape(planted), "key-1", operatorRoles()).Code)
+		"ruleId=orders/per-client&axis.sub="+url.QueryEscape(planted), "key-1", operatorRoles()).Code)
 
 	line := log.find(t, "management mutation ")
 	require.NotContains(t, line.message, "\n", "a control character from the axis reached the journal")
-	require.Contains(t, line.message, `axes={"client":"crawler\nmanagement mutation subject=someone-else`,
+	require.Contains(t, line.message, `axes={"sub":"crawler\nmanagement mutation subject=someone-else`,
 		"the axis value is not recorded as escaped JSON: %s", line.message)
 	require.Contains(t, line.message, "subject=alice@example.com")
 }
@@ -140,7 +140,7 @@ func TestAudit_carriesTheRequestIDThroughItsContext(t *testing.T) {
 	log := &recordingLogger{}
 	h.api.Log = log
 
-	recorder := h.reset(t, "ruleId=orders/per-client&axis.client=alice", "key-1", operatorRoles())
+	recorder := h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", operatorRoles())
 	require.Equal(t, http.StatusOK, recorder.Code)
 
 	line := log.find(t, "management mutation ")
@@ -160,7 +160,7 @@ func TestAudit_carriesTheCallersRequestID(t *testing.T) {
 	h.api.Log = log
 
 	target := BasePath + "/domains/" + testDomain +
-		"/counters?ruleId=orders/per-client&axis.client=alice"
+		"/counters?ruleId=orders/per-client&axis.sub=alice"
 	recorder := h.callWith(t, http.MethodDelete, target, operatorRoles(), nil,
 		func(request *http.Request) {
 			request.Header.Set("Idempotency-Key", "key-1")

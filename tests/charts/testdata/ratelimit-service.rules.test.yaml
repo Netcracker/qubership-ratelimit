@@ -102,7 +102,7 @@ tests:
         values: "0x40"
       - series: 'ratelimit_tokens_seen_total{namespace="biz", pod="ratelimit-service-0", domain="gateway.public"}'
         values: "0+20x40"
-      - series: 'ratelimit_extractions_total{namespace="biz", pod="ratelimit-service-0", domain="gateway.private", key="client"}'
+      - series: 'ratelimit_extractions_total{namespace="biz", pod="ratelimit-service-0", domain="gateway.private", key="sub"}'
         values: "0x40"
     alert_rule_test:
       - eval_time: 40m

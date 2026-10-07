@@ -28,7 +28,7 @@ func policyOf() model.Policy {
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/"}}}},
 			Rules: []model.Rule{{
 				Name:     "per-user",
-				Counters: []string{model.KeyClient},
+				Counters: []string{model.KeySub},
 				Rates:    []model.Rate{rate(100, time.Minute)},
 			}},
 		}},
@@ -177,7 +177,7 @@ func TestBlockingReasons(t *testing.T) {
 		}, ReasonUnresolvedKeyReference},
 		{"unknown group", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
-				{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "ghosts"}}
+				{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "ghosts"}}
 		}, ReasonUnresolvedGroupReference},
 		{"replacedRules names a missing rule", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].ReplacedRules = []string{"ghost"}
@@ -249,7 +249,7 @@ func TestInvalidSpecFamily(t *testing.T) {
 		{"unknown behavior", func(p *model.Policy) { p.Blocks[0].Rules[0].Behavior = "Maybe" }},
 		{"unknown operator", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
-				{Key: model.KeyClient, Operator: "Matches", Value: "x"}}
+				{Key: model.KeySub, Operator: "Matches", Value: "x"}}
 		}},
 		{"unknown path type", func(p *model.Policy) { p.Blocks[0].Target.Routes[0].Path.Type = "Regex" }},
 		{"relative path", func(p *model.Policy) { p.Blocks[0].Target.Routes[0].Path.Value = "api/" }},
@@ -264,7 +264,7 @@ func TestInvalidSpecFamily(t *testing.T) {
 		}},
 		{"unnamed group", func(p *model.Policy) { p.Groups = []model.Group{{Clients: []string{"a"}}} }},
 		{"empty In values", func(p *model.Policy) {
-			p.Blocks[0].Rules[0].Matches = []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorIn}}
+			p.Blocks[0].Rules[0].Matches = []model.Predicate{{Key: model.KeySub, Operator: model.OperatorIn}}
 		}},
 		{"bypass under All without replacedRules", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].Behavior = model.BehaviorBypass
@@ -272,15 +272,15 @@ func TestInvalidSpecFamily(t *testing.T) {
 		}},
 		{"exists with a value", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
-				{Key: model.KeyClient, Operator: model.OperatorExists, Value: "alice"}}
+				{Key: model.KeySub, Operator: model.OperatorExists, Value: "alice"}}
 		}},
 		{"equals with values", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
-				{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "a", Values: []string{"b"}}}
+				{Key: model.KeySub, Operator: model.OperatorEquals, Value: "a", Values: []string{"b"}}}
 		}},
 		{"in with a value", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
-				{Key: model.KeyClient, Operator: model.OperatorIn, Value: "a", Values: []string{"b"}}}
+				{Key: model.KeySub, Operator: model.OperatorIn, Value: "a", Values: []string{"b"}}}
 		}},
 		{"bad mapping key name", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: "Bad-Name", Claim: "x"}}
@@ -296,6 +296,12 @@ func TestInvalidSpecFamily(t *testing.T) {
 				Type:  model.PathTemplate,
 				Value: "/api/{" + "k" + strings.Repeat("x", maxKeyLength) + "}",
 			}
+		}},
+		// A capture named after a built-in key is refused: the caller controls
+		// the path, and {sub} would let it pick its own identity within the
+		// block.
+		{"placeholder named after the built-in sub", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{sub}"}
 		}},
 		// A segment is a literal or a single placeholder. A brace outside a
 		// placeholder used to compile into a literal that only a request
@@ -338,9 +344,9 @@ func TestInvalidSpecFamily(t *testing.T) {
 		{"mapping key declared twice", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: "plan", Claim: "a"}, {Key: "plan", Claim: "b"}}
 		}},
-		{"client declared twice", func(p *model.Policy) {
+		{"sub declared twice", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{
-				{Key: model.KeyClient, Claim: "azp"}, {Key: model.KeyClient, Claim: "sub"}}
+				{Key: model.KeySub, Claim: "azp"}, {Key: model.KeySub, Claim: "sub"}}
 		}},
 		{"empty claim segment", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: "plan", Claim: "a..b"}}
@@ -445,12 +451,12 @@ func TestNilPolicyIsTheEmptyDomain(t *testing.T) {
 	if len(snap.Blocks) != 0 {
 		t.Errorf("blocks = %d, want none", len(snap.Blocks))
 	}
-	want := []string{model.KeyClient, model.KeyMethod, model.KeyPath}
+	want := []string{model.KeyMethod, model.KeyPath, model.KeySub}
 	if !reflect.DeepEqual(snap.EffectiveKeys, want) {
 		t.Errorf("effective keys = %v, want %v", snap.EffectiveKeys, want)
 	}
-	if len(snap.Extraction) != 1 || snap.Extraction[0].Key != model.KeyClient {
-		t.Errorf("extraction = %+v, want the built-in client alone", snap.Extraction)
+	if len(snap.Extraction) != 1 || snap.Extraction[0].Key != model.KeySub {
+		t.Errorf("extraction = %+v, want the built-in sub alone", snap.Extraction)
 	}
 }
 
@@ -466,7 +472,7 @@ func TestSnapshotDoesNotAliasTheModel(t *testing.T) {
 	}
 
 	p.Blocks[0].Rules[0].Counters[0] = "mutated"
-	if snap.Blocks[0].Rules[0].Counters[0] != model.KeyClient {
+	if snap.Blocks[0].Rules[0].Counters[0] != model.KeySub {
 		t.Error("the snapshot aliased the model's counters slice")
 	}
 	p.Mappings[0].ClaimPath[0] = "mutated"
@@ -542,7 +548,7 @@ func TestCamelCaseKeysAreAdmitted(t *testing.T) {
 func TestGroupsResolveAtCompileTime(t *testing.T) {
 	p := withKeys(policyOf())
 	p.Blocks[0].Rules[0].Matches = []model.Predicate{
-		{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "partners"},
+		{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "partners"},
 	}
 
 	snap, problems := compileOne(p)
@@ -561,8 +567,8 @@ func TestExtractionPlan(t *testing.T) {
 		t.Fatalf("unexpected problems: %v", problems)
 	}
 
-	if snap.Extraction[0].Key != model.KeyClient || snap.Extraction[0].Path[0] != "sub" {
-		t.Errorf("extraction[0] = %+v, want the built-in client from sub", snap.Extraction[0])
+	if snap.Extraction[0].Key != model.KeySub || snap.Extraction[0].Path[0] != "sub" {
+		t.Errorf("extraction[0] = %+v, want the built-in sub from the sub claim", snap.Extraction[0])
 	}
 	roles := snap.Extraction[1]
 	if !reflect.DeepEqual(roles.Path, []string{"realm_access", "roles"}) {
@@ -573,15 +579,15 @@ func TestExtractionPlan(t *testing.T) {
 		t.Errorf("tenant fallbacks = %v, want [[sub]]", tenant.Fallbacks)
 	}
 
-	want := []string{model.KeyClient, model.KeyMethod, model.KeyPath, "roles", "tenant"}
+	want := []string{model.KeyMethod, model.KeyPath, "roles", model.KeySub, "tenant"}
 	if !reflect.DeepEqual(snap.EffectiveKeys, want) {
 		t.Errorf("effective keys = %v, want %v", snap.EffectiveKeys, want)
 	}
 }
 
-func TestClientOverrideReplacesBuiltin(t *testing.T) {
+func TestSubOverrideReplacesBuiltin(t *testing.T) {
 	p := policyOf()
-	p.Mappings = []model.KeyMapping{{Key: model.KeyClient, Claim: "azp"}}
+	p.Mappings = []model.KeyMapping{{Key: model.KeySub, Claim: "azp"}}
 
 	snap, problems := compileOne(p)
 	if len(problems) != 0 {
@@ -620,12 +626,12 @@ func TestSpecCascadeCompiles(t *testing.T) {
 				Rules: []model.Rule{
 					{Name: "internal", Behavior: model.BehaviorBypass,
 						Matches: []model.Predicate{
-							{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus"}}},
+							{Key: model.KeySub, Operator: model.OperatorEquals, Value: "prometheus"}}},
 					{Name: "trial",
-						Matches:  []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "trial"}},
-						Behavior: model.BehaviorShadow, Counters: []string{model.KeyClient},
+						Matches:  []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "trial"}},
+						Behavior: model.BehaviorShadow, Counters: []string{model.KeySub},
 						Rates: []model.Rate{rate(10, time.Minute)}},
-					{Name: "everyone", Counters: []string{model.KeyClient},
+					{Name: "everyone", Counters: []string{model.KeySub},
 						Rates: []model.Rate{
 							rate(100, time.Minute),
 							{Requests: 10000, Period: 24 * time.Hour, Algorithm: "FixedWindow"}}},

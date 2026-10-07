@@ -71,7 +71,7 @@ func TestCompile_reportsWhatTheGenerationContributed(t *testing.T) {
 	assert.Equal(t, int64(1), outcome.ActiveGeneration)
 	assert.True(t, outcome.Enforced())
 	assert.True(t, outcome.Compiled())
-	assert.Subset(t, outcome.EffectiveKeys, []string{"client", "method", "path"})
+	assert.Subset(t, outcome.EffectiveKeys, []string{"method", "path", "sub"})
 }
 
 func TestCompile_aBlockingProblemKeepsTheWholeGenerationOut(t *testing.T) {
@@ -137,7 +137,7 @@ func TestCompile_theMappingsOfTheObjectResolveItsOwnRules(t *testing.T) {
 
 	require.NoError(t, outcome.Err)
 	assert.True(t, outcome.Enforced())
-	assert.Subset(t, outcome.EffectiveKeys, []string{"client", "roles"})
+	assert.Subset(t, outcome.EffectiveKeys, []string{"roles", "sub"})
 }
 
 func TestCompile_anUndeclaredKeyBlocksTheGeneration(t *testing.T) {

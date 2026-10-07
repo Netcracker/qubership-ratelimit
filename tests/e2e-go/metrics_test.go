@@ -152,7 +152,7 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 		// arrives, and it is the domain's, since a key is declared per
 		// domain and a dead claim path is a fact about one domain's mapping.
 		Expect(hasSeries(families, "ratelimit_extractions_total",
-			map[string]string{"domain": domain, "key": "client"})).To(BeTrue(),
+			map[string]string{"domain": domain, "key": "sub"})).To(BeTrue(),
 			"the scrape carries no seeded extraction series for the domain's built-in key")
 	})
 

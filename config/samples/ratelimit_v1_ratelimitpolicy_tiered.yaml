@@ -46,14 +46,14 @@ spec:
         # One bucket shared by the whole group: InGroup plus no counting axes.
         - name: bulk-clients-shared
           matches:
-            - { key: client, operator: InGroup, value: bulk-clients }
+            - { key: sub, operator: InGroup, value: bulk-clients }
           counters: []
           rates:
             - { requests: 200, periodSeconds: 60 }
 
         - name: trial-clients-shared
           matches:
-            - { key: client, operator: InGroup, value: trial-clients }
+            - { key: sub, operator: InGroup, value: trial-clients }
           counters: []
           rates:
             - { requests: 60, periodSeconds: 60 }
@@ -99,14 +99,14 @@ spec:
       rules:
         - name: bulk-clients-writes
           matches:
-            - { key: client, operator: InGroup, value: bulk-clients }
+            - { key: sub, operator: InGroup, value: bulk-clients }
           counters: []
           rates:
             - { requests: 30, periodSeconds: 60 }
 
         - name: trial-clients-writes
           matches:
-            - { key: client, operator: InGroup, value: trial-clients }
+            - { key: sub, operator: InGroup, value: trial-clients }
           counters: []
           rates:
             - { requests: 10, periodSeconds: 60 }

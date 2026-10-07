@@ -108,8 +108,8 @@ spec:
                     clients:
                       description: |-
                         clients lists the members of the group. Values are compared with the
-                        client key after its effective normalization, which is lower-case unless
-                        a mapping entry overrides client with normalization None — then they are
+                        sub key after its effective normalization, which is lower-case unless
+                        a mapping entry overrides sub with normalization None — then they are
                         compared as written, and the case is the author's responsibility.
                       items:
                         maxLength: 256
@@ -175,7 +175,7 @@ spec:
                             description: |-
                               counters are the axes of the bucket. An empty list gives the rule a
                               single shared bucket. A rule whose axis the request does not carry, such
-                              as client for an anonymous caller, does not match: there is nothing to
+                              as sub for an anonymous caller, does not match: there is nothing to
                               key the bucket by.
                             items:
                               maxLength: 63
@@ -200,7 +200,7 @@ spec:
                               properties:
                                 key:
                                   description: |-
-                                    key names the descriptor key the predicate reads: client, a mappings
+                                    key names the descriptor key the predicate reads: sub, a mappings
                                     key, or a capture of the block's own Template routes.
                                   maxLength: 63
                                   minLength: 1
@@ -390,7 +390,7 @@ spec:
               mappings:
                 description: |-
                   mappings declare which token claims become descriptor keys. An empty
-                  list leaves the domain with its built-in keys, client among them.
+                  list leaves the domain with its built-in keys, sub among them.
                 items:
                   description: ClaimMapping turns one JWT claim into one descriptor
                     key.
@@ -427,7 +427,7 @@ spec:
                       description: |-
                         key names the descriptor key the rules reference. It uses the one
                         descriptor key pattern of this API, camelCase included; path, method and
-                        token are produced by the engine and cannot be redefined, while client
+                        token are produced by the engine and cannot be redefined, while sub
                         is an allowed override.
                       maxLength: 63
                       minLength: 1

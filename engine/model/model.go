@@ -3,7 +3,7 @@ package model
 import "time"
 
 // Built-in descriptor keys. They exist in every domain with no mappings at
-// all; a mapping entry may override KeyClient and must not declare the others.
+// all; a mapping entry may override KeySub and must not declare the others.
 const (
 	// KeyPath is the request path with the query string already stripped.
 	KeyPath = "path"
@@ -11,8 +11,8 @@ const (
 	// KeyMethod is the HTTP method.
 	KeyMethod = "method"
 
-	// KeyClient is the built-in identity: the JWT sub claim, lowercased.
-	KeyClient = "client"
+	// KeySub is the built-in identity: the JWT sub claim, lowercased.
+	KeySub = "sub"
 
 	// KeyToken names the raw-token descriptor entry the gateways send. It is
 	// never a rule key and never leaves identity extraction.
@@ -207,7 +207,7 @@ type Rate struct {
 
 // KeyMapping declares one descriptor key extracted from the token.
 type KeyMapping struct {
-	// Key must not collide with the built-ins other than KeyClient, which a
+	// Key must not collide with the built-ins other than KeySub, which a
 	// mapping entry may override.
 	Key string
 

@@ -25,7 +25,7 @@ info:
     * The base path is a security boundary: the gateway's auth extension authenticates every call against the platform identity provider, and the service itself authorizes it by the roles the token carries, per path and verb.
 
     Dynamic axis parameters: counters are addressed by named identity axes
-    (client, captured path segments). Query parameters of the form
+    (sub, captured path segments). Query parameters of the form
     `axis.<name>=<value>` select by them: repeating one name ORs its values,
     different names AND together, and a counter whose rule lacks a named
     axis never matches. OpenAPI cannot declare wildcard parameter names, so each endpoint carries a stand-in entry marked x-dynamic-parameter: true - exclude those from generated clients and send the family as raw query pairs; the stand-ins document the contract and are shown in examples. Bulk selections
@@ -84,9 +84,9 @@ paths:
                   blocks: 8
                   rules: 15
                   effectiveKeys:
-                  - client
                   - plan
                   - roles
+                  - sub
                   - tenant
                   listValuedKeys:
                   - roles
@@ -130,7 +130,7 @@ paths:
 
         The response names the ruleSetVersion of the snapshot it renders; the addressed DELETE accepts it as expectedRuleSetVersion to refuse acting on a set the operator has not seen.
 
-        Scoped by axis.<name> (e.g. ?axis.client=alice), the same view turns into an applicability analysis: every rule is annotated always (applies for every completion of the unknown identity), conditional (for some - conditionalOn names the gates), or never. Supplying more axes sharpens the answer monotonically: a gate closed by a new value moves rules between the classes and never reopens.
+        Scoped by axis.<name> (e.g. ?axis.sub=alice), the same view turns into an applicability analysis: every rule is annotated always (applies for every completion of the unknown identity), conditional (for some - conditionalOn names the gates), or never. Supplying more axes sharpens the answer monotonically: a gate closed by a new value moves rules between the classes and never reopens.
       parameters:
       - $ref: '#/components/parameters/domain'
       - name: path
@@ -159,10 +159,10 @@ paths:
           ONE value, and repeating it is refused (RLS-0400), unlike the listing''s
           OR; a list-valued key (see listValuedKeys) IS repeatable, and the supplied
           values form its COMPLETE set - Contains and Exists decide against it,
-          e.g. ?axis.client=alice&axis.roles=support&axis.roles=operator. Unnamed
+          e.g. ?axis.sub=alice&axis.roles=support&axis.roles=operator. Unnamed
           keys stay unknown. Every rule then carries applicability and, when conditional,
           conditionalOn. Valid names are the domain''s effectiveKeys and the blocks''
-          captures; an unknown name is refused (RLS-0400), never ignored. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use. With
+          captures; an unknown name is refused (RLS-0400), never ignored. A value is compared in the form traffic counts it - the sub key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use. With
           path, the matched route decides the blocks'' captures before the
           annotation: a capture it produces is known with its value, one it does
           not produce is known-absent, without method a capture the routes
@@ -210,9 +210,9 @@ paths:
                     domain: gateway.public
                     ruleSetVersion: 7c31a9f4e0d2
                     effectiveKeys:
-                    - client
                     - plan
                     - roles
+                    - sub
                     - tenant
                     listValuedKeys:
                     - roles
@@ -232,7 +232,7 @@ paths:
                         mode: bypass
                         axes: []
                         matches:
-                        - key: client
+                        - key: sub
                           operator: Equals
                           value: prometheus
                         rates: []
@@ -241,9 +241,9 @@ paths:
                         rule: trial
                         mode: shadow
                         axes:
-                        - client
+                        - sub
                         matches:
-                        - key: client
+                        - key: sub
                           operator: In
                           values:
                           - trial-1
@@ -258,7 +258,7 @@ paths:
                         rule: premium
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         matches:
                         - key: plan
                           operator: In
@@ -276,7 +276,7 @@ paths:
                         rule: everyone
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         rates:
                         - algorithm: gcra
                           requests: 100
@@ -294,7 +294,7 @@ paths:
                         rule: daily
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         rates:
                         - algorithm: gcra
                           requests: 100
@@ -317,7 +317,7 @@ paths:
                         rule: heavy
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         - path
                         rates:
                         - algorithm: gcra
@@ -329,7 +329,7 @@ paths:
                         rule: gold
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         - path
                         matches:
                         - key: plan
@@ -375,7 +375,7 @@ paths:
                         mode: bypass
                         axes: []
                         matches:
-                        - key: client
+                        - key: sub
                           operator: In
                           values:
                           - p-1
@@ -440,7 +440,7 @@ paths:
                         rule: bots
                         mode: shadow
                         axes:
-                        - client
+                        - sub
                         matches:
                         - key: roles
                           operator: Contains
@@ -471,21 +471,21 @@ paths:
                         rule: per-client
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         rates:
                         - algorithm: gcra
                           requests: 30
                           periodSeconds: 60
                           period: 1m
-                scopedToClient:
-                  summary: ?axis.client=alice - every rule annotated with applicability
+                scopedToSub:
+                  summary: ?axis.sub=alice - every rule annotated with applicability
                   value:
                     domain: gateway.public
                     ruleSetVersion: 7c31a9f4e0d2
                     effectiveKeys:
-                    - client
                     - plan
                     - roles
+                    - sub
                     - tenant
                     listValuedKeys:
                     - roles
@@ -505,7 +505,7 @@ paths:
                         mode: bypass
                         axes: []
                         matches:
-                        - key: client
+                        - key: sub
                           operator: Equals
                           value: prometheus
                         rates: []
@@ -515,9 +515,9 @@ paths:
                         rule: trial
                         mode: shadow
                         axes:
-                        - client
+                        - sub
                         matches:
-                        - key: client
+                        - key: sub
                           operator: In
                           values:
                           - trial-1
@@ -533,7 +533,7 @@ paths:
                         rule: premium
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         matches:
                         - key: plan
                           operator: In
@@ -555,7 +555,7 @@ paths:
                         rule: everyone
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         rates:
                         - algorithm: gcra
                           requests: 100
@@ -577,7 +577,7 @@ paths:
                         rule: daily
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         rates:
                         - algorithm: gcra
                           requests: 100
@@ -601,7 +601,7 @@ paths:
                         rule: heavy
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         - path
                         rates:
                         - algorithm: gcra
@@ -617,7 +617,7 @@ paths:
                         rule: gold
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         - path
                         matches:
                         - key: plan
@@ -668,7 +668,7 @@ paths:
                         mode: bypass
                         axes: []
                         matches:
-                        - key: client
+                        - key: sub
                           operator: In
                           values:
                           - p-1
@@ -746,7 +746,7 @@ paths:
                         rule: bots
                         mode: shadow
                         axes:
-                        - client
+                        - sub
                         matches:
                         - key: roles
                           operator: Contains
@@ -782,7 +782,7 @@ paths:
                         rule: per-client
                         mode: enforce
                         axes:
-                        - client
+                        - sub
                         rates:
                         - algorithm: gcra
                           requests: 30
@@ -881,8 +881,8 @@ paths:
         description: 'Documentation stand-in for the dynamic axis parameters (OpenAPI
           cannot declare wildcard names). Listings accept partial selections: repeating
           one name ORs its values, different names AND together, and a counter whose
-          rule lacks a named axis never matches - e.g. ?axis.client=alice answers
-          what alice has accumulated anywhere in the domain. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use.'
+          rule lacks a named axis never matches - e.g. ?axis.sub=alice answers
+          what alice has accumulated anywhere in the domain. A value is compared in the form traffic counts it - the sub key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use.'
         schema:
           type: string
         example: alice
@@ -939,7 +939,7 @@ paths:
                   algorithm: gcra
                   periodSeconds: 60
                   axes:
-                    client: bob
+                    sub: bob
                   limit: 100
                   remaining: 17
                   limited: false
@@ -951,7 +951,7 @@ paths:
                   algorithm: gcra
                   periodSeconds: 60
                   axes:
-                    client: crawler
+                    sub: crawler
                   limit: 100
                   remaining: 0
                   limited: true
@@ -1016,9 +1016,9 @@ paths:
         The bounded-by-construction form. The invariant is key
         computability: exactly one whole block/rule id, and one
         `axis.<name>=<value>` parameter for EVERY axis the rule declares,
-        each with a single value - e.g. for a rule with axes [client, path]:
+        each with a single value - e.g. for a rule with axes [sub, path]:
 
-            ?ruleId=by-path/each&axis.client=alice&axis.path=/api/orders
+            ?ruleId=by-path/each&axis.sub=alice&axis.path=/api/orders
 
         With the identity fully named, the keys are computed from the
         snapshot - one per window - never scanned. `algorithm`/`period`
@@ -1123,7 +1123,7 @@ paths:
           cannot declare wildcard names): one parameter per declared axis
           of the rule, single value each, all of them required when the
           rule declares any. See the operation description for the exact
-          contract and an example. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use.
+          contract and an example. A value is compared in the form traffic counts it - the sub key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400) with the form to use.
         schema:
           type: string
         example: alice
@@ -1157,7 +1157,7 @@ paths:
                     ruleId: quota/daily
                     ruleSetVersion: 7c31a9f4e0d2
                     axes:
-                      client: alice
+                      sub: alice
                     resetCount: 2
                     keys:
                     - 'rl:v1:{core-1-core/gateway.public}:quota/daily:gcra:60:alice:'
@@ -1171,7 +1171,7 @@ paths:
                     ruleId: quota/daily
                     ruleSetVersion: 7c31a9f4e0d2
                     axes:
-                      client: alice
+                      sub: alice
                     matchedCount: 2
                     keys:
                     - 'rl:v1:{core-1-core/gateway.public}:quota/daily:gcra:60:alice:'
@@ -1253,8 +1253,8 @@ paths:
                 id: 7b40e2d9-3c58-4f16-a2e7-9d0b5c8f1a73
                 code: RLS-0400
                 reason: Invalid request
-                message: the rule declares axes [client, path] and the selection
-                  names only client; use the counter-resets action
+                message: the rule declares axes [sub, path] and the selection
+                  names only sub; use the counter-resets action
                 status: '400'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1341,7 +1341,7 @@ paths:
                 value:
                   selector:
                     axes:
-                      client:
+                      sub:
                       - u1
                       - u2
                       - u3
@@ -1662,7 +1662,7 @@ paths:
                   path: /api/invoices/42
                   method: GET
                   keys:
-                    client:
+                    sub:
                     - alice
                     tenant:
                     - acme
@@ -1733,8 +1733,8 @@ paths:
                   periodSeconds: 60
                 skips: []
                 extractedKeys:
-                - client
                 - plan
+                - sub
                 - tenant
           headers:
             X-Request-Id:
@@ -2117,7 +2117,7 @@ components:
           items:
             type: string
           example:
-          - client
+          - sub
           - tenant
           description: Every identity key the domain declares - built-ins plus mapped
             keys, sorted.
@@ -2282,7 +2282,7 @@ components:
           description: The rule's declared axes. Direct DELETE requires one value
             for every declared axis; bulk selections filter by axis name.
           example:
-          - client
+          - sub
         matches:
           type: array
           items:
@@ -2454,7 +2454,7 @@ components:
           description: Identity values this counter belongs to; absent for a rule
             with no axes.
           example:
-            client: alice
+            sub: alice
         limit:
           type: integer
           format: int64
@@ -2631,9 +2631,9 @@ components:
         minItems: 1
         items:
           type: string
-      description: Pre-extracted identity values, the direct-consumer form. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase - and a value that normalization would change is refused (RLS-0400, field keys) with the form to use.
+      description: Pre-extracted identity values, the direct-consumer form. A value is compared in the form traffic counts it - the sub key is the sub claim in lower case, and a mapped key may declare Lowercase - and a value that normalization would change is refused (RLS-0400, field keys) with the form to use.
       example:
-        client:
+        sub:
         - alice
     SimulationResponse:
       description: The decision the gateway would have received, plus the per-rule
@@ -3402,9 +3402,9 @@ components:
               description: One axis value.
             description: The values of one axis; OR within the list.
           description: OR within one axis name, AND across names. Needs the rule's
-            axis-name mapping, so it matches only counters of enforced rules. A value is compared in the form traffic counts it - the client key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400, field selector.axes) with the form to use.
+            axis-name mapping, so it matches only counters of enforced rules. A value is compared in the form traffic counts it - the sub key is the sub claim in lower case, and a mapped key may declare Lowercase; a key a path capture sets in an addressed block is compared as given - and a value that normalization would change is refused (RLS-0400, field selector.axes) with the form to use.
           example:
-            client:
+            sub:
             - u1
             - u2
             - u3

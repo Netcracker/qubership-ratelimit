@@ -13,8 +13,8 @@ spec:
   # log, which is why that line is written on every check.
   domain: gateway.public
 
-  # Which token claims become descriptor keys. client is built in — the sub
-  # claim, lower-cased — and works with no entry at all.
+  # Which token claims become descriptor keys. sub is built in, the claim of
+  # the same name lower-cased, and works with no entry at all.
   mappings:
     - { key: roles, claim: realm_access.roles, type: StringArray }
 
@@ -37,21 +37,21 @@ spec:
         # rule bypasses its own block, so the ceilings below still apply.
         - name: internal-bypass
           matches:
-            - { key: client, operator: Equals, value: prometheus }
+            - { key: sub, operator: Equals, value: prometheus }
           behavior: Bypass
 
         # Shadow tries a tighter limit over the live one: it counts and records
         # metrics, never rejects, and does not end the cascade.
         - name: mvno-group-1-trial
           matches:
-            - { key: client, operator: InGroup, value: mvno-group-1 }
+            - { key: sub, operator: InGroup, value: mvno-group-1 }
           behavior: Shadow
           rates:
             - { requests: 50, periodSeconds: 60 }
 
         - name: mvno-group-1
           matches:
-            - { key: client, operator: InGroup, value: mvno-group-1 }
+            - { key: sub, operator: InGroup, value: mvno-group-1 }
           # No axes: the group shares one bucket.
           counters: []
           rates:
@@ -64,22 +64,22 @@ spec:
         - name: subscriber-per-user
           matches:
             - { key: roles, operator: Contains, value: subscriber }
-          counters: [client]
+          counters: [sub]
           rates:
             - { requests: 1000, periodSeconds: 60, burst: 100 }
 
-        # No predicate, so it matches every caller who has a client value. An
+        # No predicate, so it matches every caller who has a sub value. An
         # anonymous caller has none, and a rule cannot key a bucket by an axis
         # the request does not carry, so anonymous traffic falls through to the
         # rule below.
         - name: per-user
-          counters: [client]
+          counters: [sub]
           rates:
             - { requests: 100, periodSeconds: 60 }
 
         - name: anonymous
           matches:
-            - { key: client, operator: DoesNotExist }
+            - { key: sub, operator: DoesNotExist }
           counters: []
           rates:
             - { requests: 100, periodSeconds: 60 }
@@ -94,7 +94,7 @@ spec:
         # A smoothed minute next to a daily quota. Each window is an independent
         # bucket, and each can reject on its own.
         - name: per-user
-          counters: [client]
+          counters: [sub]
           rates:
             - { requests: 300, periodSeconds: 60 }
             - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
@@ -103,6 +103,6 @@ spec:
         # is the raw request path, so its cardinality is as wide as the traffic;
         # under a Template route it is the template itself.
         - name: per-user-per-path
-          counters: [client, path]
+          counters: [sub, path]
           rates:
             - { requests: 60, periodSeconds: 60 }

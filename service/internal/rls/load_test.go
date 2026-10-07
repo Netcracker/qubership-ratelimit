@@ -83,7 +83,7 @@ func loadPolicy() model.Policy {
 			Name: "all",
 			Rules: []model.Rule{{
 				Name:     "per-client",
-				Counters: []string{model.KeyClient},
+				Counters: []string{model.KeySub},
 				Rates:    []model.Rate{{Requests: 1_000_000_000, Period: time.Hour, Algorithm: "FixedWindow"}},
 			}},
 		}},
@@ -236,7 +236,7 @@ func runLoad(t *testing.T, client envoyratelimit.RateLimitServiceClient) []time.
 			req := request("gateway.public", map[string]string{
 				"path":   "/api/v1/orders",
 				"method": "GET",
-				"client": fmt.Sprintf("load-%d", w),
+				"sub":    fmt.Sprintf("load-%d", w),
 			})
 			// Sized so a healthy run never grows the slice mid-measurement.
 			samples := make([]time.Duration, 0, loadFloorPerSecond*int(loadDuration.Seconds()))

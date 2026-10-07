@@ -162,7 +162,7 @@ func TestBulk_retryFinalizesADeadSweep(t *testing.T) {
 func TestBulk_deadlineIsRecordedWithItsDisclosure(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol"} {
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
 	}
 
 	// The clock is consulted for the deadline, then before the first step, then
@@ -195,7 +195,7 @@ func TestBulk_aPreviewWalksEveryStepOfALargeBlock(t *testing.T) {
 	h := newTestAPI(t)
 	const clients = 1300
 	for i := range clients {
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {fmt.Sprintf("client-%04d", i)}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {fmt.Sprintf("client-%04d", i)}}, 1)
 	}
 
 	var preview BulkResult
@@ -231,7 +231,7 @@ func TestBulk_theDeadlineIsCheckedBeforeEveryStep(t *testing.T) {
 // the next command is not blocked by a command that already ended.
 func TestBulk_aRecordedFailureReleasesTheDomain(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	h.deadlineAfter(t, 1)
 	requireError(t, h.bulk(t, map[string]any{
@@ -275,7 +275,7 @@ func TestReset_versionConflictNamesItsRecovery(t *testing.T) {
 	h := newTestAPI(t)
 
 	body := requireError(t, h.reset(t,
-		"ruleId=orders/per-client&axis.client=alice&expectedRuleSetVersion=000000000000",
+		"ruleId=orders/per-client&axis.sub=alice&expectedRuleSetVersion=000000000000",
 		"key-1", operatorRoles()), http.StatusConflict, CodeConflict)
 	require.Equal(t, ConflictStaleRuleSet, body.Meta.ConflictType)
 }
@@ -316,7 +316,7 @@ func (h *testAPI) shutDown(t *testing.T) {
 // accepted until its lease expired.
 func TestBulk_recordsItsOutcomeWhenShutdownEndsTheWalk(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 	h.shutDown(t)
 
 	var preview BulkResult
@@ -331,7 +331,7 @@ func TestBulk_recordsItsOutcomeWhenShutdownEndsTheWalk(t *testing.T) {
 func TestBulk_recordsAFailureWhenShutdownEndsTheWalk(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol"} {
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
 	}
 	h.shutDown(t)
 	h.deadlineAfter(t, 3)
@@ -365,7 +365,7 @@ func (b batchRefusingRecords) Batch(ctx context.Context, batch records.Batch) er
 func TestBulk_aFailureInsideABatchDisclosesWhatTheStoreCommitted(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol"} {
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
 	}
 	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
@@ -418,7 +418,7 @@ func TestBulk_aFailureWithoutItsCommittedProgressAnswersThatTheStoreIsDown(t *te
 		t.Run(name, func(t *testing.T) {
 			h := newTestAPI(t)
 			for _, client := range []string{"alice", "bob", "carol"} {
-				h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+				h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
 			}
 			selector := map[string]any{"ruleIds": []string{"orders"}}
 			preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
@@ -455,7 +455,7 @@ func (putRefusingRecords) Put(context.Context, string, []byte, time.Duration) er
 // shutdown has ended the walk, rather than answering that the store is down.
 func TestBulk_recordsAFailedMintWhenShutdownEndsTheWalk(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	h.api.StartBackground(ctx)

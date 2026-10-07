@@ -269,7 +269,7 @@ var _ = Describe("RateLimitPolicy", func() {
 		It("accepts the mappings and groups of the one object", func() {
 			policy := policyWith("gateway.public", blockWith("api",
 				predicateRule("partners", ratelimitv1.Predicate{
-					Key: "client", Operator: ratelimitv1.OperatorInGroup, Value: "partners",
+					Key: "sub", Operator: ratelimitv1.OperatorInGroup, Value: "partners",
 				})))
 			policy.Spec.Mappings = []ratelimitv1.ClaimMapping{{
 				Key:           "roles",
@@ -311,7 +311,7 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(reconciled.Status.ObservedGeneration).To(Equal(reconciled.Generation))
 			Expect(reconciled.Status.ActiveGeneration).To(Equal(reconciled.Generation))
 			Expect(reconciled.Status.Rules).To(Equal(int32(1)))
-			Expect(reconciled.Status.EffectiveKeys).To(ContainElement("client"))
+			Expect(reconciled.Status.EffectiveKeys).To(ContainElement("sub"))
 
 			accepted := meta.FindStatusCondition(reconciled.Status.Conditions, ratelimitv1.ConditionAccepted)
 			Expect(accepted).NotTo(BeNil())

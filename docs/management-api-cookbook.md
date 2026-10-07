@@ -25,7 +25,7 @@ op()  { curl -sS -H "Authorization: Bearer $OPTOKEN" "$@"; }
 Constructed to exercise every mechanism: both block modes (All / FirstMatch), every behavior (Enforce / Shadow /
 Bypass), every operator (Equals / In / InGroup / Contains / Exists / DoesNotExist), every route type (Exact / Prefix /
 Template) and the method filter, replacedRules, burst, both algorithms (GCRA / FixedWindow), window pairs, every axis
-shape (no axes / client / client+path / capture / tenant), groups and claim mapping inside the same object. The domain
+shape (no axes / sub / sub+path / capture / tenant), groups and claim mapping inside the same object. The domain
 has one policy: the object name == the domain.
 
 ```yaml
@@ -61,18 +61,18 @@ spec:
       rules:
         - name: internal          # Bypass + Equals
           behavior: Bypass
-          matches: [{key: client, operator: Equals, value: prometheus}]
+          matches: [{key: sub, operator: Equals, value: prometheus}]
         - name: trial             # Shadow + InGroup
           behavior: Shadow
-          counters: [client]
-          matches: [{key: client, operator: InGroup, value: trial}]
+          counters: [sub]
+          matches: [{key: sub, operator: InGroup, value: trial}]
           rates: [{requests: 10, periodSeconds: 60}]
         - name: premium           # In on the mapped axis plan
-          counters: [client]
+          counters: [sub]
           matches: [{key: plan, operator: In, values: [gold, platinum]}]
           rates: [{requests: 300, periodSeconds: 60, burst: 50}]
         - name: everyone          # unconditional tail of the cascade, burst
-          counters: [client]
+          counters: [sub]
           rates: [{requests: 100, periodSeconds: 60, burst: 20}]
 
     # -- window pair: a gcra minute + a FixedWindow daily quota
@@ -81,12 +81,12 @@ spec:
         routes: [{path: {type: Prefix, value: /api/invoices/}}]
       rules:
         - name: daily
-          counters: [client]
+          counters: [sub]
           rates:
             - {requests: 100, periodSeconds: 60}
             - {requests: 10000, periodSeconds: 86400, algorithm: FixedWindow}
 
-    # -- two axes [client, path] + replacedRules (a narrow rule silences a wide one)
+    # -- two axes [sub, path] + replacedRules (a narrow rule silences a wide one)
     - name: reports
       target:
         routes:
@@ -94,10 +94,10 @@ spec:
             methods: [POST]
       rules:
         - name: heavy
-          counters: [client, path]
+          counters: [sub, path]
           rates: [{requests: 5, periodSeconds: 60}]
         - name: gold              # In + replacedRules: the narrow one silences heavy
-          counters: [client, path]
+          counters: [sub, path]
           matches: [{key: plan, operator: In, values: [gold, platinum]}]
           replacedRules: [heavy]
           rates: [{requests: 20, periodSeconds: 60}]
@@ -118,7 +118,7 @@ spec:
       rules:
         - name: partner-lift      # Bypass + InGroup;
           behavior: Bypass          # in an All block, Bypass must name
-          matches: [{key: client, operator: InGroup, value: partners}]
+          matches: [{key: sub, operator: InGroup, value: partners}]
           replacedRules: [per-tenant]    # whom it frees (in FirstMatch the cascade
                                     # cuts itself off)
         - name: per-tenant
@@ -147,7 +147,7 @@ spec:
       rules:
         - name: bots              # Shadow + Contains: element membership in
           behavior: Shadow          # the list-valued claim roles (NOT a substring)
-          counters: [client]
+          counters: [sub]
           matches: [{key: roles, operator: Contains, value: bot}]
           rates: [{requests: 1, periodSeconds: 60}]
         - name: all               # rule with no axes: one bucket per domain
@@ -159,7 +159,7 @@ spec:
         routes: [{path: {type: Prefix, value: /api/search}}]
       rules:
         - name: per-client
-          counters: [client]
+          counters: [sub]
           rates: [{requests: 30, periodSeconds: 60}]
 ```
 
@@ -168,20 +168,20 @@ The compiled map (what GET /rules returns):
 | ruleId | mode | axes | windows |
 | --- | --- | --- | --- |
 | cascade/internal | bypass | - | - |
-| cascade/trial | shadow | [client] | gcra 10/1m |
-| cascade/premium | enforce | [client] | gcra 300/1m burst 50 |
-| cascade/everyone | enforce | [client] | gcra 100/1m burst 20 |
-| quota/daily | enforce | [client] | gcra 100/1m + fixedwindow 10000/24h |
-| reports/heavy | enforce | [client, path] | gcra 5/1m |
-| reports/gold | enforce | [client, path] | gcra 20/1m (replacedRules: heavy; matches plan In) |
+| cascade/trial | shadow | [sub] | gcra 10/1m |
+| cascade/premium | enforce | [sub] | gcra 300/1m burst 50 |
+| cascade/everyone | enforce | [sub] | gcra 100/1m burst 20 |
+| quota/daily | enforce | [sub] | gcra 100/1m + fixedwindow 10000/24h |
+| reports/heavy | enforce | [sub, path] | gcra 5/1m |
+| reports/gold | enforce | [sub, path] | gcra 20/1m (replacedRules: heavy; matches plan In) |
 | services/per-service | enforce | [service] | gcra 60/1m |
 | tenants/partner-lift | bypass | - | (replacedRules: per-tenant) |
 | tenants/per-tenant | enforce | [tenant] | gcra 1000/1m |
 | login/anonymous | enforce | - | gcra 20/1m |
 | login/authenticated | enforce | [tenant] | gcra 100/1m |
-| total/bots | shadow | [client] | gcra 1/1m |
+| total/bots | shadow | [sub] | gcra 1/1m |
 | total/all | enforce | - | gcra 5000/1m |
-| search/per-client | enforce | [client] | gcra 30/1m |
+| search/per-client | enforce | [sub] | gcra 30/1m |
 
 The cast of the examples: client alice (tenant acme, plan gold), bob (tenant acme, no plan), trial-1 (the trial group),
 p-1 (a partner), prometheus (monitoring), scanner-bot-7 (roles: [bot]).
@@ -197,7 +197,7 @@ api "$BASE/domains"
 ```json
 {"items": [{"domain": "gateway.public", "ruleSetVersion": "7c31a9f4e0d2",
   "blocks": 8, "rules": 15,
-  "effectiveKeys": ["client", "method", "path", "plan", "roles", "tenant"],
+  "effectiveKeys": ["method", "path", "plan", "roles", "sub", "tenant"],
   "listValuedKeys": ["roles"]}]}
 ```
 
@@ -243,7 +243,7 @@ applicability, and the engine accounts for the cascade (FirstMatch/bypass) and r
 view cannot do:
 
 ```bash
-api "$BASE/domains/gateway.public/rules?axis.client=alice" \
+api "$BASE/domains/gateway.public/rules?axis.sub=alice" \
   | jq '{tochno:        [.blocks[].rules[] | select(.applicability == "always") | .id],
          teoreticheski: [.blocks[].rules[] | select(.applicability == "conditional") | .id]}'
 ```
@@ -262,21 +262,21 @@ preempted by premium (may_be_preempted, FirstMatch), heavy may be silenced by go
 tenant axis (missing_axis). Once you learn the tenant, the refinement narrows monotonically:
 
 ```bash
-api ".../rules?axis.client=alice&axis.tenant=acme"
+api ".../rules?axis.sub=alice&axis.tenant=acme"
 # per-tenant: conditional -> always; authenticated -> always; anonymous -> never
 ```
 
 List-valued keys (roles) are repeatable and define the complete set of values:
 
 ```bash
-api ".../rules?axis.client=alice&axis.roles=support&axis.roles=operator"
+api ".../rules?axis.sub=alice&axis.roles=support&axis.roles=operator"
 # total/bots: conditional -> never (roles are fully known, and bot is not among them)
 ```
 
 Known absence: the absent parameter (the key's empty set):
 
 ```bash
-api ".../rules?axis.client=bob&absent=tenant"
+api ".../rules?axis.sub=bob&absent=tenant"
 # login/anonymous:     conditional -> always  (DoesNotExist tenant decided)
 # login/authenticated: conditional -> never   (Exists failed)
 # tenants/per-tenant:  conditional -> never   (the counting axis is empty forever)
@@ -295,7 +295,7 @@ The merge form (the default) works like the gateway: extraction from the token, 
 ```bash
 api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
   "domain": "gateway.public", "path": "/api/invoices/42", "method": "GET",
-  "keys": {"client": ["alice"], "tenant": ["acme"], "plan": ["gold"]}
+  "keys": {"sub": ["alice"], "tenant": ["acme"], "plan": ["gold"]}
 }'
 ```
 
@@ -315,7 +315,7 @@ api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
     {"id": "total/all", "mode": "enforce", "allowed": true,
      "algorithm": "gcra", "periodSeconds": 60, "limit": 5000, "remaining": 4310}
   ],
-  "extractedKeys": ["client", "plan", "tenant"]
+  "extractedKeys": ["plan", "sub", "tenant"]
 }
 ```
 
@@ -328,7 +328,7 @@ The cascade for a client without a plan: everyone decides:
 ```bash
 api -X POST "$BASE/simulations" -d '{
   "domain": "gateway.public", "path": "/api/invoices/42", "method": "GET",
-  "keys": {"client": ["bob"], "tenant": ["acme"]}
+  "keys": {"sub": ["bob"], "tenant": ["acme"]}
 }' | jq '[.rules[] | {id, allowed, remaining}]'
 ```
 
@@ -346,7 +346,7 @@ only for p-1/p-2; prometheus goes through per-tenant without a tenant axis, so t
 ```bash
 api -X POST "$BASE/simulations" -d '{
   "domain": "gateway.public", "path": "/api/invoices/1", "method": "GET",
-  "keys": {"client": ["prometheus"]}
+  "keys": {"sub": ["prometheus"]}
 }' | jq '[.rules[].id]'
 # -> ["quota/daily", "total/all"]
 ```
@@ -356,7 +356,7 @@ Shadow is visible in rules[] but does not affect allowed: trial-1 is past its sh
 ```bash
 api -X POST "$BASE/simulations" -d '{
   "domain": "gateway.public", "path": "/api/invoices/1", "method": "GET",
-  "keys": {"client": ["trial-1"]}
+  "keys": {"sub": ["trial-1"]}
 }' | jq '{allowed, evaluatedAt, trial: [.rules[] | select(.mode == "shadow")]}'
 ```
 
@@ -374,7 +374,7 @@ without a plan would go through heavy):
 ```bash
 api -X POST "$BASE/simulations" -d '{
   "domain": "gateway.public", "path": "/api/reports/2026-08", "method": "POST",
-  "keys": {"client": ["alice"], "tenant": ["acme"], "plan": ["gold"]}
+  "keys": {"sub": ["alice"], "tenant": ["acme"], "plan": ["gold"]}
 }' | jq '[.rules[] | select(.id | startswith("reports")) | .id]'
 # -> ["reports/gold"]
 ```
@@ -384,7 +384,7 @@ An expensive request: cost from hits_addend:
 ```bash
 api -X POST "$BASE/simulations" -d '{
   "domain": "gateway.public", "path": "/api/invoices/1", "method": "GET",
-  "keys": {"client": ["bob"]}, "cost": 5
+  "keys": {"sub": ["bob"]}, "cost": 5
 }' | jq '{allowed, refusalReason, headers}'
 # with remaining=3 and cost=5 -> {"allowed": false, "refusalReason": "rate_limited",
 #    "headers": {"algorithm": "gcra", "periodSeconds": 60, "limit": 100,
@@ -415,7 +415,7 @@ api -X POST "$BASE/simulations" -d '{
 ```
 
 ```json
-[{"key": "client", "reason": "decode_failed"},
+[{"key": "sub", "reason": "decode_failed"},
  {"key": "plan", "reason": "decode_failed"},
  {"key": "roles", "reason": "decode_failed"},
  {"key": "tenant", "reason": "decode_failed"}]
@@ -435,10 +435,10 @@ api "$BASE/domains/gateway.public/counters?ruleId=cascade/everyone"
    "ruleId": "cascade/everyone",
    "block": "cascade", "rule": "everyone", "mode": "enforce",
    "algorithm": "gcra", "periodSeconds": 60,
-   "axes": {"client": "bob"},
+   "axes": {"sub": "bob"},
    "limit": 100, "remaining": 17, "limited": false},
   {"key": "rl:v1:{core/gateway.public}:cascade/everyone:gcra:60:crawler:",
-   "axes": {"client": "crawler"},
+   "axes": {"sub": "crawler"},
    "limit": 100, "remaining": 0, "limited": true,
    "retryAfterSeconds": 12.4, "resetAfterSeconds": 60,
    "ruleId": "cascade/everyone", "mode": "enforce",
@@ -457,16 +457,16 @@ Everything alice has accumulated across the domain (partial axes are legal in a 
 completeness):
 
 ```bash
-api "$BASE/domains/gateway.public/counters?axis.client=alice" \
+api "$BASE/domains/gateway.public/counters?axis.sub=alice" \
   | jq '[.items[] | {ruleId, axes, remaining}]'
 ```
 
 ```json
-[{"ruleId": "cascade/premium", "axes": {"client": "alice"}, "remaining": 254},
- {"ruleId": "quota/daily", "axes": {"client": "alice"}, "remaining": 61},
- {"ruleId": "quota/daily", "axes": {"client": "alice"}, "remaining": 8734},
- {"ruleId": "reports/gold", "axes": {"client": "alice", "path": "/api/reports/2026-08"}, "remaining": 0},
- {"ruleId": "reports/gold", "axes": {"client": "alice", "path": "/api/reports/2026-07"}, "remaining": 14}]
+[{"ruleId": "cascade/premium", "axes": {"sub": "alice"}, "remaining": 254},
+ {"ruleId": "quota/daily", "axes": {"sub": "alice"}, "remaining": 61},
+ {"ruleId": "quota/daily", "axes": {"sub": "alice"}, "remaining": 8734},
+ {"ruleId": "reports/gold", "axes": {"sub": "alice", "path": "/api/reports/2026-08"}, "remaining": 0},
+ {"ruleId": "reports/gold", "axes": {"sub": "alice", "path": "/api/reports/2026-07"}, "remaining": 14}]
 ```
 
 (daily appears twice: two windows of one rule; gold gets a counter per actual path.)
@@ -479,10 +479,10 @@ api "$BASE/domains/gateway.public/counters?limited=true" \
 ```
 
 ```json
-[{"ruleId": "cascade/everyone", "axes": {"client": "crawler"}, "mode": "enforce"},
- {"ruleId": "cascade/trial", "axes": {"client": "trial-1"}, "mode": "shadow"},
- {"ruleId": "reports/gold", "axes": {"client": "alice", "path": "/api/reports/2026-08"}, "mode": "enforce"},
- {"ruleId": "total/bots", "axes": {"client": "scanner-bot-7"}, "mode": "shadow"}]
+[{"ruleId": "cascade/everyone", "axes": {"sub": "crawler"}, "mode": "enforce"},
+ {"ruleId": "cascade/trial", "axes": {"sub": "trial-1"}, "mode": "shadow"},
+ {"ruleId": "reports/gold", "axes": {"sub": "alice", "path": "/api/reports/2026-08"}, "mode": "enforce"},
+ {"ruleId": "total/bots", "axes": {"sub": "scanner-bot-7"}, "mode": "shadow"}]
 ```
 
 (shadow with limited=true means "would have refused": trial-1 and the bot lose no traffic.)
@@ -491,11 +491,11 @@ Slices: daily windows only; a capture axis; a tenant; an exact path; a client wi
 
 ```bash
 api "...counters?period=24h" | jq '[.items[] | {axes, remaining}]'
-# -> [{"axes": {"client": "alice"}, "remaining": 8734}, {"axes": {"client": "bob"}, ...}]
+# -> [{"axes": {"sub": "alice"}, "remaining": 8734}, {"axes": {"sub": "bob"}, ...}]
 api "...counters?axis.service=billing"
 api "...counters?limited=true&axis.tenant=acme" | jq '[.items[].ruleId] | unique'
 api "...counters?ruleId=reports/heavy&axis.path=/api/reports/2026-08"
-api "...counters?limited=true&axis.client=alice&axis.tenant=acme"
+api "...counters?limited=true&axis.sub=alice&axis.tenant=acme"
 # AND: only rules that count BY BOTH axes; alice's per-client rules
 # do not land here: the client->tenant linkage lives in the IdP, not in the keys
 ```
@@ -549,38 +549,38 @@ it from bulk, whose sweep cannot be expressed as one script. Record retention is
 
 ```bash
 # one client of one rule (all windows)
-opk -X DELETE "$BASE/domains/gateway.public/counters?ruleId=quota/daily&axis.client=alice"
+opk -X DELETE "$BASE/domains/gateway.public/counters?ruleId=quota/daily&axis.sub=alice"
 ```
 
 ```json
 {"dryRun": false, "domain": "gateway.public", "ruleId": "quota/daily",
  "ruleSetVersion": "7c31a9f4e0d2",
- "axes": {"client": "alice"}, "resetCount": 2,
+ "axes": {"sub": "alice"}, "resetCount": 2,
  "keys": ["rl:v1:{core/gateway.public}:quota/daily:gcra:60:alice:",
           "rl:v1:{core/gateway.public}:quota/daily:fixedwindow:86400:alice:"]}
 ```
 
 ```bash
 # the daily window only: return the quota, leave the per-minute protection alone
-opk -X DELETE "...?ruleId=quota/daily&axis.client=alice&period=24h"
+opk -X DELETE "...?ruleId=quota/daily&axis.sub=alice&period=24h"
 # -> {"resetCount": 1, "keys": ["...fixedwindow:86400:alice:"]}
 
 # a two-axis rule: BOTH axes are mandatory
-opk -X DELETE "...?ruleId=reports/heavy&axis.client=alice&axis.path=/api/reports/2026-08"
+opk -X DELETE "...?ruleId=reports/heavy&axis.sub=alice&axis.path=/api/reports/2026-08"
 
 # a rule with no axes: no axis parameters
 opk -X DELETE "...?ruleId=total/all"
 
 # careful: only if blocked right now (gold requires both axes)
-opk -X DELETE "...?ruleId=reports/gold&axis.client=alice&axis.path=/api/reports/2026-08&limited=true"
+opk -X DELETE "...?ruleId=reports/gold&axis.sub=alice&axis.path=/api/reports/2026-08&limited=true"
 
 # preview
-opk -X DELETE "...?ruleId=quota/daily&axis.client=alice&dryRun=true"
+opk -X DELETE "...?ruleId=quota/daily&axis.sub=alice&dryRun=true"
 # -> {"dryRun": true, "matchedCount": 2, ...}: matched, not deleted;
 #    the addressed preview issues no token: none is needed
 
 # pin the reset to the rule set you looked at (ruleSetVersion from GET /rules):
-opk -X DELETE "...?ruleId=quota/daily&axis.client=alice&expectedRuleSetVersion=7c31a9f4e0d2"
+opk -X DELETE "...?ruleId=quota/daily&axis.sub=alice&expectedRuleSetVersion=7c31a9f4e0d2"
 # 409 if a rollout swapped the snapshot between the look and the deletion;
 # without the parameter the current snapshot applies: the radius is bounded anyway
 ```
@@ -588,12 +588,12 @@ opk -X DELETE "...?ruleId=quota/daily&axis.client=alice&expectedRuleSetVersion=7
 Refusals of the addressed form are RLS-0400, not a silent widening:
 
 ```bash
-opk -X DELETE "...?ruleId=reports/heavy&axis.client=alice"
-# 400: the rule has axes [client, path], and only client is named;
+opk -X DELETE "...?ruleId=reports/heavy&axis.sub=alice"
+# 400: the rule has axes [sub, path], and only sub is named;
 #      "all of alice's paths" requires a scan, which is bulk
 opk -X DELETE "...?ruleId=cascade"
 # 400: a prefix is rejected in the addressed form
-opk -X DELETE "...?ruleId=quota/daily&axis.client=alice&period=7h"
+opk -X DELETE "...?ruleId=quota/daily&axis.sub=alice&period=7h"
 # 404: the rule has no 7h window; a typo does not look like success
 ```
 
@@ -637,8 +637,8 @@ re-resolves the same selection (the documented non-snapshot semantics). The othe
 
 ```bash
 # a client across the domain / a tenant's list of clients / a tenant: preview, then token
-... -d '{"selector": {"axes": {"client": ["alice"]}}, "dryRun": true}'
-... -d '{"selector": {"axes": {"client": ["u1", "u2", "u3"]}}, "dryRun": true}'
+... -d '{"selector": {"axes": {"sub": ["alice"]}}, "dryRun": true}'
+... -d '{"selector": {"axes": {"sub": ["u1", "u2", "u3"]}}, "dryRun": true}'
 ... -d '{"selector": {"axes": {"tenant": ["acme"]}}, "dryRun": true}'
 
 # the whole domain: the name is repeated in the body AND the execution step needs the preview's token

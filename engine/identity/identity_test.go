@@ -64,7 +64,7 @@ func TestExtract(t *testing.T) {
 		t.Fatalf("unexpected skips: %v", skips)
 	}
 	want := map[string][]string{
-		"client": {"alice"},         // built-in: sub, lowercased
+		"sub":    {"alice"},         // built-in: sub, lowercased
 		"tenant": {"acme"},          // normalized
 		"roles":  {"user", "admin"}, // array claim through the dot path
 	}
@@ -79,7 +79,7 @@ func TestBearerPrefixAndPadding(t *testing.T) {
 	padded := "h." + base64.URLEncoding.EncodeToString(raw) + ".sig"
 
 	keys, skips := Extract(p, "Bearer "+padded)
-	if len(skips) != 0 || len(keys["client"]) != 1 || keys["client"][0] != "bob" {
+	if len(skips) != 0 || len(keys["sub"]) != 1 || keys["sub"][0] != "bob" {
 		t.Errorf("keys = %v, skips = %v: bearer prefix and padded base64 must both be accepted", keys, skips)
 	}
 }
@@ -135,8 +135,8 @@ func TestSanitaryLimits(t *testing.T) {
 
 	long := strings.Repeat("x", MaxValueBytes+1)
 	keys, skips := Extract(p, token(t, map[string]any{"sub": long}))
-	if _, present := keys["client"]; present || skipsOf(skips)["client"] != SkipTooLong {
-		t.Errorf("keys = %v, skips = %v: want too_long and no client key", keys, skips)
+	if _, present := keys["sub"]; present || skipsOf(skips)["sub"] != SkipTooLong {
+		t.Errorf("keys = %v, skips = %v: want too_long and no sub key", keys, skips)
 	}
 
 	items := make([]any, MaxArrayItems+1)
@@ -170,7 +170,7 @@ func TestAbsenceIsSilent(t *testing.T) {
 // sanitary bounds regardless of input shape.
 func FuzzExtract(f *testing.F) {
 	p := []compile.KeyExtraction{
-		{Key: "client", Path: []string{"sub"}, Type: model.ValueString, Normalization: model.NormalizeLowercase},
+		{Key: "sub", Path: []string{"sub"}, Type: model.ValueString, Normalization: model.NormalizeLowercase},
 		{Key: "roles", Path: []string{"a", "b"}, Type: model.ValueStringArray},
 		{Key: "tenant", Path: []string{"org"}, Type: model.ValueString, Fallbacks: [][]string{{"sub"}}},
 	}
@@ -211,7 +211,7 @@ func TestShapeLimits(t *testing.T) {
 	p := plan(t)
 	ok := func(claims map[string]any) bool {
 		_, skips := Extract(p, token(t, claims))
-		return skipsOf(skips)["client"] != SkipDecodeFailed
+		return skipsOf(skips)["sub"] != SkipDecodeFailed
 	}
 
 	// The payload object itself is the first level.
@@ -256,18 +256,18 @@ func TestExplicit_appliesTheTokensRules(t *testing.T) {
 	long := strings.Repeat("x", MaxValueBytes)
 
 	keys, skips := Explicit(p, map[string][]string{
-		"client": {long}, "roles": many(MaxArrayItems), "tenant": {"Acme", ""}, "own": {"Kept"}})
-	want := map[string][]string{"client": {long}, "roles": many(MaxArrayItems), "tenant": {"acme"}, "own": {"Kept"}}
+		"sub": {long}, "roles": many(MaxArrayItems), "tenant": {"Acme", ""}, "own": {"Kept"}})
+	want := map[string][]string{"sub": {long}, "roles": many(MaxArrayItems), "tenant": {"acme"}, "own": {"Kept"}}
 	if !reflect.DeepEqual(keys, want) || len(skips) != 0 {
 		t.Errorf("values within the bounds: keys %v, skips %v; want %v and no skips", keys, skips, want)
 	}
 
 	keys, skips = Explicit(p, map[string][]string{
-		"client": {long + "x"}, "roles": many(MaxArrayItems + 1), "own": {long + "x"}})
+		"sub": {long + "x"}, "roles": many(MaxArrayItems + 1), "own": {long + "x"}})
 	if len(keys) != 0 {
 		t.Errorf("a key past a bound was kept: %v", keys)
 	}
-	wantSkips := map[string]SkipReason{"client": SkipTooLong, "roles": SkipTooManyItems}
+	wantSkips := map[string]SkipReason{"sub": SkipTooLong, "roles": SkipTooManyItems}
 	if got := skipsOf(skips); !reflect.DeepEqual(got, wantSkips) {
 		t.Errorf("skips %v, want %v: an undeclared key reports none", got, wantSkips)
 	}

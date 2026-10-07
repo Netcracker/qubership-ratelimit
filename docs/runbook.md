@@ -110,7 +110,7 @@ kubectl get rlp -n "$NS" "$DOMAIN" \
 ```json
 {"observedGeneration": 1, "activeGeneration": 1, "rules": 12,
  "replicas": {"applied": 1, "lastCheckTime": "2026-09-21T13:22:45Z", "summary": "1/1", "total": 1},
- "effectiveKeys": ["client", "method", "path", "plan", "roles"],
+ "effectiveKeys": ["method", "path", "plan", "roles", "sub"],
  "conditions": [
    {"type": "Accepted", "status": "True", "reason": "RulesCompiled", "message": "generation 1 compiles: 2 blocks, 12 rules"},
    {"type": "Ready", "status": "True", "reason": "AllReplicas", "message": "all 1 ready replicas enforce generation 1"},
@@ -126,7 +126,7 @@ api "$BASE/status" | jq
 #  "counterStore": {"backend": "redis at e2e-redis:6379"}}
 api "$BASE/domains" | jq
 # {"items": [{"domain": "gateway.public", "ruleSetVersion": "5ff0f5a9e94d", "blocks": 2, "rules": 12,
-#             "effectiveKeys": ["client", "method", "path", "plan", "roles"], "listValuedKeys": ["roles"]}, ...]}
+#             "effectiveKeys": ["method", "path", "plan", "roles", "sub"], "listValuedKeys": ["roles"]}, ...]}
 ```
 
 The channel between the two Deployments is the ConfigMap `ratelimit-config`, one per namespace. The operator writes it
@@ -300,30 +300,30 @@ of cost one; a `shadow` entry means "would have refused" and loses no traffic:
 
 ```bash
 api "$BASE/domains/$DOMAIN/counters?limited=true" | jq -c '[.items[] | {ruleId, axes, mode, retryAfterSeconds}]'
-# [{"ruleId": "api/exports-per-client-trial", "axes": {"client": "bob"}, "mode": "shadow", "retryAfterSeconds": 719.7},
-#  {"ruleId": "api/per-client", "axes": {"client": "alice"}, "mode": "enforce", "retryAfterSeconds": 0.04}]
+# [{"ruleId": "api/exports-per-client-trial", "axes": {"sub": "bob"}, "mode": "shadow", "retryAfterSeconds": 719.7},
+#  {"ruleId": "api/per-client", "axes": {"sub": "alice"}, "mode": "enforce", "retryAfterSeconds": 0.04}]
 ```
 
 **One client across the domain.** A partial identity is legal in a read; one entry per window of every rule that
 counts by the axis:
 
 ```bash
-api "$BASE/domains/$DOMAIN/counters?axis.client=alice" | jq -c '[.items[] | {ruleId, axes, limit, remaining}]'
-# [{"ruleId": "api/per-client", "axes": {"client": "alice"}, "limit": 20000, "remaining": 19976},
-#  {"ruleId": "api/per-client", "axes": {"client": "alice"}, "limit": 100, "remaining": 0}]
+api "$BASE/domains/$DOMAIN/counters?axis.sub=alice" | jq -c '[.items[] | {ruleId, axes, limit, remaining}]'
+# [{"ruleId": "api/per-client", "axes": {"sub": "alice"}, "limit": 20000, "remaining": 19976},
+#  {"ruleId": "api/per-client", "axes": {"sub": "alice"}, "limit": 100, "remaining": 0}]
 ```
 
 **Which rules apply to a client.** The rule listing scoped by a partial identity annotates every rule with its
 applicability, and the engine accounts for the cascade and `replacedRules`, which `jq` over the bare view cannot:
 
 ```bash
-api "$BASE/domains/$DOMAIN/rules?axis.client=alice" \
+api "$BASE/domains/$DOMAIN/rules?axis.sub=alice" \
   | jq '{always: [.blocks[].rules[] | select(.applicability == "always") | .id],
          conditional: [.blocks[].rules[] | select(.applicability == "conditional") | .id]}'
 # {"always": ["api/per-path", "api/total"],
 #  "conditional": ["api/per-client", "api/enterprise-per-client", "api/role-crawler", "api/exports-per-client-trial",
 #                  "orders/items-per-order", "orders/orders-per-client"]}
-api "$BASE/domains/$DOMAIN/rules?axis.client=alice" \
+api "$BASE/domains/$DOMAIN/rules?axis.sub=alice" \
   | jq -c '[.blocks[].rules[] | select(.applicability == "conditional") | {id, conditionalOn}]'
 # [{"id": "api/per-client", "conditionalOn": [{"reason": "may_be_preempted", "rule": "api/enterprise-per-client"}]},
 #  {"id": "api/enterprise-per-client", "conditionalOn": [{"reason": "undecided_condition", "key": "plan"}]}, ...]
@@ -334,7 +334,7 @@ a rule ahead of it in a `FirstMatch` cascade or a `replacedRules` neighbor that 
 Name more of the identity, and the picture narrows:
 
 ```bash
-api "$BASE/domains/$DOMAIN/rules?axis.client=alice&axis.plan=enterprise&absent=roles"
+api "$BASE/domains/$DOMAIN/rules?axis.sub=alice&axis.plan=enterprise&absent=roles"
 # {"always": ["api/per-path", "api/enterprise-per-client", "api/total"],
 #  "conditional": ["orders/items-per-order", "orders/orders-per-client"]}
 ```
@@ -352,7 +352,7 @@ rule that applied and the binding window in `headers`:
 ```bash
 api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
   "domain": "'"$DOMAIN"'", "path": "/api/v1/exports/1", "method": "GET",
-  "keys": {"client": ["alice"], "plan": ["free"]}
+  "keys": {"sub": ["alice"], "plan": ["free"]}
 }' | jq -c '{allowed, refusalReason, headers, rules: [.rules[] | {id, mode, allowed, remaining}]}'
 # {"allowed": true, "refusalReason": null,
 #  "headers": {"algorithm": "gcra", "periodSeconds": 60, "limit": 100, "remaining": 1, "resetAfterSeconds": 11.2},
@@ -370,7 +370,7 @@ api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
   "identitySource": "token", "token": "garbage"
 }' | jq -c '{allowed, extractedKeys, skips}'
 # {"allowed": true, "extractedKeys": null,
-#  "skips": [{"key": "client", "reason": "decode_failed"}, {"key": "roles", "reason": "decode_failed"},
+#  "skips": [{"key": "sub", "reason": "decode_failed"}, {"key": "roles", "reason": "decode_failed"},
 #            {"key": "plan", "reason": "decode_failed"}]}
 ```
 
@@ -392,7 +392,7 @@ sum by (domain, key) (rate(ratelimit_extractions_total{key="plan"}[15m])) == 0
 ```
 
 ```text
-ratelimit_extractions_total{domain="gateway.public",key="client"} 44
+ratelimit_extractions_total{domain="gateway.public",key="sub"} 44
 ratelimit_extractions_total{domain="gateway.public",key="plan"} 44
 ratelimit_extractions_total{domain="gateway.public",key="roles"} 44
 ratelimit_tokens_seen_total{domain="gateway.public"} 69
@@ -750,7 +750,7 @@ and it never refuses:
 rules:
   - name: exports-per-client-trial
     behavior: Shadow
-    counters: [client]
+    counters: [sub]
     rates: [{requests: 5, periodSeconds: 3600}]
 ```
 
@@ -768,7 +768,7 @@ ratelimit_decisions_total{domain="gateway.public",outcome="shadow_over_limit",ru
 ```bash
 api "$BASE/domains/$DOMAIN/counters?limited=true&ruleId=api/exports-per-client-trial" \
   | jq -c '[.items[] | {axes, mode, remaining}]'
-# [{"axes": {"client": "bob"}, "mode": "shadow", "remaining": 0}]
+# [{"axes": {"sub": "bob"}, "mode": "shadow", "remaining": 0}]
 ```
 
 `mode: shadow` with `limited: true` is a client that would have been refused; on the stand, eight requests against a
@@ -795,7 +795,7 @@ old buckets expire on their own TTL. On the stand, `periodSeconds: 60` changed t
 requests later:
 
 ```bash
-api "$BASE/domains/$DOMAIN/counters?ruleId=api/per-client&axis.client=alice" \
+api "$BASE/domains/$DOMAIN/counters?ruleId=api/per-client&axis.sub=alice" \
   | jq -c '{scanned, items: [.items[] | {key, periodSeconds, limit, remaining}]}'
 # {"scanned": 3, "items": [
 #   {"key": "rl:v1:{ratelimit-e2e/gateway.public}:api/per-client:fixedwindow:86400:alice:", ...},
@@ -820,12 +820,12 @@ alias opk='op -H "Idempotency-Key: $(uuidgen)"'
 **One client of one rule.**
 
 ```bash
-opk -X DELETE "$BASE/domains/$DOMAIN/counters?ruleId=api/per-client&axis.client=alice&dryRun=true"
+opk -X DELETE "$BASE/domains/$DOMAIN/counters?ruleId=api/per-client&axis.sub=alice&dryRun=true"
 # {"domain": "gateway.public", "ruleId": "api/per-client", "ruleSetVersion": "5ff0f5a9e94d",
-#  "axes": {"client": "alice"}, "dryRun": true, "matchedCount": 1,
+#  "axes": {"sub": "alice"}, "dryRun": true, "matchedCount": 1,
 #  "keys": ["rl:v1:{ratelimit-e2e/gateway.public}:api/per-client:fixedwindow:86400:alice:",
 #           "rl:v1:{ratelimit-e2e/gateway.public}:api/per-client:gcra:60:alice:"]}
-opk -X DELETE "$BASE/domains/$DOMAIN/counters?ruleId=api/per-client&axis.client=alice"
+opk -X DELETE "$BASE/domains/$DOMAIN/counters?ruleId=api/per-client&axis.sub=alice"
 # the same body with "dryRun": false, "resetCount": 2
 ```
 
@@ -835,10 +835,10 @@ looked at, `&expectedRuleSetVersion=<from GET /rules>`, which answers `409` if a
 between. Refusals do not widen the command silently:
 
 ```bash
-opk -X DELETE "...counters?ruleId=api/per-client&axis.client=alice&dryrun=true"
+opk -X DELETE "...counters?ruleId=api/per-client&axis.sub=alice&dryrun=true"
 # {"code": "RLS-0400", "message": "the query carries parameters this endpoint does not define: dryrun",
 #  "meta": {"fields": ["dryrun"]}}
-opk -X DELETE "...counters?ruleId=api/per-client&axis.client=alice&period=7h"
+opk -X DELETE "...counters?ruleId=api/per-client&axis.sub=alice&period=7h"
 # {"code": "RLS-0404", "message": "rule api/per-client has no window matching the algorithm and period given"}
 ```
 
@@ -880,9 +880,9 @@ logs the outcome, the bulk form logs the acceptance with the hash of the selecti
 ```bash
 kubectl logs -n "$NS" deploy/ratelimit-service --since=24h | grep 'management mutation'
 # management mutation subject=operator@example.com idempotencyKey=CE81F29B-... domain=gateway.public
-#   endpoint=counters ruleId=api/per-client axes=map[client:alice] dryRun=false outcome=reset count=1
+#   endpoint=counters ruleId=api/per-client axes=map[sub:alice] dryRun=false outcome=reset count=1
 # management mutation subject=operator@example.com idempotencyKey=69DA3B84-... domain=gateway.public
-#   endpoint=counters ruleId=api/per-client axes=map[client:alice] dryRun=true outcome=previewed count=1
+#   endpoint=counters ruleId=api/per-client axes=map[sub:alice] dryRun=true outcome=previewed count=1
 # management mutation accepted subject=operator@example.com idempotencyKey=08439BE2-... domain=gateway.public
 #   endpoint=counter-resets command=execute-selector selection=72a94e83cf44e26d dryRun=false
 ```

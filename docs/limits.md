@@ -139,7 +139,7 @@ the rule; last-good holds the traffic.
 
 ## Store and key capacity
 
-- **Redis** does not bound the keys: their number is determined by the axes (`counters: [client]` gives one counter
+- **Redis** does not bound the keys: their number is determined by the axes (`counters: [sub]` gives one counter
   per client), and the TTL by the window period. All keys of a domain share one slot (hash tag `{ns/domain}`): the
   domain's throughput is bounded by one shard; the reference point is ~80 k decisions/s with one bucket, ~38 k/s with
   four.

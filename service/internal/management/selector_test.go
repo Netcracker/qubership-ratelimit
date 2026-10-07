@@ -15,11 +15,11 @@ import (
 
 func TestSelector_canonicalizesTheSpellingsOfOneSelection(t *testing.T) {
 	first, err := parseSelector(mustQuery(t,
-		"ruleId=b/b&ruleId=a/a&axis.client=bob&axis.client=alice&period=1m&algorithm=GCRA"))
+		"ruleId=b/b&ruleId=a/a&axis.sub=bob&axis.sub=alice&period=1m&algorithm=GCRA"))
 	require.Nil(t, err)
 
 	second, err := parseSelector(mustQuery(t,
-		"ruleId=a/a&ruleId=b/b&ruleId=a/a&axis.client=alice&axis.client=bob&period=60&algorithm=gcra"))
+		"ruleId=a/a&ruleId=b/b&ruleId=a/a&axis.sub=alice&axis.sub=bob&period=60&algorithm=gcra"))
 	require.Nil(t, err)
 
 	require.Equal(t, first, second)
@@ -30,12 +30,12 @@ func TestSelector_canonicalizesTheSpellingsOfOneSelection(t *testing.T) {
 }
 
 func TestSelector_differentSelectionsDoNotCollide(t *testing.T) {
-	alice, _ := parseSelector(mustQuery(t, "axis.client=alice"))
-	bob, _ := parseSelector(mustQuery(t, "axis.client=bob"))
+	alice, _ := parseSelector(mustQuery(t, "axis.sub=alice"))
+	bob, _ := parseSelector(mustQuery(t, "axis.sub=bob"))
 	require.NotEqual(t, alice.fingerprint(), bob.fingerprint())
 
 	// A second name is an AND, not a wider OR.
-	both, _ := parseSelector(mustQuery(t, "axis.client=alice&axis.plan=premium"))
+	both, _ := parseSelector(mustQuery(t, "axis.sub=alice&axis.plan=premium"))
 	require.NotEqual(t, alice.fingerprint(), both.fingerprint())
 }
 
@@ -54,8 +54,8 @@ func TestParsePeriod_normalizesAndRefuses(t *testing.T) {
 }
 
 func TestCursor_isBoundToItsSelectionAndItsLifetime(t *testing.T) {
-	sel, _ := parseSelector(mustQuery(t, "axis.client=alice"))
-	other, _ := parseSelector(mustQuery(t, "axis.client=bob"))
+	sel, _ := parseSelector(mustQuery(t, "axis.sub=alice"))
+	other, _ := parseSelector(mustQuery(t, "axis.sub=bob"))
 	now := time.Now()
 
 	const step = "127.0.0.1:6379@42"

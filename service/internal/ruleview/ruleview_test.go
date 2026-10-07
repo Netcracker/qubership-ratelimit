@@ -28,9 +28,9 @@ func policy(requests int64) model.Policy {
 			Rules: []model.Rule{{
 				Name: "everyone",
 				Matches: []model.Predicate{{
-					Key: model.KeyClient, Operator: model.OperatorIn, Values: []string{"bob", "alice"},
+					Key: model.KeySub, Operator: model.OperatorIn, Values: []string{"bob", "alice"},
 				}},
-				Counters: []string{model.KeyClient},
+				Counters: []string{model.KeySub},
 				Rates:    []model.Rate{{Requests: requests, Period: time.Minute}},
 			}},
 		}},
@@ -104,7 +104,7 @@ func TestSummary_countsTheEnforcedSet(t *testing.T) {
 	require.Equal(t, "7c31a9f4e0d2", summary.RuleSetVersion)
 	require.Equal(t, 2, summary.Blocks)
 	require.Equal(t, 2, summary.Rules)
-	require.Equal(t, []string{"client", "method", "path"}, summary.EffectiveKeys)
+	require.Equal(t, []string{"method", "path", "sub"}, summary.EffectiveKeys)
 	require.Empty(t, summary.ListValuedKeys, "this domain declares no array claim")
 }
 

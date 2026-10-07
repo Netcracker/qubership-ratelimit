@@ -10,7 +10,7 @@ import (
 
 // unnormalized refuses an identity value the domain's normalization would
 // change. Traffic counts a key under its normalized value, whichever form
-// carried it: the built-in client is the sub claim in lower case, and a
+// carried it: the built-in sub key is the sub claim in lower case, and a
 // mapping may declare Lowercase. A value that differs from its normalized form
 // names no counter any request writes and no identity any rule sees, so
 // listing, resetting, or simulating it would answer about nobody, silently.

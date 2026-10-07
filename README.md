@@ -18,7 +18,7 @@ is provisioned by DBaaS: the service chart declares it and every replica reads i
 dbaas-operator writes (see "Install").
 
 **What is not built**: the gateways do not verify the tokens they forward. The identity-keyed rules below extract claims
-from the `authorization` header without checking a signature, so a limit keyed on `client` or `tenant` is only as
+from the `authorization` header without checking a signature, so a limit keyed on `sub` or `tenant` is only as
 trustworthy as the traffic reaching the gateway. Put `jwt_authn` ahead of the rate limit filter before relying on one to
 separate tenants.
 
@@ -67,13 +67,12 @@ A rule carries axes (`counters`) and windows (`rates`). Each window is an indepe
 daily quota live in one rule and either can reject. `GCRA` meters at a steady rate with a burst allowance; `FixedWindow`
 counts per wall-clock window and resets at the boundary. A rule whose axis the request does not carry does not match at
 all — there is nothing to key the bucket by, which is what excludes an anonymous caller from a rule counting by
-`client`.
+`sub`.
 
 `spec.mappings` declares how identity is read out of the JWT and `spec.groups` holds the named client lists `InGroup`
 resolves against. Both live in the same object as the rules that reference them, which is the point of the singleton:
 they change in one edit and apply as one generation, so a request never sees new rules over old extraction. The
-built-in `client` key — the `sub` claim, lower-cased — works with no mapping at all, and an entry named `client`
-overrides it.
+built-in `sub` key, the `sub` claim lower-cased, works with no mapping at all, and an entry named `sub` overrides it.
 
 `config/samples/` holds a full public-gateway policy and a tiered one whose group, role, and total limits stack on a
 single request. An envtest spec applies all of them against a real API server on every `make test`, so a

@@ -159,9 +159,9 @@ const (
 	// already verified the signature, so the engine only decodes the payload.
 	KeyToken = "token"
 
-	// KeyClient is the built-in identity key: claim sub, lower-cased. It works
+	// KeySub is the built-in identity key: claim sub, lower-cased. It works
 	// with an empty mappings list, and an entry of the same name overrides it.
-	KeyClient = "client"
+	KeySub = "sub"
 )
 
 // ClaimType is the shape a claim takes once extracted, which decides which
@@ -197,7 +197,7 @@ const (
 type ClaimMapping struct {
 	// key names the descriptor key the rules reference. It uses the one
 	// descriptor key pattern of this API, camelCase included; path, method and
-	// token are produced by the engine and cannot be redefined, while client
+	// token are produced by the engine and cannot be redefined, while sub
 	// is an allowed override.
 	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:MinLength=1
@@ -248,8 +248,8 @@ type ClientGroup struct {
 	Name string `json:"name"`
 
 	// clients lists the members of the group. Values are compared with the
-	// client key after its effective normalization, which is lower-case unless
-	// a mapping entry overrides client with normalization None — then they are
+	// sub key after its effective normalization, which is lower-case unless
+	// a mapping entry overrides sub with normalization None — then they are
 	// compared as written, and the case is the author's responsibility.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:MaxLength=256

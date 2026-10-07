@@ -1,7 +1,7 @@
 # Example RateLimitPolicy, one object per domain: claim mapping, groups, rule blocks.
 #
 # Schema: ratelimitpolicy-cr-spec.md; bounds and their origin: limits.md.
-# The keys client (the sub claim, lowercased), path, and method are built in; roles and plan are declared in mappings.
+# The keys sub (the claim of the same name, lowercased), path, and method are built in; roles and plan are declared in mappings.
 #
 # Windows are the rates[] list inside a rule: every entry is an independent bucket with its own periodSeconds
 # (1..86400, periods unique, number of windows unbounded); the algorithm is a property of the window, GCRA by default.
@@ -15,12 +15,12 @@ spec:
   # Binding to the gateway: the string must match domain in this gateway's EnvoyFilter (installed by the Helm chart).
   domain: gateway.public
 
-  # Which token claims become descriptor keys. client <- sub is built in, no need to declare it.
+  # Which token claims become descriptor keys. sub, lowercased, is built in, no need to declare it.
   mappings:
   - { key: roles, claim: realm_access.roles, type: StringArray }   # array: the Contains/In/InGroup operators
   - { key: plan, claim: plan, normalization: Lowercase }         # scalar: Equals/In, usable in counters
 
-  # Named client groups. The client value = the sub claim, lowercased.
+  # Named client groups. The sub value = the sub claim, lowercased.
   groups:
   - name: bulk-clients
     clients:
@@ -46,7 +46,7 @@ spec:
       - { requests: 1000, periodSeconds: 60, burst: 100 }
     # A counter per client, all paths together; a minute rate and a daily quota are two buckets.
     - name: per-client
-      counters: [client]
+      counters: [sub]
       rates:
       - { requests: 100, periodSeconds: 60, burst: 20 }
       - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
@@ -54,20 +54,20 @@ spec:
     - name: enterprise-per-client
       matches:
       - { key: plan, operator: Equals, value: enterprise }
-      counters: [client]
+      counters: [sub]
       replacedRules: [per-client]
       rates:
       - { requests: 10000, periodSeconds: 60 }
     # An internal client past this block's limits and past Redis; in an All block, Bypass must name what it bypasses.
     - name: internal-scraper
       matches:
-      - { key: client, operator: Equals, value: prometheus }
+      - { key: sub, operator: Equals, value: prometheus }
       behavior: Bypass
       replacedRules: [per-path, per-client]
     # A shared bucket for a named group: empty counters = one counter for everyone.
     - name: any-bulk-client
       matches:
-      - { key: client, operator: InGroup, value: bulk-clients }
+      - { key: sub, operator: InGroup, value: bulk-clients }
       counters: []
       rates:
       - { requests: 200, periodSeconds: 60 }
@@ -83,7 +83,7 @@ spec:
     - name: exports-per-client-trial
       matches:
       - { key: roles, operator: Contains, value: ROLE_Exporter }
-      counters: [client]
+      counters: [sub]
       behavior: Shadow
       rates:
       - { requests: 5, periodSeconds: 3600 }
@@ -105,7 +105,7 @@ spec:
     # A narrow group limit on the order operations of this block; the cascade ends here.
     - name: create-bulk-client
       matches:
-      - { key: client, operator: InGroup, value: bulk-clients }
+      - { key: sub, operator: InGroup, value: bulk-clients }
       counters: []
       rates:
       - { requests: 30, periodSeconds: 60 }
@@ -119,13 +119,13 @@ spec:
       - { requests: 10, periodSeconds: 60 }
     # The rest: per client.
     - name: orders-per-client
-      counters: [client]
+      counters: [sub]
       rates:
       - { requests: 50, periodSeconds: 60 }
-    # Anonymous callers: a separate shared bucket (they have no client axis, so the rule above does not match).
+    # Anonymous callers: a separate shared bucket (they have no sub axis, so the rule above does not match).
     - name: anonymous
       matches:
-      - { key: client, operator: DoesNotExist }
+      - { key: sub, operator: DoesNotExist }
       counters: []
       rates:
       - { requests: 20, periodSeconds: 60 }
@@ -135,7 +135,7 @@ spec:
 # status:
 #   observedGeneration: 3
 #   activeGeneration: 3
-#   effectiveKeys: [client, method, path, plan, roles]
+#   effectiveKeys: [method, path, plan, roles, sub]
 #   replicas: { total: 3, applied: 3, summary: "3/3", lastCheckTime: "2026-09-02T12:00:05Z" }
 #   conditions:
 #   - { type: Accepted, status: "True",  reason: RulesCompiled }
@@ -154,6 +154,6 @@ spec:
   - name: all
     rules:
     - name: per-caller
-      counters: [client]
+      counters: [sub]
       rates:
       - { requests: 5000, periodSeconds: 60, burst: 500 }
