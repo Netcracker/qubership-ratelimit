@@ -41,8 +41,8 @@ func policy() model.Policy {
 			}}},
 			Rules: []model.Rule{
 				{Name: "partners",
-					Matches:  []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "partners"}},
-					Counters: []string{model.KeyClient},
+					Matches:  []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "partners"}},
+					Counters: []string{model.KeySub},
 					Rates:    []model.Rate{{Requests: 100, Period: time.Minute}}},
 				{Name: "everyone", Rates: []model.Rate{{Requests: 1000, Period: time.Minute}}},
 			},
@@ -137,7 +137,7 @@ func TestDomain_rendersTheResolvedRulesAndTheClaimPaths(t *testing.T) {
 	require.NotNil(t, tenant, "the mapped key is missing from the extraction plan: %+v", doc.Keys)
 	assert.Equal(t, "org.id", tenant.Claim)
 	assert.Equal(t, string(model.NormalizeLowercase), tenant.Normalization)
-	assert.Equal(t, model.KeyClient, doc.Keys[0].Key, "the built-in client is extracted first")
+	assert.Equal(t, model.KeySub, doc.Keys[0].Key, "the built-in sub is extracted first")
 }
 
 func TestDomain_answersYAMLOnRequest(t *testing.T) {

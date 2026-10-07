@@ -151,16 +151,16 @@ func TestOperators(t *testing.T) {
 		keys    map[string][]string
 		matches bool
 	}{
-		{"equals hit", model.Predicate{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"},
-			map[string][]string{model.KeyClient: {"alice"}}, true},
-		{"equals miss", model.Predicate{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"},
-			map[string][]string{model.KeyClient: {"bob"}}, false},
-		{"in hit", model.Predicate{Key: model.KeyClient, Operator: model.OperatorIn, Values: []string{"a", "b"}},
-			map[string][]string{model.KeyClient: {"b"}}, true},
-		{"ingroup hit", model.Predicate{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"},
-			map[string][]string{model.KeyClient: {"bob"}}, true},
-		{"ingroup miss", model.Predicate{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"},
-			map[string][]string{model.KeyClient: {"eve"}}, false},
+		{"equals hit", model.Predicate{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"},
+			map[string][]string{model.KeySub: {"alice"}}, true},
+		{"equals miss", model.Predicate{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"},
+			map[string][]string{model.KeySub: {"bob"}}, false},
+		{"in hit", model.Predicate{Key: model.KeySub, Operator: model.OperatorIn, Values: []string{"a", "b"}},
+			map[string][]string{model.KeySub: {"b"}}, true},
+		{"ingroup hit", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
+			map[string][]string{model.KeySub: {"bob"}}, true},
+		{"ingroup miss", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
+			map[string][]string{model.KeySub: {"eve"}}, false},
 		{"contains on array", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
 			map[string][]string{"roles": {"user", "admin"}}, true},
 		{"contains never substring", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
@@ -189,7 +189,7 @@ func TestMissingAxisSkipsRule(t *testing.T) {
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
-				{Name: "per-user", Counters: []string{model.KeyClient}, Rates: minuteRate()},
+				{Name: "per-user", Counters: []string{model.KeySub}, Rates: minuteRate()},
 				{Name: "total", Rates: minuteRate()},
 			}}},
 	}
@@ -200,7 +200,7 @@ func TestMissingAxisSkipsRule(t *testing.T) {
 		t.Errorf("anonymous matched %v, want [total]: per-user has nothing to key its bucket with", got)
 	}
 
-	authed := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"alice"}}})
+	authed := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"alice"}}})
 	if got := ruleNames(authed); len(got) != 2 {
 		t.Errorf("authenticated matched %v, want both rules", got)
 	}
@@ -214,12 +214,12 @@ func TestAxisRefusesAmbiguity(t *testing.T) {
 		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
-			Rules:  []model.Rule{{Name: "per-user", Counters: []string{model.KeyClient}, Rates: minuteRate()}}}},
+			Rules:  []model.Rule{{Name: "per-user", Counters: []string{model.KeySub}, Rates: minuteRate()}}}},
 	}
 	snap := mustCompile(t, p)
 
 	got := evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeyClient: {"a", "b"}}})
+		Keys: map[string][]string{model.KeySub: {"a", "b"}}})
 	if len(got.Rules) != 0 {
 		t.Errorf("matched %v: an ambiguous axis must not match", ruleNames(got))
 	}
@@ -232,22 +232,22 @@ func TestReplacesSuppressesUnderAll(t *testing.T) {
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
-				{Name: "base", Counters: []string{model.KeyClient}, Rates: minuteRate()},
+				{Name: "base", Counters: []string{model.KeySub}, Rates: minuteRate()},
 				{Name: "enterprise",
-					Matches:       []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "enterprise"}},
-					Counters:      []string{model.KeyClient},
+					Matches:       []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "enterprise"}},
+					Counters:      []string{model.KeySub},
 					Rates:         []model.Rate{{Requests: 1000, Period: time.Minute}},
 					ReplacedRules: []string{"base"}},
 			}}},
 	}
 	snap := mustCompile(t, p)
 
-	corp := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"corp"}}})
+	corp := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"corp"}}})
 	if got := ruleNames(corp); len(got) != 1 || got[0] != "enterprise" {
 		t.Errorf("enterprise client matched %v, want the override only", got)
 	}
 
-	plain := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"alice"}}})
+	plain := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"alice"}}})
 	if got := ruleNames(plain); len(got) != 1 || got[0] != "base" {
 		t.Errorf("plain client matched %v, want [base]: replaces of an unmatched rule must not fire", got)
 	}
@@ -262,15 +262,15 @@ func TestReplacesOfAShadowRuleSuppressNothing(t *testing.T) {
 		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Rules: []model.Rule{
-				{Name: "base", Counters: []string{model.KeyClient}, Rates: minuteRate()},
-				{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeyClient},
+				{Name: "base", Counters: []string{model.KeySub}, Rates: minuteRate()},
+				{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeySub},
 					Rates: []model.Rate{{Requests: 10, Period: time.Minute}}, ReplacedRules: []string{"base"}},
 			}}},
 	}
 	snap := mustCompile(t, p)
 
 	got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeyClient: {"alice"}}}))
+		Keys: map[string][]string{model.KeySub: {"alice"}}}))
 	if len(got) != 2 || !slices.Contains(got, "base") || !slices.Contains(got, "trial") {
 		t.Errorf("matched %v, want base and trial: a shadow rule must not suppress the rule it names", got)
 	}
@@ -305,22 +305,22 @@ func TestBypassUnderAllExemptsNamedRulesOnly(t *testing.T) {
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
-				{Name: "base", Counters: []string{model.KeyClient}, Rates: minuteRate()},
+				{Name: "base", Counters: []string{model.KeySub}, Rates: minuteRate()},
 				{Name: "guard", Rates: minuteRate()},
 				{Name: "vip-exempt", Behavior: model.BehaviorBypass, ReplacedRules: []string{"base"},
-					Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}}},
+					Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"}}},
 			}}},
 	}
 	snap := mustCompile(t, p)
 
 	corp := evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeyClient: {"corp"}}})
+		Keys: map[string][]string{model.KeySub: {"corp"}}})
 	if got := ruleNames(corp); len(got) != 1 || got[0] != "guard" {
 		t.Errorf("vip matched %v, want [guard]: exempt from base only, guard still counts", got)
 	}
 
 	plain := evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeyClient: {"alice"}}})
+		Keys: map[string][]string{model.KeySub: {"alice"}}})
 	if got := ruleNames(plain); len(got) != 2 {
 		t.Errorf("plain client matched %v, want base and guard", got)
 	}
@@ -334,16 +334,16 @@ func TestFirstMatchCascade(t *testing.T) {
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
 			Rules: []model.Rule{
 				{Name: "internal", Behavior: model.BehaviorBypass,
-					Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus"}}},
-				{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeyClient},
-					Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "trial"}},
+					Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorEquals, Value: "prometheus"}}},
+				{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeySub},
+					Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "trial"}},
 					Rates:   []model.Rate{{Requests: 10, Period: time.Minute}}},
-				{Name: "everyone", Counters: []string{model.KeyClient}, Rates: minuteRate()},
+				{Name: "everyone", Counters: []string{model.KeySub}, Rates: minuteRate()},
 			}}},
 	}
 	snap := mustCompile(t, p)
 	client := func(id string) request {
-		return request{Path: "/q", Method: "GET", Keys: map[string][]string{model.KeyClient: {id}}}
+		return request{Path: "/q", Method: "GET", Keys: map[string][]string{model.KeySub: {id}}}
 	}
 
 	if got := evaluate(snap, client("prometheus")); len(got.Rules) != 0 {
@@ -397,14 +397,14 @@ func TestBucketsPerWindow(t *testing.T) {
 		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
-			Rules: []model.Rule{{Name: "r", Counters: []string{model.KeyClient}, Rates: []model.Rate{
+			Rules: []model.Rule{{Name: "r", Counters: []string{model.KeySub}, Rates: []model.Rate{
 				{Requests: 100, Period: time.Minute},
 				{Requests: 10000, Period: 24 * time.Hour, Algorithm: "FixedWindow"},
 			}}}}},
 	}
 	snap := mustCompile(t, p)
 
-	got := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"alice"}}})
+	got := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"alice"}}})
 	buckets := got.Buckets()
 	if len(buckets) != 2 {
 		t.Fatalf("buckets = %d, want one per window", len(buckets))

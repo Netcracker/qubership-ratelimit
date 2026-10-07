@@ -45,10 +45,10 @@ A selection = rules x window x identity x state. Where it lives:
   confirmDomain is the domain-wide form, strictly on its own.
 
 Identity values, in `axis.<name>`, `selector.axes`, and a simulation's `keys`, are compared in the form traffic counts
-them, whether a token or the direct form carried them: the client key is the sub claim in lower case, and a mapping
+them, whether a token or the direct form carried them: the `sub` key is the `sub` claim in lower case, and a mapping
 may declare `normalization: Lowercase`. A value that normalization would change addresses no counter and no identity a
-request carries, so it is refused with 0400, the field it came from, and the form to use: `axis.client=Alice` answers
-`the client value "Alice" addresses no counter and no identity a request carries: the domain lowercases client, so use
+request carries, so it is refused with 0400, the field it came from, and the form to use: `axis.sub=Alice` answers
+`the sub value "Alice" addresses no counter and no identity a request carries: the domain lowercases sub, so use
 "alice"`. A path capture counts the segment as sent, so an axis a block captures is compared as given: in a listing,
 a reset, or a selector whose rule ids address that block, and in one that addresses no rule, which spans every block.
 

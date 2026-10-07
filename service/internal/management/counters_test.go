@@ -35,7 +35,7 @@ func TestSelectCandidates_carriesACursorWhenTheBudgetFillsWithNoMatch(t *testing
 			testNamespace, testDomain, i))
 	}
 	seedCounters(t, h.counters, keys)
-	sel, apiErr := parseSelector(url.Values{"axis.client": {"nobody"}})
+	sel, apiErr := parseSelector(url.Values{"axis.sub": {"nobody"}})
 	require.Nil(t, apiErr)
 	inspector := h.counters.(counters.Inspector)
 
@@ -64,7 +64,7 @@ func TestSelectCandidates_theBudgetBindsTheLastStepOfThePage(t *testing.T) {
 			testNamespace, testDomain, i))
 	}
 	seedCounters(t, h.counters, keys)
-	sel, apiErr := parseSelector(url.Values{"axis.client": {"nobody"}})
+	sel, apiErr := parseSelector(url.Values{"axis.sub": {"nobody"}})
 	require.Nil(t, apiErr)
 
 	page, err := h.api.selectCandidates(t.Context(), h.snapshot, h.counters.(counters.Inspector), sel, 499, "")
@@ -86,7 +86,7 @@ func TestSelectCandidates_resumesAtTheCursorOfTheLastStep(t *testing.T) {
 			testNamespace, testDomain, i))
 	}
 	seedCounters(t, h.counters, keys)
-	sel, apiErr := parseSelector(url.Values{"axis.client": {"client-00"}})
+	sel, apiErr := parseSelector(url.Values{"axis.sub": {"client-00"}})
 	require.Nil(t, apiErr)
 	inspector := h.counters.(counters.Inspector)
 
@@ -113,7 +113,7 @@ func TestCounters_pagesAcrossStoreStepsWithoutLosingOrRepeatingACounter(t *testi
 	want := make([]string, 0, clients)
 	for i := range clients {
 		client := fmt.Sprintf("client-%04d", i)
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
 		want = append(want, client)
 	}
 
@@ -126,7 +126,7 @@ func TestCounters_pagesAcrossStoreStepsWithoutLosingOrRepeatingACounter(t *testi
 		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
 		pages++
 		for _, item := range page.Items {
-			seen = append(seen, item.Axes["client"])
+			seen = append(seen, item.Axes["sub"])
 		}
 		if page.NextCursor == "" {
 			break
@@ -194,7 +194,7 @@ func TestCounters_aFailedScanIsAnOutageNotABadRequest(t *testing.T) {
 func TestCounters_pagesFollowTheStoreCursorChain(t *testing.T) {
 	h := newTestAPI(t)
 	for i := range 10 {
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {fmt.Sprintf("client-%02d", i)}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {fmt.Sprintf("client-%02d", i)}}, 1)
 	}
 	chain := &cursorChain{Store: h.counters, step: 3}
 	h.api.Counters = chain
@@ -225,18 +225,18 @@ func TestCounters_pagesFollowTheStoreCursorChain(t *testing.T) {
 func TestCounters_aStepAsksForTheRoomLeftOnThePage(t *testing.T) {
 	h := newTestAPI(t)
 	for i := range 10 {
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {fmt.Sprintf("client-%02d", i)}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {fmt.Sprintf("client-%02d", i)}}, 1)
 	}
 
 	var page CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client"+
-		"&pageSize=4&axis.client=client-01&axis.client=client-03&axis.client=client-04"+
-		"&axis.client=client-05&axis.client=client-06&axis.client=client-07", viewerRoles(), nil),
+		"&pageSize=4&axis.sub=client-01&axis.sub=client-03&axis.sub=client-04"+
+		"&axis.sub=client-05&axis.sub=client-06&axis.sub=client-07", viewerRoles(), nil),
 		http.StatusOK, &page)
 
 	clients := make([]string, 0, len(page.Items))
 	for _, item := range page.Items {
-		clients = append(clients, item.Axes["client"])
+		clients = append(clients, item.Axes["sub"])
 	}
 	require.Equal(t, []string{"client-01", "client-03", "client-04", "client-05"}, clients)
 	require.NotEmpty(t, page.NextCursor, "two selected clients remain")
@@ -251,7 +251,7 @@ func TestCounters_aStepOverTheAskOverfillsThePageByThatMuch(t *testing.T) {
 	want := make([]string, 0, 10)
 	for i := range 10 {
 		client := fmt.Sprintf("client-%02d", i)
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
 		want = append(want, client)
 	}
 	h.api.Counters = &cursorChain{Store: h.counters, over: 2}
@@ -265,7 +265,7 @@ func TestCounters_aStepOverTheAskOverfillsThePageByThatMuch(t *testing.T) {
 		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
 		sizes = append(sizes, len(page.Items))
 		for _, item := range page.Items {
-			seen = append(seen, item.Axes["client"])
+			seen = append(seen, item.Axes["sub"])
 		}
 		if page.NextCursor == "" {
 			break
@@ -361,7 +361,7 @@ func TestCounters_pagesThroughEveryCounterOfARule(t *testing.T) {
 	h := newTestAPI(t)
 	clients := []string{"alpha", "bravo", "zulu"}
 	for _, client := range clients {
-		h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
 	}
 
 	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=orders/per-client&pageSize=1"
@@ -372,7 +372,7 @@ func TestCounters_pagesThroughEveryCounterOfARule(t *testing.T) {
 		var page CounterList
 		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
 		for _, item := range page.Items {
-			seen = append(seen, item.Axes["client"])
+			seen = append(seen, item.Axes["sub"])
 		}
 		if page.NextCursor == "" {
 			break

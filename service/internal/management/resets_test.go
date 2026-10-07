@@ -42,8 +42,8 @@ func (h *testAPI) preview(t *testing.T, body map[string]any, key string) BulkRes
 
 func TestBulk_previewMintsATokenAndDeletesNothing(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"bob"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"bob"}}, 1)
 
 	result := h.preview(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}},
@@ -66,8 +66,8 @@ func TestBulk_previewMintsATokenAndDeletesNothing(t *testing.T) {
 
 func TestBulk_executionNeedsThePreviewsToken(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"bob"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"bob"}}, 1)
 
 	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
@@ -117,7 +117,7 @@ func TestBulk_refusesAMalformedToken(t *testing.T) {
 
 func TestBulk_tokenIsSingleUse(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
@@ -164,8 +164,8 @@ func TestBulk_tokenIsBoundToItsSubject(t *testing.T) {
 
 func TestBulk_domainWideFormStandsAlone(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
-	h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {"bob"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {"bob"}}, 1)
 
 	preview := h.preview(t, map[string]any{"confirmDomain": testDomain}, "key-preview")
 	require.Equal(t, 2, *preview.MatchedCount)
@@ -250,7 +250,7 @@ func TestBulk_needsAnIdempotencyKeyAndTheOperatorRole(t *testing.T) {
 
 func TestBulk_retryAnswersTheRecordedOutcome(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
 
@@ -292,7 +292,7 @@ func TestBulk_previewAndExecutionNeedDifferentKeys(t *testing.T) {
 // works under the other.
 func TestBulk_normalizesTheSelectionTheTokenIsBoundTo(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders/4711", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders/4711", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	preview := h.preview(t, map[string]any{"selector": map[string]any{
 		"ruleIds": []string{"by-order", "by-order"},
@@ -315,7 +315,7 @@ func TestBulk_normalizesTheSelectionTheTokenIsBoundTo(t *testing.T) {
 // enforced set: a stale rule id sweeps whatever is left of it.
 func TestBulk_reachesCountersOfRemovedRules(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	// The rule leaves the enforced set while its counters live out their TTL.
 	h.replaceRules(t, cascadeBlocks()...)
@@ -364,8 +364,8 @@ func TestBulk_refusesAnUnknownSelectorMember(t *testing.T) {
 func TestBulk_refusesAnAxisThatAddressesNoCounter(t *testing.T) {
 	for name, axes := range map[string]map[string][]string{
 		"an axis without a name":      {"": {"alice"}},
-		"an axis without values":      {model.KeyClient: {}},
-		"an axis with an empty value": {model.KeyClient: {"alice", ""}},
+		"an axis without values":      {model.KeySub: {}},
+		"an axis with an empty value": {model.KeySub: {"alice", ""}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newTestAPI(t)

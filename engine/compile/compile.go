@@ -71,7 +71,7 @@ type Snapshot struct {
 	// carries part of one.
 	Blocks []Block
 
-	// Extraction drives identity: built-in client first unless overridden,
+	// Extraction drives identity: built-in sub first unless overridden,
 	// then mapped keys in authored order.
 	Extraction []KeyExtraction
 

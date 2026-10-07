@@ -42,7 +42,7 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
 - Direct gRPC consumers get the same contract. They may send pre-extracted descriptor entries and no token; the engine
   matches on whatever keys are present. Those values meet the rules a token's values meet: a key past the value length
   or the array bound is absent and counted as an extraction skip, and a key the domain lowercases is lowercased, so a
-  direct `client=Alice` and a token whose `sub` is `Alice` charge one counter.
+  direct `sub=Alice` and a token whose `sub` claim is `Alice` charge one counter.
 - The standard gRPC health service is exposed for direct gRPC consumers. Deployment readiness and liveness use HTTP
   `readyz` and `healthz` on port 8081, and `readyz` opens after the first manifest is applied from the ConfigMap volume;
   the probes do not use the gRPC health service.
@@ -175,12 +175,12 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   to the rules of that block and usable in their `counters`, giving "a counter per `{orderId}`". Within a block whose
   matched route is a `Template`, the `path` axis takes the template string rather than the raw path, so axis cardinality
   is bounded by construction; when a non-template route matched, capture keys are absent. Placeholder names must not
-  collide with the built-in keys `path`, `method`, `token`, and `client`, and the compiler checks it (`InvalidSpec`).
-  For `client` the ban is load-bearing: a capture is a value taken from the path, the caller controls the path, and
-  `{client}` would let callers pick their own client identity within the block, minting a fresh bucket per invented name
+  collide with the built-in keys `path`, `method`, `token`, and `sub`, and the compiler checks it (`InvalidSpec`).
+  For `sub` the ban is fundamental: a capture is a value taken from the path, the caller controls the path, and
+  `{sub}` would let callers pick their own identity within the block, minting a fresh bucket per invented name
   or writing into someone else's. Collision with a `spec.mappings` key is shadowing: the capture wins within its block,
   and the operator records `CaptureShadowsMappedKey` in `status.ruleProblems`.
-- **A missing axis means the rule does not match.** A rule whose `counters` axis is absent from the request (`client` on
+- **A missing axis means the rule does not match.** A rule whose `counters` axis is absent from the request (`sub` on
   an anonymous call, or a capture of a route that did not match) does not match: there is nothing to key the bucket
   with. This is a mechanism, not an error, and it is what lets a per-user rule skip anonymous traffic with no explicit
   exclusion. An unknown key, one outside the domain's effective set (built-ins plus `spec.mappings` plus block
@@ -295,13 +295,13 @@ The full contract, the interfaces, and the implementations are in the [store con
   unrepresentable). An entry carries `key`; `claim` (a dot path) or `claimPath` (a segment list for claim names
   containing dots); `type: String | StringArray`; `normalization`; and `fallbacks` (the first non-empty result).
   Array-valued claims are supported, which is the reason extraction lives in the engine at all: Istio's
-  claim-to-header cannot export arrays. `sub -> client`, lowercased, is built in and works with an empty `mappings`; an
-  entry with `key: client` overrides it. The sanitary limits (token size and shape, value length, array size, and the
+  claim-to-header cannot export arrays. `sub` (the claim, lowercased) is built in and works with an empty `mappings`; an
+  entry with `key: sub` overrides it. The sanitary limits (token size and shape, value length, array size, and the
   token cache's bounds) are engine constants, not fields, listed in [limits](limits.md), and axis values are escaped
   when embedded into counter keys. The mapping is applied atomically with the rules: one object, one generation.
 - **Values are normalized at extraction**, at minimum by configurable lowercasing, which is what preserves
   case-insensitive membership semantics. Group values (`groups[].clients`) are compared after the effective
-  normalization of the `client` key; when `client` is overridden by an entry with `normalization: None`, they are
+  normalization of the `sub` key; when `sub` is overridden by an entry with `normalization: None`, they are
   compared as written.
 - **The raw token never appears** in logs, metrics labels, or storage. Redaction of the `token` descriptor value is part
   of the gRPC server.

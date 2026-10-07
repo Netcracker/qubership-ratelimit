@@ -104,7 +104,7 @@ func TestFailClosed_anAddressedResetThatNeverRanCanBeRetried(t *testing.T) {
 	h := newTestAPI(t)
 	h.breakRecords(&brokenRecords{failReset: true})
 
-	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice",
+	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice",
 		"key-1", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
 	require.Contains(t, body.Message, "nothing was bound")
 }
@@ -113,7 +113,7 @@ func TestFailClosed_anAddressedResetThatNeverRanCanBeRetried(t *testing.T) {
 // was recorded, not from what this call did.
 func TestFailClosed_aLostLeaseAnswersFromTheRecord(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	// The lease is taken away mid-command by expiring it, and somebody else
 	// finalizes the record before the walk commits.
@@ -155,8 +155,8 @@ func (s *stealingRecords) Commit(ctx context.Context, c records.Commit) error {
 // before deleting it. Both reset forms carry it.
 func TestLimited_sweepsOnlyTheCountersRefusingRightNow(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	selector := map[string]any{"ruleIds": []string{"orders"}, "limited": true}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
@@ -177,10 +177,10 @@ func TestLimited_sweepsOnlyTheCountersRefusingRightNow(t *testing.T) {
 
 func TestLimited_addressedResetSkipsACounterUnderItsLimit(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice&limited=true",
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&limited=true",
 		"key-1", operatorRoles()), http.StatusOK, &response)
 	require.Equal(t, 0, *response.ResetCount, "alice is not refusing, so nothing was reset")
 	// keys reports what the command addressed, one per window of the rule;
@@ -195,10 +195,10 @@ func TestLimited_addressedResetSkipsACounterUnderItsLimit(t *testing.T) {
 
 func TestLimited_addressedResetDropsARefusingCounter(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=orders/per-client&axis.client=crawler&limited=true",
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler&limited=true",
 		"key-1", operatorRoles()), http.StatusOK, &response)
 	require.Equal(t, 1, *response.ResetCount)
 

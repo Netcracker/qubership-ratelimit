@@ -100,5 +100,5 @@ func TestActiveSetOf_listsWhatTheSnapshotsCanLabel(t *testing.T) {
 	assert.Contains(t, active.Domains, "gateway.public")
 	assert.Contains(t, active.Rules, RuleID("api", "total"))
 	assert.Contains(t, active.Keys["gateway.public"], "tenant")
-	assert.ElementsMatch(t, []string{model.KeyClient, "tenant"}, ExtractionKeysOf(snapshots)["gateway.public"])
+	assert.ElementsMatch(t, []string{model.KeySub, "tenant"}, ExtractionKeysOf(snapshots)["gateway.public"])
 }

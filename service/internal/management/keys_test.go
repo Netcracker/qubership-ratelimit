@@ -94,12 +94,12 @@ func TestParseCounterKey_refusesWhatItCannotRead(t *testing.T) {
 func TestNamedAxes_refusesARuleThatDisagreesWithItsCounter(t *testing.T) {
 	parsed := counterKey{RuleID: "orders/per-client", Axes: []string{"alice"}}
 
-	axes, err := parsed.namedAxes([]string{model.KeyClient})
+	axes, err := parsed.namedAxes([]string{model.KeySub})
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{model.KeyClient: "alice"}, axes)
+	require.Equal(t, map[string]string{model.KeySub: "alice"}, axes)
 
 	// A rule redefined under a live counter: two axes now, one value in the key.
-	_, err = parsed.namedAxes([]string{model.KeyClient, "order_id"})
+	_, err = parsed.namedAxes([]string{model.KeySub, "order_id"})
 	require.Error(t, err)
 }
 

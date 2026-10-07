@@ -50,8 +50,8 @@ func gateReasons(rule ruleview.RuleView) []string {
 	return out
 }
 
-func TestApplicability_clientAloneLeavesThePlanUndecided(t *testing.T) {
-	rules := annotationsFor(t, "axis.client=alice")
+func TestApplicability_subAloneLeavesThePlanUndecided(t *testing.T) {
+	rules := annotationsFor(t, "axis.sub=alice")
 
 	// The bypass names another client, so it is out for every completion.
 	require.Equal(t, ruleview.ApplicabilityNever, rules["cascade/internal"].Applicability)
@@ -70,7 +70,7 @@ func TestApplicability_clientAloneLeavesThePlanUndecided(t *testing.T) {
 }
 
 func TestApplicability_decidingThePlanDecidesTheCascade(t *testing.T) {
-	rules := annotationsFor(t, "axis.client=alice&axis.plan=premium")
+	rules := annotationsFor(t, "axis.sub=alice&axis.plan=premium")
 
 	require.Equal(t, ruleview.ApplicabilityAlways, rules["cascade/premium"].Applicability)
 	// Premium matches for every completion now, so everyone is unreachable.
@@ -78,7 +78,7 @@ func TestApplicability_decidingThePlanDecidesTheCascade(t *testing.T) {
 }
 
 func TestApplicability_aFailedConditionEndsTheCascadeAhead(t *testing.T) {
-	rules := annotationsFor(t, "axis.client=alice&axis.plan=free")
+	rules := annotationsFor(t, "axis.sub=alice&axis.plan=free")
 
 	require.Equal(t, ruleview.ApplicabilityNever, rules["cascade/premium"].Applicability)
 	// Nothing ahead of everyone can match any more, and its own axis is named.
@@ -86,7 +86,7 @@ func TestApplicability_aFailedConditionEndsTheCascadeAhead(t *testing.T) {
 }
 
 func TestApplicability_theExemptClientSilencesEverythingBehindIt(t *testing.T) {
-	rules := annotationsFor(t, "axis.client=prometheus")
+	rules := annotationsFor(t, "axis.sub=prometheus")
 
 	require.Equal(t, ruleview.ApplicabilityAlways, rules["cascade/internal"].Applicability)
 	require.Equal(t, ruleview.ApplicabilityNever, rules["cascade/premium"].Applicability)
@@ -96,7 +96,7 @@ func TestApplicability_theExemptClientSilencesEverythingBehindIt(t *testing.T) {
 func TestApplicability_replacesPreemptsInsideAnAllBlock(t *testing.T) {
 	// The support rule replaces per-client, and whether it matches turns on a
 	// role the caller did not name.
-	rules := annotationsFor(t, "axis.client=alice")
+	rules := annotationsFor(t, "axis.sub=alice")
 
 	support := rules["orders/support"]
 	require.Equal(t, ruleview.ApplicabilityConditional, support.Applicability)
@@ -115,7 +115,7 @@ func TestApplicability_aShadowRuleReplacesNothing(t *testing.T) {
 	blocks := orderBlocks()
 	blocks[0].Rules[1].Behavior = model.BehaviorShadow
 	snapshot := compileSnapshot(t, append(cascadeBlocks(), blocks...))
-	values, err := url.ParseQuery("axis.client=alice&axis.roles=support")
+	values, err := url.ParseQuery("axis.sub=alice&axis.roles=support")
 	require.NoError(t, err)
 	sc, apiErr := parseScope(snapshot, values)
 	require.Nil(t, apiErr, "scope: %+v", apiErr)
@@ -141,14 +141,14 @@ func TestApplicability_aShadowRuleReplacesNothing(t *testing.T) {
 func TestApplicability_aCompleteRoleSetDecidesContains(t *testing.T) {
 	// roles is list-valued, so the supplied values are the whole set: support
 	// is not in it, which settles the condition rather than leaving it open.
-	rules := annotationsFor(t, "axis.client=alice&axis.roles=billing&axis.roles=readonly")
+	rules := annotationsFor(t, "axis.sub=alice&axis.roles=billing&axis.roles=readonly")
 
 	require.Equal(t, ruleview.ApplicabilityNever, rules["orders/support"].Applicability)
 	require.Equal(t, ruleview.ApplicabilityAlways, rules["orders/per-client"].Applicability)
 }
 
 func TestApplicability_anAbsentKeyVoidsTheRulesReadingIt(t *testing.T) {
-	rules := annotationsFor(t, "axis.client=alice&absent=roles&absent=plan")
+	rules := annotationsFor(t, "axis.sub=alice&absent=roles&absent=plan")
 
 	require.Equal(t, ruleview.ApplicabilityNever, rules["orders/support"].Applicability)
 	require.Equal(t, ruleview.ApplicabilityNever, rules["cascade/premium"].Applicability)
@@ -159,7 +159,7 @@ func TestApplicability_anAbsentKeyVoidsTheRulesReadingIt(t *testing.T) {
 // reaches the block, so an axis over one is available even though its value
 // is unknown; by-order has one template route and nothing else.
 func TestApplicability_captureAxesCountAsAvailable(t *testing.T) {
-	rules := annotationsFor(t, "axis.client=alice")
+	rules := annotationsFor(t, "axis.sub=alice")
 	require.Equal(t, ruleview.ApplicabilityAlways, rules["by-order/each"].Applicability)
 }
 
@@ -174,7 +174,7 @@ func TestApplicability_anUnnamedAxisIsAGate(t *testing.T) {
 	// unnamed client — two independent gates, both reported.
 	require.Equal(t,
 		[]string{ruleview.GateMissingAxis, ruleview.GateMayBePreempted}, gateReasons(everyone))
-	require.Equal(t, "client", everyone.ConditionalOn[0].Key)
+	require.Equal(t, "sub", everyone.ConditionalOn[0].Key)
 	require.Equal(t, "cascade/internal", everyone.ConditionalOn[1].Rule)
 }
 
@@ -207,8 +207,8 @@ func TestApplicability_gatesAreMinimal(t *testing.T) {
 // Adding an axis may only sharpen the answer: a rule never moves back from
 // never or always into conditional.
 func TestApplicability_sharpensMonotonically(t *testing.T) {
-	broad := annotationsFor(t, "axis.client=alice")
-	narrow := annotationsFor(t, "axis.client=alice&axis.plan=premium")
+	broad := annotationsFor(t, "axis.sub=alice")
+	narrow := annotationsFor(t, "axis.sub=alice&axis.plan=premium")
 
 	for id, before := range broad {
 		after, ok := narrow[id]
@@ -227,8 +227,8 @@ func TestParseScope_refusesWhatItCannotAnswer(t *testing.T) {
 	cases := map[string]url.Values{
 		"an unknown axis name":        {"axis.tenant": {"acme"}},
 		"an unknown absent name":      {"absent": {"tenant"}},
-		"a repeated scalar key":       {"axis.client": {"alice", "bob"}},
-		"an empty axis value":         {"axis.client": {""}},
+		"a repeated scalar key":       {"axis.sub": {"alice", "bob"}},
+		"an empty axis value":         {"axis.sub": {""}},
 		"a key both given and absent": {"axis.plan": {"premium"}, "absent": {"plan"}},
 	}
 	for name, query := range cases {

@@ -37,12 +37,12 @@ func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 				Rules: []model.Rule{
 					{Name: "internal", Behavior: model.BehaviorBypass,
 						Matches: []model.Predicate{
-							{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus"}}},
-					{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeyClient},
+							{Key: model.KeySub, Operator: model.OperatorEquals, Value: "prometheus"}}},
+					{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeySub},
 						Matches: []model.Predicate{
-							{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "trial"}},
+							{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "trial"}},
 						Rates: []model.Rate{{Requests: 10, Period: time.Minute}}},
-					{Name: "everyone", Counters: []string{model.KeyClient},
+					{Name: "everyone", Counters: []string{model.KeySub},
 						Rates: []model.Rate{
 							{Requests: 100, Period: time.Minute},
 							{Requests: 10000, Period: 24 * time.Hour, Algorithm: "FixedWindow"}}},
@@ -115,7 +115,7 @@ func TestHeadersComeFromTheStrictestRule(t *testing.T) {
 	if first.Headers.Limit != 100 || first.Headers.Remaining != 99 {
 		t.Errorf("headers = %+v: want the per-client minute window, the tightest of three", first.Headers)
 	}
-	if len(first.ExtractedKeys) != 1 || first.ExtractedKeys[0] != model.KeyClient {
+	if len(first.ExtractedKeys) != 1 || first.ExtractedKeys[0] != model.KeySub {
 		t.Errorf("extracted keys = %v: the success counters need the key names", first.ExtractedKeys)
 	}
 	everyone := first.Rules[0]
@@ -204,7 +204,7 @@ func TestCostThatNeverFits(t *testing.T) {
 func TestExplicitKeysOverrideTheToken(t *testing.T) {
 	e := newEngine(t)
 	req := orderRequest(t, "alice")
-	req.Keys = map[string][]string{model.KeyClient: {"t1"}}
+	req.Keys = map[string][]string{model.KeySub: {"t1"}}
 
 	d := decide(t, e, req)
 	if len(d.Rules) != 3 || d.Rules[0].Rule != "trial" {
@@ -217,7 +217,7 @@ func TestExtractionSkipsPropagate(t *testing.T) {
 	d := decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET", Token: "garbage"})
 
 	if len(d.Skips) != 1 || d.Skips[0].Reason != identity.SkipDecodeFailed {
-		t.Fatalf("skips = %v, want one decode_failed for the planned client key", d.Skips)
+		t.Fatalf("skips = %v, want one decode_failed for the planned sub key", d.Skips)
 	}
 	// The broken token degrades to anonymity: per-client rules skip, the
 	// unconditional total still enforces.
@@ -295,8 +295,8 @@ func cacheProbe(t *testing.T, opts ...engine.Option) *engine.Engine {
 	t.Helper()
 	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
-		Rules: []model.Rule{{Name: "alice-only", Counters: []string{model.KeyClient},
-			Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorEquals, Value: "alice"}},
+		Rules: []model.Rule{{Name: "alice-only", Counters: []string{model.KeySub},
+			Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"}},
 			Rates:   []model.Rate{{Requests: 100, Period: time.Minute}}}},
 	}}}
 	snap, problems := compile.Compile("core-1-core", domain, &p)
@@ -313,7 +313,7 @@ func TestTokenCacheIsolatesOverlays(t *testing.T) {
 	e := cacheProbe(t)
 	tok := token(t, "alice")
 	overlaid := engine.Request{Path: "/x", Method: "GET", Token: tok,
-		Keys: map[string][]string{model.KeyClient: {"mallory"}}}
+		Keys: map[string][]string{model.KeySub: {"mallory"}}}
 	clean := engine.Request{Path: "/x", Method: "GET", Token: tok}
 
 	for step, tc := range []struct {
@@ -731,12 +731,12 @@ func TestTokenCacheSkipsALargeExtraction(t *testing.T) {
 }
 
 // The direct form's values are normalized as a token's are, so a direct
-// caller's client Alice and a token whose sub is Alice charge one counter:
+// caller's sub Alice and a token whose sub is Alice charge one counter:
 // the overlay of unnormalized values was what made a counter the management
 // API could not address.
 func TestDecide_theDirectFormIsNormalizedLikeTheToken(t *testing.T) {
 	p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "each",
-		Counters: []string{model.KeyClient}, Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}}}}}
+		Counters: []string{model.KeySub}, Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}}}}}
 	snap, problems := compile.Compile("core-1-core", domain, &p)
 	if len(problems) != 0 {
 		t.Fatalf("compile problems: %v", problems)
@@ -746,7 +746,7 @@ func TestDecide_theDirectFormIsNormalizedLikeTheToken(t *testing.T) {
 	if d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: token(t, "Alice")}); !d.Allowed {
 		t.Fatal("the first request was refused")
 	}
-	direct := engine.Request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeyClient: {"Alice"}}}
+	direct := engine.Request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"Alice"}}}
 	if d := decide(t, e, direct); d.Allowed {
 		t.Error("the direct form's Alice was counted apart from the token's")
 	}

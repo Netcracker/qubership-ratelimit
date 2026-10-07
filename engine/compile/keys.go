@@ -47,18 +47,18 @@ func compileEnvironment(domain string, p *model.Policy) (*environment, []Problem
 		keys: map[string]bool{
 			model.KeyPath:   false,
 			model.KeyMethod: false,
-			model.KeyClient: false,
+			model.KeySub:    false,
 		},
 		groups: map[string][]string{},
 	}
-	builtinClient := KeyExtraction{
-		Key:           model.KeyClient,
+	builtinSub := KeyExtraction{
+		Key:           model.KeySub,
 		Path:          []string{"sub"},
 		Type:          model.ValueString,
 		Normalization: model.NormalizeLowercase,
 	}
 	if p == nil {
-		env.extraction = []KeyExtraction{builtinClient}
+		env.extraction = []KeyExtraction{builtinSub}
 		return env, nil
 	}
 
@@ -75,10 +75,10 @@ func compileEnvironment(domain string, p *model.Policy) (*environment, []Problem
 		fail("policy domain %q does not belong to domain %q", p.Domain, domain)
 	}
 
-	clientOverridden := false
+	subOverridden := false
 	// declared tracks the policy's own keys, separately from the seeded
-	// built-ins: overriding the built-in client is legal, declaring any key —
-	// client included — twice is not, or the winner would depend on which
+	// built-ins: overriding the built-in sub is legal, declaring any key —
+	// sub included — twice is not, or the winner would depend on which
 	// entry finds its claim first.
 	declared := map[string]struct{}{}
 	for _, km := range p.Mappings {
@@ -93,14 +93,14 @@ func compileEnvironment(domain string, p *model.Policy) (*environment, []Problem
 			problems = append(problems, *problem)
 			continue
 		}
-		if km.Key == model.KeyClient {
-			clientOverridden = true
+		if km.Key == model.KeySub {
+			subOverridden = true
 		}
 		env.keys[km.Key] = extraction.Type == model.ValueStringArray
 		env.extraction = append(env.extraction, extraction)
 	}
-	if !clientOverridden {
-		env.extraction = append([]KeyExtraction{builtinClient}, env.extraction...)
+	if !subOverridden {
+		env.extraction = append([]KeyExtraction{builtinSub}, env.extraction...)
 	}
 
 	problems = append(problems, compileGroups(p.Groups, env.groups)...)

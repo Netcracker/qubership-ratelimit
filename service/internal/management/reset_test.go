@@ -34,7 +34,7 @@ func (h *testAPI) remaining(t *testing.T, client string) (int64, bool) {
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&axis.client="+client,
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&axis.sub="+client,
 		viewerRoles(), nil), http.StatusOK, &list)
 
 	if len(list.Items) == 0 {
@@ -45,18 +45,18 @@ func (h *testAPI) remaining(t *testing.T, client string) (int64, bool) {
 
 func TestReset_dropsTheCountersItAddresses(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=orders/per-client&axis.client=crawler", "key-1", operatorRoles()),
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", operatorRoles()),
 		http.StatusOK, &response)
 
 	require.False(t, response.DryRun)
 	require.Equal(t, testDomain, response.Domain)
 	require.Equal(t, "orders/per-client", response.RuleID)
 	require.Equal(t, h.version, response.RuleSetVersion)
-	require.Equal(t, map[string]string{"client": "crawler"}, response.Axes)
+	require.Equal(t, map[string]string{"sub": "crawler"}, response.Axes)
 	require.Len(t, response.Keys, 1)
 	require.NotNil(t, response.ResetCount)
 	require.Equal(t, 1, *response.ResetCount)
@@ -73,10 +73,10 @@ func TestReset_dropsTheCountersItAddresses(t *testing.T) {
 
 func TestReset_previewChangesNothing(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 
 	var preview ResetResponse
-	decode(t, h.reset(t, "ruleId=orders/per-client&axis.client=crawler&dryRun=true", "key-1",
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler&dryRun=true", "key-1",
 		operatorRoles()), http.StatusOK, &preview)
 
 	require.True(t, preview.DryRun)
@@ -105,23 +105,23 @@ func TestReset_handlesARuleWithoutAxes(t *testing.T) {
 // unless the call narrows to one.
 func TestReset_narrowsToOneWindowOnRequest(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders/4711", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders/4711", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	var all ResetResponse
-	decode(t, h.reset(t, "ruleId=by-order/each&axis.client=alice&axis.order_id=4711&dryRun=true",
+	decode(t, h.reset(t, "ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&dryRun=true",
 		"key-1", operatorRoles()), http.StatusOK, &all)
 	require.Len(t, all.Keys, 2, "one key per window")
 
 	var narrowed ResetResponse
 	decode(t, h.reset(t,
-		"ruleId=by-order/each&axis.client=alice&axis.order_id=4711&period=1m&dryRun=true",
+		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=1m&dryRun=true",
 		"key-2", operatorRoles()), http.StatusOK, &narrowed)
 	require.Len(t, narrowed.Keys, 1)
 
 	// A period is normalized before comparison, so 60s and 1m are one window.
 	var bySeconds ResetResponse
 	decode(t, h.reset(t,
-		"ruleId=by-order/each&axis.client=alice&axis.order_id=4711&period=60&dryRun=true",
+		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=60&dryRun=true",
 		"key-3", operatorRoles()), http.StatusOK, &bySeconds)
 	require.Equal(t, narrowed.Keys, bySeconds.Keys)
 }
@@ -129,9 +129,9 @@ func TestReset_narrowsToOneWindowOnRequest(t *testing.T) {
 func TestReset_refusesAPartialAxisSelection(t *testing.T) {
 	h := newTestAPI(t)
 
-	// The rule counts by client and order_id; naming one would delete every
+	// The rule counts by sub and order_id; naming one would delete every
 	// order of that client, which is a sweep and not this endpoint's job.
-	body := requireError(t, h.reset(t, "ruleId=by-order/each&axis.client=alice", "key-1",
+	body := requireError(t, h.reset(t, "ruleId=by-order/each&axis.sub=alice", "key-1",
 		operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
 	require.Contains(t, body.Message, "every axis")
 }
@@ -150,11 +150,11 @@ func TestReset_refusesWhatItCannotAddress(t *testing.T) {
 			query: "ruleId=orders", status: http.StatusBadRequest, code: CodeInvalidRequest,
 		},
 		"a rule id carrying the retired policy segment": {
-			query:  "ruleId=api/orders/per-client&axis.client=alice",
+			query:  "ruleId=api/orders/per-client&axis.sub=alice",
 			status: http.StatusBadRequest, code: CodeInvalidRequest,
 		},
 		"several rule ids": {
-			query:  "ruleId=orders/per-client&ruleId=orders/support&axis.client=alice",
+			query:  "ruleId=orders/per-client&ruleId=orders/support&axis.sub=alice",
 			status: http.StatusBadRequest, code: CodeInvalidRequest,
 		},
 		"an axis the rule does not count by": {
@@ -162,15 +162,15 @@ func TestReset_refusesWhatItCannotAddress(t *testing.T) {
 			status: http.StatusBadRequest, code: CodeInvalidRequest,
 		},
 		"an explicit dryRun=false": {
-			query:  "ruleId=orders/per-client&axis.client=alice&dryRun=false",
+			query:  "ruleId=orders/per-client&axis.sub=alice&dryRun=false",
 			status: http.StatusBadRequest, code: CodeInvalidRequest,
 		},
 		"a rule outside the enforced set": {
-			query:  "ruleId=orders/gone&axis.client=alice",
+			query:  "ruleId=orders/gone&axis.sub=alice",
 			status: http.StatusNotFound, code: CodeNotFound,
 		},
 		"a window the rule does not have": {
-			query:  "ruleId=orders/per-client&axis.client=alice&period=5m",
+			query:  "ruleId=orders/per-client&axis.sub=alice&period=5m",
 			status: http.StatusNotFound, code: CodeNotFound,
 		},
 	}
@@ -197,7 +197,7 @@ func TestReset_needsALogSafeIdempotencyKey(t *testing.T) {
 
 func TestReset_pinsTheRuleSetVersionWhenAsked(t *testing.T) {
 	h := newTestAPI(t)
-	query := "ruleId=orders/per-client&axis.client=alice&expectedRuleSetVersion="
+	query := "ruleId=orders/per-client&axis.sub=alice&expectedRuleSetVersion="
 
 	requireError(t, h.reset(t, query+"000000000000", "key-1", operatorRoles()),
 		http.StatusConflict, CodeConflict)
@@ -209,14 +209,14 @@ func TestReset_pinsTheRuleSetVersionWhenAsked(t *testing.T) {
 // first time, so a retry answers the recorded outcome instead of executing.
 func TestReset_retryReplaysTheRecordedOutcome(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
-	query := "ruleId=orders/per-client&axis.client=crawler"
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
+	query := "ruleId=orders/per-client&axis.sub=crawler"
 
 	first := h.reset(t, query, "key-1", operatorRoles())
 	require.Equal(t, http.StatusOK, first.Code)
 
 	// The client spends again between the two calls.
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 2)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 2)
 
 	second := h.reset(t, query, "key-1", operatorRoles())
 	require.Equal(t, http.StatusOK, second.Code)
@@ -232,13 +232,13 @@ func TestReset_refusesTheSameKeyForADifferentCommand(t *testing.T) {
 	h := newTestAPI(t)
 
 	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=orders/per-client&axis.client=alice", "key-1", operatorRoles()).Code)
+		h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", operatorRoles()).Code)
 
-	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.client=bob", "key-1", operatorRoles()),
+	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=bob", "key-1", operatorRoles()),
 		http.StatusConflict, CodeConflict)
 
 	// A preview and its execution are different commands for the same reason.
-	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice&dryRun=true",
+	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&dryRun=true",
 		"key-1", operatorRoles()), http.StatusConflict, CodeConflict)
 }
 
@@ -247,26 +247,26 @@ func TestReset_refusesTheSameKeyForADifferentCommand(t *testing.T) {
 func TestReset_aRefusalBindsNothing(t *testing.T) {
 	h := newTestAPI(t)
 
-	requireError(t, h.reset(t, "ruleId=orders/gone&axis.client=alice", "key-1", operatorRoles()),
+	requireError(t, h.reset(t, "ruleId=orders/gone&axis.sub=alice", "key-1", operatorRoles()),
 		http.StatusNotFound, CodeNotFound)
 
 	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=orders/per-client&axis.client=alice", "key-1", operatorRoles()).Code)
+		h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", operatorRoles()).Code)
 }
 
 // The canonical command normalizes what a client may spell in several ways, so
 // a retry that spells its window differently is still a retry.
 func TestReset_normalizesTheCommandBeforeComparingIt(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders/4711", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders/4711", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	first := h.reset(t,
-		"ruleId=by-order/each&axis.client=alice&axis.order_id=4711&period=1m&algorithm=GCRA",
+		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=1m&algorithm=GCRA",
 		"key-1", operatorRoles())
 	require.Equal(t, http.StatusOK, first.Code)
 
 	second := h.reset(t,
-		"ruleId=by-order/each&axis.client=alice&axis.order_id=4711&period=60&algorithm=gcra",
+		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=60&algorithm=gcra",
 		"key-1", operatorRoles())
 	require.Equal(t, http.StatusOK, second.Code)
 	require.JSONEq(t, first.Body.String(), second.Body.String())
@@ -276,7 +276,7 @@ func TestReset_normalizesTheCommandBeforeComparingIt(t *testing.T) {
 func TestReset_scopesTheKeyToItsSubject(t *testing.T) {
 	h := newTestAPI(t)
 	target := BasePath + "/domains/" + testDomain +
-		"/counters?ruleId=orders/per-client&axis.client=alice"
+		"/counters?ruleId=orders/per-client&axis.sub=alice"
 
 	call := func(subject string) *testResponse {
 		request := httptest.NewRequest(http.MethodDelete, target, strings.NewReader(""))
@@ -292,7 +292,7 @@ func TestReset_scopesTheKeyToItsSubject(t *testing.T) {
 func TestReset_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 	h := newTestAPI(t)
 
-	target := BasePath + "/domains/gateway.typo/counters?ruleId=orders/per-client&axis.client=alice"
+	target := BasePath + "/domains/gateway.typo/counters?ruleId=orders/per-client&axis.sub=alice"
 	request := httptest.NewRequest(http.MethodDelete, target, strings.NewReader(""))
 	request.Header.Set("Authorization", "Bearer "+testToken("alice@example.com", operatorRoles()))
 	request.Header.Set("Idempotency-Key", "key-1")
@@ -305,7 +305,7 @@ func TestReset_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 func TestReset_recordsTheBodyItAnswered(t *testing.T) {
 	h := newTestAPI(t)
 
-	recorder := h.reset(t, "ruleId=orders/per-client&axis.client=alice", "key-1", operatorRoles())
+	recorder := h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", operatorRoles())
 	require.Equal(t, http.StatusOK, recorder.Code)
 
 	var response ResetResponse
@@ -315,7 +315,7 @@ func TestReset_recordsTheBodyItAnswered(t *testing.T) {
 }
 
 // addressAlice is the one addressed command these replay tests repeat.
-const addressAlice = "ruleId=orders/per-client&axis.client=alice"
+const addressAlice = "ruleId=orders/per-client&axis.sub=alice"
 
 // A retry answers from the record, not from the snapshot serving now.
 //
@@ -326,7 +326,7 @@ const addressAlice = "ruleId=orders/per-client&axis.client=alice"
 // 409 for a command that already ran.
 func TestReset_replaysTheBodyItRecordedAfterTheRuleSetMoved(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	query := addressAlice
 	var first ResetResponse
@@ -348,7 +348,7 @@ func TestReset_replaysTheBodyItRecordedAfterTheRuleSetMoved(t *testing.T) {
 // failing because the set moved after it ran.
 func TestReset_aPinnedRetryStillReplays(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	query := addressAlice + "&expectedRuleSetVersion=" + h.version
 	var first ResetResponse
@@ -365,7 +365,7 @@ func TestReset_aPinnedRetryStillReplays(t *testing.T) {
 // replays for one that already ran.
 func TestReset_replaysEvenWhenTheRuleIsGone(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	query := addressAlice
 	var first ResetResponse

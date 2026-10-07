@@ -71,7 +71,7 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(p.Status.ObservedGeneration).To(Equal(p.Generation))
 		Expect(p.Status.ActiveGeneration).To(Equal(p.Generation))
-		Expect(p.Status.EffectiveKeys).To(ContainElement("client"),
+		Expect(p.Status.EffectiveKeys).To(ContainElement("sub"),
 			"the status must publish the key set the rules resolve against")
 	})
 

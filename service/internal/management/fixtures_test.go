@@ -57,7 +57,7 @@ func cascadeBlocks() []model.Block {
 				Name:     "internal",
 				Behavior: model.BehaviorBypass,
 				Matches: []model.Predicate{{
-					Key: model.KeyClient, Operator: model.OperatorEquals, Value: "prometheus",
+					Key: model.KeySub, Operator: model.OperatorEquals, Value: "prometheus",
 				}},
 			},
 			{
@@ -65,12 +65,12 @@ func cascadeBlocks() []model.Block {
 				Matches: []model.Predicate{{
 					Key: "plan", Operator: model.OperatorEquals, Value: "premium",
 				}},
-				Counters: []string{model.KeyClient},
+				Counters: []string{model.KeySub},
 				Rates:    []model.Rate{{Requests: 1000, Period: time.Minute}},
 			},
 			{
 				Name:     "everyone",
-				Counters: []string{model.KeyClient},
+				Counters: []string{model.KeySub},
 				Rates:    []model.Rate{{Requests: 100, Period: time.Minute}},
 			},
 		},
@@ -90,7 +90,7 @@ func orderBlocks() []model.Block {
 			Rules: []model.Rule{
 				{
 					Name:     "per-client",
-					Counters: []string{model.KeyClient},
+					Counters: []string{model.KeySub},
 					Rates:    []model.Rate{{Requests: 3, Period: time.Hour}},
 				},
 				{
@@ -98,7 +98,7 @@ func orderBlocks() []model.Block {
 					Matches: []model.Predicate{{
 						Key: "roles", Operator: model.OperatorContains, Value: "support",
 					}},
-					Counters:      []string{model.KeyClient},
+					Counters:      []string{model.KeySub},
 					ReplacedRules: []string{"per-client"},
 					Rates:         []model.Rate{{Requests: 50, Period: time.Hour}},
 				},
@@ -111,7 +111,7 @@ func orderBlocks() []model.Block {
 			}}},
 			Rules: []model.Rule{{
 				Name:     "each",
-				Counters: []string{model.KeyClient, "order_id"},
+				Counters: []string{model.KeySub, "order_id"},
 				Rates: []model.Rate{
 					{Requests: 5, Period: time.Minute},
 					{Requests: 20, Period: time.Hour},
@@ -146,7 +146,7 @@ func orderCascadeBlocks() []model.Block {
 			},
 			{
 				Name:     "orders-per-client",
-				Counters: []string{model.KeyClient},
+				Counters: []string{model.KeySub},
 				Rates:    []model.Rate{{Requests: 50, Period: time.Minute}},
 			},
 		},
@@ -170,12 +170,12 @@ func planCascadeBlocks() []model.Block {
 			{
 				Name:     "silver-only",
 				Matches:  []model.Predicate{{Key: "plan", Operator: model.OperatorEquals, Value: "silver"}},
-				Counters: []string{model.KeyClient},
+				Counters: []string{model.KeySub},
 				Rates:    []model.Rate{{Requests: 10, Period: time.Minute}},
 			},
 			{
 				Name:     "per-client",
-				Counters: []string{model.KeyClient},
+				Counters: []string{model.KeySub},
 				Rates:    []model.Rate{{Requests: 50, Period: time.Minute}},
 			},
 		},

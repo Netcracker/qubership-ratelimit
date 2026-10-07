@@ -62,7 +62,7 @@ func TestAcceptanceSharedGroupBucket(t *testing.T) {
 		Groups: []model.Group{{Name: "partners", Clients: []string{"partner-a", "partner-b"}}},
 		Blocks: []model.Block{prefixBlock("api", model.Rule{
 			Name:    "partners-shared",
-			Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "partners"}},
+			Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "partners"}},
 			Rates:   []model.Rate{{Requests: 3, Period: time.Minute}},
 		})},
 	})
@@ -85,11 +85,11 @@ func TestAcceptanceOverrideOnTopOfBase(t *testing.T) {
 		Domain: domain,
 		Groups: []model.Group{{Name: "vip", Clients: []string{"partner-a"}}},
 		Blocks: []model.Block{prefixBlock("api",
-			model.Rule{Name: "base", Counters: []string{model.KeyClient},
+			model.Rule{Name: "base", Counters: []string{model.KeySub},
 				Rates: []model.Rate{{Requests: 2, Period: time.Minute}}},
 			model.Rule{Name: "vip",
-				Matches:       []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}},
-				Counters:      []string{model.KeyClient},
+				Matches:       []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"}},
+				Counters:      []string{model.KeySub},
 				Rates:         []model.Rate{{Requests: 5, Period: time.Minute}},
 				ReplacedRules: []string{"base"}},
 		)},
@@ -118,10 +118,10 @@ func TestAcceptanceShadowOverrideLeavesTheBaseEnforcing(t *testing.T) {
 	e := engineFor(t, model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{prefixBlock("api",
-			model.Rule{Name: "base", Counters: []string{model.KeyClient},
+			model.Rule{Name: "base", Counters: []string{model.KeySub},
 				Rates: []model.Rate{{Requests: 2, Period: time.Minute}}},
 			model.Rule{Name: "trial", Behavior: model.BehaviorShadow,
-				Counters:      []string{model.KeyClient},
+				Counters:      []string{model.KeySub},
 				Rates:         []model.Rate{{Requests: 1, Period: time.Minute}},
 				ReplacedRules: []string{"base"}},
 		)},
@@ -150,9 +150,9 @@ func TestAcceptanceRoleTiersFromArrayClaim(t *testing.T) {
 			Rules: []model.Rule{
 				{Name: "admin-tier",
 					Matches:  []model.Predicate{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
-					Counters: []string{model.KeyClient},
+					Counters: []string{model.KeySub},
 					Rates:    []model.Rate{{Requests: 4, Period: time.Minute}}},
-				{Name: "basic-tier", Counters: []string{model.KeyClient},
+				{Name: "basic-tier", Counters: []string{model.KeySub},
 					Rates: []model.Rate{{Requests: 2, Period: time.Minute}}},
 			},
 		}},
@@ -205,7 +205,7 @@ func TestAcceptanceMultiWindow(t *testing.T) {
 	e := engineFor(t, model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{prefixBlock("api", model.Rule{
-			Name: "per-user", Counters: []string{model.KeyClient},
+			Name: "per-user", Counters: []string{model.KeySub},
 			Rates: []model.Rate{
 				{Requests: 100, Period: time.Minute},
 				{Requests: 3, Period: time.Hour, Algorithm: "FixedWindow"},
@@ -248,9 +248,9 @@ func TestAcceptanceAnonymousOnly(t *testing.T) {
 		Domain: domain,
 		Blocks: []model.Block{prefixBlock("api",
 			model.Rule{Name: "anonymous",
-				Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorDoesNotExist}},
+				Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorDoesNotExist}},
 				Rates:   []model.Rate{{Requests: 2, Period: time.Minute}}},
-			model.Rule{Name: "per-user", Counters: []string{model.KeyClient},
+			model.Rule{Name: "per-user", Counters: []string{model.KeySub},
 				Rates: []model.Rate{{Requests: 5, Period: time.Minute}}},
 		)},
 	})
@@ -272,7 +272,7 @@ func TestAcceptanceAdditiveBlocks(t *testing.T) {
 		Domain: domain,
 		Blocks: []model.Block{
 			prefixBlock("api", model.Rule{
-				Name: "per-user", Counters: []string{model.KeyClient},
+				Name: "per-user", Counters: []string{model.KeySub},
 				Rates: []model.Rate{{Requests: 5, Period: time.Minute}},
 			}),
 			prefixBlock("guard", model.Rule{

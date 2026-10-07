@@ -24,8 +24,8 @@ ambient gateways (and any other consumers) over the Envoy RLS protocol (`envoy.s
    `authorization` header), and `request_id`. The gateway takes the request's domain from the configuration of its
    `envoy.filters.http.ratelimit` filter (the service chart installs it).
 5. The service decodes the JWT payload from `token`, **without verifying the signature**: the `jwt_authn` filter on
-   the gateway has already verified it. Identity keys are assembled from the claims: the built-in `client` (the `sub`
-   claim) and the keys declared in `spec.mappings` (for example `roles`, `tenant`).
+   the gateway has already verified it. Identity keys are assembled from the claims: the built-in `sub` (the `sub`
+   claim, lowercased) and the keys declared in `spec.mappings` (for example `roles`, `tenant`).
 6. The service finds the domain's rules, computes which ones matched, updates the counters in the shared store
    (Redis) with one atomic script, and returns `OK` or `OVER_LIMIT`; on a refusal the gateway returns `429` and the
    `x-ratelimit-*` headers to the client.
@@ -61,8 +61,8 @@ baseline and from the satellites are indistinguishable and are charged to the sa
 - **Everything in one object.** The claim mapping, the groups, and the rules change in one edit and apply atomically: a
   request never sees old extraction mixed with new rules. The compiler checks references from rules to keys and groups
   inside the one object; there is no cross-object arbitration.
-- **A built-in default.** `client` from the `sub` claim (lowercased) is hardcoded in the service and works with an
-  empty `mappings`; a `key: client` entry overrides it.
+- **A built-in default.** `sub` from the `sub` claim (lowercased) is hardcoded in the service and works with an
+  empty `mappings`; a `key: sub` entry overrides it.
 - **Object bounds**, per [the limits and their origin](limits.md): 128 buckets per decision, the decision of one
   descriptor, is an engine constant held by the compiler, and a gRPC check carries at most 16 descriptors; the number
   of blocks, rules, axes, and windows is unbounded, and the object size is bounded only by the API server.
@@ -86,7 +86,7 @@ spec:
 
   groups:                                    # named client lists; InGroup refers to them
   - name: mvno-group-1
-    clients: [mvno_acc1, mvno_acc2]          # client values in its effective normalization (default Lowercase)
+    clients: [mvno_acc1, mvno_acc2]          # sub values in its effective normalization (default Lowercase)
 
   limits:
   # ── Block 1: a cascade of plans ────────────────────────────────────
@@ -100,18 +100,18 @@ spec:
     rules:
     - name: internal-bypass                  # Bypass: matched -> the cascade ends with an allow,
       matches:                                  # no trip to the store. Bypasses only THIS block:
-      - { key: client, operator: Equals, value: prometheus }  # block 2 still applies
+      - { key: sub, operator: Equals, value: prometheus }  # block 2 still applies
       behavior: Bypass
     - name: mvno-group-1-trial               # Shadow in a cascade: counts and writes metrics,
       matches:                                  # but does NOT stop the cascade: trialing a tighter
-      - { key: client, operator: InGroup, value: mvno-group-1 }  # limit on top of the live rule below
+      - { key: sub, operator: InGroup, value: mvno-group-1 }  # limit on top of the live rule below
       counters: []
       behavior: Shadow
       rates:
       - { requests: 50, periodSeconds: 60 }
     - name: mvno-group-1                     # unique within the block
       matches:                                  # identity/claims only; AND
-      - { key: client, operator: InGroup, value: mvno-group-1 }
+      - { key: sub, operator: InGroup, value: mvno-group-1 }
       counters: []                           # bucket axes; empty = one shared bucket for the rule
       rates:                                 # the algorithm is a property of the entry (window); default GCRA
       - { requests: 100, periodSeconds: 60, algorithm: FixedWindow }
@@ -119,16 +119,16 @@ spec:
     - name: subscriber-per-user
       matches:
       - { key: roles, operator: Contains, value: subscriber }
-      counters: [client]
+      counters: [sub]
       rates:
       - { requests: 1000, periodSeconds: 60, burst: 100 }
-    - name: per-user                         # no matches: matches everyone who has client
-      counters: [client]                     # (the missing-axis semantics cuts anonymous callers off)
+    - name: per-user                         # no matches: matches everyone who has sub
+      counters: [sub]                     # (the missing-axis semantics cuts anonymous callers off)
       rates:
       - { requests: 100, periodSeconds: 60 }
     - name: anonymous
       matches:
-      - { key: client, operator: DoesNotExist } # an explicit absence predicate
+      - { key: sub, operator: DoesNotExist } # an explicit absence predicate
       counters: []
       rates:
       - { requests: 100, periodSeconds: 60 }
@@ -140,12 +140,12 @@ spec:
       - path: { type: Prefix, value: /api/ }
     rules:                                   # mode: All (default): the rules add up
     - name: per-user                         # axis: user; all paths share one bucket
-      counters: [client]
+      counters: [sub]
       rates:                                 # rate + quota in one rule:
       - { requests: 300, periodSeconds: 60 }        # minute window: GCRA, smoothing
       - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }  # daily quota with a reset
     - name: per-user-per-path                # axes: user + path; a bucket per pair
-      counters: [client, path]               # under Prefix the path axis is the raw path: mind the
+      counters: [sub, path]               # under Prefix the path axis is the raw path: mind the
       rates:                                 # cardinality; under Template the path = the template itself
       - { requests: 60, periodSeconds: 60 }
 ```
@@ -158,14 +158,14 @@ spec:
 | --- | --- | --- |
 | `domain` | string, required | binding to the traffic source (see above); equals `metadata.name` |
 | `mappings` | list | extraction of keys from token claims; empty = built-in keys only |
-| `groups` | list | named client lists; the `InGroup` operator refers to a group; values are compared with the `client` key after its effective normalization |
+| `groups` | list | named client lists; the `InGroup` operator refers to a group; values are compared with the `sub` key after its effective normalization |
 | `limits` | list of blocks | block = `target` + `mode` + `rules`; blocks are always additive with each other |
 
 ### The mappings[] entry
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `key` | string, required | descriptor key name: the shared key pattern `^[a-z][a-zA-Z0-9_]*$`, at most 63 characters; `path`/`method`/`token` are forbidden; `client` is an allowed override |
+| `key` | string, required | descriptor key name: the shared key pattern `^[a-z][a-zA-Z0-9_]*$`, at most 63 characters; `path`/`method`/`token` are forbidden; `sub` is an allowed override |
 | `claim` | string | dot-separated path in the token payload (`realm_access.roles`) |
 | `claimPath` | list of strings | the same path segment by segment, for claim names with dots; exactly one of `claim`/`claimPath` |
 | `type` | `String` (default) \| `StringArray` | shape of the value; an array key is a set of elements |
@@ -176,8 +176,8 @@ Sanity limits (token size, axis value length, array size) are constants of the s
 escaped when counter keys are assembled. A semantically broken claim path cannot be caught by static checks at all; the
 runtime detector "key declared, tokens arriving, zero extractions" catches it (extraction metrics, under an alert).
 
-The values of `groups[].clients` are compared with the `client` key after its effective normalization: `Lowercase` by
-default; when `client` is overridden by a `mappings` entry with `normalization: None`, group values are stored and
+The values of `groups[].clients` are compared with the `sub` key after its effective normalization: `Lowercase` by
+default; when `sub` is overridden by a `mappings` entry with `normalization: None`, group values are stored and
 compared as written, and the exact case is the author's responsibility. The compiler adds no normalization of its own.
 
 ### The limits[] block
@@ -196,8 +196,8 @@ compared as written, and the exact case is the author's responsibility. The comp
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string, required | unique within the block; part of the counter key |
-| `matches` | list of predicates | a conjunction; the key is `client`, a `mappings` key, or a capture of its own block (`path`/`method`/`token` are forbidden: routes go in `target`); empty = everyone |
-| `counters` | list of keys | bucket axes: `client`, `path`, `method`, a scalar `mappings` key, or a capture; empty = one shared bucket |
+| `matches` | list of predicates | a conjunction; the key is `sub`, a `mappings` key, or a capture of its own block (`path`/`method`/`token` are forbidden: routes go in `target`); empty = everyone |
+| `counters` | list of keys | bucket axes: `sub`, `path`, `method`, a scalar `mappings` key, or a capture; empty = one shared bucket |
 | `rates` | list of entries | counting windows; absent in a rule with `behavior: Bypass` |
 | `behavior` | `Enforce` (default) \| `Shadow` \| `Bypass` | Shadow: count and write metrics, never refuse; Bypass: skip without going to the store |
 | `replacedRules` | list of names | suppresses rules of its own block (only with `mode: All`); inert while the rule is `Shadow` |
@@ -239,7 +239,7 @@ An unknown key (one outside the effective key set of the domain) is rejected by 
 exactly and case-sensitively. Captured segments become descriptor keys visible to the rules of their own block and are
 usable in `counters` ("a counter per `{orderId}`"); a placeholder name follows the shared descriptor key pattern
 `^[a-z][a-zA-Z0-9_]*$` (at most 63 characters, camelCase allowed), and the names `path`, `method`, `token`, and
-`client` are forbidden for placeholders; see "Validations". Inside a block whose route is a Template, the `path` axis
+`sub` are forbidden for placeholders; see "Validations". Inside a block whose route is a Template, the `path` axis
 takes the value of the template itself rather than the raw path: axis cardinality is bounded by construction.
 
 ### Prefix and Exact semantics
@@ -257,15 +257,15 @@ a `/`; `/api/v1/orders` matches `/api/v1/orders` and `/api/v1/orders/42` but not
 | --- | --- | --- |
 | `path` | the request's `:path` | the query string is stripped before matching and axes; as an axis: the template string under `Template`, the raw path under `Prefix`/`Exact` |
 | `method` | the request's `:method` | |
-| `client` | built-in: the `sub` claim, lowercased | works with an empty `mappings`; overridden by a `key: client` entry |
+| `sub` | built-in: the `sub` claim, lowercased | works with an empty `mappings`; overridden by a `key: sub` entry |
 | mapping keys | `spec.mappings` (`roles`, `tenant`, ...) | types and normalization per the entry |
 | captures | the block's `Template` routes | visible to the rules of their own block; shadow a mapping key of the same name (an informational entry) |
 
-Where a key is allowed: `matches[].key` is `client`, a `mappings` key, or a capture of the same block (`path`,
-`method`, and `token` are forbidden in `matches`: routes are described by `target`); `counters[]` is `client`, `path`,
+Where a key is allowed: `matches[].key` is `sub`, a `mappings` key, or a capture of the same block (`path`,
+`method`, and `token` are forbidden in `matches`: routes are described by `target`); `counters[]` is `sub`, `path`,
 `method`, a scalar `mappings` key, or a capture (`path` under `Template` is the template string, under
 `Prefix`/`Exact` the raw path). `token` is an input of extraction, not a key. The effective key set of a domain is
-`client`, `path`, `method`, and the `spec.mappings` keys; `status.effectiveKeys` publishes exactly that set. Captures
+`sub`, `path`, `method`, and the `spec.mappings` keys; `status.effectiveKeys` publishes exactly that set. Captures
 extend it only inside their own block and are not listed in `effectiveKeys`. A missing or malformed token is not an
 error: there are simply no identity keys, the rules on them do not match, and the rest apply. The gateway, not the
 component, enforces that a token is required.
@@ -280,7 +280,7 @@ component, enforces that a token is required.
 3. **`mode: FirstMatch`** applies the first matched rule in list order; the order is semantics. A rule with
    `behavior: Shadow` counts but does not stop the cascade; `behavior: Bypass` ends the cascade with an allow;
    `replacedRules` is forbidden by validation.
-4. **A missing axis**: a rule whose `counters` axis is absent from the request (for example `client` for an anonymous
+4. **A missing axis**: a rule whose `counters` axis is absent from the request (for example `sub` for an anonymous
    caller) does not match; there is nothing to key the bucket with.
 5. **The verdict**: `OVER_LIMIT` if at least one applied rule (of any block) is exceeded; the `x-ratelimit-*` headers
    come from the strictest matched rule.
@@ -327,7 +327,7 @@ client ──HTTP──> gateway ──jwt_authn──> (token signature verifie
    chart's `management.gatewayDomains`, no block is matched, whatever its `target`
    ([chart](helm-chart.md), "Management API port").
 3. **Matching**: the blocks whose `target` matched are selected; inside a block, `mode` decides between all matched
-   rules and the first one. A rule without its axis (`client` for an anonymous caller) does not match. A `Bypass` rule
+   rules and the first one. A rule without its axis (`sub` for an anonymous caller) does not match. A `Bypass` rule
    ends its cascade with an allow and does not go to the store.
 4. **Expansion**: every window of every matched rule is a separate bucket; a single builder constructs the keys.
 5. **One trip to the store, two passes inside**: first, all buckets are only evaluated; if no enforcing bucket refused,
@@ -505,7 +505,7 @@ problem) or does not fit into the ConfigMap, and last-good is enforced.
 status:
   observedGeneration: 7
   activeGeneration: 7                  # the latest generation is enforced
-  effectiveKeys: [client, method, path, roles, plan]   # domain-wide keys of activeGeneration; captures are not listed
+  effectiveKeys: [method, path, plan, roles, sub]   # domain-wide keys of activeGeneration; captures are not listed
   replicas:                            # what the operator sees through the EndpointSlice of the Service ratelimit
     total: 3                           # ready replicas at the time of the probe
     applied: 2                         # of them, enforcing activeGeneration
@@ -643,8 +643,8 @@ Schema (OpenAPI):
 The operator's compiler, on every generation, with the result in `status.ruleProblems`, `Accepted`/`Ready`, and
 last-good:
 
-- references: a predicate key is `client`, a `mappings` key, or a capture of a `Template` route of its own block; an
-  axis key is `client`, `path`, `method`, a scalar `mappings` key, or the same kind of capture
+- references: a predicate key is `sub`, a `mappings` key, or a capture of a `Template` route of its own block; an
+  axis key is `sub`, `path`, `method`, a scalar `mappings` key, or the same kind of capture
   (`UnresolvedKeyReference`); `InGroup` names a group from `groups` (`UnresolvedGroupReference`); `replacedRules`
   names rules of its own block (`UnresolvedReplacedRules`);
 - types: `Equals` does not apply to a `StringArray` key unless a capture shadows it (`IncompatibleOperator`); an array
@@ -653,10 +653,10 @@ last-good:
   `In` takes only a non-empty `values`, `Exists`/`DoesNotExist` take no parameters; `matches` does not accept
   `path`/`method`/`token`; `Bypass` carries no `rates`, all others carry at least one window; `replacedRules` only in
   `All`; `Bypass` in `All` names `replacedRules`, otherwise `InvalidSpec` (a silent no-op is not acceptable);
-  `mappings[].key` is not `path`/`method`/`token` (`client` is an allowed override), and exactly one of
+  `mappings[].key` is not `path`/`method`/`token` (`sub` is an allowed override), and exactly one of
   `claim`/`claimPath`; `Template`: segments are literals or a single `{name}`, placeholders do not repeat and do not
-  coincide with the built-in keys `path`, `method`, `token`, `client` (for `client` the ban is fundamental: the caller
-  controls the path, and a capture would let it assign itself a client identity); an unknown field or enum value of a
+  coincide with the built-in keys `path`, `method`, `token`, `sub` (for `sub` the ban is fundamental: the caller
+  controls the path, and a capture would let it assign itself an identity); an unknown field or enum value of a
   newer schema: the object is decoded strictly (`DisallowUnknownFields`), and the field path goes into the message;
 - windows (`InvalidWindow`, the engine's window check): `burst` only with GCRA; `requests ≤ periodSeconds × 10⁶`;
   with an emission < 100 µs `periodSeconds × 10⁶` is divisible by `requests` without remainder;

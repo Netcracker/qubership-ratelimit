@@ -149,7 +149,7 @@ func TestReconcile_reportsAHealthyGeneration(t *testing.T) {
 	assert.Equal(t, int64(3), stored.Status.ActiveGeneration)
 	assert.Equal(t, int32(1), stored.Status.Rules)
 	assert.Zero(t, stored.Status.Problems)
-	assert.Subset(t, stored.Status.EffectiveKeys, []string{"client", "method", "path"})
+	assert.Subset(t, stored.Status.EffectiveKeys, []string{"method", "path", "sub"})
 
 	accepted := condition(t, stored.Status.Conditions, ratelimitv1.ConditionAccepted)
 	assert.Equal(t, metav1.ConditionTrue, accepted.Status)

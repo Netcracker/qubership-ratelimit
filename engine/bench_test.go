@@ -41,13 +41,13 @@ func benchSnapshot(b *testing.B) *compile.Snapshot {
 				Target: model.Target{Routes: []model.Route{
 					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/widgets/"}}}},
 				Rules: []model.Rule{
-					{Name: "vip", Counters: []string{model.KeyClient},
-						Matches: []model.Predicate{{Key: model.KeyClient, Operator: model.OperatorInGroup, Value: "vip"}},
+					{Name: "vip", Counters: []string{model.KeySub},
+						Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"}},
 						Rates:   []model.Rate{{Requests: 1000, Period: time.Minute}}},
-					{Name: "admin", Counters: []string{model.KeyClient},
+					{Name: "admin", Counters: []string{model.KeySub},
 						Matches: []model.Predicate{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
 						Rates:   []model.Rate{{Requests: 500, Period: time.Minute}}},
-					{Name: "everyone", Counters: []string{model.KeyClient},
+					{Name: "everyone", Counters: []string{model.KeySub},
 						Rates: []model.Rate{
 							{Requests: 6_000_000, Period: time.Minute},
 							{Requests: 1_000_000_000, Period: time.Hour, Algorithm: "FixedWindow"}}},
@@ -95,7 +95,7 @@ func BenchmarkDecideAuthed(b *testing.B) {
 func BenchmarkDecidePreExtracted(b *testing.B) {
 	e := engine.New(benchSnapshot(b), memory.New())
 	req := engine.Request{Path: "/api/widgets/1", Method: "GET",
-		Keys: map[string][]string{model.KeyClient: {"alice"}, "roles": {"basic", "reporting"}}}
+		Keys: map[string][]string{model.KeySub: {"alice"}, "roles": {"basic", "reporting"}}}
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := e.Decide(b.Context(), req); err != nil {
@@ -181,7 +181,7 @@ func BenchmarkMatchTargets(b *testing.B) {
 
 func BenchmarkMatchEvaluate(b *testing.B) {
 	snap := benchSnapshot(b)
-	keys := map[string][]string{model.KeyClient: {"alice"}, "roles": {"basic", "reporting"}}
+	keys := map[string][]string{model.KeySub: {"alice"}, "roles": {"basic", "reporting"}}
 	b.ReportAllocs()
 	for b.Loop() {
 		match.Match(snap, "/api/widgets/1", "GET").Evaluate(keys)
@@ -246,7 +246,7 @@ func BenchmarkKeyBucket(b *testing.B) {
 func BenchmarkMemoryStoreDecide(b *testing.B) {
 	s := memory.New()
 	snap := benchSnapshot(b)
-	keys := map[string][]string{model.KeyClient: {"alice"}}
+	keys := map[string][]string{model.KeySub: {"alice"}}
 	buckets := match.Match(snap, "/api/widgets/1", "GET").Evaluate(keys).Buckets()
 	b.ReportAllocs()
 	for b.Loop() {

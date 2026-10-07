@@ -31,7 +31,7 @@ func ActiveSetOf(snapshots map[string]*compile.Snapshot) *ActiveSet {
 }
 
 // ExtractionKeysOf lists, per domain, the keys the snapshot extracts from a
-// token: the built-in client plus the domain's mapped keys. Their series are
+// token: the built-in sub plus the domain's mapped keys. Their series are
 // seeded so that "declared but never extracted" is a visible zero rather
 // than a missing series. path and method are resolved from the request, not
 // extracted, and stay out.

@@ -265,7 +265,7 @@ func withClients(p *v1.RateLimitPolicy, n int) *v1.RateLimitPolicy {
 		Name: "tenants",
 		Rules: []v1.Rule{{
 			Name:    "listed",
-			Matches: []v1.Predicate{{Key: "client", Operator: v1.OperatorInGroup, Value: "tenants"}},
+			Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorInGroup, Value: "tenants"}},
 			Rates:   []v1.Rate{{Requests: 100, PeriodSeconds: 60}},
 		}},
 	})

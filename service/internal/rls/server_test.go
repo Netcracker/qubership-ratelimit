@@ -504,7 +504,7 @@ func TestShouldRateLimit_extractsTheClientFromTheToken(t *testing.T) {
 	const domain = "gateway.public"
 	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
+		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
 			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
 	ruleStore := store.New()
@@ -535,7 +535,7 @@ func TestShouldRateLimit_acceptsPreExtractedKeys(t *testing.T) {
 	const domain = "gateway.public"
 	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
+		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
 			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
 	ruleStore := store.New()
@@ -545,7 +545,7 @@ func TestShouldRateLimit_acceptsPreExtractedKeys(t *testing.T) {
 
 	check := func(client string) envoyratelimit.RateLimitResponse_Code {
 		resp, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"client": client}))
+			request(domain, map[string]string{"sub": client}))
 		require.NoError(t, err)
 		return resp.GetOverallCode()
 	}
@@ -681,14 +681,14 @@ func requestWith(descriptors ...map[string]string) *envoyratelimit.RateLimitRequ
 func perClientOnePerHourPolicy() model.Policy {
 	return model.Policy{Domain: "gateway.public", Blocks: []model.Block{{
 		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
+		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
 			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
 }
 
 func TestShouldRateLimit_decidesEachDescriptorIndependently(t *testing.T) {
 	// Merging two descriptors into one request would hand the rule a
-	// two-valued client axis, which no rule matches — a silent bypass. Each
+	// two-valued sub axis, which no rule matches — a silent bypass. Each
 	// descriptor must be its own decision instead.
 	ruleStore := store.New()
 	ruleStore.Replace(ruleSetWith(t, perClientOnePerHourPolicy()))
@@ -696,7 +696,7 @@ func TestShouldRateLimit_decidesEachDescriptorIndependently(t *testing.T) {
 	server := NewServer(ruleStore, log)
 
 	twoClients := func() *envoyratelimit.RateLimitRequest {
-		return requestWith(map[string]string{"client": "alice"}, map[string]string{"client": "bob"})
+		return requestWith(map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"})
 	}
 
 	first, err := server.ShouldRateLimit(context.Background(), twoClients())
@@ -716,12 +716,12 @@ func TestShouldRateLimit_refusesWhenAnyDescriptorRefuses(t *testing.T) {
 	server := NewServer(ruleStore, log)
 
 	first, err := server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"client": "alice"}))
+		requestWith(map[string]string{"sub": "alice"}))
 	require.NoError(t, err)
 	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode())
 
 	mixed, err := server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"client": "alice"}, map[string]string{"client": "bob"}))
+		requestWith(map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"}))
 	require.NoError(t, err)
 
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, mixed.GetOverallCode(),
@@ -759,10 +759,10 @@ func TestShouldRateLimit_emptyDescriptorValueMeansAbsence(t *testing.T) {
 
 	for range 3 {
 		resp, err := server.ShouldRateLimit(context.Background(),
-			requestWith(map[string]string{"client": ""}))
+			requestWith(map[string]string{"sub": ""}))
 		require.NoError(t, err)
 		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
-			"no client key means the per-client rule does not match")
+			"no sub key means the per-client rule does not match")
 	}
 }
 
@@ -776,7 +776,7 @@ func TestShouldRateLimit_tooManyDescriptorsDeny(t *testing.T) {
 
 	descriptors := make([]map[string]string, 0, 17)
 	for i := range 17 {
-		descriptors = append(descriptors, map[string]string{"client": fmt.Sprintf("c%d", i)})
+		descriptors = append(descriptors, map[string]string{"sub": fmt.Sprintf("c%d", i)})
 	}
 	resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), requestWith(descriptors...))
 
@@ -825,12 +825,12 @@ func TestShouldRateLimit_storeErrorAfterRefusalStillDenies(t *testing.T) {
 	server := NewServer(ruleStore, log)
 
 	first, err := server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"client": "alice"}))
+		requestWith(map[string]string{"sub": "alice"}))
 	require.NoError(t, err)
 	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode())
 
 	resp, err := server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"client": "alice"}, map[string]string{"client": "bob"}))
+		requestWith(map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"}))
 
 	require.NoError(t, err, "a known refusal is an answer, not an error")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())

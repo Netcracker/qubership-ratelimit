@@ -178,16 +178,16 @@ func TestEntrySize_isNeverUnderTheHeap(t *testing.T) {
 			return nil, []identity.Skip{{Key: "a"}, {Key: "b"}, {Key: "c"}, {Key: "d"}, {Key: "e"}}
 		}},
 		{"a subject", func(i int) (map[string][]string, []identity.Skip) {
-			return map[string][]string{"client": {value(i, 36)}}, nil
+			return map[string][]string{"sub": {value(i, 36)}}, nil
 		}},
 		{"a subject, a plan, 20 roles", func(i int) (map[string][]string, []identity.Skip) {
-			return map[string][]string{"client": {value(i, 36)}, "plan": {value(i, 6)}, "roles": roles(i, 20, 15)}, nil
+			return map[string][]string{"sub": {value(i, 36)}, "plan": {value(i, 6)}, "roles": roles(i, 20, 15)}, nil
 		}},
 		{"a subject, a plan, 40 long roles", func(i int) (map[string][]string, []identity.Skip) {
-			return map[string][]string{"client": {value(i, 36)}, "plan": {value(i, 6)}, "roles": roles(i, 40, 24)}, nil
+			return map[string][]string{"sub": {value(i, 36)}, "plan": {value(i, 6)}, "roles": roles(i, 40, 24)}, nil
 		}},
 		{"a subject, a plan, 64 short roles", func(i int) (map[string][]string, []identity.Skip) {
-			return map[string][]string{"client": {value(i, 36)}, "plan": {value(i, 6)}, "roles": roles(i, 64, 8)}, nil
+			return map[string][]string{"sub": {value(i, 36)}, "plan": {value(i, 6)}, "roles": roles(i, 64, 8)}, nil
 		}},
 		{"nine keys", func(i int) (map[string][]string, []identity.Skip) {
 			keys := map[string][]string{}

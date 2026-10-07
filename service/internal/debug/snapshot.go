@@ -90,7 +90,7 @@ type DomainSnapshot struct {
 	ListValuedKeys []string `json:"listValuedKeys,omitempty"`
 
 	// Keys are the identity extractions in the order the engine runs them:
-	// the built-in client first unless a mapping overrides it, then the
+	// the built-in sub first unless a mapping overrides it, then the
 	// mapped keys as authored.
 	Keys []KeyView `json:"keys"`
 

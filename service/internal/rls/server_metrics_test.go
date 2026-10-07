@@ -249,7 +249,7 @@ func TestShouldRateLimit_countsExtractionsAndSkips(t *testing.T) {
 	const domain = "gateway.public"
 	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
+		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
 			Rates: []model.Rate{{Requests: 10, Period: time.Hour}}}},
 	}}}
 	ruleStore := store.New()
@@ -258,10 +258,10 @@ func TestShouldRateLimit_countsExtractionsAndSkips(t *testing.T) {
 	server := NewServer(ruleStore, log)
 
 	extractions := func() float64 {
-		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(domain, model.KeyClient))
+		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(domain, model.KeySub))
 	}
 	skips := func() float64 {
-		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(domain, model.KeyClient, "decode_failed"))
+		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(domain, model.KeySub, "decode_failed"))
 	}
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice"}`))
 
@@ -285,7 +285,7 @@ func TestShouldRateLimit_countsTheDirectFormsSkips(t *testing.T) {
 	const domain = "gateway.public"
 	p := model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeyClient},
+		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
 			Rates: []model.Rate{{Requests: 10, Period: time.Hour}}}},
 	}}}
 	ruleStore := store.New()
@@ -294,14 +294,14 @@ func TestShouldRateLimit_countsTheDirectFormsSkips(t *testing.T) {
 	server := NewServer(ruleStore, log)
 
 	skips := func() float64 {
-		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(domain, model.KeyClient, "too_long"))
+		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(domain, model.KeySub, "too_long"))
 	}
 	extractions := func() float64 {
-		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(domain, model.KeyClient))
+		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(domain, model.KeySub))
 	}
 	check := func(client string) {
 		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api", "client": client}))
+			request(domain, map[string]string{"path": "/api", "sub": client}))
 		require.NoError(t, err)
 	}
 
@@ -489,11 +489,11 @@ func TestShouldRateLimit_theBudgetBindsOneDecisionNotTheCall(t *testing.T) {
 		for _, pd := range periods {
 			rates = append(rates, model.Rate{Requests: 100, Period: pd})
 		}
-		// Counted by client, so the two descriptors below address disjoint
+		// Counted by sub, so the two descriptors below address disjoint
 		// buckets: a per-call check that merged equal keys would not see them
 		// as one set.
 		rules = append(rules, model.Rule{
-			Name: fmt.Sprintf("r%d", ri), Counters: []string{model.KeyClient}, Rates: rates,
+			Name: fmt.Sprintf("r%d", ri), Counters: []string{model.KeySub}, Rates: rates,
 		})
 	}
 	atTheBudget := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
@@ -516,8 +516,8 @@ func TestShouldRateLimit_theBudgetBindsOneDecisionNotTheCall(t *testing.T) {
 	refused := delta(overBudget, func() {
 		var err error
 		resp, err = server.ShouldRateLimit(context.Background(), requestWith(
-			map[string]string{"path": "/any", model.KeyClient: "alice"},
-			map[string]string{"path": "/any", model.KeyClient: "bob"}))
+			map[string]string{"path": "/any", model.KeySub: "alice"},
+			map[string]string{"path": "/any", model.KeySub: "bob"}))
 		require.NoError(t, err)
 	})
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),

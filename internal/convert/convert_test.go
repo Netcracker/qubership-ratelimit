@@ -46,7 +46,7 @@ func TestModelVocabulary_matchesTheAPI(t *testing.T) {
 
 	assert.Equal(t, model.KeyPath, v1.KeyPath)
 	assert.Equal(t, model.KeyMethod, v1.KeyMethod)
-	assert.Equal(t, model.KeyClient, v1.KeyClient)
+	assert.Equal(t, model.KeySub, v1.KeySub)
 	assert.Equal(t, model.KeyToken, v1.KeyToken)
 }
 
@@ -89,8 +89,8 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 			}}},
 			Rules: []v1.Rule{{
 				Name:          "per-user",
-				Matches:       []v1.Predicate{{Key: "client", Operator: v1.OperatorIn, Values: []string{"a"}}},
-				Counters:      []string{"client"},
+				Matches:       []v1.Predicate{{Key: "sub", Operator: v1.OperatorIn, Values: []string{"a"}}},
+				Counters:      []string{"sub"},
 				Behavior:      v1.RuleBehaviorShadow,
 				ReplacedRules: []string{"other"},
 				Rates: []v1.Rate{{
@@ -124,7 +124,7 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 	require.Len(t, block.Rules, 1)
 	rule := block.Rules[0]
 	assert.Equal(t, model.BehaviorShadow, rule.Behavior)
-	assert.Equal(t, []string{"client"}, rule.Counters)
+	assert.Equal(t, []string{"sub"}, rule.Counters)
 	assert.Equal(t, []string{"other"}, rule.ReplacedRules)
 	require.Len(t, rule.Matches, 1)
 	assert.Equal(t, model.OperatorIn, rule.Matches[0].Operator)

@@ -49,7 +49,7 @@ func TestRules_reportsTheCompiledSet(t *testing.T) {
 	cascade := view.Blocks[0]
 	require.Equal(t, "FirstMatch", cascade.Mode, "block mode mirrors the custom resource")
 	require.Equal(t, "bypass", cascade.Rules[0].Mode, "rule mode is the runtime vocabulary")
-	require.Equal(t, []string{"client"}, cascade.Rules[2].Axes)
+	require.Equal(t, []string{"sub"}, cascade.Rules[2].Axes)
 	require.Equal(t, int64(60), cascade.Rules[2].Rates[0].PeriodSeconds)
 	require.Equal(t, "1m0s", cascade.Rules[2].Rates[0].Period)
 
@@ -88,7 +88,7 @@ func TestRules_annotatesAScopedListing(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?axis.client=prometheus", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?axis.sub=prometheus", viewerRoles(), nil),
 		http.StatusOK, &view)
 
 	byID := map[string]ruleview.RuleView{}
@@ -135,19 +135,19 @@ func TestRules_judgesACaptureKeyedRuleTheWayADecisionWould(t *testing.T) {
 		want  map[string]annotation
 	}{
 		"the prefix route carries no capture": {
-			query: "path=/api/orders&method=POST&axis.client=dave",
+			query: "path=/api/orders&method=POST&axis.sub=dave",
 			want:  map[string]annotation{items: never, perClient: always},
 		},
 		"the template route carries the capture": {
-			query: "path=/api/orders/42/items&method=GET&axis.client=dave",
+			query: "path=/api/orders/42/items&method=GET&axis.sub=dave",
 			want:  map[string]annotation{items: always, perClient: never},
 		},
 		"the caller repeats what the route decided": {
-			query: "path=/api/orders/42/items&method=GET&axis.client=dave&axis.order_id=42",
+			query: "path=/api/orders/42/items&method=GET&axis.sub=dave&axis.order_id=42",
 			want:  map[string]annotation{items: always, perClient: never},
 		},
 		"no path leaves the capture open": {
-			query: "axis.client=dave",
+			query: "axis.sub=dave",
 			want: map[string]annotation{
 				items: {
 					Applicability: ruleview.ApplicabilityConditional,
@@ -160,15 +160,15 @@ func TestRules_judgesACaptureKeyedRuleTheWayADecisionWould(t *testing.T) {
 			},
 		},
 		"known-absent decides it without a path": {
-			query: "axis.client=dave&absent=order_id",
+			query: "axis.sub=dave&absent=order_id",
 			want:  map[string]annotation{items: never, perClient: always},
 		},
 		"known-absent agreeing with the prefix route": {
-			query: "path=/api/orders&method=POST&axis.client=dave&absent=order_id",
+			query: "path=/api/orders&method=POST&axis.sub=dave&absent=order_id",
 			want:  map[string]annotation{items: never, perClient: always},
 		},
 		"no method leaves a capture the routes disagree on open": {
-			query: "path=/api/orders/42/items&axis.client=dave",
+			query: "path=/api/orders/42/items&axis.sub=dave",
 			want: map[string]annotation{
 				items: {
 					Applicability: ruleview.ApplicabilityConditional,
@@ -199,13 +199,13 @@ func TestRules_refusesACaptureThatContradictsThePath(t *testing.T) {
 
 	cases := map[string]struct{ query, field string }{
 		"a value on a route that produces none": {
-			query: "path=/api/orders&method=POST&axis.client=dave&axis.order_id=42", field: "axis.order_id",
+			query: "path=/api/orders&method=POST&axis.sub=dave&axis.order_id=42", field: "axis.order_id",
 		},
 		"a value other than the one the route produced": {
-			query: "path=/api/orders/42/items&method=GET&axis.client=dave&axis.order_id=7", field: "axis.order_id",
+			query: "path=/api/orders/42/items&method=GET&axis.sub=dave&axis.order_id=7", field: "axis.order_id",
 		},
 		"known-absent on a route that produces it": {
-			query: "path=/api/orders/42/items&method=GET&axis.client=dave&absent=order_id", field: "absent",
+			query: "path=/api/orders/42/items&method=GET&axis.sub=dave&absent=order_id", field: "absent",
 		},
 	}
 	for name, tc := range cases {
@@ -243,19 +243,19 @@ func TestRules_judgesAShadowedKeyByTheRouteThatProducesIt(t *testing.T) {
 		want  map[string]annotation
 	}{
 		"the identity's plan applies on the prefix route": {
-			query: "path=/plans&method=POST&axis.client=dave&axis.plan=gold",
+			query: "path=/plans&method=POST&axis.sub=dave&axis.plan=gold",
 			want:  map[string]annotation{silverOnly: never, perClient: always},
 		},
 		"no plan from either side leaves the rule open": {
-			query: "path=/plans&method=POST&axis.client=dave",
+			query: "path=/plans&method=POST&axis.sub=dave",
 			want:  open,
 		},
 		"the route's plan replaces the identity's on the template route": {
-			query: "path=/plans/silver/items&method=GET&axis.client=dave&axis.plan=gold",
+			query: "path=/plans/silver/items&method=GET&axis.sub=dave&axis.plan=gold",
 			want:  map[string]annotation{silverOnly: always, perClient: never},
 		},
 		"the method picks the route, so the plan is open": {
-			query: "path=/plans/silver/items&axis.client=dave&axis.plan=gold",
+			query: "path=/plans/silver/items&axis.sub=dave&axis.plan=gold",
 			want:  open,
 		},
 	}
@@ -283,11 +283,11 @@ func TestRules_alwaysAgreesWithTheSimulation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?path="+tc.path+
-				"&method="+tc.method+"&axis.client=dave", viewerRoles(), nil), http.StatusOK, &view)
+				"&method="+tc.method+"&axis.sub=dave", viewerRoles(), nil), http.StatusOK, &view)
 			var simulation SimulationResponse
 			decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
 				Domain: testDomain, Path: tc.path, Method: tc.method,
-				Keys: map[string][]string{"client": {"dave"}},
+				Keys: map[string][]string{"sub": {"dave"}},
 			}), http.StatusOK, &simulation)
 
 			require.Equal(t, appliedRuleIDs(simulation), alwaysRuleIDs(view), "%s %s", tc.method, tc.path)
@@ -324,8 +324,8 @@ func TestRules_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 
 func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {"alice"}}, 4)
-	h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {"bob"}}, 1)
+	h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {"alice"}}, 4)
+	h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {"bob"}}, 1)
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
@@ -338,7 +338,7 @@ func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 
 	alice := list.Items[0]
 	require.Equal(t, "cascade/everyone", alice.RuleID)
-	require.Equal(t, map[string]string{"client": "alice"}, alice.Axes)
+	require.Equal(t, map[string]string{"sub": "alice"}, alice.Axes)
 	require.Equal(t, "enforce", alice.Mode)
 	require.Equal(t, int64(100), alice.Limit)
 	require.Equal(t, int64(96), alice.Remaining)
@@ -348,7 +348,7 @@ func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 // Reading must not spend anyone's budget: the listing goes through Peek.
 func TestCounters_doNotChargeWhatTheyReport(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	target := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 	var first, second CounterList
@@ -360,8 +360,8 @@ func TestCounters_doNotChargeWhatTheyReport(t *testing.T) {
 
 func TestCounters_limitedSelectsOnlyTheRefusingOnes(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
@@ -369,7 +369,7 @@ func TestCounters_limitedSelectsOnlyTheRefusingOnes(t *testing.T) {
 		viewerRoles(), nil), http.StatusOK, &list)
 
 	require.Len(t, list.Items, 1)
-	require.Equal(t, map[string]string{"client": "crawler"}, list.Items[0].Axes)
+	require.Equal(t, map[string]string{"sub": "crawler"}, list.Items[0].Axes)
 	require.True(t, list.Items[0].Limited)
 	require.Positive(t, list.Items[0].RetryAfterSeconds)
 }
@@ -384,17 +384,17 @@ func TestCounters_refusesAFalseThatPretendsToNarrow(t *testing.T) {
 func TestCounters_axisFiltersAreOrWithinANameAndAndBetweenNames(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol"} {
-		h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {client}}, 1)
 	}
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?axis.client=alice&axis.client=carol",
+		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.sub=carol",
 		viewerRoles(), nil), http.StatusOK, &list)
 
 	require.Len(t, list.Items, 2)
 	for _, item := range list.Items {
-		require.Contains(t, []string{"alice", "carol"}, item.Axes["client"])
+		require.Contains(t, []string{"alice", "carol"}, item.Axes["sub"])
 	}
 }
 
@@ -409,7 +409,7 @@ func TestCounters_anAxisTheRuleLacksMatchesNothing(t *testing.T) {
 	require.Len(t, all.Items, 1)
 	require.Empty(t, all.Items[0].Axes)
 
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?axis.client=alice",
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice",
 		viewerRoles(), nil), http.StatusOK, &filtered)
 	require.Empty(t, filtered.Items)
 }
@@ -417,7 +417,7 @@ func TestCounters_anAxisTheRuleLacksMatchesNothing(t *testing.T) {
 func TestCounters_pagesWithACursorBoundToItsSelection(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol", "dave"} {
-		h.spend(t, "/api/invoices/1", map[string][]string{model.KeyClient: {client}}, 1)
+		h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {client}}, 1)
 	}
 	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 
@@ -438,7 +438,7 @@ func TestCounters_pagesWithACursorBoundToItsSelection(t *testing.T) {
 	// order the store walks them.
 	clients := make([]string, 0, 4)
 	for _, item := range append(first.Items, second.Items...) {
-		clients = append(clients, item.Axes["client"])
+		clients = append(clients, item.Axes["sub"])
 	}
 	require.ElementsMatch(t, []string{"alice", "bob", "carol", "dave"}, clients)
 
@@ -464,7 +464,7 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 		Domain: testDomain,
 		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
-		Keys:   map[string][]string{model.KeyClient: {"alice"}},
+		Keys:   map[string][]string{model.KeySub: {"alice"}},
 	}), http.StatusOK, &response)
 
 	require.True(t, response.Allowed)
@@ -472,7 +472,7 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 	require.NotNil(t, response.Headers)
 	require.Equal(t, "gcra", response.Headers.Algorithm)
 	require.Equal(t, int64(60), response.Headers.PeriodSeconds)
-	require.Equal(t, []string{"client"}, response.ExtractedKeys)
+	require.Equal(t, []string{"sub"}, response.ExtractedKeys)
 
 	require.Len(t, response.Rules, 1)
 	require.Equal(t, "cascade/everyone", response.Rules[0].ID)
@@ -488,14 +488,14 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 
 func TestSimulation_namesTheBindingWindowOnARefusal(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"crawler"}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 
 	var response SimulationResponse
 	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/orders",
 		Method: http.MethodGet,
-		Keys:   map[string][]string{model.KeyClient: {"crawler"}},
+		Keys:   map[string][]string{model.KeySub: {"crawler"}},
 	}), http.StatusOK, &response)
 
 	require.False(t, response.Allowed)
@@ -515,7 +515,7 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 		Domain: testDomain,
 		Path:   "/api/orders",
 		Method: http.MethodGet,
-		Keys:   map[string][]string{model.KeyClient: {"alice"}},
+		Keys:   map[string][]string{model.KeySub: {"alice"}},
 		Cost:   1_000_000,
 	}), http.StatusOK, &response)
 
@@ -536,12 +536,12 @@ func TestSimulation_refusesTheCombinationsTheFormsForbid(t *testing.T) {
 		"the token form carrying keys": {
 			Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
 			IdentitySource: identityToken, Token: "t",
-			Keys: map[string][]string{model.KeyClient: {"alice"}},
+			Keys: map[string][]string{model.KeySub: {"alice"}},
 		},
 		"the keys form carrying a token": {
 			Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
 			IdentitySource: identityKeys, Token: "t",
-			Keys: map[string][]string{model.KeyClient: {"alice"}},
+			Keys: map[string][]string{model.KeySub: {"alice"}},
 		},
 		"an unknown identity source": {
 			Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
@@ -624,9 +624,9 @@ func TestRules_aPathWithoutAMethodKeepsMethodRestrictedBlocks(t *testing.T) {
 // typo in one of them has to be an error rather than a silently wider command.
 func TestReset_refusesAMisspelledSafetyParameter(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
-	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.client=alice&dryrun=true",
+	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&dryrun=true",
 		"key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
 	require.Equal(t, []string{"dryrun"}, body.Meta.Fields,
 		"the answer names the parameter, because the caller cannot see the whitelist")
@@ -642,9 +642,9 @@ func TestReset_refusesAMisspelledSafetyParameter(t *testing.T) {
 // on whether the key had been seen.
 func TestReset_refusesAMisspelledSafetyParameterOnARetryToo(t *testing.T) {
 	h := newTestAPI(t)
-	h.spend(t, "/api/orders", map[string][]string{model.KeyClient: {"alice"}}, 1)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
-	const selector = "ruleId=orders/per-client&axis.client=alice"
+	const selector = "ruleId=orders/per-client&axis.sub=alice"
 	var first ResetResponse
 	decode(t, h.reset(t, selector, "key-1", operatorRoles()), http.StatusOK, &first)
 
@@ -674,6 +674,6 @@ func TestQueryNames_admitTheAxisFamily(t *testing.T) {
 	h := newTestAPI(t)
 
 	require.Equal(t, http.StatusOK, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?axis.client=alice&axis.order_id=4711",
+		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.order_id=4711",
 		viewerRoles(), nil).Code)
 }
