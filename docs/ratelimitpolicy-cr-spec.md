@@ -740,7 +740,8 @@ in them) and contain only root causes:
 | `UnresolvedReplacedRules`: `replacedRules` names a rule outside its own block | blocking |
 | `UnresolvedPresetReference`: `preset` names a preset that does not exist | blocking |
 | `IncompatibleOperator` / `InvalidCounterAxis`: the key type does not suit the operator or the axis | blocking |
-| `InvalidSpec`: a structural defect invisible to the schema: predicate arity, `Bypass` without `replacedRules` in `All`, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, an empty segment), a preset body that names a preset, a preset declared twice or without a name, an unknown field or enum value of a newer schema | blocking |
+| `InvalidSpec`: a structural defect invisible to the schema: predicate arity, `Bypass` without `replacedRules` in `All`, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, an empty segment), an unknown field or enum value of a newer schema | blocking |
+| `InvalidSpec` on presets: a preset body that names a preset, a preset declared twice or without a name | blocking |
 | `InvalidWindow`: a window the math cannot enforce | blocking |
 | `DomainBudgetExceeded`: the worst case of a decision above 128 buckets | blocking |
 | `ResolvedPolicyTooLarge`: the estimated serialized size of the resolved policy is above 1.5 MiB (1572864 bytes) | blocking |

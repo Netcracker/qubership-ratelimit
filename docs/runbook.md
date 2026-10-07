@@ -472,7 +472,8 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 | `UnresolvedReplacedRules` | `replacedRules` names a rule outside its own block |
 | `UnresolvedPresetReference` | `preset` names a preset `spec.presets.rules` does not hold; the address is the rule that names it |
 | `IncompatibleOperator`, `InvalidCounterAxis` | the key's type does not suit the operator or the axis |
-| `InvalidSpec` | a structural defect the schema cannot see: predicate arity, `Bypass` without `replacedRules` in an `All` block, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, or an empty segment from a slash at the end or two in a row), a preset body that names a preset, a preset declared twice or without a name, an unknown field or enum value (section 5) |
+| `InvalidSpec` | a structural defect the schema cannot see: predicate arity, `Bypass` without `replacedRules` in an `All` block, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, or an empty segment from a slash at the end or two in a row), an unknown field or enum value (section 5) |
+| `InvalidSpec` on presets | a preset body that names a preset, a preset declared twice or without a name |
 | `InvalidWindow` | a window the algorithm cannot enforce |
 | `DomainBudgetExceeded` | the worst case of one decision exceeds 128 buckets |
 | `ResolvedPolicyTooLarge` | the presets written into the rules that take them would make the policy larger than 1.5 MiB (1572864 bytes), by an estimate made before any preset is written into a rule; the address is empty, the policy as a whole |

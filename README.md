@@ -85,19 +85,19 @@ sample that stopped being valid fails the build.
 The schema rejects what it can see; the compiler reports what needs the domain to judge. Those land in
 `status.ruleProblems`, and the `PROBLEMS` printer column counts them:
 
-| Reason                     | Weight        | Means                                                                       |
-|----------------------------|---------------|-----------------------------------------------------------------------------|
-| `UnresolvedKeyReference`   | blocking      | nothing produces the key — no built-in, no mapping, no capture              |
-| `UnresolvedGroupReference` | blocking      | `InGroup` names a group the policy does not define                          |
-| `UnresolvedReplacedRules`  | blocking      | `replacedRules` names a rule outside its own block                          |
-| `UnresolvedPresetReference` | blocking     | `preset` names a preset `spec.presets.rules` does not hold                  |
-| `IncompatibleOperator`     | blocking      | the operator cannot apply to the type of the key, e.g. `Equals` on an array |
-| `InvalidCounterAxis`       | blocking      | an array key cannot key a bucket                                            |
-| `InvalidSpec`              | blocking      | a structural defect the schema cannot see, an unknown field among them      |
-| `InvalidWindow`            | blocking      | a window the counting math cannot honor                                     |
-| `DomainBudgetExceeded`     | blocking      | the worst-case decision is over 128 buckets                                 |
-| `ResolvedPolicyTooLarge`   | blocking      | the presets written into the rules would make the policy larger than 1.5 MiB |
-| `CaptureShadowsMappedKey`  | informational | inside this block a route capture wins over the mapped key                  |
+| Reason                      | Weight        | Means                                                                        |
+|-----------------------------|---------------|------------------------------------------------------------------------------|
+| `UnresolvedKeyReference`    | blocking      | nothing produces the key — no built-in, no mapping, no capture               |
+| `UnresolvedGroupReference`  | blocking      | `InGroup` names a group the policy does not define                           |
+| `UnresolvedReplacedRules`   | blocking      | `replacedRules` names a rule outside its own block                           |
+| `UnresolvedPresetReference` | blocking      | `preset` names a preset `spec.presets.rules` does not hold                   |
+| `IncompatibleOperator`      | blocking      | the operator cannot apply to the type of the key, e.g. `Equals` on an array  |
+| `InvalidCounterAxis`        | blocking      | an array key cannot key a bucket                                             |
+| `InvalidSpec`               | blocking      | a structural defect the schema cannot see, an unknown field among them       |
+| `InvalidWindow`             | blocking      | a window the counting math cannot honor                                      |
+| `DomainBudgetExceeded`      | blocking      | the worst-case decision is over 128 buckets                                  |
+| `ResolvedPolicyTooLarge`    | blocking      | the presets written into the rules would make the policy larger than 1.5 MiB |
+| `CaptureShadowsMappedKey`   | informational | inside this block a route capture wins over the mapped key                   |
 
 One blocking entry invalidates the whole generation: not one of its rules enters the snapshot. Applying the healthy
 rules of a broken generation would be worse than applying none — a `FirstMatch` cascade missing a rule silently hands
