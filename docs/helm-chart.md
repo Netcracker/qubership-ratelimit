@@ -267,6 +267,13 @@ metrics:                             # (there are no port values: probes 8081, m
                                      #   service logs `METRICS_NEAR_LIMIT_RATIO="1.5" is not a ratio in (0, 1),
                                      #   using 0.9` and uses 0.9
 
+responseHeaders:
+  ietf: true                         # Deployment.yaml: the ratelimit-policy and ratelimit fields of
+                                     #   draft-ietf-httpapi-ratelimit-headers-11 beside x-ratelimit-* (engine.md);
+                                     #   false leaves them out, for clients that misread them or must not learn the
+                                     #   rule names, and keeps x-ratelimit-* and retry-after. Goes out as
+                                     #   RESPONSE_HEADERS_IETF; a boolean by the schema
+
 management:                          # Deployment.yaml, Service.yaml, AuthorizationPolicy.yaml: the interface for
   enabled: false                     #   human operators (management-api.md), off by default: the port can lift a
                                      #   limit; on, it is port 8082 on the pod and the Service plus
@@ -292,8 +299,9 @@ filter:                              # EnvoyFilter.yaml: installation defaults; 
   rateLimitedStatus: 429             # refusal status for the client; Envoy ignores values < 400
   grpcAsResourceExhausted: false     # RESOURCE_EXHAUSTED instead of UNAVAILABLE for gRPC calls behind the gateway
   xRateLimitHeaders: "OFF"           # the filter always gets OFF: the response carries no per-descriptor statuses
-                                     # for Envoy to render headers from; the service sends x-ratelimit-* and
-                                     # retry-after itself, as ready-made headers
+                                     # for Envoy to render headers from; the service sends x-ratelimit-*,
+                                     # retry-after, and the ratelimit-policy and ratelimit fields of
+                                     # draft-ietf-httpapi-ratelimit-headers-11 itself, as ready-made headers
 
 runtime:                             # EnvoyFilter.yaml: gateway-side kill switches for the filter, independent of
   enabledPercent: 100                # behavior: Shadow; rendered as Envoy runtime fractions
@@ -511,8 +519,8 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 - env: `LOGGING_LEVEL_ROOT` (not `--zap-log-level`), `CLOUD_NAMESPACE` and `POD_NAME` from fieldRefs (the Downward API;
   the namespace is the installation scope and the namespace segment in counter keys), `SERVICE_VERSION` (the image tag,
   reported as `ratelimit_build_info`; the pipeline passes no build argument to the image, so without it every scrape
-  would say `dev`), `METRICS_NEAR_LIMIT_RATIO`, plus `MANAGEMENT_CLAIMS_*`, `MANAGEMENT_ROLES_*`, and
-  `MANAGEMENT_GATEWAY_DOMAINS` behind `management.enabled`;
+  would say `dev`), `METRICS_NEAR_LIMIT_RATIO`, `RESPONSE_HEADERS_IETF`, plus `MANAGEMENT_CLAIMS_*`,
+  `MANAGEMENT_ROLES_*`, and `MANAGEMENT_GATEWAY_DOMAINS` behind `management.enabled`;
 - the `maxSurge: 1 / maxUnavailable: 0` strategy unless `DEPLOYMENT_STRATEGY_TYPE` says otherwise: the gateways must
   not lose all RLS endpoints at once;
 - `lifecycle.preStop.sleep: 7s` (the native handler, needs k8s >= 1.30): on deletion the pod leaves Endpoints

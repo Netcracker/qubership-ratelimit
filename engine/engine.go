@@ -130,12 +130,27 @@ type Request struct {
 	Cost int64
 }
 
-// Headers is the x-ratelimit source: the strictest applied enforcing rule.
+// Headers is the source of the rate limit response headers: the strictest
+// applied enforcing rule.
 type Headers struct {
+	// Block and Rule name the rule whose window the numbers came from, the
+	// identity the metrics and the management API use as block/rule.
+	Block string
+	Rule  string
+
 	Limit      int64
 	Remaining  int64
 	RetryAfter time.Duration // negative when no retry hint applies
 	ResetAfter time.Duration
+
+	// EffectiveWindow is how long until the window admits one request more
+	// than Remaining: the t parameter of the ratelimit field, which
+	// draft-ietf-httpapi-ratelimit-headers-11 defines as the time within
+	// which the client can use no more than Remaining. It is ResetAfter for a
+	// fixed window, which returns its whole quota at once, and at most that
+	// for GCRA, which returns one request per emission interval. Negative when
+	// the window already holds its whole capacity and nothing returns.
+	EffectiveWindow time.Duration
 
 	// Algorithm and PeriodSeconds name the window these numbers came from.
 	// Without them a reader cannot tell which of a rule's windows bound the
@@ -263,7 +278,7 @@ func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decis
 		Skips:         skips,
 		ExtractedKeys: e.keyNames(keys),
 	}
-	decision.Headers, decision.CostExceedsCapacity = aggregate(buckets, verdicts, decision.Allowed)
+	decision.Headers, decision.CostExceedsCapacity = aggregate(matched, buckets, verdicts, decision.Allowed)
 	return decision, nil
 }
 
@@ -368,7 +383,7 @@ func bucketCapacity(w algo.Window) int64 {
 // pair: deterministic across replicas, so headers do not jitter between them.
 // A refusal that no waiting cures surfaces as CostExceedsCapacity with no
 // retry hint.
-func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (*Headers, bool) {
+func aggregate(matched match.Result, buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (*Headers, bool) {
 	costExceeds := false
 	if !allowed {
 		for i := range buckets {
@@ -383,18 +398,54 @@ func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (
 		return nil, false
 	}
 
+	owner := ruleOf(matched, best)
 	h := &Headers{
-		Limit:         buckets[best].Window.Requests,
-		Remaining:     verdicts[best].Remaining,
-		RetryAfter:    verdicts[best].RetryAfter,
-		ResetAfter:    verdicts[best].ResetAfter,
-		Algorithm:     algorithmName(buckets[best].Algorithm),
-		PeriodSeconds: int64(buckets[best].Window.Period / time.Second),
+		Block:      owner.Block,
+		Rule:       owner.Rule,
+		Limit:      buckets[best].Window.Requests,
+		Remaining:  verdicts[best].Remaining,
+		RetryAfter: verdicts[best].RetryAfter,
+		ResetAfter: verdicts[best].ResetAfter,
+		Algorithm:  algorithmName(buckets[best].Algorithm),
+
+		EffectiveWindow: effectiveWindow(buckets[best], verdicts[best]),
+		PeriodSeconds:   int64(buckets[best].Window.Period / time.Second),
 	}
 	if costExceeds {
 		h.RetryAfter = -1
 	}
 	return h, costExceeds
+}
+
+// effectiveWindow is how long until bucket b admits one request more than its
+// verdict v reports. A verdict's Remaining and ResetAfter describe one moment,
+// after the charge on an admission and before it on a refusal, and for GCRA
+// ResetAfter is the bucket's depth d: Remaining is floor((tau-d)/emission), so
+// the next request returns once d has drained to tau-(Remaining+1)*emission.
+// A fixed window returns its whole quota at the boundary, ResetAfter away. A
+// window at its full capacity returns nothing, and the result is negative.
+func effectiveWindow(b store.Bucket, v store.Verdict) time.Duration {
+	if v.Remaining >= bucketCapacity(b.Window) {
+		return -1
+	}
+	if b.Algorithm != algo.GCRAID {
+		return v.ResetAfter
+	}
+	depth := v.ResetAfter.Microseconds()
+	emission := algo.EmissionMicros(b.Window)
+	return time.Duration(depth-algo.TauMicros(b.Window)+(v.Remaining+1)*emission) * time.Microsecond
+}
+
+// ruleOf returns the matched rule that owns the bucket at index i of
+// matched.Buckets, which lays the rules' buckets out in rule order.
+func ruleOf(matched match.Result, i int) match.MatchedRule {
+	for _, m := range matched.Rules {
+		if i < len(m.Buckets) {
+			return m
+		}
+		i -= len(m.Buckets)
+	}
+	return match.MatchedRule{}
 }
 
 // strictestIndex picks the strictest bucket of a range: on allow, the minimum

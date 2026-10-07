@@ -78,9 +78,14 @@ type SimulationResponse struct {
 	ExtractedKeys []string `json:"extractedKeys,omitempty"`
 }
 
-// HeadersView is what the x-ratelimit response headers would have carried: the
+// HeadersView is what the rate limit response headers would have carried: the
 // binding window across every applied enforcing rule.
 type HeadersView struct {
+	// Block and Rule name the rule the numbers came from, the name the
+	// ratelimit-policy and ratelimit fields carry as block/rule.
+	Block string `json:"block"`
+	Rule  string `json:"rule"`
+
 	Algorithm     string `json:"algorithm"`
 	PeriodSeconds int64  `json:"periodSeconds"`
 
@@ -90,6 +95,15 @@ type HeadersView struct {
 	// RetryAfterSeconds is present exactly on refusals that waiting cures.
 	RetryAfterSeconds *float64 `json:"retryAfterSeconds,omitempty"`
 	ResetAfterSeconds *float64 `json:"resetAfterSeconds,omitempty"`
+
+	// EffectiveWindowSeconds is the t of the ratelimit response field: the
+	// seconds until the window admits one request more than Remaining. It is
+	// absent where the window holds its whole capacity, which, since the
+	// simulation charges nothing, includes a window the request would be the
+	// first to touch. The real answer, after its own charge, carries one
+	// emission interval there under GCRA and the time to the boundary under
+	// a fixed window.
+	EffectiveWindowSeconds *float64 `json:"effectiveWindowSeconds,omitempty"`
 }
 
 // RuleOutcomeView is one applied rule's own verdict. A rule may carry several
@@ -237,6 +251,8 @@ func simulationResponse(decision engine.Decision, at time.Time) SimulationRespon
 
 func headersView(headers *engine.Headers, allowed, costExceeds bool) *HeadersView {
 	view := &HeadersView{
+		Block:         headers.Block,
+		Rule:          headers.Rule,
 		Algorithm:     headers.Algorithm,
 		PeriodSeconds: headers.PeriodSeconds,
 		Limit:         headers.Limit,
@@ -247,6 +263,9 @@ func headersView(headers *engine.Headers, allowed, costExceeds bool) *HeadersVie
 	}
 	if headers.ResetAfter > 0 {
 		view.ResetAfterSeconds = seconds(headers.ResetAfter)
+	}
+	if headers.EffectiveWindow >= 0 {
+		view.EffectiveWindowSeconds = seconds(headers.EffectiveWindow)
 	}
 	return view
 }

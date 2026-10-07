@@ -178,6 +178,132 @@ func TestHeadersComeFromTheStrictestRule(t *testing.T) {
 	}
 }
 
+// The headers name the rule whose window they report, as block and rule.
+// The binding window here belongs to the second matched rule, behind a rule
+// of two windows, so the bucket the headers come from has to be traced back
+// across the first rule's buckets, on an admission, on a refusal that
+// waiting cures, and on one it does not.
+func TestHeaders_nameTheRuleOfTheStrictestWindow(t *testing.T) {
+	p := model.Policy{Domain: domain, Blocks: []model.Block{
+		{Name: "api", Rules: []model.Rule{{Name: "loose", Rates: []model.Rate{
+			{Requests: 1000, Period: time.Minute}, {Requests: 10000, Period: time.Hour}}}}},
+		{Name: "exports", Rules: []model.Rule{{Name: "tight", Rates: []model.Rate{
+			{Requests: 2, Period: time.Minute}}}}},
+	}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	e := engine.New(snap, memory.New())
+	req := engine.Request{Path: "/x", Method: "GET"}
+	named := func(step string, d engine.Decision) {
+		t.Helper()
+		if d.Headers == nil || d.Headers.Block != "exports" || d.Headers.Rule != "tight" ||
+			d.Headers.Limit != 2 || d.Headers.PeriodSeconds != 60 {
+			t.Errorf("%s: headers = %+v, want the exports/tight minute window", step, d.Headers)
+		}
+	}
+
+	named("admission", decide(t, e, req))
+	decide(t, e, req)
+	refused := decide(t, e, req)
+	if refused.Allowed || refused.Headers.RetryAfter <= 0 {
+		t.Fatalf("decision = %+v: want a refusal waiting cures", refused)
+	}
+	named("refusal", refused)
+
+	req.Cost = 3
+	never := decide(t, engine.New(snap, memory.New()), req)
+	if !never.CostExceedsCapacity {
+		t.Fatalf("decision = %+v: want a refusal no waiting cures", never)
+	}
+	named("refusal no waiting cures", never)
+}
+
+// EffectiveWindow is the time until the window admits one request more, the
+// t of the ratelimit field. For a GCRA counter within its capacity it is one
+// emission interval or less, not the time until the bucket drains: at two per
+// hour, a client that spent both requests gets the next one 1800 s later,
+// while the bucket is empty only after 3600 s. A fixed window returns its
+// quota at the boundary, and a window at its full capacity has nothing to
+// return.
+func TestHeaders_effectiveWindowIsTheTimeToTheNextRequest(t *testing.T) {
+	compiled := func(algorithm string) *compile.Snapshot {
+		p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
+			Name: "exports", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Algorithm: algorithm}}}}}}}
+		snap, problems := compile.Compile("core-1-core", domain, &p)
+		if len(problems) != 0 {
+			t.Fatalf("compile problems: %v", problems)
+		}
+		return snap
+	}
+	req := engine.Request{Path: "/x", Method: "GET"}
+	// The store reads the clock on every decision, so each one sees the
+	// bucket a few microseconds drained.
+	near := func(got, want time.Duration) bool { return got <= want && got > want-time.Second }
+	check := func(step string, h *engine.Headers, window, reset time.Duration) {
+		t.Helper()
+		if !near(h.EffectiveWindow, window) || !near(h.ResetAfter, reset) {
+			t.Errorf("%s: effective window %s and reset %s, want %s and %s",
+				step, h.EffectiveWindow, h.ResetAfter, window, reset)
+		}
+	}
+
+	gcra := engine.New(compiled(""), memory.New())
+	check("GCRA, first admission", decide(t, gcra, req).Headers, 30*time.Minute, 30*time.Minute)
+	check("GCRA, second admission", decide(t, gcra, req).Headers, 30*time.Minute, time.Hour)
+	refused := decide(t, gcra, req)
+	check("GCRA, refusal", refused.Headers, 30*time.Minute, time.Hour)
+	if refused.Headers.RetryAfter < refused.Headers.EffectiveWindow {
+		t.Errorf("retry after %s is shorter than the effective window %s",
+			refused.Headers.RetryAfter, refused.Headers.EffectiveWindow)
+	}
+
+	fixed := engine.New(compiled("FixedWindow"), memory.New())
+	h := decide(t, fixed, req).Headers
+	if h.EffectiveWindow <= 0 || h.EffectiveWindow != h.ResetAfter {
+		t.Errorf("fixed window: effective window %s, want the reset %s", h.EffectiveWindow, h.ResetAfter)
+	}
+
+	req.Cost = 3
+	if h := decide(t, engine.New(compiled(""), memory.New()), req).Headers; h.EffectiveWindow >= 0 {
+		t.Errorf("a full window reports an effective window of %s", h.EffectiveWindow)
+	}
+}
+
+// A policy change that lowers burst keeps the counter's depth, so the
+// effective window counts until that depth drains to one request below the
+// new capacity and can exceed one emission interval: at two per hour, four
+// requests under burst 4 leave a depth of 7200 s, and under burst 1 the next
+// request returns 7200 s later, four intervals. retry-after and
+// x-ratelimit-reset carry the same wait.
+func TestHeaders_effectiveWindowCarriesTheDebtOfALoweredBurst(t *testing.T) {
+	compiled := func(burst int64) *compile.Snapshot {
+		p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
+			Name: "exports", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Burst: burst}}}}}}}
+		snap, problems := compile.Compile("core-1-core", domain, &p)
+		if len(problems) != 0 {
+			t.Fatalf("compile problems: %v", problems)
+		}
+		return snap
+	}
+	req := engine.Request{Path: "/x", Method: "GET"}
+	counters := memory.New()
+	wide := engine.New(compiled(4), counters)
+	for i := range 4 {
+		if d := decide(t, wide, req); !d.Allowed {
+			t.Fatalf("request %d under burst 4 = %+v, want an admission", i+1, d.Headers)
+		}
+	}
+
+	h := decide(t, engine.New(compiled(1), counters), req).Headers
+	near := func(got, want time.Duration) bool { return got <= want && got > want-time.Second }
+	if !near(h.EffectiveWindow, 2*time.Hour) || !near(h.RetryAfter, 2*time.Hour) || !near(h.ResetAfter, 2*time.Hour) {
+		t.Errorf("under burst 1: effective window %s, retry after %s, reset %s, want 2h0m0s each",
+			h.EffectiveWindow, h.RetryAfter, h.ResetAfter)
+	}
+}
+
 func TestShadowReportsWithoutVetoing(t *testing.T) {
 	e := newEngine(t)
 

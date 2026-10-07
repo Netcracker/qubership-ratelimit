@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -148,4 +149,24 @@ func TestManagementRoles_unsetIsTheCanonicalName(t *testing.T) {
 	roles := ManagementRoles()
 	assert.Equal(t, []string{management.RoleViewer}, roles.Viewer)
 	assert.Equal(t, []string{management.RoleOperator}, roles.Operator)
+}
+
+// RESPONSE_HEADERS_IETF turns the ratelimit-policy and ratelimit fields off
+// only when it reads as false: unset or empty is on, and a value that is not a boolean
+// is reported and read as on, so a typo does not change what clients receive.
+func TestIETFHeaders_isOnUnlessSetToFalse(t *testing.T) {
+	var warned []string
+	warn := func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+	read := func(value string) bool {
+		t.Setenv("RESPONSE_HEADERS_IETF", value)
+		configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+		return IETFHeaders(warn)
+	}
+
+	assert.True(t, read(""), "an empty value")
+	assert.False(t, read("false"))
+	assert.True(t, read("true"))
+	assert.Empty(t, warned)
+	assert.True(t, read("off"), "a value that is not a boolean")
+	assert.Len(t, warned, 1)
 }

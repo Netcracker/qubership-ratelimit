@@ -28,7 +28,7 @@ ambient gateways (and any other consumers) over the Envoy RLS protocol (`envoy.s
    claim, lowercased) and the keys declared in `spec.mappings` (for example `roles`, `tenant`).
 6. The service finds the domain's rules, computes which ones matched, updates the counters in the shared store
    (Redis) with one atomic script, and returns `OK` or `OVER_LIMIT`; on a refusal the gateway returns `429` and the
-   `x-ratelimit-*` headers to the client.
+   `x-ratelimit-*`, `ratelimit-policy`, and `ratelimit` headers to the client.
 
 ## Binding to the traffic source: spec.domain
 
@@ -488,7 +488,8 @@ component, enforces that a token is required.
 4. **A missing axis**: a rule whose `counters` axis is absent from the request (for example `sub` for an anonymous
    caller) does not match; there is nothing to key the bucket with.
 5. **The verdict**: `OVER_LIMIT` if at least one applied rule (of any block) is exceeded; the `x-ratelimit-*` headers
-   come from the strictest matched rule.
+   come from the strictest matched rule, and `ratelimit-policy` and `ratelimit` carry its limit and remaining under
+   that rule's name, `<block>/<rule>`, with the time until one more request is admitted ([engine](engine.md)).
 6. **Request cost**: the protocol field `hits_addend` (default 1), a descriptor's own `hits_addend` taking precedence
    for that descriptor, where an explicit zero checks without charging; a cost above the burst capacity produces a
    deterministic refusal, not a wait.
@@ -539,13 +540,13 @@ client ──HTTP──> gateway ──jwt_authn──> (token signature verifie
    the second pass writes the new states and TTLs. If at least one refused, there is no second pass and no bucket is
    charged: the daily quota is not spent on requests refused by the minute limit. A shadow bucket has no veto and is
    charged only per its own verdict.
-6. **Response**: the verdict is an AND over the enforcing buckets; the `x-ratelimit-*` headers come from the strictest
-   matched bucket (the minimal remaining when the request is allowed, the maximal retry-after on a refusal; on a tie, a
-   deterministic tie-break by bucket key). A refusal is `OVER_LIMIT` with `retry-after`; a cost that can never fit gets
-   no retry headers. If the store does not answer within the budget, the service answers `UNAVAILABLE` and the gateway's
-   failure mode decides: with `failClosed: false`, the default, the request passes unlimited, and with `true` the
-   gateway answers 503. The error metric grows either way. A check some rule already refused answers `OVER_LIMIT`
-   regardless.
+6. **Response**: the verdict is an AND over the enforcing buckets; the `x-ratelimit-*` headers, and `ratelimit-policy`
+   and `ratelimit` with the name of the bucket's rule, come from the strictest matched bucket (the minimal remaining
+   when the request is allowed, the maximal retry-after on a refusal; on a tie, a deterministic tie-break by bucket
+   key). A refusal is `OVER_LIMIT` with `retry-after`; a cost that can never fit gets no retry headers. If the store
+   does not answer within the budget, the service answers `UNAVAILABLE` and the gateway's failure mode decides: with
+   `failClosed: false`, the default, the request passes unlimited, and with `true` the gateway answers 503. The error
+   metric grows either way. A check some rule already refused answers `OVER_LIMIT` regardless.
 
 ## Compilation model
 

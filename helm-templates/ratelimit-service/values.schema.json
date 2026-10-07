@@ -239,6 +239,18 @@
       },
       "additionalProperties": false
     },
+    "responseHeaders": {
+      "type": "object",
+      "title": "Rate limit response headers",
+      "properties": {
+        "ietf": {
+          "type": "boolean",
+          "description": "Whether a response carries the ratelimit-policy and ratelimit fields of draft-ietf-httpapi-ratelimit-headers-11 beside x-ratelimit-*; false sends x-ratelimit-* and retry-after alone.",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
     "filter": {
       "type": "object",
       "title": "Gateway filter",
@@ -273,7 +285,7 @@
         "xRateLimitHeaders": {
           "type": "string",
           "title": "x-ratelimit response headers",
-          "description": "The service supplies the x-ratelimit-* and retry-after headers itself. DRAFT_VERSION_03 additionally lets Envoy render X-RateLimit-* from per-descriptor statuses, which the service does not populate, so OFF is the default.",
+          "description": "The service supplies the x-ratelimit-* and retry-after headers, and the ratelimit-policy and ratelimit fields of draft-ietf-httpapi-ratelimit-headers-11, itself. DRAFT_VERSION_03 additionally lets Envoy render X-RateLimit-* from per-descriptor statuses, which the service does not populate, so OFF is the default.",
           "enum": [
             "OFF",
             "DRAFT_VERSION_03"

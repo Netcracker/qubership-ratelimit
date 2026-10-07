@@ -133,7 +133,10 @@ func Build(namespace string, options Options) (*Service, error) {
 	cacheStats := &engine.CacheStats{}
 	metrics.RegisterCacheStats(registry, cacheStats)
 
-	serverOptions := []rls.Option{rls.WithNearLimitRatio(settings.NearLimitRatio(platform.Errorf))}
+	serverOptions := []rls.Option{
+		rls.WithNearLimitRatio(settings.NearLimitRatio(platform.Errorf)),
+		rls.WithIETFHeaders(settings.IETFHeaders(platform.Errorf)),
+	}
 	if enabled(options.ManagementAddr) {
 		// A check that reads the counter store fails while the store is down,
 		// and a gateway that fails closed returns 503 for the request it

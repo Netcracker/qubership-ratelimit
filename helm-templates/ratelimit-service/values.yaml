@@ -102,6 +102,18 @@ metrics:
   # parses it.
   nearLimitRatio: "0.9"
 
+# ============== RESPONSE HEADERS ============================
+# The service answers every check that a counting rule matched with
+# x-ratelimit-limit, x-ratelimit-remaining, and x-ratelimit-reset, and a
+# refusal that waiting cures with retry-after. ietf adds the ratelimit-policy
+# and ratelimit fields of draft-ietf-httpapi-ratelimit-headers-11, which carry
+# the limit and the remaining under the name of the rule, <block>/<rule>, with
+# the time until one more request is admitted. false leaves
+# them out, for clients that misread the fields or that must not learn the
+# rule names; the other four headers stay either way.
+responseHeaders:
+  ietf: true
+
 # ============== MANAGEMENT API ============================
 # The operator interface: read the enforced rules, inspect live counters, and
 # reset them. Off by default, because turning it on opens a port that can lift a
@@ -198,11 +210,12 @@ filter:
   # on.
   grpcAsResourceExhausted: false
   # The service supplies x-ratelimit-limit, x-ratelimit-remaining,
-  # x-ratelimit-reset and retry-after itself, as ready response headers.
-  # DRAFT_VERSION_03 would additionally let Envoy render X-RateLimit-* from
-  # per-descriptor statuses, which the service does not populate, so OFF is
-  # the honest default: the flag changes nothing today, and the headers keep
-  # coming from the one place that computes them.
+  # x-ratelimit-reset, retry-after, and the ratelimit-policy and ratelimit
+  # fields of draft-ietf-httpapi-ratelimit-headers-11 itself, as ready
+  # response headers. DRAFT_VERSION_03 would additionally let Envoy render
+  # X-RateLimit-* from per-descriptor statuses, which the service does not
+  # populate, so OFF is the honest default: the flag changes nothing today,
+  # and the headers keep coming from the one place that computes them.
   xRateLimitHeaders: "OFF"
 
 # Gateway-side switches of the filter itself: the share of requests the filter
