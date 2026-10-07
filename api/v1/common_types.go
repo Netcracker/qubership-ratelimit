@@ -102,8 +102,10 @@ const (
 	// outside its own block. Blocking.
 	ProblemUnresolvedReplacedRules = "UnresolvedReplacedRules"
 
-	// ProblemUnresolvedPresetReference marks a rule whose preset names an
-	// entry spec.presets.rules does not hold. Blocking.
+	// ProblemUnresolvedPresetReference marks a preset a rule or a block names
+	// that spec.presets does not hold, a before that names a rule neither in
+	// the block's preset nor written earlier in the list, or a drop that
+	// names a rule the block's preset does not hold. Blocking.
 	ProblemUnresolvedPresetReference = "UnresolvedPresetReference"
 
 	// ProblemIncompatibleOperator marks an operator that cannot apply to the
@@ -114,10 +116,11 @@ const (
 	// such as an array-typed key. Blocking.
 	ProblemInvalidCounterAxis = "InvalidCounterAxis"
 
-	// ProblemInvalidSpec marks a structural defect the schema cannot see:
-	// predicate arity, a Bypass without replacedRules under All, a repeated
-	// placeholder, a preset body that names a preset, a preset declared twice
-	// or without a name, an unknown field or enum value of a newer schema.
+	// ProblemInvalidSpec marks a structural defect the schema cannot see,
+	// such as predicate arity, a Bypass without replacedRules under All, a
+	// repeated placeholder, an unknown field or enum value of a newer
+	// schema, or a shape a preset or a block that takes one may not have;
+	// the reasons table of the resource specification lists every case.
 	// Blocking.
 	ProblemInvalidSpec = "InvalidSpec"
 

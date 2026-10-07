@@ -67,9 +67,10 @@ A rule carries axes (`counters`) and windows (`rates`). Each window is an indepe
 daily quota live in one rule and either can reject. `GCRA` meters at a steady rate with a burst allowance; `FixedWindow`
 counts per wall-clock window and resets at the boundary. A rule whose axis the request does not carry does not match at
 all — there is nothing to key the bucket by, which is what excludes an anonymous caller from a rule counting by
-`sub`. A rule body written once under `spec.presets.rules` serves every rule that names it through `preset`, with the
-fields the rule writes on top; the operator writes presets into the rules before the policy compiles, so a preset name
-is part of no counter key and reaches no service.
+`sub`. A rule body written once under `spec.presets.rules`, or a block body under `spec.presets.blocks`, serves every
+rule or block that names it through `preset`, with the fields written at the point of use on top; the operator writes
+presets into the blocks and rules before the policy compiles, so a preset name is part of no counter key and reaches no
+service.
 
 `spec.mappings` declares how identity is read out of the JWT and `spec.groups` holds the named value lists `InGroup`
 resolves against. Both live in the same object as the rules that reference them, which is the point of the singleton:
@@ -90,7 +91,7 @@ The schema rejects what it can see; the compiler reports what needs the domain t
 | `UnresolvedKeyReference`    | blocking      | nothing produces the key — no built-in, no mapping, no capture               |
 | `UnresolvedGroupReference`  | blocking      | `InGroup` names a group the policy does not define                           |
 | `UnresolvedReplacedRules`   | blocking      | `replacedRules` names a rule outside its own block                           |
-| `UnresolvedPresetReference` | blocking      | `preset` names a preset `spec.presets.rules` does not hold                   |
+| `UnresolvedPresetReference` | blocking      | `preset`, `before`, or `drop` names a preset or a rule that does not exist   |
 | `IncompatibleOperator`      | blocking      | the operator cannot apply to the type of the key, e.g. `Equals` on an array  |
 | `InvalidCounterAxis`        | blocking      | an array key cannot key a bucket                                             |
 | `InvalidSpec`               | blocking      | a structural defect the schema cannot see, an unknown field among them       |

@@ -290,11 +290,41 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(stored.Spec.Limits[0].Rules[0].Preset).To(Equal("standard-client"))
 		})
 
+		It("stores block presets and the blocks that take them", func() {
+			policy := policyWith("gateway.public",
+				ratelimitv1.LimitBlock{Name: "orders", Preset: "cascade"},
+				ratelimitv1.LimitBlock{Name: "exports", Preset: "cascade", Rules: []ratelimitv1.Rule{
+					{Name: "partner", Before: "total", Rates: []ratelimitv1.Rate{{Requests: 5, PeriodSeconds: 60}}},
+					{Name: "total", Drop: true},
+				}})
+			policy.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.LimitBlock{{
+				Name:  "cascade",
+				Mode:  ratelimitv1.BlockModeFirstMatch,
+				Rules: []ratelimitv1.Rule{ruleWith("total")},
+			}}}
+			Expect(create(policy)).To(Succeed())
+
+			stored := &ratelimitv1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
+
+			Expect(stored.Spec.Presets).To(Equal(policy.Spec.Presets))
+			Expect(stored.Spec.Limits[0].Preset).To(Equal("cascade"))
+			Expect(stored.Spec.Limits[0].Rules).To(BeEmpty(), "a block that takes a preset may carry no rules")
+			Expect(stored.Spec.Limits[1].Rules).To(Equal(policy.Spec.Limits[1].Rules))
+		})
+
 		It("rejects a preset reference outside the name pattern", func() {
 			policy := policyWith("gateway.public", blockWith("api",
 				ratelimitv1.Rule{Name: "per-user", Preset: "Standard Client"}))
 
 			Expect(create(policy)).To(MatchError(ContainSubstring("spec.limits[0].rules[0].preset")))
+		})
+
+		It("rejects a before outside the name pattern", func() {
+			policy := policyWith("gateway.public", ratelimitv1.LimitBlock{Name: "orders", Preset: "cascade",
+				Rules: []ratelimitv1.Rule{{Name: "partner", Before: "Not A Name"}}})
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("spec.limits[0].rules[0].before")))
 		})
 
 		It("rejects two rule presets of one name", func() {

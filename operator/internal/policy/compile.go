@@ -289,7 +289,7 @@ func latestGeneration(
 	}
 
 	snapshot, problems := enginecompile.Compile(namespace, object.Spec.Domain, convert.Policy(&resolved.Spec))
-	outcome.Problems = ruleProblems(problems, resolved.Presets)
+	outcome.Problems = ruleProblems(problems, resolved)
 	outcome.Err = blockingError(outcome.Problems)
 	if outcome.Err != nil {
 		return snapshot, outcome, nil
@@ -339,17 +339,24 @@ func sortedPolicies(policies []v1.RateLimitPolicy) []*v1.RateLimitPolicy {
 }
 
 // ruleProblems renders the compiler's findings for the status. A finding at a
-// rule that took a preset names the preset, because the defect may be in the
-// preset's body rather than in the fields the rule wrote.
-func ruleProblems(problems []enginecompile.Problem, presets map[RuleRef]string) []v1.RuleProblem {
+// rule or a block that took a preset names the preset, because the defect may
+// be in the preset's body rather than in the fields written at the point of
+// use; resolved is nil for a spec that went through no resolution, such as a
+// persisted last-good one.
+func ruleProblems(problems []enginecompile.Problem, resolved *Resolved) []v1.RuleProblem {
 	if len(problems) == 0 {
 		return nil
 	}
 	out := make([]v1.RuleProblem, 0, len(problems))
 	for _, problem := range problems {
 		message := problem.Message
-		if preset, ok := presets[RuleRef{Block: problem.Block, Rule: problem.Rule}]; ok {
-			message = fmt.Sprintf("%s; the rule takes preset %q", message, preset)
+		if resolved != nil {
+			if preset, ok := resolved.Presets[RuleRef{Block: problem.Block, Rule: problem.Rule}]; ok {
+				message = fmt.Sprintf("%s; the rule takes preset %q", message, preset)
+			}
+			if preset, ok := resolved.BlockPresets[problem.Block]; ok {
+				message = fmt.Sprintf("%s; the block takes preset %q", message, preset)
+			}
 		}
 		out = append(out, v1.RuleProblem{
 			Block:   problem.Block,

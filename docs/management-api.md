@@ -294,7 +294,7 @@ property of the access model. Axis values and the Idempotency-Key land in the lo
   applicability annotations leaves it alone, and a domain running on last-good reports the version of the set it is
   actually serving. Treat the value as opaque: compare it, and pin it with `expectedRuleSetVersion`, but do not parse
   or recompute it. The service computes it once, at the snapshot swap, so the decision path hashes nothing. The
-  operator writes the presets of a policy into the rules that take them before the set is built
+  operator writes the presets of a policy into the blocks and rules that take them before the set is built
   ([the resource specification](ratelimitpolicy-cr-spec.md), "Presets"), so the listing shows resolved rules under
   their own names, no preset name appears in it, and an edit of a preset changes the version where it changes a
   resolved rule.

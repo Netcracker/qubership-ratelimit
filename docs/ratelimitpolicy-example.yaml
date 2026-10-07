@@ -31,9 +31,9 @@ spec:
     values:
     - 00000000-0000-4000-8000-00000000d001
 
-  # Rule bodies written once; a rule takes one by name through preset and writes only the fields that differ.
-  # The operator writes presets into the rules that take them before the policy compiles: a preset name is
-  # part of no counter key and appears nowhere outside this object.
+  # Rule bodies and block bodies written once; a rule or a block takes one by name through preset and writes only
+  # the fields that differ. The operator writes presets into the blocks and rules that take them before the policy
+  # compiles: a preset name is part of no counter key and appears nowhere outside this object.
   presets:
     rules:
     # A partial body: the axes and the windows of a standard client, no predicates.
@@ -42,6 +42,30 @@ spec:
       rates:
       - { requests: 100, periodSeconds: 60, burst: 20 }
       - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
+    blocks:
+    # A cascade of plans for the operations with identifiers: no target, every block that takes it brings one.
+    - name: plan-cascade
+      mode: FirstMatch                # the first matched rule decides; the order is semantics
+      rules:
+      # A narrow group limit; the cascade ends here.
+      - name: bulk-client
+        matches:
+        - { key: sub, operator: InGroup, value: bulk-clients }
+        counters: []
+        rates:
+        - { requests: 30, periodSeconds: 60 }
+      # The rest: per client, the preset's axis with this cascade's own window.
+      - name: per-client
+        preset: standard-client
+        rates:
+        - { requests: 50, periodSeconds: 60 }
+      # Anonymous callers: a separate shared bucket (they have no sub axis, so the rule above does not match).
+      - name: anonymous
+        matches:
+        - { key: sub, operator: DoesNotExist }
+        counters: []
+        rates:
+        - { requests: 20, periodSeconds: 60 }
 
   limits:
 
@@ -102,43 +126,31 @@ spec:
       rates:
       - { requests: 600, periodSeconds: 60, algorithm: FixedWindow }
 
-  # ── Block 2: operations with identifiers: a target with a template, a counter per capture ───────
+  # ── Block 2: the cascade on the order operations, with a rule of this block's own inserted ───────
   - name: orders
+    preset: plan-cascade              # the mode and the rules come from the preset; the target is this block's
     target:
       routes:
       - path: { type: Template, value: "/api/v1/orders/{orderId}/items" }   # {} in quotes (YAML)
       - path: { type: Prefix, value: /api/v1/orders }
         methods: [POST, PUT]
-    mode: FirstMatch                  # the first matched rule decides; the order is semantics
     rules:
-    # A narrow group limit on the order operations of this block; the cascade ends here.
-    - name: create-bulk-client
-      matches:
-      - { key: sub, operator: InGroup, value: bulk-clients }
-      counters: []
-      rates:
-      - { requests: 30, periodSeconds: 60 }
-    # The {orderId} capture is a counting axis: a counter per order;
-    # the path axis inside the block = the template itself.
+    # The {orderId} capture is a counting axis: a counter per order, in front of the per-client rule of the
+    # cascade; the path axis inside the block = the template itself.
     - name: items-per-order
+      before: per-client
       matches:
       - { key: orderId, operator: Exists }
       counters: [orderId]
       rates:
       - { requests: 10, periodSeconds: 60 }
-    # The rest: per client. The preset's axis with this rule's own windows: a field written here replaces the
-    # preset's whole, so the daily quota of the preset does not apply to orders.
-    - name: orders-per-client
-      preset: standard-client
-      rates:
-      - { requests: 50, periodSeconds: 60 }
-    # Anonymous callers: a separate shared bucket (they have no sub axis, so the rule above does not match).
-    - name: anonymous
-      matches:
-      - { key: sub, operator: DoesNotExist }
-      counters: []
-      rates:
-      - { requests: 20, periodSeconds: 60 }
+
+  # ── Block 3: the same cascade on the catalog, as declared ──────────────────────────────────────
+  - name: catalog
+    preset: plan-cascade
+    target:
+      routes:
+      - path: { type: Prefix, value: /api/v1/catalog }
 
 # The operator writes the status; approximate shape:
 #

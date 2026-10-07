@@ -30,6 +30,10 @@ func specWithPresets(presets []v1.Rule, blocks ...v1.LimitBlock) *v1.RateLimitPo
 	}
 }
 
+// perUserName is the name of the rule that takes standardClient in these
+// tests; the name is the point of use's own.
+const perUserName = "per-user"
+
 // standardClient is a partial preset: axes and windows, no predicates.
 func standardClient() v1.Rule {
 	burst := int32(20)
@@ -60,31 +64,32 @@ func resolvedRule(t *testing.T, resolved *Resolved, rule string) v1.Rule {
 
 func TestResolve_aRuleTakesEveryFieldOfItsPresetAndKeepsItsName(t *testing.T) {
 	spec := specWithPresets([]v1.Rule{standardClient()},
-		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "per-user", Preset: "standard-client"}}})
+		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-client"}}})
 
 	resolved, problems := Resolve(spec)
 
 	require.Empty(t, problems)
 	burst := int32(20)
 	assert.Equal(t, v1.Rule{
-		Name:     "per-user",
+		Name:     perUserName,
 		Counters: []string{"sub"},
 		Rates: []v1.Rate{
 			{Requests: 100, PeriodSeconds: 60, Burst: &burst, Algorithm: v1.AlgorithmGCRA},
 			{Requests: 20000, PeriodSeconds: 86400, Algorithm: v1.AlgorithmFixedWindow},
 		},
 		Behavior: v1.RuleBehaviorEnforce,
-	}, resolvedRule(t, resolved, "per-user"))
+	}, resolvedRule(t, resolved, perUserName))
 	assert.Nil(t, resolved.Spec.Presets, "the resolved spec carries no presets section")
-	assert.Equal(t, map[RuleRef]string{{Block: "api", Rule: "per-user"}: "standard-client"}, resolved.Presets)
+	assert.Equal(t, map[RuleRef]string{{Block: "api", Rule: perUserName}: "standard-client"}, resolved.Presets)
 }
 
-// Every field of a rule except its name and its preset is one the rule takes
-// from the preset when it leaves the field out. The set of fields is read
-// from the type, so a field added to Rule and left out of the merge fails
-// here rather than being dropped on the way to the engine.
+// Every field of a rule except its name and the authoring fields preset,
+// before, and drop is one the rule takes from the preset when it leaves the
+// field out. The set of fields is read from the type, so a field added to
+// Rule and left out of the merge fails here rather than being dropped on the
+// way to the engine.
 func TestResolve_aRuleTakesEveryFieldOfTheRuleTypeItLeavesOut(t *testing.T) {
-	own := map[string]bool{"Name": true, "Preset": true}
+	own := map[string]bool{"Name": true, "Preset": true, "Before": true, "Drop": true}
 	preset := v1.Rule{Name: "p"}
 	presetValue := reflect.ValueOf(&preset).Elem()
 	for i := range presetValue.NumField() {
@@ -296,7 +301,7 @@ func TestResolve_aSpecWithoutPresetsResolvesToItselfWithTheDefaults(t *testing.T
 
 func TestResolve_leavesTheSpecItWasGivenUntouched(t *testing.T) {
 	spec := specWithPresets([]v1.Rule{standardClient()},
-		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "per-user", Preset: "standard-client"}}})
+		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-client"}}})
 	written := spec.DeepCopy()
 
 	_, problems := Resolve(spec)
@@ -307,7 +312,7 @@ func TestResolve_leavesTheSpecItWasGivenUntouched(t *testing.T) {
 
 func TestResolve_aRuleNamingAPresetTheSpecDoesNotDeclareIsAnUnresolvedReference(t *testing.T) {
 	spec := specWithPresets([]v1.Rule{standardClient()},
-		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "per-user", Preset: "standard-clinet"}}})
+		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-clinet"}}})
 
 	resolved, problems := Resolve(spec)
 
@@ -315,7 +320,7 @@ func TestResolve_aRuleNamingAPresetTheSpecDoesNotDeclareIsAnUnresolvedReference(
 	require.Len(t, problems, 1)
 	assert.Equal(t, v1.RuleProblem{
 		Block:   "api",
-		Rule:    "per-user",
+		Rule:    perUserName,
 		Reason:  v1.ProblemUnresolvedPresetReference,
 		Message: `preset "standard-clinet" is not declared under spec.presets.rules`,
 	}, problems[0])
@@ -364,7 +369,7 @@ func TestResolve_rejectsTheShapeOfAPresetNoRuleTakes(t *testing.T) {
 // that takes it is told about the chain and nothing else.
 func TestResolve_aRuleTakingAChainedPresetIsReportedTheChainAlone(t *testing.T) {
 	spec := specWithPresets([]v1.Rule{standardClient(), {Name: "chained", Preset: "standard-client"}},
-		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "per-user", Preset: "chained"}}})
+		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "chained"}}})
 
 	resolved, problems := Resolve(spec)
 
@@ -563,7 +568,7 @@ func TestCompile_aPolicyWithPresetsCompilesLikeThePolicyWrittenOut(t *testing.T)
 	withPresets := specWithPresets([]v1.Rule{internalBypass, standardClient()},
 		v1.LimitBlock{Name: "orders", Target: target("/orders"), Mode: v1.BlockModeFirstMatch, Rules: []v1.Rule{
 			{Name: "internal", Preset: "internal-bypass"},
-			{Name: "per-user", Preset: "standard-client"},
+			{Name: perUserName, Preset: "standard-client"},
 		}},
 		v1.LimitBlock{Name: "catalog", Target: target("/catalog"), Mode: v1.BlockModeFirstMatch, Rules: []v1.Rule{
 			{Name: "internal", Preset: "internal-bypass"},
@@ -572,7 +577,7 @@ func TestCompile_aPolicyWithPresetsCompilesLikeThePolicyWrittenOut(t *testing.T)
 	internal := internalBypass
 	internal.Name = "internal"
 	perUser := standardClient()
-	perUser.Name = "per-user"
+	perUser.Name = perUserName
 	perUserCatalog := perUser
 	perUserCatalog.Rates = []v1.Rate{minuteRate(300)}
 	writtenOut := &v1.RateLimitPolicySpec{Domain: testDomain, Limits: []v1.LimitBlock{
@@ -603,7 +608,7 @@ func objectWithSpec(spec *v1.RateLimitPolicySpec) v1.RateLimitPolicy {
 // resolved spec, and a preset field never reaches a payload.
 func TestCompile_theBundleAndThePayloadCarryNoPreset(t *testing.T) {
 	object := objectWithSpec(specWithPresets([]v1.Rule{standardClient()},
-		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "per-user", Preset: "standard-client"}}}))
+		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-client"}}}))
 
 	result := compileOf(object)
 
@@ -642,7 +647,7 @@ func jsonKeys(v any) []string {
 func TestCompile_anUnresolvedPresetKeepsTheLastGoodGenerationServing(t *testing.T) {
 	good := policyObject(v1.LimitBlock{Name: "api", Rules: []v1.Rule{simpleRule("total")}})
 	broken := objectWithSpec(specWithPresets(nil,
-		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "per-user", Preset: "standard-client"}}}))
+		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-client"}}}))
 	broken.Generation = 2
 
 	result := Compile(Input{
@@ -656,7 +661,7 @@ func TestCompile_anUnresolvedPresetKeepsTheLastGoodGenerationServing(t *testing.
 	assert.Contains(t, outcome.Err.Error(), v1.ProblemUnresolvedPresetReference)
 	require.Len(t, outcome.Problems, 1)
 	assert.Equal(t, "api", outcome.Problems[0].Block)
-	assert.Equal(t, "per-user", outcome.Problems[0].Rule)
+	assert.Equal(t, perUserName, outcome.Problems[0].Rule)
 	assert.Equal(t, int64(1), outcome.ActiveGeneration, "the last-good generation keeps serving")
 	assert.Equal(t, 1, outcome.Rules)
 }
