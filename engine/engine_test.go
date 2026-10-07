@@ -221,11 +221,12 @@ func TestHeaders_nameTheRuleOfTheStrictestWindow(t *testing.T) {
 }
 
 // EffectiveWindow is the time until the window admits one request more, the
-// t of the ratelimit field. For GCRA it is one emission interval or less, not
-// the time until the bucket drains: at two per hour, a client that spent both
-// requests gets the next one 1800 s later, while the bucket is empty only
-// after 3600 s. A fixed window returns its quota at the boundary, and a window
-// at its full capacity has nothing to return.
+// t of the ratelimit field. For a GCRA counter within its capacity it is one
+// emission interval or less, not the time until the bucket drains: at two per
+// hour, a client that spent both requests gets the next one 1800 s later,
+// while the bucket is empty only after 3600 s. A fixed window returns its
+// quota at the boundary, and a window at its full capacity has nothing to
+// return.
 func TestHeaders_effectiveWindowIsTheTimeToTheNextRequest(t *testing.T) {
 	compiled := func(algorithm string) *compile.Snapshot {
 		p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
@@ -267,6 +268,39 @@ func TestHeaders_effectiveWindowIsTheTimeToTheNextRequest(t *testing.T) {
 	req.Cost = 3
 	if h := decide(t, engine.New(compiled(""), memory.New()), req).Headers; h.EffectiveWindow >= 0 {
 		t.Errorf("a full window reports an effective window of %s", h.EffectiveWindow)
+	}
+}
+
+// A policy change that lowers burst keeps the counter's depth, so the
+// effective window counts until that depth drains to one request below the
+// new capacity and can exceed one emission interval: at two per hour, four
+// requests under burst 4 leave a depth of 7200 s, and under burst 1 the next
+// request returns 7200 s later, four intervals. retry-after and
+// x-ratelimit-reset carry the same wait.
+func TestHeaders_effectiveWindowCarriesTheDebtOfALoweredBurst(t *testing.T) {
+	compiled := func(burst int64) *compile.Snapshot {
+		p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
+			Name: "exports", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Burst: burst}}}}}}}
+		snap, problems := compile.Compile("core-1-core", domain, &p)
+		if len(problems) != 0 {
+			t.Fatalf("compile problems: %v", problems)
+		}
+		return snap
+	}
+	req := engine.Request{Path: "/x", Method: "GET"}
+	counters := memory.New()
+	wide := engine.New(compiled(4), counters)
+	for i := 0; i < 4; i++ {
+		if d := decide(t, wide, req); !d.Allowed {
+			t.Fatalf("request %d under burst 4 = %+v, want an admission", i+1, d.Headers)
+		}
+	}
+
+	h := decide(t, engine.New(compiled(1), counters), req).Headers
+	near := func(got, want time.Duration) bool { return got <= want && got > want-time.Second }
+	if !near(h.EffectiveWindow, 2*time.Hour) || !near(h.RetryAfter, 2*time.Hour) || !near(h.ResetAfter, 2*time.Hour) {
+		t.Errorf("under burst 1: effective window %s, retry after %s, reset %s, want 2h0m0s each",
+			h.EffectiveWindow, h.RetryAfter, h.ResetAfter)
 	}
 }
 

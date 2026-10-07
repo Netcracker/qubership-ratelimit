@@ -41,13 +41,16 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
   and `x-ratelimit-remaining`, and `w` is the period of the rule's binding window. `t` is the effective window of the
   draft's section 4.1.2: the seconds until the window admits one request more than `r`. For a fixed window that is
   `x-ratelimit-reset`, since the whole quota returns at the boundary; GCRA returns one request per emission interval, so
-  `t` is at most one interval, and `x-ratelimit-reset` keeps counting to the empty bucket. At two requests per hour, a
-  client that spent both reads `t=1800` and `x-ratelimit-reset: 3600`. On a refusal `t` is never longer than
-  `retry-after`, and a window that holds its whole capacity, which only a refusal no waiting cures reports, sends no
-  `t`. Each field carries one item, from the strictest bucket of this response, so the name in `ratelimit-policy`
-  changes when a different rule binds: it is not the stable list of every rule that applies. Neither field carries `pk`,
-  which would hand the client the identity its counter is keyed on, or `qu`, whose default, requests, is the unit. A
-  request that matched no counting rule carries none of the six headers. The service chart's
+  `t` is at most one interval while the counter is within the window's capacity, and `x-ratelimit-reset` keeps counting
+  to the empty bucket. At two requests per hour, a client that spent both reads `t=1800` and `x-ratelimit-reset: 3600`.
+  A policy change that lowers `burst` keeps the counter's depth, and `t` then counts until that depth drains to one
+  request below the new capacity: with `burst` lowered from 4 to 1 after four requests at two per hour, the next answer
+  carries `t=7200`, four intervals, and `retry-after` and `x-ratelimit-reset` the same 7200. On a refusal `t` is never
+  longer than `retry-after`, and a window that holds its whole capacity, which only a refusal no waiting cures reports,
+  sends no `t`. Each field carries one item, from the strictest bucket of this response, so the name in
+  `ratelimit-policy` changes when a different rule binds: it is not the stable list of every rule that applies. Neither
+  field carries `pk`, which would hand the client the identity its counter is keyed on, or `qu`, whose default,
+  requests, is the unit. A request that matched no counting rule carries none of the six headers. The service chart's
   `responseHeaders.ietf: false` leaves the two fields out and keeps the other four, for clients that misread them or
   that must not learn the rule names. "Strictest" is deterministic: minimal remaining on an admission; longest
   retry-after on a refusal (every refusing bucket has about zero remaining, and a short hint would steer the client's

@@ -189,7 +189,7 @@ func TestShouldRateLimit_sendsTheIETFRateLimitFields(t *testing.T) {
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, refused.GetOverallCode())
 	headers := agrees("refusal", refused, "1800")
 	assert.Equal(t, "3600", headers["x-ratelimit-reset"], "x-ratelimit-reset counts to the empty bucket")
-	assert.Equal(t, "1800", headers["retry-after"], "the effective window is longer than the retry hint")
+	assert.Equal(t, "1800", headers["retry-after"], "a refusal of cost 1 waits one effective window")
 
 	never := check(newServer(), "/api/exports", 3)
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, never.GetOverallCode())
