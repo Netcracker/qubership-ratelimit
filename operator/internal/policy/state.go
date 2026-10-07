@@ -36,7 +36,7 @@ type Bundle struct {
 	// GoodGeneration is the generation GoodSpec came from.
 	GoodGeneration int64 `json:"goodGeneration"`
 
-	// GoodSpec is the spec being enforced.
+	// GoodSpec is the spec being enforced, with its presets resolved.
 	GoodSpec v1.RateLimitPolicySpec `json:"goodSpec"`
 }
 

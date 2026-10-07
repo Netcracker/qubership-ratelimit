@@ -293,7 +293,11 @@ property of the access model. Axis values and the Idempotency-Key land in the lo
   and effective keys that `GET /rules` renders. Editing a policy's annotations, changing another domain, or asking for
   applicability annotations leaves it alone, and a domain running on last-good reports the version of the set it is
   actually serving. Treat the value as opaque: compare it, and pin it with `expectedRuleSetVersion`, but do not parse
-  or recompute it. The service computes it once, at the snapshot swap, so the decision path hashes nothing.
+  or recompute it. The service computes it once, at the snapshot swap, so the decision path hashes nothing. The
+  operator writes the presets of a policy into the rules that take them before the set is built
+  ([the resource specification](ratelimitpolicy-cr-spec.md), "Presets"), so the listing shows resolved rules under
+  their own names, no preset name appears in it, and an edit of a preset changes the version where it changes a
+  resolved rule.
 - **Bulk is always synchronous**: the selection is swept to the end inside the call, one code path (SCAN in batches plus
   UNLINK; a domain is one slot). The bounds are server-side rather than client knobs: the sweep deadline (a constant on
   the order of a minute; exceeding it is a recorded failed outcome RLS-0422 with partialReset) and the one-sweep-per-

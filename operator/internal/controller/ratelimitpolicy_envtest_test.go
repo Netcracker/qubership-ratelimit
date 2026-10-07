@@ -254,16 +254,57 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(create(policy)).To(Succeed())
 		})
 
-		It("applies the defaults of the schema", func() {
+		// The schema holds no default for mode, behavior, and algorithm: a
+		// value the API server wrote into every object would be one the
+		// compiler cannot tell from the author's, and a rule could never take
+		// its behavior from a preset. The compiler reads the absent value as
+		// All, Enforce, and GCRA.
+		It("stores mode, behavior, and algorithm only where the author wrote them", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
 			Expect(create(policy)).To(Succeed())
 
 			stored := &ratelimitv1.RateLimitPolicy{}
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
 
-			Expect(stored.Spec.Limits[0].Mode).To(Equal(ratelimitv1.BlockModeAll))
-			Expect(stored.Spec.Limits[0].Rules[0].Behavior).To(Equal(ratelimitv1.RuleBehaviorEnforce))
-			Expect(stored.Spec.Limits[0].Rules[0].Rates[0].Algorithm).To(Equal(ratelimitv1.AlgorithmGCRA))
+			Expect(stored.Spec.Limits[0].Mode).To(BeEmpty())
+			Expect(stored.Spec.Limits[0].Rules[0].Behavior).To(BeEmpty())
+			Expect(stored.Spec.Limits[0].Rules[0].Rates[0].Algorithm).To(BeEmpty())
+		})
+
+		It("stores rule presets and a rule that takes one", func() {
+			// Read back, because a structural schema prunes a field it does
+			// not define, and the create would succeed without a word.
+			policy := policyWith("gateway.public", blockWith("api",
+				ratelimitv1.Rule{Name: "per-user", Preset: "standard-client"}))
+			policy.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.Rule{{
+				Name:     "standard-client",
+				Counters: []string{"sub"},
+				Rates:    []ratelimitv1.Rate{{Requests: 100, PeriodSeconds: 60}},
+			}}}
+			Expect(create(policy)).To(Succeed())
+
+			stored := &ratelimitv1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
+
+			Expect(stored.Spec.Presets).To(Equal(policy.Spec.Presets))
+			Expect(stored.Spec.Limits[0].Rules[0].Preset).To(Equal("standard-client"))
+		})
+
+		It("rejects a preset reference outside the name pattern", func() {
+			policy := policyWith("gateway.public", blockWith("api",
+				ratelimitv1.Rule{Name: "per-user", Preset: "Standard Client"}))
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("spec.limits[0].rules[0].preset")))
+		})
+
+		It("rejects two rule presets of one name", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.Rule{
+				{Name: "standard-client", Counters: []string{"sub"}},
+				{Name: "standard-client", Counters: []string{"path"}},
+			}}
+
+			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
 		})
 
 		It("accepts the mappings and groups of the one object", func() {

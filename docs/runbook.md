@@ -470,11 +470,16 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 | `UnresolvedKeyReference` | a `matches` key or a counter axis that no mapping and no capture of the domain produces |
 | `UnresolvedGroupReference` | `InGroup` names a group the object does not declare |
 | `UnresolvedReplacedRules` | `replacedRules` names a rule outside its own block |
+| `UnresolvedPresetReference` | `preset` names a preset `spec.presets.rules` does not hold; the address is the rule that names it |
 | `IncompatibleOperator`, `InvalidCounterAxis` | the key's type does not suit the operator or the axis |
-| `InvalidSpec` | a structural defect the schema cannot see: predicate arity, `Bypass` without `replacedRules` in an `All` block, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, or an empty segment from a slash at the end or two in a row), an unknown field or enum value (section 5) |
+| `InvalidSpec` | a structural defect the schema cannot see: predicate arity, `Bypass` without `replacedRules` in an `All` block, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, or an empty segment from a slash at the end or two in a row), a preset body that names a preset, a preset declared twice or without a name, an unknown field or enum value (section 5) |
 | `InvalidWindow` | a window the algorithm cannot enforce |
 | `DomainBudgetExceeded` | the worst case of one decision exceeds 128 buckets |
+| `ResolvedPolicyTooLarge` | the presets written into the rules that take them would make the policy larger than 1.5 MiB (1572864 bytes), by an estimate made before any preset is written into a rule; the address is empty, the policy as a whole |
 | `CaptureShadowsMappedKey` | informational: inside the block the capture wins over the mapped key of the same name |
+
+A problem at a rule that takes a preset ends with `; the rule takes preset "<name>"`: the defect may be in the body
+of the preset rather than in the fields the rule wrote.
 
 **What traffic sees meanwhile.** `activeGeneration` is enforced, and the management API keeps reporting its rule set:
 `GET /domains` showed `ruleSetVersion 5ff0f5a9e94d` with 12 rules throughout, and the manifest kept generation 1. If
@@ -494,6 +499,24 @@ kubectl logs -n "$NS" -l name=ratelimit-operator --prefix | grep 'dropped a save
 
 **Act.** Fix the spec at the address and apply it. The compiler judges the whole generation, so fix every listed problem
 in one edit; a second `apply` that fixes one of two does nothing for traffic.
+
+**A preset that does not take effect.** A rule that takes a preset keeps every field it carries itself, and an object
+stored before the schema stopped writing defaults may carry `mode: All`, `behavior: Enforce`, and `algorithm: GCRA`
+where the author left them out ([the resource specification](ratelimitpolicy-cr-spec.md), "Why the defaults of mode,
+behavior, and algorithm leave the schema"). A rule that takes a `Shadow` preset and still enforces is the symptom.
+Read what the stored object carries, then remove with a JSON patch the stored value of each field the preset is meant
+to supply, `behavior` or `algorithm`; the generation that follows is resolved from the preset:
+
+```bash
+kubectl get rlp -n "$NS" "$DOMAIN" -o jsonpath='{range .spec.limits[*]}{.name}{" mode="}{.mode}{"\n"}{range .rules[*]}{"  "}{.name}{" preset="}{.preset}{" behavior="}{.behavior}{"\n"}{end}{end}'
+# api mode=All
+#   per-client preset=standard-client behavior=Enforce     <- a stored default over a Shadow preset
+kubectl patch rlp -n "$NS" "$DOMAIN" --type=json \
+  -p '[{"op": "remove", "path": "/spec/limits/0/rules/1/behavior"}]'
+```
+
+The index in the path is the position of the rule in the stored list. `kubectl replace -f` with the author's manifest
+does the same for the whole object, since the manifest carries only what the author wrote.
 
 **Verify.** `Accepted: True` with reason `RulesCompiled`, `Ready` back to `True` within the probe interval (10 s on the
 stand, after the kubelet's projection), and the three numbers agree:

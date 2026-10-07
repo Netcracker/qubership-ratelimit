@@ -194,8 +194,9 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
 - **Generation validity is atomic.** The CRD schema cuts off only the shape (patterns, enums, ranges, duplicate names,
   `name == domain`); the content (references, types, structure, window math, budgets, and schema version skew) is judged
   by the operator's compiler on every generation. A generation with at least one blocking problem
-  (`UnresolvedKeyReference`, `UnresolvedGroupReference`, `UnresolvedReplacedRules`, `IncompatibleOperator`,
-  `InvalidCounterAxis`, `InvalidSpec`, `InvalidWindow`, `DomainBudgetExceeded`) is invalid as a whole: none of its rules
+  (`UnresolvedKeyReference`, `UnresolvedGroupReference`, `UnresolvedReplacedRules`, `UnresolvedPresetReference`,
+  `IncompatibleOperator`, `InvalidCounterAxis`, `InvalidSpec`, `InvalidWindow`, `DomainBudgetExceeded`,
+  `ResolvedPolicyTooLarge`) is invalid as a whole: none of its rules
   enters the snapshot, `Ready: False`, `Accepted: False`, and last-good stays in force. Partially enforced generations
   do not exist; otherwise a `FirstMatch` cascade with a dead rule would silently hand traffic to neighboring rules.
   `CaptureShadowsMappedKey` is informational and does not block validity.

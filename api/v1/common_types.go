@@ -102,6 +102,10 @@ const (
 	// outside its own block. Blocking.
 	ProblemUnresolvedReplacedRules = "UnresolvedReplacedRules"
 
+	// ProblemUnresolvedPresetReference marks a rule whose preset names an
+	// entry spec.presets.rules does not hold. Blocking.
+	ProblemUnresolvedPresetReference = "UnresolvedPresetReference"
+
 	// ProblemIncompatibleOperator marks an operator that cannot apply to the
 	// type of its key, such as Equals against an array claim. Blocking.
 	ProblemIncompatibleOperator = "IncompatibleOperator"
@@ -112,7 +116,9 @@ const (
 
 	// ProblemInvalidSpec marks a structural defect the schema cannot see:
 	// predicate arity, a Bypass without replacedRules under All, a repeated
-	// placeholder, an unknown field or enum value of a newer schema. Blocking.
+	// placeholder, a preset body that names a preset, a preset declared twice
+	// or without a name, an unknown field or enum value of a newer schema.
+	// Blocking.
 	ProblemInvalidSpec = "InvalidSpec"
 
 	// ProblemInvalidWindow marks a rate the counting math cannot honor, such
@@ -125,6 +131,12 @@ const (
 	// Blocking: enforcing it would leave the widest paths to the runtime
 	// backstop, which refuses them outright.
 	ProblemDomainBudgetExceeded = "DomainBudgetExceeded"
+
+	// ProblemResolvedPolicyTooLarge marks a generation whose presets, written
+	// into the rules that take them, are estimated to make the policy larger
+	// than one authored object may be: 1.5 MiB (1572864 bytes). The estimate
+	// is made before any preset is written into a rule. Blocking.
+	ProblemResolvedPolicyTooLarge = "ResolvedPolicyTooLarge"
 
 	// ProblemCaptureShadowsMappedKey is informational: inside the block, a
 	// route capture takes precedence over the mapped key of the same name.

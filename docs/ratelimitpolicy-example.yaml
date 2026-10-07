@@ -31,6 +31,18 @@ spec:
     values:
     - 00000000-0000-4000-8000-00000000d001
 
+  # Rule bodies written once; a rule takes one by name through preset and writes only the fields that differ.
+  # The operator writes presets into the rules that take them before the policy compiles: a preset name is
+  # part of no counter key and appears nowhere outside this object.
+  presets:
+    rules:
+    # A partial body: the axes and the windows of a standard client, no predicates.
+    - name: standard-client
+      counters: [sub]
+      rates:
+      - { requests: 100, periodSeconds: 60, burst: 20 }
+      - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
+
   limits:
 
   # ── Block 1: basic counting axes over the whole API (mode: All: the rules add up) ─────────
@@ -44,12 +56,9 @@ spec:
       counters: [path]
       rates:
       - { requests: 1000, periodSeconds: 60, burst: 100 }
-    # A counter per client, all paths together; a minute rate and a daily quota are two buckets.
+    # A counter per client, all paths together; the preset's axis and its two windows, under this rule's name.
     - name: per-client
-      counters: [sub]
-      rates:
-      - { requests: 100, periodSeconds: 60, burst: 20 }
-      - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
+      preset: standard-client
     # The Enterprise plan instead of per-client: replacedRules suppresses the replaced rule entirely.
     - name: enterprise-per-client
       matches:
@@ -117,9 +126,10 @@ spec:
       counters: [orderId]
       rates:
       - { requests: 10, periodSeconds: 60 }
-    # The rest: per client.
+    # The rest: per client. The preset's axis with this rule's own windows: a field written here replaces the
+    # preset's whole, so the daily quota of the preset does not apply to orders.
     - name: orders-per-client
-      counters: [sub]
+      preset: standard-client
       rates:
       - { requests: 50, periodSeconds: 60 }
     # Anonymous callers: a separate shared bucket (they have no sub axis, so the rule above does not match).

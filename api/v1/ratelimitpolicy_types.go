@@ -194,8 +194,9 @@ type Rate struct {
 	// +kubebuilder:validation:Maximum=2147483647
 	Burst *int32 `json:"burst,omitempty"`
 
-	// algorithm is a property of the window rather than of the rule.
-	// +kubebuilder:default=GCRA
+	// algorithm is a property of the window rather than of the rule. Absent,
+	// it is GCRA, or the algorithm of the preset the rule takes.
+	// +optional
 	Algorithm Algorithm `json:"algorithm,omitempty"`
 }
 
@@ -206,6 +207,18 @@ type Rule struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
+
+	// preset names the entry of spec.presets.rules the rule starts from. The
+	// rule begins as a copy of that body, and every field it writes replaces
+	// the field of the preset whole; a field it leaves out comes from the
+	// preset. A list written empty is a value: counters: [] is one shared
+	// bucket, whatever axes the preset has. name is always the rule's own.
+	// A preset body carries no preset of its own.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Preset string `json:"preset,omitempty" manifest:"-"`
 
 	// matches is a conjunction of predicates. An empty list matches every
 	// request the block sees.
@@ -230,8 +243,9 @@ type Rule struct {
 	// +listMapKey=periodSeconds
 	Rates []Rate `json:"rates,omitempty"`
 
-	// behavior selects what the rule does with the verdict.
-	// +kubebuilder:default=Enforce
+	// behavior selects what the rule does with the verdict. Absent, it is
+	// Enforce, or the behavior of the preset the rule takes.
+	// +optional
 	Behavior RuleBehavior `json:"behavior,omitempty"`
 
 	// replacedRules silences rules of the same block, which is how a narrow
@@ -261,8 +275,8 @@ type LimitBlock struct {
 	Target *Target `json:"target,omitempty"`
 
 	// mode selects how the rules of the block combine. It has no effect across
-	// blocks.
-	// +kubebuilder:default=All
+	// blocks. Absent, it is All.
+	// +optional
 	Mode BlockMode `json:"mode,omitempty"`
 
 	// rules are the counters of the block.
@@ -270,6 +284,24 @@ type LimitBlock struct {
 	// +listType=map
 	// +listMapKey=name
 	Rules []Rule `json:"rules"`
+}
+
+// Presets are the bodies a rule of spec.limits takes by name through its
+// preset field. The operator writes them into the rules that take them before
+// the policy compiles, so the counter keys, the status, the configuration the
+// service reads, and the management API see the resolved rules under the
+// names of the rules that took them, and a preset name appears nowhere
+// outside the object.
+type Presets struct {
+	// rules holds rule bodies: the fields of a rule, with name as the name of
+	// the preset. A body may be partial, a preset of windows alone or of
+	// predicates alone. It carries no preset of its own: presets do not
+	// chain. The shape of every body is checked whether a rule takes it or
+	// not; its content is checked through the rules that take it.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Rules []Rule `json:"rules,omitempty"`
 }
 
 // RateLimitPolicySpec is the whole rate limit configuration of one domain:
@@ -302,6 +334,11 @@ type RateLimitPolicySpec struct {
 	// +listType=map
 	// +listMapKey=name
 	Groups []Group `json:"groups,omitempty"`
+
+	// presets are the rule bodies a rule of limits starts from through its
+	// preset field, resolved inside this object before it compiles.
+	// +optional
+	Presets *Presets `json:"presets,omitempty" manifest:"-"`
 
 	// limits are the blocks of the policy.
 	// +kubebuilder:validation:MinItems=1
@@ -338,8 +375,9 @@ type RuleProblem struct {
 	Rule string `json:"rule,omitempty"`
 
 	// reason is one of UnresolvedKeyReference, UnresolvedGroupReference,
-	// UnresolvedReplacedRules, IncompatibleOperator, InvalidCounterAxis,
-	// InvalidSpec, InvalidWindow, DomainBudgetExceeded, and
+	// UnresolvedReplacedRules, UnresolvedPresetReference,
+	// IncompatibleOperator, InvalidCounterAxis, InvalidSpec, InvalidWindow,
+	// DomainBudgetExceeded, ResolvedPolicyTooLarge, and
 	// CaptureShadowsMappedKey. CaptureShadowsMappedKey is informational; every
 	// other reason blocks the generation.
 	Reason string `json:"reason"`
@@ -456,8 +494,8 @@ type RateLimitPolicyStatus struct {
 // Everything the domain needs lives in this one object: the claim mapping, the
 // groups, and the rules change in one edit and apply atomically, so a request
 // never sees old extraction mixed with new rules. The compiler resolves the
-// references from rules to keys and groups inside the object, with no
-// cross-object arbitration anywhere.
+// presets and the references from rules to keys and groups inside the object,
+// with no cross-object arbitration anywhere.
 //
 // A generation is enforced whole or not at all. The API server checks only the
 // shape — patterns, enums, ranges, duplicate names, and this name rule — while

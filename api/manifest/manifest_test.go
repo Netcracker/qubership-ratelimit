@@ -253,15 +253,18 @@ func jsonPaths(v any, prefix string, out map[string]bool) {
 
 // TestFieldPaths_walksTheShapesTheSpecUses pins the walker on a type built
 // to hold every shape the spec has: nested structs, slices of structs,
-// slices of scalars, pointers, maps, an inlined struct, and a recursive type.
+// slices of scalars, pointers, maps, an inlined struct, a recursive type,
+// and a field of the authoring form, tagged manifest:"-", which no payload
+// carries and the field set leaves out.
 func TestFieldPaths_walksTheShapesTheSpecUses(t *testing.T) {
 	type leaf struct {
-		Name  string         `json:"name"`
-		Count *int32         `json:"count,omitempty"`
-		Skip  string         `json:"-"`
-		Bare  string         // no tag: the Go name
-		Tags  []string       `json:"tags,omitempty"`
-		Extra map[string]int `json:"extra,omitempty"`
+		Name   string         `json:"name"`
+		Count  *int32         `json:"count,omitempty"`
+		Skip   string         `json:"-"`
+		Bare   string         // no tag: the Go name
+		Tags   []string       `json:"tags,omitempty"`
+		Extra  map[string]int `json:"extra,omitempty"`
+		Preset string         `json:"preset,omitempty" manifest:"-"`
 	}
 	type inlined struct {
 		Kind string `json:"kind"`
@@ -281,6 +284,9 @@ func TestFieldPaths_walksTheShapesTheSpecUses(t *testing.T) {
 		Timeouts []metav1.Duration  `json:"timeouts"`
 		Size     *resource.Quantity `json:"size,omitempty"`
 		When     metav1.Time        `json:"when"`
+
+		// An authoring-only subtree: left out whole, its own fields with it.
+		Presets *leaf `json:"presets,omitempty" manifest:"-"`
 	}
 
 	assert.Equal(t, []string{
