@@ -505,8 +505,9 @@ in one edit; a second `apply` that fixes one of two does nothing for traffic.
 stored before the schema stopped writing defaults may carry `mode: All`, `behavior: Enforce`, and `algorithm: GCRA`
 where the author left them out ([the resource specification](ratelimitpolicy-cr-spec.md), "Why the defaults of mode,
 behavior, and algorithm leave the schema"). A rule that takes a `Shadow` preset and still enforces is the symptom.
-Read what the stored object carries, then remove with a JSON patch the stored value of each field the preset is meant
-to supply, `behavior` or `algorithm`; the generation that follows is resolved from the preset:
+Read what the stored object carries, then remove with a JSON patch the stored `behavior` where the preset is meant to
+supply it; a stored `algorithm` needs nothing, since a window is taken or replaced with the whole `rates` list. The
+generation that follows is resolved from the preset:
 
 ```bash
 kubectl get rlp -n "$NS" "$DOMAIN" -o jsonpath='{range .spec.limits[*]}{.name}{" mode="}{.mode}{"\n"}{range .rules[*]}{"  "}{.name}{" preset="}{.preset}{" behavior="}{.behavior}{"\n"}{end}{end}'

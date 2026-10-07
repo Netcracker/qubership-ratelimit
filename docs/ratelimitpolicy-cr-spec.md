@@ -225,7 +225,7 @@ responsibility. The compiler adds no normalization of its own.
 | `requests` | int32, 1..2 147 483 647 | the window's quota |
 | `periodSeconds` | int32 | window length in seconds, 1..86400 (one day); unique within the rule |
 | `burst` | int32, 1..2 147 483 647 | only with the `GCRA` algorithm; defaults to `requests` (a full bucket) |
-| `algorithm` | `GCRA` \| `FixedWindow`; absent = `GCRA`, or the preset's | a property of the window; every entry is an independent bucket |
+| `algorithm` | `GCRA` \| `FixedWindow`; absent = `GCRA` | a property of the window; every entry is an independent bucket |
 
 GCRA limits visible to the rule author: the service counts in whole microseconds, so the rate is capped at one
 request per microsecond; at a rate above ~10 000/s per bucket the emission interval is rounded to a microsecond, and
@@ -329,6 +329,9 @@ the preset whole, and a field left out comes from the preset. A list written emp
 | `rates: []` | no windows; valid only together with `behavior: Bypass` |
 | `behavior: Shadow` over a `Bypass` preset | a Shadow rule, which has to carry `rates` of its own |
 
+`rates` is taken or replaced whole: a rule that leaves it out takes the preset's windows, their `algorithm` included,
+and a window the rule writes carries its own `algorithm`, `GCRA` when absent.
+
 The merged rule is checked exactly like a rule written out in full, and a problem is reported at the rule's own
 address, the block and the rule of the point of use, with the preset named in the message. `replacedRules` and
 captures are resolved in the block that holds the rule: a preset with `replacedRules: [per-user]` is valid in a
@@ -370,17 +373,19 @@ What follows for the rest of the object:
 The API server writes a schema default into every object at admission. A rule that names a `Shadow` preset would
 carry `behavior: Enforce` as a written field, and the compiler could not tell that field from an omission, so the
 preset's `behavior` would never apply. With no schema default, an absent field is an omission and the compiler
-reads it as `Enforce`, `GCRA`, or `All`, which is what the engine does with an empty value. `kubectl get -o yaml`
-shows `behavior`, `algorithm`, and `mode` only on objects that wrote them.
+reads it as `Enforce`, `GCRA`, or `All`, which is what the engine does with an empty value. `algorithm` leaves the
+schema with the other two so that the three defaults live in one place, the compiler; a window is taken or replaced
+with the whole `rates` list, so a stored `algorithm: GCRA` changes nothing. `kubectl get -o yaml` shows `behavior`,
+`algorithm`, and `mode` only on objects that wrote them.
 
 **Objects stored before the change.** Such an object may carry `mode: All`, `behavior: Enforce`, and
 `algorithm: GCRA` as written fields where it left them out, because the API server wrote them at admission. A stored
 value can survive an apply that leaves the field out; under server-side apply the outcome depends on which manager
 owns the field. A rule that keeps such a value and takes a preset keeps that value over the preset's, and the
 compiler cannot tell the stored default from a value the author wrote. Before a rule of such an object takes a
-preset, read the stored object and remove, with a JSON patch, the stored value of each field the preset is meant to
-supply, `behavior` or `algorithm`; a value the author wrote on purpose, such as `behavior: Shadow`, stays. Replacing
-the object from its
+preset, read the stored object and remove, with a JSON patch, the stored `behavior` where the preset is meant to
+supply it; a value the author wrote on purpose, such as `behavior: Shadow`, stays, and a stored `algorithm` needs
+nothing, since a window is taken or replaced with the whole `rates` list. Replacing the object from its
 manifest with `kubectl replace -f` does the same, since the manifest carries only what the author wrote. An object
 written under the changed schema needs nothing. The commands are in the [runbook](runbook.md), section 3.
 

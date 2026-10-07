@@ -267,7 +267,9 @@ spec:
                                 algorithm:
                                   description: |-
                                     algorithm is a property of the window rather than of the rule. Absent,
-                                    it is GCRA, or the algorithm of the preset the rule takes.
+                                    it is GCRA. A rule that takes a preset and leaves rates out takes the
+                                    preset's windows with their algorithms; a window the rule writes
+                                    carries its own.
                                   enum:
                                   - GCRA
                                   - FixedWindow
@@ -586,7 +588,9 @@ spec:
                               algorithm:
                                 description: |-
                                   algorithm is a property of the window rather than of the rule. Absent,
-                                  it is GCRA, or the algorithm of the preset the rule takes.
+                                  it is GCRA. A rule that takes a preset and leaves rates out takes the
+                                  preset's windows with their algorithms; a window the rule writes
+                                  carries its own.
                                 enum:
                                 - GCRA
                                 - FixedWindow

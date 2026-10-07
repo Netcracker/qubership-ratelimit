@@ -197,6 +197,15 @@ func TestResolve_aFieldWrittenAtThePointOfUseReplacesThePresetsWhole(t *testing.
 			},
 		},
 		{
+			name:   "a window written without algorithm over a FixedWindow preset is GCRA",
+			preset: v1.Rule{Name: "standard-client", Rates: []v1.Rate{{Requests: 20000, PeriodSeconds: 86400, Algorithm: v1.AlgorithmFixedWindow}}},
+			use:    v1.Rule{Name: "r", Preset: "standard-client", Rates: []v1.Rate{minuteRate(300)}},
+			want: func(t *testing.T, got v1.Rule) {
+				assert.Equal(t, []v1.Rate{{Requests: 300, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}}, got.Rates,
+					"rates are replaced whole, so the written window carries no algorithm of the preset's")
+			},
+		},
+		{
 			name:   "Shadow over a Bypass preset is a Shadow rule with its own windows",
 			preset: bypass,
 			use: v1.Rule{Name: "r", Preset: "internal-bypass", Behavior: v1.RuleBehaviorShadow,

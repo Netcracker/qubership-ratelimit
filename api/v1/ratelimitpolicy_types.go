@@ -195,10 +195,17 @@ type Rate struct {
 	Burst *int32 `json:"burst,omitempty"`
 
 	// algorithm is a property of the window rather than of the rule. Absent,
-	// it is GCRA, or the algorithm of the preset the rule takes.
+	// it is GCRA. A rule that takes a preset and leaves rates out takes the
+	// preset's windows with their algorithms; a window the rule writes
+	// carries its own.
 	// +optional
 	Algorithm Algorithm `json:"algorithm,omitempty"`
 }
+
+// The lists of a rule are omitzero rather than omitempty: a list a Go client
+// writes empty, such as counters: [] for one shared bucket over a preset's
+// axes, has to reach the API server as [] and stay a value, where omitempty
+// would drop it and the rule would take the preset's list.
 
 // Rule is one counter of a block.
 type Rule struct {
@@ -224,7 +231,7 @@ type Rule struct {
 	// request the block sees.
 	// +optional
 	// +listType=atomic
-	Matches []Predicate `json:"matches,omitempty"`
+	Matches []Predicate `json:"matches,omitzero"`
 
 	// counters are the axes of the bucket. An empty list gives the rule a
 	// single shared bucket. A rule whose axis the request does not carry, such
@@ -234,14 +241,14 @@ type Rule struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:items:MaxLength=63
 	// +listType=atomic
-	Counters []string `json:"counters,omitempty"`
+	Counters []string `json:"counters,omitzero"`
 
 	// rates are the counting windows of the rule, keyed by period. A rule with
 	// behavior Bypass carries none; every other rule carries at least one.
 	// +optional
 	// +listType=map
 	// +listMapKey=periodSeconds
-	Rates []Rate `json:"rates,omitempty"`
+	Rates []Rate `json:"rates,omitzero"`
 
 	// behavior selects what the rule does with the verdict. Absent, it is
 	// Enforce, or the behavior of the preset the rule takes.
@@ -256,7 +263,7 @@ type Rule struct {
 	// +optional
 	// +kubebuilder:validation:items:MaxLength=63
 	// +listType=atomic
-	ReplacedRules []string `json:"replacedRules,omitempty"`
+	ReplacedRules []string `json:"replacedRules,omitzero"`
 }
 
 // LimitBlock is a target plus the rules that count the traffic it selects.
