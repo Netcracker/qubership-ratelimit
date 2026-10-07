@@ -22,7 +22,7 @@ import (
 // sorted and deduplicated, axis names sorted, values within an axis sorted and
 // deduplicated, the period in seconds, the algorithm lowercased, and absent
 // fields absent. So 1m and 60s are one selection, and so are two orderings of
-// the same client list.
+// the same value list.
 
 // axisPrefix marks the dynamic identity parameters. OpenAPI cannot declare
 // wildcard parameter names, so the family travels as raw query pairs.

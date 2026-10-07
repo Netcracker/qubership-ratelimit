@@ -98,25 +98,13 @@ spec:
                 pattern: ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$
                 type: string
               groups:
-                description: groups are the named client lists the InGroup operator
+                description: groups are the named value lists the InGroup operator
                   resolves against.
                 items:
                   description: |-
-                    ClientGroup names a list of client identities that the InGroup operator
-                    matches against.
+                    Group names a list of values that the InGroup operator matches a key
+                    against.
                   properties:
-                    clients:
-                      description: |-
-                        clients lists the members of the group. Values are compared with the
-                        sub key after its effective normalization, which is lower-case unless
-                        a mapping entry overrides sub with normalization None — then they are
-                        compared as written, and the case is the author's responsibility.
-                      items:
-                        maxLength: 256
-                        type: string
-                      minItems: 1
-                      type: array
-                      x-kubernetes-list-type: atomic
                     name:
                       description: |-
                         name is how a predicate references the group. It is unique within the
@@ -125,9 +113,23 @@ spec:
                       minLength: 1
                       pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
                       type: string
+                    values:
+                      description: |-
+                        values lists the members of the group. A predicate compares them with
+                        the value of its own key after that key's normalization: lower-case for
+                        sub unless a mapping entry overrides sub, whose own normalization then
+                        applies (None by default); what the mapping entry declares for a
+                        mapped key; and a path capture as the segment was sent. The members
+                        are compared as written, so their case is the author's responsibility.
+                      items:
+                        maxLength: 256
+                        type: string
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
                   required:
-                  - clients
                   - name
+                  - values
                   type: object
                 type: array
                 x-kubernetes-list-map-keys:

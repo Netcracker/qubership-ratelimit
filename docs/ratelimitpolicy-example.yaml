@@ -20,15 +20,15 @@ spec:
   - { key: roles, claim: realm_access.roles, type: StringArray }   # array: the Contains/In/InGroup operators
   - { key: plan, claim: plan, normalization: Lowercase }         # scalar: Equals/In, usable in counters
 
-  # Named client groups. The sub value = the sub claim, lowercased.
+  # Named groups for InGroup. These hold sub values: the sub claim, lowercased.
   groups:
   - name: bulk-clients
-    clients:
+    values:
     - 00000000-0000-4000-8000-00000000c001
     - 00000000-0000-4000-8000-00000000c002
     - 00000000-0000-4000-8000-00000000c003
   - name: trial-clients
-    clients:
+    values:
     - 00000000-0000-4000-8000-00000000d001
 
   limits:

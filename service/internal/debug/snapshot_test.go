@@ -28,12 +28,12 @@ const (
 )
 
 // policy declares a mapped key and a group, so that the rendering has a
-// claim path to show and a client list to resolve.
+// claim path to show and a group to resolve.
 func policy() model.Policy {
 	return model.Policy{
 		Domain:   domain,
 		Mappings: []model.KeyMapping{{Key: "tenant", Claim: "org.id", Normalization: model.NormalizeLowercase}},
-		Groups:   []model.Group{{Name: "partners", Clients: []string{"zed", "bob", "alice"}}},
+		Groups:   []model.Group{{Name: "partners", Values: []string{"zed", "bob", "alice"}}},
 		Blocks: []model.Block{{
 			Name: "api",
 			Target: model.Target{Routes: []model.Route{{
@@ -119,7 +119,7 @@ func TestDomain_rendersTheResolvedRulesAndTheClaimPaths(t *testing.T) {
 	require.Len(t, doc.Blocks, 1)
 	require.Len(t, doc.Blocks[0].Rules, 2)
 
-	// The group is resolved: the rule shows the client list the engine
+	// The group is resolved: the rule shows the values the engine
 	// tests, sorted, not the group's name.
 	partners := doc.Blocks[0].Rules[0]
 	require.Len(t, partners.Matches, 1)

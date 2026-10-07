@@ -54,12 +54,12 @@ func prefixBlock(name string, rules ...model.Rule) model.Block {
 	}
 }
 
-// Pattern 1: a shared counter over an enumerated client group — every member
+// Pattern 1: a shared counter over an enumerated group of clients — every member
 // draws from one bucket, outsiders are untouched.
 func TestAcceptanceSharedGroupBucket(t *testing.T) {
 	e := engineFor(t, model.Policy{
 		Domain: domain,
-		Groups: []model.Group{{Name: "partners", Clients: []string{"partner-a", "partner-b"}}},
+		Groups: []model.Group{{Name: "partners", Values: []string{"partner-a", "partner-b"}}},
 		Blocks: []model.Block{prefixBlock("api", model.Rule{
 			Name:    "partners-shared",
 			Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "partners"}},
@@ -83,7 +83,7 @@ func TestAcceptanceSharedGroupBucket(t *testing.T) {
 func TestAcceptanceOverrideOnTopOfBase(t *testing.T) {
 	e := engineFor(t, model.Policy{
 		Domain: domain,
-		Groups: []model.Group{{Name: "vip", Clients: []string{"partner-a"}}},
+		Groups: []model.Group{{Name: "vip", Values: []string{"partner-a"}}},
 		Blocks: []model.Block{prefixBlock("api",
 			model.Rule{Name: "base", Counters: []string{model.KeySub},
 				Rates: []model.Rate{{Requests: 2, Period: time.Minute}}},

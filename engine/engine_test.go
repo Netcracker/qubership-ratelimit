@@ -27,7 +27,7 @@ func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 	t.Helper()
 	p := model.Policy{
 		Domain: domain,
-		Groups: []model.Group{{Name: "trial", Clients: []string{"t1"}}},
+		Groups: []model.Group{{Name: "trial", Values: []string{"t1"}}},
 		Blocks: []model.Block{
 			{
 				Name: "cascade",
@@ -83,6 +83,55 @@ func decide(t *testing.T, e *engine.Engine, req engine.Request) engine.Decision 
 		t.Fatalf("Decide: %v", err)
 	}
 	return d
+}
+
+// A group is compared with the key of the predicate that names it after that
+// key's normalization, and the group values are compared as written: a token
+// whose org_id is ACME lands in a group that lists acme, because extraction
+// lowercases the key, and a group that lists Acme matches no token, because
+// nothing lowercases the group.
+func TestInGroupComparesTheGroupAsWrittenWithTheNormalizedKey(t *testing.T) {
+	engineWithGroupOf := func(t *testing.T, member string) *engine.Engine {
+		t.Helper()
+		p := model.Policy{
+			Domain:   domain,
+			Mappings: []model.KeyMapping{{Key: "tenant", Claim: "org_id", Normalization: model.NormalizeLowercase}},
+			Groups:   []model.Group{{Name: "partners", Values: []string{member}}},
+			Blocks: []model.Block{{
+				Name: "api",
+				Target: model.Target{Routes: []model.Route{
+					{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/"}}}},
+				Rules: []model.Rule{{Name: "partners",
+					Matches:  []model.Predicate{{Key: "tenant", Operator: model.OperatorInGroup, Value: "partners"}},
+					Counters: []string{model.KeySub},
+					Rates:    []model.Rate{{Requests: 100, Period: time.Minute}}}},
+			}},
+		}
+		snap, problems := compile.Compile("core-1-core", domain, &p)
+		if len(problems) != 0 {
+			t.Fatalf("compile problems: %v", problems)
+		}
+		return engine.New(snap, memory.New())
+	}
+	requestOf := func(t *testing.T, orgID string) engine.Request {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{"sub": "alice", "org_id": orgID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return engine.Request{Path: "/api/orders", Method: "GET",
+			Token: "h." + base64.RawURLEncoding.EncodeToString(raw) + ".s"}
+	}
+
+	lowered := decide(t, engineWithGroupOf(t, "acme"), requestOf(t, "ACME"))
+	if len(lowered.Rules) != 1 || lowered.Rules[0].Rule != "partners" {
+		t.Errorf("org_id ACME against the group [acme]: rules = %+v, want [partners]", lowered.Rules)
+	}
+
+	asWritten := decide(t, engineWithGroupOf(t, "Acme"), requestOf(t, "acme"))
+	if len(asWritten.Rules) != 0 {
+		t.Errorf("org_id acme against the group [Acme]: rules = %+v, want none", asWritten.Rules)
+	}
 }
 
 func TestBypassLiftsItsBlockOnly(t *testing.T) {

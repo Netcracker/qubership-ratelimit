@@ -195,7 +195,7 @@ func compileGroups(groups []model.Group, dst map[string][]string) []Problem {
 			fail("group %q is declared twice", g.Name)
 			continue
 		}
-		dst[g.Name] = g.Clients
+		dst[g.Name] = g.Values
 	}
 	return problems
 }

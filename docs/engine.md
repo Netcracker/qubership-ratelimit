@@ -60,7 +60,7 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   `generation`, the `uid`, and the `hash`. The ConfigMap is the last-good state of the namespace. Before the write the
   operator checks the compressed total against the 1 MiB limit of a ConfigMap; a generation that does not fit is
   reported with reason `ConfigMapTooLarge` (`Ready: False`, `Stalled: True`), distinct from `NotCompiled`, and the
-  last-good state stays enforced. Rules compress about 20 to 40 times and a client list of UUIDs about 1.8 times, so
+  last-good state stays enforced. Rules compress about 20 to 40 times and a group of UUIDs about 1.8 times, so
   about 45000 UUIDs fill the object.
 - **The read side.** The service mounts the ConfigMap as a whole directory at `/etc/ratelimit/config` with
   `optional: true` and watches the `..data` symlink for the kubelet's swap. On a swap it decodes the manifest, compiles
@@ -116,15 +116,15 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   exactly one non-empty segment, the template covers the whole path, comparison is exact and case-sensitive, and
   repeated placeholder names are rejected; it is implemented as a segment-wise comparison, with no regex), plus
   `methods`, a list that ORs over its values and, when absent, means any method. The `matches` operators are `Equals`,
-  `In`, `InGroup` (a named client list), `Contains` (for array-valued keys such as roles), `Exists`, and
+  `In`, `InGroup` (a named value list), `Contains` (for array-valued keys such as roles), `Exists`, and
   `DoesNotExist` (key-presence predicates, for anonymous traffic). The semantics are set-based: a key is a set (a scalar
   is a singleton, an array is its elements, absent is empty); `In` and `InGroup` are a non-empty intersection ("any
   element"), `Contains` is element membership and never a substring, `Equals` is equality to a singleton set and is
   rejected for array keys, and `Exists`/`DoesNotExist` are non-emptiness and emptiness. An incompatible operator/type
   pair is a blocking `IncompatibleOperator` entry in `status.ruleProblems`. Array keys are forbidden as `counters` axes,
   a blocking `InvalidCounterAxis` entry.
-- **Named groups** are client lists defined once per policy and referenced by `InGroup`, giving a shared bucket over an
-  enumerated set of clients.
+- **Named groups** are value lists defined once per policy and referenced by `InGroup` from a predicate on any key;
+  whether the members share a bucket or get one each is the rule's `counters`.
 - **Rule combination.** Across blocks it is always additive: a request matching several blocks must fit the verdict of
   each, and there is no default deny, so a request outside all rules is allowed. Within a block it follows `mode`: `All`
   (the default) applies every matching rule, `FirstMatch` applies only the first matching rule in list order, which
@@ -300,9 +300,10 @@ The full contract, the interfaces, and the implementations are in the [store con
   token cache's bounds) are engine constants, not fields, listed in [limits](limits.md), and axis values are escaped
   when embedded into counter keys. The mapping is applied atomically with the rules: one object, one generation.
 - **Values are normalized at extraction**, at minimum by configurable lowercasing, which is what preserves
-  case-insensitive membership semantics. Group values (`groups[].clients`) are compared after the effective
-  normalization of the `sub` key; when `sub` is overridden by an entry with `normalization: None`, they are
-  compared as written.
+  case-insensitive membership semantics. Group values (`groups[].values`) are compared with the key of the
+  predicate that names the group, after that key's normalization: `Lowercase` for `sub` unless an entry overrides
+  `sub`, whose own `normalization` then applies (`None` by default); what the entry declares for a mapped key; and
+  a path capture as the segment was sent. They are compared as written.
 - **The raw token never appears** in logs, metrics labels, or storage. Redaction of the `token` descriptor value is part
   of the gRPC server.
 - **A missing or undecodable token is not an error**: identity-based keys are absent from the request, rules referencing

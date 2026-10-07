@@ -208,13 +208,13 @@ func (c *blockCompiler) compilePredicate(
 	case model.OperatorIn:
 		compiled.Values = toSet(p.Values)
 	case model.OperatorInGroup:
-		clients, ok := c.env.groups[p.Value]
+		values, ok := c.env.groups[p.Value]
 		if !ok {
 			c.fail(b.Name, r.Name, ReasonUnresolvedGroupReference,
 				"InGroup names %q, which no group declares", p.Value)
 			return Predicate{}, false
 		}
-		compiled.Values = toSet(clients)
+		compiled.Values = toSet(values)
 	case model.OperatorContains, model.OperatorExists, model.OperatorDoesNotExist:
 	}
 	return compiled, true

@@ -79,7 +79,7 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 			ClaimPath: []string{"https://acme.com/entitlements"},
 			Type:      v1.ClaimTypeStringArray,
 		}},
-		Groups: []v1.ClientGroup{{Name: "partners", Clients: []string{"p1", "p2"}}},
+		Groups: []v1.Group{{Name: "partners", Values: []string{"p1", "p2"}}},
 		Limits: []v1.LimitBlock{{
 			Name: "api",
 			Mode: v1.BlockModeFirstMatch,
@@ -105,7 +105,7 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 	require.NotNil(t, out)
 	assert.Equal(t, testDomain, out.Domain)
 	require.Len(t, out.Groups, 1)
-	assert.Equal(t, []string{"p1", "p2"}, out.Groups[0].Clients)
+	assert.Equal(t, []string{"p1", "p2"}, out.Groups[0].Values)
 
 	require.Len(t, out.Mappings, 2)
 	assert.Equal(t, "org_id", out.Mappings[0].Claim)

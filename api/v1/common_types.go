@@ -237,9 +237,9 @@ type ClaimMapping struct {
 	Fallbacks []string `json:"fallbacks,omitempty"`
 }
 
-// ClientGroup names a list of client identities that the InGroup operator
-// matches against.
-type ClientGroup struct {
+// Group names a list of values that the InGroup operator matches a key
+// against.
+type Group struct {
 	// name is how a predicate references the group. It is unique within the
 	// policy.
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
@@ -247,12 +247,14 @@ type ClientGroup struct {
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
-	// clients lists the members of the group. Values are compared with the
-	// sub key after its effective normalization, which is lower-case unless
-	// a mapping entry overrides sub with normalization None — then they are
-	// compared as written, and the case is the author's responsibility.
+	// values lists the members of the group. A predicate compares them with
+	// the value of its own key after that key's normalization: lower-case for
+	// sub unless a mapping entry overrides sub, whose own normalization then
+	// applies (None by default); what the mapping entry declares for a
+	// mapped key; and a path capture as the segment was sent. The members
+	// are compared as written, so their case is the author's responsibility.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:MaxLength=256
 	// +listType=atomic
-	Clients []string `json:"clients"`
+	Values []string `json:"values"`
 }

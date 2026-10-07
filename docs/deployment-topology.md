@@ -6,7 +6,7 @@ of its own namespace, validates them, writes them into one ConfigMap, and writes
 installed in every namespace where a domain lives: in the application's single namespace or in the baseline of a
 composite. There are no cluster-level components: no cluster-wide operator, no ClusterRole, no auxiliary CRs. The only
 user-facing resource is `RateLimitPolicy`, one per domain; it holds the rules, the extraction of keys from the token,
-and the client groups ([specification](ratelimitpolicy-cr-spec.md)).
+and the groups ([specification](ratelimitpolicy-cr-spec.md)).
 
 ## Deployment schemes
 
@@ -73,7 +73,7 @@ For a visual picture with the composite, the satellites, and the request path, s
 ## Resource
 
 `RateLimitPolicy` is one object per domain, `metadata.name == spec.domain`. Inside: `mappings` (which token claims
-become keys), `groups` (named client lists), `limits` (limit blocks: target + rules + windows). The resource is atomic:
+become keys), `groups` (named value lists), `limits` (limit blocks: target + rules + windows). The resource is atomic:
 an edit to the single object changes the rules, the key extraction, and the groups at once; by construction there is
 no window between their updates. A second object for the same domain in a namespace cannot be represented: the object
 name is unique, and it is also the domain.
@@ -130,7 +130,7 @@ plane:
   operator reads it for the strict `Ready`. `/debug/snapshot` answers a human with a port-forward: a summary of the
   domains this replica enforces, each with the generation it was applied from, its `ruleSetVersion`, its block, rule,
   and worst-case bucket counts, and its effective keys; `/debug/snapshot/{domain}` renders the compiled domain in full,
-  the identity keys with the claim paths behind them and every group resolved into the client list the engine tests.
+  the identity keys with the claim paths behind them and every group resolved into the values the engine tests.
   Both answer JSON, or YAML on `?format=yaml` or an Accept header that asks for it, and every method but GET is 405.
   Every document is built from one load of the rule set, so a request that lands inside an apply describes one state
   whole. No mutations, no authentication; this is not the management API (a separate port behind the private gateway,
@@ -256,7 +256,7 @@ enforcement.
 Decision budgets, window math, formats, and the physical walls of the object size are collected in one document that
 says where each number comes from and who checks it: [limits and their origin](limits.md). There are no bounds for the
 validator's sake. One wall belongs to the configuration channel: the compressed configuration of a namespace, the
-ConfigMap `ratelimit-config`, is bounded by 1 MiB. Rules compress about 20 to 40 times and a client list of UUIDs about
+ConfigMap `ratelimit-config`, is bounded by 1 MiB. Rules compress about 20 to 40 times and a group of UUIDs about
 1.8 times, so about 45000 UUIDs fill the object; a generation that does not fit is reported with `ConfigMapTooLarge`,
 and last-good stays enforced.
 

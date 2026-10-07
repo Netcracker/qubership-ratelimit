@@ -162,13 +162,13 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 		AfterAll(func() { deletePolicies(bigA, bigB) })
 
 		It("reports ConfigMapTooLarge and keeps the last-good generation", func() {
-			// Two domains of client lists that each fit their own object but
+			// Two domains of long groups that each fit their own object but
 			// not, compressed together, the 1 MiB of a ConfigMap: a list of
 			// random alphanumeric names compresses about 1.3 times, so two
 			// of 860 KiB each land past the limit while each policy stays
 			// under the API server's own cap of 1.5 MiB.
 			Expect(apply(newPolicy(bigA, totalLimits(100, 60)))).To(Succeed())
-			Expect(apply(withClients(newPolicy(bigB, totalLimits(100, 60)), bigClients))).To(Succeed())
+			Expect(apply(withGroup(newPolicy(bigB, totalLimits(100, 60)), bigGroupSize))).To(Succeed())
 			waitApplied(bigA, bigB)
 			Eventually(readyReason(bigA)).Should(Equal(v1.ReasonAllReplicas))
 			Eventually(readyReason(bigB)).Should(Equal(v1.ReasonAllReplicas))
@@ -178,7 +178,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			// generation stays in the object and enforced; B is untouched.
 			p, err := getPolicy(bigA)
 			Expect(err).NotTo(HaveOccurred())
-			withClients(p, bigClients)
+			withGroup(p, bigGroupSize)
 			Expect(k8s.Update(ctx, p)).To(Succeed())
 
 			Eventually(readyReason(bigA)).WithTimeout(propagationTimeout).WithPolling(2*time.Second).
@@ -243,24 +243,24 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 	})
 })
 
-// bigClients is the size of the client list that puts two policies past the
+// bigGroupSize is the number of members that puts two policies past the
 // ConfigMap limit together and each under the API server's cap alone.
-const bigClients = 26000
+const bigGroupSize = 26000
 
-// withClients gives the policy a group of n random client names and a rule
+// withGroup gives the policy a group of n random names and a rule
 // that references it, so the payload compresses poorly: the spec on the
 // size limit needs bytes gzip cannot fold.
-func withClients(p *v1.RateLimitPolicy, n int) *v1.RateLimitPolicy {
+func withGroup(p *v1.RateLimitPolicy, n int) *v1.RateLimitPolicy {
 	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	clients := make([]string, 0, n)
+	members := make([]string, 0, n)
 	name := make([]byte, 32)
 	for i := 0; i < n; i++ {
 		for j := range name {
 			name[j] = alphabet[rand.IntN(len(alphabet))]
 		}
-		clients = append(clients, string(name))
+		members = append(members, string(name))
 	}
-	p.Spec.Groups = []v1.ClientGroup{{Name: "tenants", Clients: clients}}
+	p.Spec.Groups = []v1.Group{{Name: "tenants", Values: members}}
 	p.Spec.Limits = append(p.Spec.Limits, v1.LimitBlock{
 		Name: "tenants",
 		Rules: []v1.Rule{{

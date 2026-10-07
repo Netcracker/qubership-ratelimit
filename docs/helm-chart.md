@@ -13,7 +13,7 @@ lives, the gateway filters alone in a satellite.
 The operator chart owns the operator deployment; the service chart owns the service deployment, the Service
 `ratelimit`, and the Envoy configuration (the ratelimit filter on the gateways). The ConfigMap
 `ratelimit-config` between the two is written by the operator on every reconcile and rendered by neither chart. Helm
-and Argo CD overwrite what a chart renders on every sync. Rules, claim extraction, and client groups do not live in
+and Argo CD overwrite what a chart renders on every sync. Rules, claim extraction, and groups do not live in
 values; they belong to `RateLimitPolicy`, one per domain, see the [resource specification](ratelimitpolicy-cr-spec.md).
 
 ## Chart contents
