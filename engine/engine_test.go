@@ -290,7 +290,7 @@ func TestHeaders_effectiveWindowCarriesTheDebtOfALoweredBurst(t *testing.T) {
 	req := engine.Request{Path: "/x", Method: "GET"}
 	counters := memory.New()
 	wide := engine.New(compiled(4), counters)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if d := decide(t, wide, req); !d.Allowed {
 			t.Fatalf("request %d under burst 4 = %+v, want an admission", i+1, d.Headers)
 		}
