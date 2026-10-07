@@ -81,7 +81,11 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 		// an admission and on a refusal: x-ratelimit-* and retry-after, and
 		// the ratelimit-policy and ratelimit fields of
 		// draft-ietf-httpapi-ratelimit-headers-11, which name the rule as
-		// block/rule and repeat the x-ratelimit numbers.
+		// block/rule and repeat the x-ratelimit numbers. The rule is a fixed
+		// window, which returns its whole quota at the boundary, so t, the
+		// time until one more request is admitted, is x-ratelimit-reset; under
+		// GCRA the two differ, which the unit tests of the engine and the
+		// server cover.
 		nextWindow()
 		codes, answered := gatewayBurstWithHeaders("public-gateway", probePath, 3, nil)
 		Expect(codes[0]).NotTo(Equal(429), "the first request of a burst was refused")

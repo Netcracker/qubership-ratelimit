@@ -271,7 +271,7 @@ x-ratelimit-remaining: 0
 x-ratelimit-reset: 3589
 retry-after: 349
 ratelimit-policy: "api/exports-per-client-trial";q=10;w=3600
-ratelimit: "api/exports-per-client-trial";r=0;t=3589
+ratelimit: "api/exports-per-client-trial";r=0;t=349
 ```
 
 ```text

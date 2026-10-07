@@ -135,7 +135,10 @@ func TestParseSFItem_refusesWhatIsNotAStringWithIntegerParameters(t *testing.T) 
 
 // Every response that carries x-ratelimit-* also carries ratelimit-policy and
 // ratelimit, naming the strictest rule as block/rule: q and w are its window,
-// r and t the same numbers as x-ratelimit-remaining and x-ratelimit-reset. A
+// r is x-ratelimit-remaining, and t the effective window, the time until one
+// more request is admitted. Under GCRA at two per hour that is 1800 s while
+// x-ratelimit-reset counts to the empty bucket, 3600 s; on a refusal t is no
+// longer than retry-after, and a window at its full capacity sends no t. A
 // request outside every rule carries none of the six headers.
 func TestShouldRateLimit_sendsTheIETFRateLimitFields(t *testing.T) {
 	const domain = "gateway.public"
@@ -158,7 +161,7 @@ func TestShouldRateLimit_sendsTheIETFRateLimitFields(t *testing.T) {
 		require.NoError(t, err)
 		return resp
 	}
-	agrees := func(step string, resp *envoyratelimit.RateLimitResponse) map[string]string {
+	agrees := func(step string, resp *envoyratelimit.RateLimitResponse, window string) map[string]string {
 		headers := headerMap(resp)
 		name, policy := sfItem(t, headers["ratelimit-policy"])
 		assert.Equal(t, "api/exports-per-hour", name, step)
@@ -167,22 +170,30 @@ func TestShouldRateLimit_sendsTheIETFRateLimitFields(t *testing.T) {
 		assert.Equal(t, "api/exports-per-hour", name, step)
 		assert.Equal(t, headers["x-ratelimit-limit"], fmt.Sprint(policy["q"]), step)
 		assert.Equal(t, headers["x-ratelimit-remaining"], fmt.Sprint(quota["r"]), step)
-		assert.Equal(t, headers["x-ratelimit-reset"], fmt.Sprint(quota["t"]), step)
-		assert.Len(t, quota, 2, "%s: ratelimit carries r and t alone", step)
+		if window == "" {
+			assert.Equal(t, map[string]int64{"r": quota["r"]}, quota, "%s: ratelimit carries r alone", step)
+		} else {
+			assert.Equal(t, window, fmt.Sprint(quota["t"]), step)
+			assert.Len(t, quota, 2, "%s: ratelimit carries r and t alone", step)
+		}
 		return headers
 	}
 
 	server := newServer()
-	admitted := agrees("admission", check(server, "/api/exports", 0))
+	admitted := agrees("admission", check(server, "/api/exports", 0), "1800")
 	assert.NotContains(t, admitted, "retry-after", "an admission carries no retry hint")
-	check(server, "/api/exports", 0)
+	second := agrees("second admission", check(server, "/api/exports", 0), "1800")
+	assert.Equal(t, "0", second["x-ratelimit-remaining"])
+	assert.Equal(t, "3600", second["x-ratelimit-reset"], "x-ratelimit-reset counts to the empty bucket")
 	refused := check(server, "/api/exports", 0)
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, refused.GetOverallCode())
-	assert.NotEmpty(t, agrees("refusal", refused)["retry-after"], "a refusal waiting cures carries the hint")
+	headers := agrees("refusal", refused, "1800")
+	assert.Equal(t, "3600", headers["x-ratelimit-reset"], "x-ratelimit-reset counts to the empty bucket")
+	assert.Equal(t, "1800", headers["retry-after"], "the effective window is longer than the retry hint")
 
 	never := check(newServer(), "/api/exports", 3)
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, never.GetOverallCode())
-	assert.NotContains(t, agrees("refusal no waiting cures", never), "retry-after")
+	assert.NotContains(t, agrees("refusal no waiting cures", never, ""), "retry-after")
 
 	assert.Empty(t, check(server, "/other", 0).GetResponseHeadersToAdd(),
 		"a request outside every rule carries no rate limit header")

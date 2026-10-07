@@ -37,16 +37,23 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
   strictest matched rule, and in the two structured fields of
   [draft-ietf-httpapi-ratelimit-headers-11](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/11/),
   which name that rule as `<block>/<rule>`: `ratelimit-policy: "<block>/<rule>";q=<requests>;w=<periodSeconds>` and
-  `ratelimit: "<block>/<rule>";r=<remaining>;t=<secondsUntilReset>`. `q`, `r`, and `t` are the numbers of
-  `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset`, and `w` is the period of the rule's binding
-  window. Each field carries one item, and neither carries `pk`, which would hand the client the identity its counter is
-  keyed on, or `qu`, whose default, requests, is the unit. A request that matched no counting rule carries none of the
-  six headers. The service chart's `responseHeaders.ietf: false` leaves the two fields out and keeps the other four, for
-  clients that misread them or that must not learn the rule names. "Strictest" is deterministic: minimal remaining on an
-  admission; longest retry-after on a refusal (every refusing bucket has about zero remaining, and a short hint would
-  steer the client's retry into the next refusal, whereas after the longest wait every window is open); ties break
-  lexicographically by the bucket key. Key order differs from pair order for names carrying `-` or `.`; that only
-  decides whose name the headers carry on an exact tie, and it is the same on every replica, so headers do not jitter.
+  `ratelimit: "<block>/<rule>";r=<remaining>;t=<effectiveWindow>`. `q` and `r` are the numbers of `x-ratelimit-limit`
+  and `x-ratelimit-remaining`, and `w` is the period of the rule's binding window. `t` is the effective window of the
+  draft's section 4.1.2: the seconds until the window admits one request more than `r`. For a fixed window that is
+  `x-ratelimit-reset`, since the whole quota returns at the boundary; GCRA returns one request per emission interval, so
+  `t` is at most one interval, and `x-ratelimit-reset` keeps counting to the empty bucket. At two requests per hour, a
+  client that spent both reads `t=1800` and `x-ratelimit-reset: 3600`. On a refusal `t` is never longer than
+  `retry-after`, and a window that holds its whole capacity, which only a refusal no waiting cures reports, sends no
+  `t`. Each field carries one item, from the strictest bucket of this response, so the name in `ratelimit-policy`
+  changes when a different rule binds: it is not the stable list of every rule that applies. Neither field carries `pk`,
+  which would hand the client the identity its counter is keyed on, or `qu`, whose default, requests, is the unit. A
+  request that matched no counting rule carries none of the six headers. The service chart's
+  `responseHeaders.ietf: false` leaves the two fields out and keeps the other four, for clients that misread them or
+  that must not learn the rule names. "Strictest" is deterministic: minimal remaining on an admission; longest
+  retry-after on a refusal (every refusing bucket has about zero remaining, and a short hint would steer the client's
+  retry into the next refusal, whereas after the longest wait every window is open); ties break lexicographically by the
+  bucket key. Key order differs from pair order for names carrying `-` or `.`; that only decides whose name the headers
+  carry on an exact tie, and it is the same on every replica, so headers do not jitter.
 - Direct gRPC consumers get the same contract. They may send pre-extracted descriptor entries and no token; the engine
   matches on whatever keys are present. Those values meet the rules a token's values meet: a key past the value length
   or the array bound is absent and counted as an extraction skip, and a key the domain lowercases is lowercased, so a

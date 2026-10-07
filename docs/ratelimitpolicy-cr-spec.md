@@ -285,8 +285,8 @@ component, enforces that a token is required.
 4. **A missing axis**: a rule whose `counters` axis is absent from the request (for example `sub` for an anonymous
    caller) does not match; there is nothing to key the bucket with.
 5. **The verdict**: `OVER_LIMIT` if at least one applied rule (of any block) is exceeded; the `x-ratelimit-*` headers
-   come from the strictest matched rule, and `ratelimit-policy` and `ratelimit` carry the same numbers under that
-   rule's name, `<block>/<rule>` ([engine](engine.md)).
+   come from the strictest matched rule, and `ratelimit-policy` and `ratelimit` carry its limit and remaining under
+   that rule's name, `<block>/<rule>`, with the time until one more request is admitted ([engine](engine.md)).
 6. **Request cost**: the protocol field `hits_addend` (default 1), a descriptor's own `hits_addend` taking precedence
    for that descriptor, where an explicit zero checks without charging; a cost above the burst capacity produces a
    deterministic refusal, not a wait.

@@ -15,10 +15,17 @@ const gatewayDomainsEnv = "MANAGEMENT_GATEWAY_DOMAINS"
 // container. ok is false where the chart did not render the variable.
 func gatewayDomainsOf(t *testing.T, objects []object) (value string, ok bool) {
 	t.Helper()
+	return envOf(t, objects, gatewayDomainsEnv)
+}
+
+// envOf reads the variable name off the container of the rendered Deployment,
+// and reports whether the chart renders it at all.
+func envOf(t *testing.T, objects []object, name string) (value string, ok bool) {
+	t.Helper()
 	containers := only(t, objects, "Deployment").at("spec", "template", "spec", "containers").list()
 	require.Len(t, containers, 1)
 	for _, env := range containers[0].at("env").list() {
-		if env.at("name").str2() == gatewayDomainsEnv {
+		if env.at("name").str2() == name {
 			return env.at("value").str2(), true
 		}
 	}

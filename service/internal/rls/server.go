@@ -550,8 +550,11 @@ func strictestDecision(decisions []engine.Decision, allowed bool) engine.Decisio
 // x-ratelimit-limit, x-ratelimit-remaining, and x-ratelimit-reset, and, on a
 // refusal that waiting can cure, retry-after; alongside them, ratelimit-policy
 // and ratelimit, the two structured fields of
-// draft-ietf-httpapi-ratelimit-headers-11, which carry the same numbers under
-// the name of the rule they came from. A decision without matched counting
+// draft-ietf-httpapi-ratelimit-headers-11, which carry the same limit and
+// remaining under the name of the rule they came from. Their t is the effective
+// window, the time until the window admits one request more, which for GCRA is
+// shorter than x-ratelimit-reset and never longer than retry-after; it is left
+// out when the window holds its whole capacity. A decision without matched counting
 // rules carries no headers at all, and a refusal no waiting cures carries no
 // retry hint — the engine marks it with a negative RetryAfter. WithIETFHeaders
 // leaves the two structured fields out.
@@ -576,11 +579,14 @@ func (s *Server) responseHeaders(decision engine.Decision) []*corev3.HeaderValue
 	// The policy name is a structured-field string. Block and rule names match
 	// the CRD's DNS-1123-like pattern, so it needs no escaping.
 	policy := `"` + h.Block + "/" + h.Rule + `"`
+	quota := fmt.Sprintf("%s;r=%d", policy, h.Remaining)
+	if h.EffectiveWindow >= 0 {
+		quota += fmt.Sprintf(";t=%d", ceilSeconds(h.EffectiveWindow))
+	}
 	return append(out,
 		&corev3.HeaderValue{Key: "ratelimit-policy",
 			Value: fmt.Sprintf("%s;q=%d;w=%d", policy, h.Limit, h.PeriodSeconds)},
-		&corev3.HeaderValue{Key: "ratelimit",
-			Value: fmt.Sprintf("%s;r=%d;t=%d", policy, h.Remaining, reset)},
+		&corev3.HeaderValue{Key: "ratelimit", Value: quota},
 	)
 }
 

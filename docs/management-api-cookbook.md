@@ -303,7 +303,7 @@ api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
 {
   "allowed": true,
   "evaluatedAt": "2026-08-24T14:02:09Z",
-  "headers": {"algorithm": "gcra", "periodSeconds": 60,
+  "headers": {"block": "quota", "rule": "daily", "algorithm": "gcra", "periodSeconds": 60,
               "limit": 100, "remaining": 61, "resetAfterSeconds": 23.4},
   "rules": [
     {"id": "cascade/premium", "mode": "enforce", "allowed": true,
@@ -387,8 +387,9 @@ api -X POST "$BASE/simulations" -d '{
   "keys": {"sub": ["bob"]}, "cost": 5
 }' | jq '{allowed, refusalReason, headers}'
 # with remaining=3 and cost=5 -> {"allowed": false, "refusalReason": "rate_limited",
-#    "headers": {"algorithm": "gcra", "periodSeconds": 60, "limit": 100,
-#                "remaining": 3, "retryAfterSeconds": 1.2}}, which is what
+#    "headers": {"block": "quota", "rule": "daily", "algorithm": "gcra",
+#                "periodSeconds": 60, "limit": 100, "remaining": 3,
+#                "retryAfterSeconds": 1.2}}, which is what
 # limited=true (cost=1) in the listing will not show
 ```
 

@@ -220,6 +220,56 @@ func TestHeaders_nameTheRuleOfTheStrictestWindow(t *testing.T) {
 	named("refusal no waiting cures", never)
 }
 
+// EffectiveWindow is the time until the window admits one request more, the
+// t of the ratelimit field. For GCRA it is one emission interval or less, not
+// the time until the bucket drains: at two per hour, a client that spent both
+// requests gets the next one 1800 s later, while the bucket is empty only
+// after 3600 s. A fixed window returns its quota at the boundary, and a window
+// at its full capacity has nothing to return.
+func TestHeaders_effectiveWindowIsTheTimeToTheNextRequest(t *testing.T) {
+	compiled := func(algorithm string) *compile.Snapshot {
+		p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
+			Name: "exports", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Algorithm: algorithm}}}}}}}
+		snap, problems := compile.Compile("core-1-core", domain, &p)
+		if len(problems) != 0 {
+			t.Fatalf("compile problems: %v", problems)
+		}
+		return snap
+	}
+	req := engine.Request{Path: "/x", Method: "GET"}
+	// The store reads the clock on every decision, so each one sees the
+	// bucket a few microseconds drained.
+	near := func(got, want time.Duration) bool { return got <= want && got > want-time.Second }
+	check := func(step string, h *engine.Headers, window, reset time.Duration) {
+		t.Helper()
+		if !near(h.EffectiveWindow, window) || !near(h.ResetAfter, reset) {
+			t.Errorf("%s: effective window %s and reset %s, want %s and %s",
+				step, h.EffectiveWindow, h.ResetAfter, window, reset)
+		}
+	}
+
+	gcra := engine.New(compiled(""), memory.New())
+	check("GCRA, first admission", decide(t, gcra, req).Headers, 30*time.Minute, 30*time.Minute)
+	check("GCRA, second admission", decide(t, gcra, req).Headers, 30*time.Minute, time.Hour)
+	refused := decide(t, gcra, req)
+	check("GCRA, refusal", refused.Headers, 30*time.Minute, time.Hour)
+	if refused.Headers.RetryAfter < refused.Headers.EffectiveWindow {
+		t.Errorf("retry after %s is shorter than the effective window %s",
+			refused.Headers.RetryAfter, refused.Headers.EffectiveWindow)
+	}
+
+	fixed := engine.New(compiled("FixedWindow"), memory.New())
+	h := decide(t, fixed, req).Headers
+	if h.EffectiveWindow <= 0 || h.EffectiveWindow != h.ResetAfter {
+		t.Errorf("fixed window: effective window %s, want the reset %s", h.EffectiveWindow, h.ResetAfter)
+	}
+
+	req.Cost = 3
+	if h := decide(t, engine.New(compiled(""), memory.New()), req).Headers; h.EffectiveWindow >= 0 {
+		t.Errorf("a full window reports an effective window of %s", h.EffectiveWindow)
+	}
+}
+
 func TestShadowReportsWithoutVetoing(t *testing.T) {
 	e := newEngine(t)
 

@@ -107,7 +107,8 @@ metrics:
 # x-ratelimit-limit, x-ratelimit-remaining, and x-ratelimit-reset, and a
 # refusal that waiting cures with retry-after. ietf adds the ratelimit-policy
 # and ratelimit fields of draft-ietf-httpapi-ratelimit-headers-11, which carry
-# the same numbers under the name of the rule, <block>/<rule>. false leaves
+# the limit and the remaining under the name of the rule, <block>/<rule>, with
+# the time until one more request is admitted. false leaves
 # them out, for clients that misread the fields or that must not learn the
 # rule names; the other four headers stay either way.
 responseHeaders:

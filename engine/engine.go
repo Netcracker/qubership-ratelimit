@@ -143,6 +143,15 @@ type Headers struct {
 	RetryAfter time.Duration // negative when no retry hint applies
 	ResetAfter time.Duration
 
+	// EffectiveWindow is how long until the window admits one request more
+	// than Remaining: the t parameter of the ratelimit field, which
+	// draft-ietf-httpapi-ratelimit-headers-11 defines as the time within
+	// which the client can use no more than Remaining. It is ResetAfter for a
+	// fixed window, which returns its whole quota at once, and shorter for
+	// GCRA, which returns one request per emission interval. Negative when
+	// the window already holds its whole capacity and nothing returns.
+	EffectiveWindow time.Duration
+
 	// Algorithm and PeriodSeconds name the window these numbers came from.
 	// Without them a reader cannot tell which of a rule's windows bound the
 	// request, and two windows of one rule report the same shape.
@@ -391,19 +400,40 @@ func aggregate(matched match.Result, buckets []store.Bucket, verdicts []store.Ve
 
 	owner := ruleOf(matched, best)
 	h := &Headers{
-		Block:         owner.Block,
-		Rule:          owner.Rule,
-		Limit:         buckets[best].Window.Requests,
-		Remaining:     verdicts[best].Remaining,
-		RetryAfter:    verdicts[best].RetryAfter,
-		ResetAfter:    verdicts[best].ResetAfter,
-		Algorithm:     algorithmName(buckets[best].Algorithm),
-		PeriodSeconds: int64(buckets[best].Window.Period / time.Second),
+		Block:      owner.Block,
+		Rule:       owner.Rule,
+		Limit:      buckets[best].Window.Requests,
+		Remaining:  verdicts[best].Remaining,
+		RetryAfter: verdicts[best].RetryAfter,
+		ResetAfter: verdicts[best].ResetAfter,
+		Algorithm:  algorithmName(buckets[best].Algorithm),
+
+		EffectiveWindow: effectiveWindow(buckets[best], verdicts[best]),
+		PeriodSeconds:   int64(buckets[best].Window.Period / time.Second),
 	}
 	if costExceeds {
 		h.RetryAfter = -1
 	}
 	return h, costExceeds
+}
+
+// effectiveWindow is how long until bucket b admits one request more than its
+// verdict v reports. A verdict's Remaining and ResetAfter describe one moment,
+// after the charge on an admission and before it on a refusal, and for GCRA
+// ResetAfter is the bucket's depth d: Remaining is floor((tau-d)/emission), so
+// the next request returns once d has drained to tau-(Remaining+1)*emission.
+// A fixed window returns its whole quota at the boundary, ResetAfter away. A
+// window at its full capacity returns nothing, and the result is negative.
+func effectiveWindow(b store.Bucket, v store.Verdict) time.Duration {
+	if v.Remaining >= bucketCapacity(b.Window) {
+		return -1
+	}
+	if b.Algorithm != algo.GCRAID {
+		return v.ResetAfter
+	}
+	depth := v.ResetAfter.Microseconds()
+	emission := algo.EmissionMicros(b.Window)
+	return time.Duration(depth-algo.TauMicros(b.Window)+(v.Remaining+1)*emission) * time.Microsecond
 }
 
 // ruleOf returns the matched rule that owns the bucket at index i of
