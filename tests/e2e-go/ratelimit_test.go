@@ -5,6 +5,7 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -73,6 +74,32 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 			"no request in the burst was refused; the declared limit is not being enforced")
 		Expect(codes).NotTo(ContainElements(0, 503),
 			"a request did not reach a routing verdict: %v", codes)
+	})
+
+	It("answers with the rate limit headers of the rule that bound the request", func() {
+		// The service supplies the headers and Envoy passes them through, on
+		// an admission and on a refusal: x-ratelimit-* and retry-after, and
+		// the ratelimit-policy and ratelimit fields of
+		// draft-ietf-httpapi-ratelimit-headers-11, which name the rule as
+		// block/rule and repeat the x-ratelimit numbers.
+		nextWindow()
+		codes, answered := gatewayBurstWithHeaders("public-gateway", probePath, 3, nil)
+		Expect(codes[0]).NotTo(Equal(429), "the first request of a burst was refused")
+		Expect(codes).To(ContainElement(429), "no request in the burst was refused")
+
+		policy := `"everything/total";q=1;w=1`
+		admitted := answered[0]
+		Expect(admitted.Get("ratelimit-policy")).To(Equal(policy))
+		Expect(admitted.Get("ratelimit")).To(Equal(fmt.Sprintf(`"everything/total";r=%s;t=%s`,
+			admitted.Get("x-ratelimit-remaining"), admitted.Get("x-ratelimit-reset"))))
+		Expect(admitted.Get("retry-after")).To(BeEmpty(), "an admission carries no retry hint")
+
+		refused := answered[slices.Index(codes, 429)]
+		Expect(refused.Get("x-ratelimit-limit")).To(Equal("1"))
+		Expect(refused.Get("x-ratelimit-remaining")).To(Equal("0"))
+		Expect(refused.Get("retry-after")).NotTo(BeEmpty(), "a refusal waiting cures carries the hint")
+		Expect(refused.Get("ratelimit-policy")).To(Equal(policy))
+		Expect(refused.Get("ratelimit")).To(Equal(`"everything/total";r=0;t=` + refused.Get("x-ratelimit-reset")))
 	})
 
 	It("admits traffic again once the window reopens", func() {

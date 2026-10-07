@@ -146,6 +146,23 @@ func NearLimitRatio(warn Warn) float64 {
 	return ratio
 }
 
+// IETFHeaders reads whether responses carry the ratelimit-policy and
+// ratelimit fields beside x-ratelimit-*, from RESPONSE_HEADERS_IETF. Unset is
+// on; a value strconv.ParseBool cannot read is reported and read as on, the
+// default, so a typo does not change what clients receive.
+func IETFHeaders(warn Warn) bool {
+	raw := configloader.GetOrDefaultString("response.headers.ietf", "")
+	if raw == "" {
+		return true
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		warn("RESPONSE_HEADERS_IETF=%q is not a boolean, using true", raw)
+		return true
+	}
+	return enabled
+}
+
 // ManagementClaims names the claims the subject and its roles are read from.
 // Both accept a dotted path, because an IdP often nests the roles: Keycloak
 // issues them under realm_access.roles.

@@ -130,8 +130,14 @@ type Request struct {
 	Cost int64
 }
 
-// Headers is the x-ratelimit source: the strictest applied enforcing rule.
+// Headers is the source of the rate limit response headers: the strictest
+// applied enforcing rule.
 type Headers struct {
+	// Block and Rule name the rule whose window the numbers came from, the
+	// identity the metrics and the management API use as block/rule.
+	Block string
+	Rule  string
+
 	Limit      int64
 	Remaining  int64
 	RetryAfter time.Duration // negative when no retry hint applies
@@ -263,7 +269,7 @@ func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decis
 		Skips:         skips,
 		ExtractedKeys: e.keyNames(keys),
 	}
-	decision.Headers, decision.CostExceedsCapacity = aggregate(buckets, verdicts, decision.Allowed)
+	decision.Headers, decision.CostExceedsCapacity = aggregate(matched, buckets, verdicts, decision.Allowed)
 	return decision, nil
 }
 
@@ -368,7 +374,7 @@ func bucketCapacity(w algo.Window) int64 {
 // pair: deterministic across replicas, so headers do not jitter between them.
 // A refusal that no waiting cures surfaces as CostExceedsCapacity with no
 // retry hint.
-func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (*Headers, bool) {
+func aggregate(matched match.Result, buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (*Headers, bool) {
 	costExceeds := false
 	if !allowed {
 		for i := range buckets {
@@ -383,7 +389,10 @@ func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (
 		return nil, false
 	}
 
+	owner := ruleOf(matched, best)
 	h := &Headers{
+		Block:         owner.Block,
+		Rule:          owner.Rule,
 		Limit:         buckets[best].Window.Requests,
 		Remaining:     verdicts[best].Remaining,
 		RetryAfter:    verdicts[best].RetryAfter,
@@ -395,6 +404,18 @@ func aggregate(buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (
 		h.RetryAfter = -1
 	}
 	return h, costExceeds
+}
+
+// ruleOf returns the matched rule that owns the bucket at index i of
+// matched.Buckets, which lays the rules' buckets out in rule order.
+func ruleOf(matched match.Result, i int) match.MatchedRule {
+	for _, m := range matched.Rules {
+		if i < len(m.Buckets) {
+			return m
+		}
+		i -= len(m.Buckets)
+	}
+	return match.MatchedRule{}
 }
 
 // strictestIndex picks the strictest bucket of a range: on allow, the minimum

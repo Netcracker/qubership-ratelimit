@@ -128,6 +128,10 @@ spec:
               value: '{{ .Values.TAG }}'
             - name: METRICS_NEAR_LIMIT_RATIO
               value: '{{ .Values.metrics.nearLimitRatio }}'
+            # Whether responses carry ratelimit-policy and ratelimit beside
+            # x-ratelimit-*; see responseHeaders in values.yaml.
+            - name: RESPONSE_HEADERS_IETF
+              value: '{{ .Values.responseHeaders.ietf }}'
             {{- if .Values.management.enabled }}
             # The identity configuration of the management API. Read through
             # the configloader, which maps MANAGEMENT_CLAIMS_SUBJECT onto

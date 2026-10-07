@@ -223,7 +223,9 @@ schema. path/method are mandatory (the gateway always has them; matching without
 Peek reserves nothing.
 
 The binding window and the response forms: RuleOutcome and Headers carry the algorithm + periodSeconds of
-the window whose numbers are shown. The choice is deterministic, in strict priority: windows with capacity_exceeded rank
+the window whose numbers are shown, and Headers also carries the block and rule of that window, the name the
+`ratelimit-policy` and `ratelimit` response fields carry as `<block>/<rule>`, so a simulated answer compares with a real
+one. The choice is deterministic, in strict priority: windows with capacity_exceeded rank
 above any retryable refusals (a fundamental impossibility binds harder than a wait; retryAfterSeconds is undefined for
 them, so among them the tie-break is immediately lexicographic by key); then retryable refusals by the largest
 retryAfterSeconds; on an admission, the window with the smallest absolute remaining; a tie goes to the lexicographically

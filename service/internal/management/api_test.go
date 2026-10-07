@@ -470,6 +470,8 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 	require.True(t, response.Allowed)
 	require.Empty(t, response.RefusalReason)
 	require.NotNil(t, response.Headers)
+	require.Equal(t, "cascade", response.Headers.Block)
+	require.Equal(t, "everyone", response.Headers.Rule)
 	require.Equal(t, "gcra", response.Headers.Algorithm)
 	require.Equal(t, int64(60), response.Headers.PeriodSeconds)
 	require.Equal(t, []string{"sub"}, response.ExtractedKeys)
@@ -502,6 +504,8 @@ func TestSimulation_namesTheBindingWindowOnARefusal(t *testing.T) {
 	require.Equal(t, ReasonRateLimited, response.RefusalReason)
 	require.NotNil(t, response.Headers.RetryAfterSeconds)
 	require.Positive(t, *response.Headers.RetryAfterSeconds)
+	require.Equal(t, response.Rules[0].ID, response.Headers.Block+"/"+response.Headers.Rule,
+		"the headers do not name the refusing rule")
 	require.Equal(t, ReasonRateLimited, response.Rules[0].RefusalReason)
 }
 
@@ -522,6 +526,8 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 	require.False(t, response.Allowed)
 	require.Equal(t, ReasonCapacityExceeded, response.RefusalReason)
 	require.Nil(t, response.Headers.RetryAfterSeconds)
+	require.Equal(t, response.Rules[0].ID, response.Headers.Block+"/"+response.Headers.Rule,
+		"the headers do not name the refusing rule")
 	require.Equal(t, ReasonCapacityExceeded, response.Rules[0].RefusalReason)
 	require.Nil(t, response.Rules[0].RetryAfterSeconds)
 }

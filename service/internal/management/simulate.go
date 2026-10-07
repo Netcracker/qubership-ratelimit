@@ -78,9 +78,14 @@ type SimulationResponse struct {
 	ExtractedKeys []string `json:"extractedKeys,omitempty"`
 }
 
-// HeadersView is what the x-ratelimit response headers would have carried: the
+// HeadersView is what the rate limit response headers would have carried: the
 // binding window across every applied enforcing rule.
 type HeadersView struct {
+	// Block and Rule name the rule the numbers came from, the name the
+	// ratelimit-policy and ratelimit fields carry as block/rule.
+	Block string `json:"block"`
+	Rule  string `json:"rule"`
+
 	Algorithm     string `json:"algorithm"`
 	PeriodSeconds int64  `json:"periodSeconds"`
 
@@ -237,6 +242,8 @@ func simulationResponse(decision engine.Decision, at time.Time) SimulationRespon
 
 func headersView(headers *engine.Headers, allowed, costExceeds bool) *HeadersView {
 	view := &HeadersView{
+		Block:         headers.Block,
+		Rule:          headers.Rule,
 		Algorithm:     headers.Algorithm,
 		PeriodSeconds: headers.PeriodSeconds,
 		Limit:         headers.Limit,

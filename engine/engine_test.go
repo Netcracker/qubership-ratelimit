@@ -178,6 +178,48 @@ func TestHeadersComeFromTheStrictestRule(t *testing.T) {
 	}
 }
 
+// The headers name the rule whose window they report, as block and rule.
+// The binding window here belongs to the second matched rule, behind a rule
+// of two windows, so the bucket the headers come from has to be traced back
+// across the first rule's buckets, on an admission, on a refusal that
+// waiting cures, and on one it does not.
+func TestHeaders_nameTheRuleOfTheStrictestWindow(t *testing.T) {
+	p := model.Policy{Domain: domain, Blocks: []model.Block{
+		{Name: "api", Rules: []model.Rule{{Name: "loose", Rates: []model.Rate{
+			{Requests: 1000, Period: time.Minute}, {Requests: 10000, Period: time.Hour}}}}},
+		{Name: "exports", Rules: []model.Rule{{Name: "tight", Rates: []model.Rate{
+			{Requests: 2, Period: time.Minute}}}}},
+	}}
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		t.Fatalf("compile problems: %v", problems)
+	}
+	e := engine.New(snap, memory.New())
+	req := engine.Request{Path: "/x", Method: "GET"}
+	named := func(step string, d engine.Decision) {
+		t.Helper()
+		if d.Headers == nil || d.Headers.Block != "exports" || d.Headers.Rule != "tight" ||
+			d.Headers.Limit != 2 || d.Headers.PeriodSeconds != 60 {
+			t.Errorf("%s: headers = %+v, want the exports/tight minute window", step, d.Headers)
+		}
+	}
+
+	named("admission", decide(t, e, req))
+	decide(t, e, req)
+	refused := decide(t, e, req)
+	if refused.Allowed || refused.Headers.RetryAfter <= 0 {
+		t.Fatalf("decision = %+v: want a refusal waiting cures", refused)
+	}
+	named("refusal", refused)
+
+	req.Cost = 3
+	never := decide(t, engine.New(snap, memory.New()), req)
+	if !never.CostExceedsCapacity {
+		t.Fatalf("decision = %+v: want a refusal no waiting cures", never)
+	}
+	named("refusal no waiting cures", never)
+}
+
 func TestShadowReportsWithoutVetoing(t *testing.T) {
 	e := newEngine(t)
 
