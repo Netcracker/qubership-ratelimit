@@ -244,12 +244,26 @@ func gatewayBurst(gateway, path string, count int, headers map[string]string) []
 }
 
 func gatewayBurstIn(ns, gateway, path string, count int, headers map[string]string) []int {
+	codes, _ := gatewayBurstWithHeadersIn(ns, gateway, path, count, headers)
+	return codes
+}
+
+// gatewayBurstWithHeaders is gatewayBurst that also keeps each response's
+// headers, for the specs that read what the gateway answered with, not only
+// its status. A transport error leaves code 0 and no headers.
+func gatewayBurstWithHeaders(gateway, path string, count int, headers map[string]string) ([]int, []http.Header) {
+	return gatewayBurstWithHeadersIn(namespace, gateway, path, count, headers)
+}
+
+func gatewayBurstWithHeadersIn(ns, gateway, path string, count int,
+	headers map[string]string) ([]int, []http.Header) {
 	pod, port := gatewayEndpointIn(ns, gateway)
 	addr, stop := forwardToPodIn(ns, pod, port)
 	defer stop()
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	codes := make([]int, 0, count)
+	answered := make([]http.Header, 0, count)
 	for i := 0; i < count; i++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+path, nil)
 		Expect(err).NotTo(HaveOccurred())
@@ -259,13 +273,15 @@ func gatewayBurstIn(ns, gateway, path string, count int, headers map[string]stri
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			codes = append(codes, 0)
+			answered = append(answered, http.Header{})
 			continue
 		}
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		codes = append(codes, resp.StatusCode)
+		answered = append(answered, resp.Header)
 	}
-	return codes
+	return codes, answered
 }
 
 // waitGatewayServes warms a gateway up until the routed probe answers a

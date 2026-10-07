@@ -20,7 +20,7 @@ A limit is turned on and off in two places, and they do different things:
 | Setting | Where | The service counts | The client sees | The metrics say |
 | --- | --- | --- | --- | --- |
 | `behavior: Shadow` on a rule | the policy | yes, per the rule's own verdict | `200`, no headers from this rule | `ratelimit_decisions_total{outcome="shadow_over_limit"}`; no near-limit |
-| `behavior: Enforce` on a rule | the policy | yes | `429` with `x-ratelimit-*` and `retry-after` | `outcome="over_limit"`, `ratelimit_near_limit_total` |
+| `behavior: Enforce` on a rule | the policy | yes | `429` with `x-ratelimit-*`, `retry-after`, `ratelimit-policy`, and `ratelimit` | `outcome="over_limit"`, `ratelimit_near_limit_total` |
 | `runtime.enforcedPercent: 0` | the gateway filter, a value of the service chart | yes: the service judges and charges | `200` | `ratelimit_checks_total{verdict="over_limit"}` keeps growing |
 | `runtime.enabledPercent: 0` | the gateway filter, a value of the service chart | no: the filter never calls | `200` | nothing moves; the service sees no traffic |
 
@@ -270,6 +270,8 @@ x-ratelimit-limit: 10
 x-ratelimit-remaining: 0
 x-ratelimit-reset: 3589
 retry-after: 349
+ratelimit-policy: "api/exports-per-client-trial";q=10;w=3600
+ratelimit: "api/exports-per-client-trial";r=0;t=349
 ```
 
 ```text

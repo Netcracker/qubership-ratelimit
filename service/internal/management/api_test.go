@@ -470,8 +470,12 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 	require.True(t, response.Allowed)
 	require.Empty(t, response.RefusalReason)
 	require.NotNil(t, response.Headers)
+	require.Equal(t, "cascade", response.Headers.Block)
+	require.Equal(t, "everyone", response.Headers.Rule)
 	require.Equal(t, "gcra", response.Headers.Algorithm)
 	require.Equal(t, int64(60), response.Headers.PeriodSeconds)
+	require.Nil(t, response.Headers.EffectiveWindowSeconds,
+		"the simulation judges the untouched window before the charge, at its whole capacity")
 	require.Equal(t, []string{"sub"}, response.ExtractedKeys)
 
 	require.Len(t, response.Rules, 1)
@@ -484,6 +488,31 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters",
 		viewerRoles(), nil), http.StatusOK, &list)
 	require.Empty(t, list.Items)
+}
+
+// A window the request has touched before holds less than its capacity, so
+// the simulation reports the effective window, the t of the ratelimit field:
+// the seconds until the window admits one request more than remaining, never
+// longer than the reset.
+func TestSimulation_reportsTheEffectiveWindowOfATouchedWindow(t *testing.T) {
+	h := newTestAPI(t)
+	keys := map[string][]string{model.KeySub: {"alice"}}
+	h.spend(t, "/api/invoices/1", keys, 1)
+
+	var response SimulationResponse
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+		Domain: testDomain,
+		Path:   "/api/invoices/1",
+		Method: http.MethodGet,
+		Keys:   keys,
+	}), http.StatusOK, &response)
+
+	require.True(t, response.Allowed)
+	require.NotNil(t, response.Headers.EffectiveWindowSeconds, "a touched window has a next request to wait for")
+	require.Positive(t, *response.Headers.EffectiveWindowSeconds)
+	require.NotNil(t, response.Headers.ResetAfterSeconds)
+	require.LessOrEqual(t, *response.Headers.EffectiveWindowSeconds, *response.Headers.ResetAfterSeconds,
+		"the effective window outlasts the reset")
 }
 
 func TestSimulation_namesTheBindingWindowOnARefusal(t *testing.T) {
@@ -502,6 +531,11 @@ func TestSimulation_namesTheBindingWindowOnARefusal(t *testing.T) {
 	require.Equal(t, ReasonRateLimited, response.RefusalReason)
 	require.NotNil(t, response.Headers.RetryAfterSeconds)
 	require.Positive(t, *response.Headers.RetryAfterSeconds)
+	require.NotNil(t, response.Headers.EffectiveWindowSeconds)
+	require.Equal(t, *response.Headers.RetryAfterSeconds, *response.Headers.EffectiveWindowSeconds,
+		"a refusal of cost 1 waits one effective window")
+	require.Equal(t, response.Rules[0].ID, response.Headers.Block+"/"+response.Headers.Rule,
+		"the headers do not name the refusing rule")
 	require.Equal(t, ReasonRateLimited, response.Rules[0].RefusalReason)
 }
 
@@ -522,6 +556,9 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 	require.False(t, response.Allowed)
 	require.Equal(t, ReasonCapacityExceeded, response.RefusalReason)
 	require.Nil(t, response.Headers.RetryAfterSeconds)
+	require.Nil(t, response.Headers.EffectiveWindowSeconds, "a window at its full capacity has no next request")
+	require.Equal(t, response.Rules[0].ID, response.Headers.Block+"/"+response.Headers.Rule,
+		"the headers do not name the refusing rule")
 	require.Equal(t, ReasonCapacityExceeded, response.Rules[0].RefusalReason)
 	require.Nil(t, response.Rules[0].RetryAfterSeconds)
 }

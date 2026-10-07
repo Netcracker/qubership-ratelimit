@@ -86,6 +86,10 @@ type Server struct {
 
 	nearLimitRatio float64
 
+	// ietfHeaders adds ratelimit-policy and ratelimit to the x-ratelimit-*
+	// response headers; WithIETFHeaders turns it off.
+	ietfHeaders bool
+
 	// exemptPrefix and exemptDomains are set by WithExemptPath: a descriptor
 	// of one of these domains whose path is under the prefix is not decided.
 	// An empty prefix or no domains exempts nothing.
@@ -116,6 +120,14 @@ func WithNearLimitRatio(ratio float64) Option {
 	}
 }
 
+// WithIETFHeaders sets whether a response carries the ratelimit-policy and
+// ratelimit fields of draft-ietf-httpapi-ratelimit-headers-11 beside the
+// x-ratelimit-* headers. They are on by default; turned off, a response
+// carries x-ratelimit-* and retry-after alone, as before the fields existed.
+func WithIETFHeaders(enabled bool) Option {
+	return func(s *Server) { s.ietfHeaders = enabled }
+}
+
 // WithExemptPath exempts the paths under prefix from the checks of domains.
 // For a descriptor of one of these domains whose path is prefix or lies under
 // it by whole segments, the server makes no decision: it reads neither the
@@ -138,7 +150,7 @@ func WithExemptPath(prefix string, domains []string) Option {
 
 // NewServer returns a Server reading its rule set from the given store.
 func NewServer(s *store.Store, log Logger, opts ...Option) *Server {
-	server := &Server{store: s, log: log, nearLimitRatio: DefaultNearLimitRatio}
+	server := &Server{store: s, log: log, nearLimitRatio: DefaultNearLimitRatio, ietfHeaders: true}
 	server.refusalLog.limit = refusalLogPerSecond
 	server.violationLog.limit = refusalLogPerSecond
 	server.unknownLog.limit = refusalLogPerSecond
@@ -252,7 +264,7 @@ func (s *Server) ShouldRateLimit(
 					domain, path, err)
 				return &envoyratelimit.RateLimitResponse{
 					OverallCode:          envoyratelimit.RateLimitResponse_OVER_LIMIT,
-					ResponseHeadersToAdd: responseHeaders(strictestDecision(decisions, false)),
+					ResponseHeadersToAdd: s.responseHeaders(strictestDecision(decisions, false)),
 				}, nil
 			}
 			// A store error becomes a gRPC error, so Envoy's failure_mode_deny
@@ -291,7 +303,7 @@ func (s *Server) ShouldRateLimit(
 
 	return &envoyratelimit.RateLimitResponse{
 		OverallCode:          code,
-		ResponseHeadersToAdd: responseHeaders(strictestDecision(decisions, allowed)),
+		ResponseHeadersToAdd: s.responseHeaders(strictestDecision(decisions, allowed)),
 	}, nil
 }
 
@@ -534,26 +546,48 @@ func strictestDecision(decisions []engine.Decision, allowed bool) engine.Decisio
 	return best
 }
 
-// responseHeaders turns the strictest-rule numbers into the x-ratelimit-*
-// response headers; a refusal that waiting can cure also carries retry-after.
-// A decision without matched counting rules carries no headers at all, and a
-// refusal no waiting cures carries no retry hint — the engine marks it with a
-// negative RetryAfter.
-func responseHeaders(decision engine.Decision) []*corev3.HeaderValue {
+// responseHeaders turns the strictest-rule numbers into the response headers:
+// x-ratelimit-limit, x-ratelimit-remaining, and x-ratelimit-reset, and, on a
+// refusal that waiting can cure, retry-after; alongside them, ratelimit-policy
+// and ratelimit, the two structured fields of
+// draft-ietf-httpapi-ratelimit-headers-11, which carry the same limit and
+// remaining under the name of the rule they came from. Their t is the effective
+// window, the time until the window admits one request more, which is at most
+// x-ratelimit-reset and at most retry-after; it is left
+// out when the window holds its whole capacity. A decision without matched counting
+// rules carries no headers at all, and a refusal no waiting cures carries no
+// retry hint — the engine marks it with a negative RetryAfter. WithIETFHeaders
+// leaves the two structured fields out.
+func (s *Server) responseHeaders(decision engine.Decision) []*corev3.HeaderValue {
 	h := decision.Headers
 	if h == nil {
 		return nil
 	}
+	reset := ceilSeconds(h.ResetAfter)
 	out := []*corev3.HeaderValue{
 		{Key: "x-ratelimit-limit", Value: strconv.FormatInt(h.Limit, 10)},
 		{Key: "x-ratelimit-remaining", Value: strconv.FormatInt(h.Remaining, 10)},
-		{Key: "x-ratelimit-reset", Value: strconv.FormatInt(ceilSeconds(h.ResetAfter), 10)},
+		{Key: "x-ratelimit-reset", Value: strconv.FormatInt(reset, 10)},
 	}
 	if !decision.Allowed && h.RetryAfter >= 0 {
 		out = append(out, &corev3.HeaderValue{
 			Key: "retry-after", Value: strconv.FormatInt(ceilSeconds(h.RetryAfter), 10)})
 	}
-	return out
+	if !s.ietfHeaders {
+		return out
+	}
+	// The policy name is a structured-field string. Block and rule names match
+	// the CRD's DNS-1123-like pattern, so it needs no escaping.
+	policy := `"` + h.Block + "/" + h.Rule + `"`
+	quota := fmt.Sprintf("%s;r=%d", policy, h.Remaining)
+	if h.EffectiveWindow >= 0 {
+		quota += fmt.Sprintf(";t=%d", ceilSeconds(h.EffectiveWindow))
+	}
+	return append(out,
+		&corev3.HeaderValue{Key: "ratelimit-policy",
+			Value: fmt.Sprintf("%s;q=%d;w=%d", policy, h.Limit, h.PeriodSeconds)},
+		&corev3.HeaderValue{Key: "ratelimit", Value: quota},
+	)
 }
 
 // ceilSeconds rounds a duration up to whole seconds — the resolution HTTP

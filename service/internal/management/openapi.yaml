@@ -1694,10 +1694,13 @@ paths:
                 evaluatedAt: '2026-08-24T14:02:09Z'
                 refusalReason: rate_limited
                 headers:
+                  block: cascade
+                  rule: everyone
                   limit: 100
                   remaining: 0
                   retryAfterSeconds: 23.4
                   resetAfterSeconds: 60
+                  effectiveWindowSeconds: 23.4
                   algorithm: gcra
                   periodSeconds: 60
                 rules:
@@ -2941,7 +2944,7 @@ components:
       type: object
       additionalProperties: false
       description: 'The headers of an admitted answer; a retry hint cannot appear
-        here. What the x-ratelimit response headers would have carried: the binding
+        here. What the rate limit response headers would have carried: the binding
         window across every applied enforcing rule - shadow rules never bind headers.
         The binding choice is deterministic, in strict priority: windows refusing
         with capacity_exceeded rank above every retryable refusal - a permanent
@@ -2953,11 +2956,20 @@ components:
         counter key, which orders by the block/rule triple, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
+      - block
+      - rule
       - algorithm
       - periodSeconds
       - limit
       - remaining
       properties:
+        block:
+          type: string
+          description: The block of the rule the numbers came from.
+        rule:
+          type: string
+          description: The rule the numbers came from; block/rule is the name the
+            ratelimit-policy and ratelimit response fields carry.
         algorithm:
           type: string
           description: The algorithm of the binding window - the one whose numbers
@@ -2978,11 +2990,19 @@ components:
         resetAfterSeconds:
           type: number
           description: Seconds until the counter returns to its empty state.
+        effectiveWindowSeconds:
+          type: number
+          description: Seconds until the window admits one request more than remaining,
+            the t of the ratelimit response field. Absent where the window holds its
+            whole capacity, which, since a simulation charges nothing, includes a
+            window the request would be the first to touch. The real answer, after
+            its own charge, carries one emission interval there under GCRA and the
+            time to the boundary under a fixed window.
     HeadersRateLimited:
       type: object
       additionalProperties: false
       description: 'The headers of a rate_limited refusal: waiting cures it, so
-        retryAfterSeconds is mandatory. What the x-ratelimit response headers would
+        retryAfterSeconds is mandatory. What the rate limit response headers would
         have carried: the binding window across every applied enforcing rule - shadow
         rules never bind headers. The binding choice is deterministic, in strict
         priority: windows refusing with capacity_exceeded rank above every retryable
@@ -2994,12 +3014,22 @@ components:
         counter key, which orders by the block/rule triple, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
+      - block
+      - rule
       - algorithm
       - periodSeconds
       - limit
       - remaining
       - retryAfterSeconds
+      - effectiveWindowSeconds
       properties:
+        block:
+          type: string
+          description: The block of the rule the numbers came from.
+        rule:
+          type: string
+          description: The rule the numbers came from; block/rule is the name the
+            ratelimit-policy and ratelimit response fields carry.
         algorithm:
           type: string
           description: The algorithm of the binding window - the one whose numbers
@@ -3024,11 +3054,19 @@ components:
         resetAfterSeconds:
           type: number
           description: Seconds until the counter returns to its empty state.
+        effectiveWindowSeconds:
+          type: number
+          description: Seconds until the window admits one request more than remaining,
+            the t of the ratelimit response field. Absent where the window holds its
+            whole capacity, which, since a simulation charges nothing, includes a
+            window the request would be the first to touch. The real answer, after
+            its own charge, carries one emission interval there under GCRA and the
+            time to the boundary under a fixed window.
     HeadersCapacityExceeded:
       type: object
       additionalProperties: false
       description: 'The headers of a capacity_exceeded refusal: no waiting cures
-        it, so no retry hint can appear. What the x-ratelimit response headers would
+        it, so no retry hint can appear. What the rate limit response headers would
         have carried: the binding window across every applied enforcing rule - shadow
         rules never bind headers. The binding choice is deterministic, in strict
         priority: windows refusing with capacity_exceeded rank above every retryable
@@ -3040,11 +3078,20 @@ components:
         counter key, which orders by the block/rule triple, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
+      - block
+      - rule
       - algorithm
       - periodSeconds
       - limit
       - remaining
       properties:
+        block:
+          type: string
+          description: The block of the rule the numbers came from.
+        rule:
+          type: string
+          description: The rule the numbers came from; block/rule is the name the
+            ratelimit-policy and ratelimit response fields carry.
         algorithm:
           type: string
           description: The algorithm of the binding window - the one whose numbers
@@ -3065,6 +3112,14 @@ components:
         resetAfterSeconds:
           type: number
           description: Seconds until the counter returns to its empty state.
+        effectiveWindowSeconds:
+          type: number
+          description: Seconds until the window admits one request more than remaining,
+            the t of the ratelimit response field. Absent where the window holds its
+            whole capacity, which, since a simulation charges nothing, includes a
+            window the request would be the first to touch. The real answer, after
+            its own charge, carries one emission interval there under GCRA and the
+            time to the boundary under a fixed window.
     SimulationRateLimited:
       type: object
       additionalProperties: false
