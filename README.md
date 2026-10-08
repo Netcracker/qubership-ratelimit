@@ -28,9 +28,9 @@ A policy binds to a gateway through a domain string that has to match on both si
 gateway carries it, and the CR names it. Nothing validates the match. A mismatch surfaces only as an `unknown rate limit
 domain` line in the service log, so that line is the one to alert on.
 
-On every request the gateway sends one flat descriptor — `path`, the `authorization` header as `token`, and
-`x-request-id`. Those are the inputs the schema is written against: a rule matches on identity read out of the token,
-and on the path through the routes of its block.
+On every request the gateway sends one flat descriptor with four entries: `path`, `method`, the `authorization` header
+as `token`, and `x-request-id` as `request_id`. Those are the inputs the schema is written against: a rule matches on
+identity read out of the token, and on the path and method through the routes of its block.
 
 The delivery is two components in one namespace, joined by one ConfigMap. The operator, one active replica, watches the
 policies of its namespace, compiles them, and writes `ratelimit-config`: a manifest with the generation, UID, and
@@ -113,8 +113,8 @@ running. `activeGeneration: 0` means the domain is unprotected: nothing is in ef
 ```console
 $ kubectl get rlp
 NAME              READY   REPLICAS   RULES   PROBLEMS   AGE
-gateway.public    False   3          5       1          5d
-gateway.private   True    3          2       0          5d
+gateway.public    False   3/3        5       1          5d
+gateway.private   True    3/3        2                  5d
 ```
 
 Reading it: the latest generation of `gateway.public` does not compile, an earlier one is still serving its five rules,
@@ -151,23 +151,40 @@ current generation.
 `Ready` is the summary; `Stalled` separates "in progress" from "stuck", so a rollout pages nobody and a broken informer
 does:
 
-| Situation                                                    | `Ready` | `Stalled` | Reason         |
-|--------------------------------------------------------------|---------|-----------|----------------|
-| every ready replica enforces the latest generation           | True    | False     | `AllReplicas`  |
-| no replica has taken the new generation up yet               | False   | False     | `Reconciling`  |
-| some have, and the lag is under 30 s                         | False   | False     | `Propagating`  |
-| the Service has no ready endpoint                            | False   | False     | `NoReplicas`   |
-| a replica lags past the threshold: broken informer, or skew  | False   | True      | `ReplicaStale` |
-| the latest generation does not compile, last-good is running | False   | True      | `NotCompiled`  |
-| the operator could not observe the replicas at all           | Unknown | Unknown   | `ProbeFailed`  |
+| Situation                                                              | `Ready` | `Stalled` | Reason                     |
+|------------------------------------------------------------------------|---------|-----------|----------------------------|
+| every ready replica enforces the latest generation                     | True    | False     | `AllReplicas`              |
+| no replica has taken the new generation up yet                         | False   | False     | `Reconciling`              |
+| some have, and the lag is under 90 s                                   | False   | False     | `Propagating`              |
+| the Service has no ready endpoint                                      | False   | False     | `NoReplicas`               |
+| a replica lags past the threshold: broken informer, or skew            | False   | True      | `ReplicaStale`             |
+| the latest generation does not compile, last-good is running           | False   | True      | `NotCompiled`              |
+| the latest generation does not fit the ConfigMap, last-good is running | False   | True      | `ConfigMapTooLarge`        |
+| a replica refuses the manifest's format version                        | False   | True      | `ReplicaFormatUnsupported` |
+| the operator could not observe the replicas at all                     | Unknown | Unknown   | `ProbeFailed`              |
 
 For Argo CD: `Stalled: True` is Degraded, `Ready: True` is Healthy, everything else is Progressing. A sync wave closes
 only once every pod enforces the rules.
 
 ## Install
 
+Prerequisites, which the charts do not install:
+
+- Istio ambient and the two `Gateway` objects that `qubership-core-mesh-config` creates, named by
+  `ISTIO_PUBLIC_GATEWAY_NAME` and `ISTIO_PRIVATE_GATEWAY_NAME` (see "Composite installations" below);
+- dbaas-operator, installed and enabled, a `Role` in the namespace that lets it write Secrets, and the DBaaS Redis
+  adapter installed with `redis.conf.maxmemory-policy: noeviction`; dbaas-operator needs Kubernetes 1.32 or later (see
+  the counter store below);
+- the Prometheus Operator CRDs behind `PodMonitor` and `PrometheusRule`, when `MONITORING_ENABLED` is set.
+
+The images are `ghcr.io/netcracker/qubership-ratelimit-operator` and `ghcr.io/netcracker/qubership-ratelimit-service`.
+Every push to `main` publishes them tagged `main-<sha>`, the first seven characters of the commit; no release exists,
+so that is the `TAG` to pass below. The pages under [`docs/`](docs/README.md) carry the detail behind this section: the
+chart reference, the resource specification, the runbook, and the management API.
+
 The delivery is three charts under `helm-templates/`. `ratelimit-crds` holds the `RateLimitPolicy` CRD and is installed
-once per cluster, before any namespace; the other two are installed into each namespace, in either order:
+once per cluster, before any namespace; the other two are installed into each namespace, the operator chart before the
+service chart:
 
 ```bash
 helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds --namespace <platform-namespace>
@@ -197,31 +214,40 @@ helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
 install that leaves `NAMESPACE`, `DEPLOYMENT_SESSION_ID`, or `TAG` empty. The platform sets `DEPLOYMENT_SESSION_ID` to
 the deployment session; a manual install passes any valid label value, such as `manual`.
 
+With both releases up, apply [`docs/ratelimitpolicy-example.yaml`](docs/ratelimitpolicy-example.yaml), a commented
+policy for `gateway.public` and a minimal one for `gateway.private`, with `metadata.namespace` changed to the business
+namespace; `kubectl get rlp` then lists them with the columns of the sample under "Two generations" above, and
+[the runbook's first look](docs/runbook.md#0-setup-and-the-first-look) reads the pods, the logs, and the management
+API of the installation.
+
 The profile is not optional. Each chart's `resource-profiles/` holds the four the platform picks from, `dev`, `dev-ha`,
-`prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT`, and,
-for the service, `REPLICAS` and the `HPA_*` parameters of its autoscaler. Each `values.schema.json` requires its keys,
-so an install without `-f` fails with `missing properties 'CPU_REQUEST', ...` rather than rendering a Deployment with
-empty resources. The service's autoscaler is off in `dev` and scales between 1 or 2 and 5 replicas in the others, the
-way the platform's other services do; the `-ha` and `prod` profiles start two replicas. The operator runs two there as
-well: the Lease holder and a standby.
+`prod-nonha`, `prod`, and they are the only source of `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT`,
+`REPLICAS`, and, for the service, the `HPA_*` parameters of its autoscaler. Each `values.schema.json` requires its keys,
+so an install without `-f` fails with `missing properties 'REPLICAS', 'CPU_REQUEST', ...` rather than rendering a
+Deployment with empty resources. The service's autoscaler is off in `dev` and scales between 1 or 2 and 5 replicas in
+the others, the way the platform's other services do; the `-ha` and `prod` profiles set the autoscaler's floor to two,
+and a fresh release starts from one pod until the autoscaler's first sync. The operator runs two there as well: the
+Lease holder and a standby.
 
 `MEMORY_LIMIT` is not only a cgroup ceiling: the platform's `memlimit` package derives `GOMEMLIMIT` from it at startup,
 so it governs when the Go heap starts collecting.
 
 `ratelimit-operator` renders the operator replicas with the only `Role` of the delivery, a `PodMonitor`, and a
 `PrometheusRule`. Its values are `policyAlerts.*` and the resource sizes with `REPLICAS`, 2 in the `-ha` and `prod`
-profiles. It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reaches the ConfigMap `ratelimit-config`
-and the operator's own Deployment by name, and nothing else in the namespace beyond the policies, the Lease, the Events,
-and the EndpointSlices.
+profiles. It installs no `ClusterRole` and no `ClusterRoleBinding`; the `Role` reads and updates the ConfigMap
+`ratelimit-config` and reads the operator's own Deployment by name, may create a ConfigMap of any name (the one verb
+RBAC cannot narrow by name), and reaches nothing else in the namespace beyond the policies, the Lease, the Events, and
+the EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
 `/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
 `grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`,
 a `PrometheusRule`, the dashboard, and one `EnvoyFilter` per enabled gateway. Its values are `redis.*`,
 `metrics.*`, `management.*`, `alerts.*`, the filter's (`filter.*`; the port the filters send checks to is the contract's
-9000 and not a value), `runtime.*`, `gateways.*`, the gateway names, and the five resource keys. Neither chart renders
-the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way: a satellite gets the filters from the
-service chart and nothing from the operator chart, so the platform installs the same pair in every namespace.
+9000 and not a value), `runtime.*`, `gateways.*`, `responseHeaders.*` (the IETF `RateLimit` fields, on by default), the
+gateway names, and the five resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read
+`BASELINE_ORIGIN` the same way: a satellite gets the filters from the service chart and nothing from the operator chart,
+so the platform installs the same pair in every namespace.
 
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
 `MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the way
@@ -263,12 +289,13 @@ policy evicts counters and management records under memory pressure. On a cluste
 platform's Go DBaaS client, `qubership-core-lib-go-dbaas-base-client`, from `/etc/secrets/dbaas-secrets`. The
 [Helm chart reference](docs/helm-chart.md#the-counter-store-from-dbaas) has the details.
 
-A fresh installation needs no order: the service waits `NotReady` until the operator writes. An upgrade installs the
-service before the operator and a rollback reverses the order, because the service reads the current and the previous
-manifest format version and the operator writes the current one. The root of each schema is open, so the platform's
-one parameter set reaches both charts and each ignores the other's blocks; the blocks a chart reads are closed. A CI
-test renders both charts and compares the Service name and ports, the filters' address, the volume's ConfigMap, and
-the mount path with the constants of `api/contract`.
+The service stays `NotReady` until the operator writes `ratelimit-config`, and its `EnvoyFilter`s are live from the
+moment the service chart is installed, so a first installation with `--wait` installs the CRD chart, then the operator
+chart, then the service chart. An upgrade installs the service before the operator and a rollback reverses the order,
+because the service reads the current and the previous manifest format version and the operator writes the current
+one. The root of each schema is open, so the platform's one parameter set reaches both charts and each ignores the
+other's blocks; the blocks a chart reads are closed. A CI test renders both charts and compares the Service name and
+ports, the filters' address, the volume's ConfigMap, and the mount path with the constants of `api/contract`.
 
 A policy change reaches the service replicas within the kubelet's sync period, one minute by default: the operator
 writes the ConfigMap at once, and the kubelet projects it into the volume on its next sync. `Ready` on the policy
@@ -336,7 +363,7 @@ namespace's policies with it.
 
 ```bash
 make build              # compile both binaries, bin/ratelimit-operator and bin/ratelimit-service
-make test-unit          # unit tests only; no envtest, no cluster, no network
+make test-unit          # unit tests only; no envtest, no cluster; the Redis suites skip without Docker or REDIS_ADDR
 make test               # everything, including the envtest controller suite
 make manifests generate # regenerate the CRD, the RBAC, and the DeepCopy methods
 make sync-helm-crds     # copy the generated CRD into the ratelimit-crds chart (alias: make helm-crd)
@@ -388,17 +415,18 @@ take field-manager ownership of `.spec.replicas` and make every later `helm upgr
 
 `make test` runs the envtest suites of `operator/internal` against a real API server, which is where the CRD schema
 and the status subresource actually exist — the fake client the other tests use validates nothing. The first run
-downloads the envtest binaries into `bin/`, so it needs internet; `make test-unit` never does. Both derive their
-Kubernetes version from `go.mod`, so the test control plane cannot drift from the client libraries the operator is
-built against.
+downloads the envtest binaries into `bin/`, so it needs internet. Both derive their Kubernetes version from `go.mod`,
+so the test control plane cannot drift from the client libraries the operator is built against. `make test-unit`
+includes the engine's Redis suites, which run against `REDIS_ADDR` when it is set, otherwise against a
+`redis:8-alpine` container they start through Docker, and skip when neither is available.
 
 `helm-templates/ratelimit-crds/templates/crd-*.yaml` is generated. Edit the Go types and run `make sync-helm-crds`
 instead of editing them.
 
 The CRD carries CEL rules, and the cost estimator budgets each one against the declared `MaxLength` and `MaxItems`. Two
 structural checks the estimator would not accept live in the compiler instead — template placeholder uniqueness, and
-`replaces` naming a rule of its own block — and a policy failing either is rejected with `Accepted: False`, exactly as
-the API server would have rejected it.
+`replacedRules` naming a rule of its own block — and a policy failing either is rejected with `Accepted: False`,
+exactly as the API server would have rejected it.
 
 Run the pair from your host. The operator talks to the cluster of your current kubeconfig; the service talks to
 nothing but a directory, which `make service-config` fills from the live `ratelimit-config` of the namespace:
@@ -422,4 +450,7 @@ images, `OPERATOR_IMG` and `SERVICE_IMG`, from the two Dockerfiles.
 
 `CLOUD_NAMESPACE` has no default. An unset value is a startup error for either process, not a fallback to watching
 the cluster: it is what keeps the operator's RBAC a `Role`, and it is a segment of every counter key the service
-writes. It is read through `configloader`, so any property source the platform configures can supply it.
+writes. It is read through `configloader`, so any property source the platform configures can supply it. The same
+loader reads each binary's `application.yaml` from the directory in `PROPERTY_FILE_PATH`, trailing slash included; the
+`run*` targets set it to `operator/` and `service/`, and a process started without it logs
+`open application.yaml: no such file or directory` and retries instead of starting.
