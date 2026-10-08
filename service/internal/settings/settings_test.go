@@ -96,6 +96,45 @@ func TestSettings_replaceABadValueWithTheDefaultAndSaySo(t *testing.T) {
 	assert.Equal(t, 0.5, NearLimitRatio(warn))
 }
 
+// A value that does not parse or lies outside the open interval (0, 1) is
+// reported once and replaced by the default; the interval's own ends are
+// outside it. NaN used to be returned as the ratio with no warning, because
+// NaN compares false with both bounds.
+func TestNearLimitRatio_replacesAValueOutsideTheIntervalWithTheDefault(t *testing.T) {
+	for _, tt := range []struct{ name, raw string }{
+		{"zero", "0"},
+		{"one", "1"},
+		{"a negative ratio", "-0.5"},
+		{"NaN", "NaN"},
+		{"a word", "ninety"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var warned []string
+			warn := func(format string, args ...any) { warned = append(warned, format) }
+			t.Setenv("METRICS_NEAR_LIMIT_RATIO", tt.raw)
+			configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+
+			ratio := NearLimitRatio(warn)
+
+			assert.Equal(t, rls.DefaultNearLimitRatio, ratio, "NearLimitRatio with %q", tt.raw)
+			assert.Len(t, warned, 1, "warnings for %q", tt.raw)
+		})
+	}
+}
+
+// An empty value reads as an unset one: the default, with no warning.
+func TestNearLimitRatio_readsAnEmptyValueAsTheDefaultWithoutAWarning(t *testing.T) {
+	var warned []string
+	warn := func(format string, args ...any) { warned = append(warned, format) }
+	t.Setenv("METRICS_NEAR_LIMIT_RATIO", "")
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+
+	ratio := NearLimitRatio(warn)
+
+	assert.Equal(t, rls.DefaultNearLimitRatio, ratio)
+	assert.Empty(t, warned)
+}
+
 // fixedResolver answers every lookup with one set of connection properties.
 type fixedResolver map[string]any
 

@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 
@@ -128,17 +129,20 @@ func CounterStore(source *redisconn.Source) CounterBackend {
 	}
 }
 
-// NearLimitRatio reads the near-limit margin for the metrics. The property
-// key spells every hump as its own segment because the configloader turns
-// each underscore of METRICS_NEAR_LIMIT_RATIO into a dot; a camelCase key
-// would never see the variable.
+// NearLimitRatio reads the near-limit margin for the metrics. Unset or empty,
+// it is [rls.DefaultNearLimitRatio]; any other value that does not parse or
+// lies outside (0, 1), NaN included, is reported through warn and replaced by
+// that default.
+// The property key spells every hump as its own segment because the
+// configloader turns each underscore of METRICS_NEAR_LIMIT_RATIO into a dot; a
+// camelCase key would never see the variable.
 func NearLimitRatio(warn Warn) float64 {
 	raw := configloader.GetOrDefaultString("metrics.near.limit.ratio", "")
 	if raw == "" {
 		return rls.DefaultNearLimitRatio
 	}
 	ratio, err := strconv.ParseFloat(raw, 64)
-	if err != nil || ratio <= 0 || ratio >= 1 {
+	if err != nil || math.IsNaN(ratio) || ratio <= 0 || ratio >= 1 {
 		warn("METRICS_NEAR_LIMIT_RATIO=%q is not a ratio in (0, 1), using %v",
 			raw, rls.DefaultNearLimitRatio)
 		return rls.DefaultNearLimitRatio
