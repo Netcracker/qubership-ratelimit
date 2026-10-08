@@ -3,9 +3,11 @@ package management
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/MicahParks/jwkset"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/netcracker/qubership-core-lib-go/v3/security/token"
@@ -70,7 +72,7 @@ func (a *API) buildVerifier(ctx context.Context) {
 			a.Log.InfoC(ctx, "management API token verifier is ready")
 			return
 		}
-		a.Log.ErrorC(ctx, "management API token verifier unavailable, retrying in %v: %v", delay, err)
+		a.Log.ErrorC(ctx, "management API token verifier unavailable, retrying in %v: %v", delay, oneLine(err))
 		select {
 		case <-ctx.Done():
 			return
@@ -107,6 +109,15 @@ func (a *API) withIdentity() fiber.Handler {
 		}
 		verified, err := (*verifier).Verify(c.UserContext(), raw)
 		if err != nil {
+			// The key id tells a key of another issuer from a key set the
+			// service never fetched; the token itself is a live credential
+			// and stays out.
+			var kid any
+			if verified != nil {
+				kid = verified.Header["kid"]
+			}
+			a.Log.DebugC(c.UserContext(), "management API refused a bearer token kid=%v error=%v",
+				logSafe(fmt.Sprint(kid)), oneLine(err))
 			return errorf(CodeUnauthorized, refusal(err))
 		}
 		name, err := token.GetSubject(verified)
@@ -138,11 +149,20 @@ func refusal(err error) string {
 		return "the bearer token is not issued for the audience of this API"
 	case errors.Is(err, jwt.ErrTokenInvalidIssuer):
 		return "the bearer token was not issued by this cluster"
+	case errors.Is(err, jwkset.ErrKeyNotFound):
+		return "the bearer token is signed with a key this cluster does not hold"
 	case errors.Is(err, jwt.ErrTokenSignatureInvalid), errors.Is(err, jwt.ErrTokenUnverifiable):
 		return "the signature of the bearer token could not be verified"
 	default:
 		return "the bearer token was not accepted"
 	}
+}
+
+// oneLine is err's text on one line: an error that wraps a library's
+// multi-line explanation would otherwise split one log record into several,
+// the later ones without a timestamp.
+func oneLine(err error) string {
+	return strings.Join(strings.Fields(err.Error()), " ")
 }
 
 // requireRole gates one handler on a role.

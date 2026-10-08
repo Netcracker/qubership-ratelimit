@@ -276,6 +276,12 @@ at all, and the pod's own ServiceAccount, whose token it mounts to read the OIDC
 narrowed to axis values: a listed caller sees the values (client id) by design, a documented property of the access
 model. Axis values and the Idempotency-Key land in the log verbatim, hence the log-safe patterns.
 
+Access is revoked by expiry and by a restart, not at once. The service verifies a token offline, against the cluster's
+key set, so a token stays valid until its `exp` after its ServiceAccount or its pod is deleted; a projected token
+expires after the `expirationSeconds` of its volume, an hour by default. The service reads `management.callers` at
+start, so a caller removed from the list keeps calling until the pods restart, which a `helm upgrade` that changes the
+list does on its own. A legacy ServiceAccount token from a Secret, which carries no `exp`, is refused.
+
 ### What a caller owes
 
 A caller is usually a backend acting for its own users, such as the platform's user interface, and the service sees

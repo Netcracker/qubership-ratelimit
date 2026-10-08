@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/netcracker/qubership-core-lib-go/v3/security/oidc"
 	"github.com/netcracker/qubership-core-lib-go/v3/security/tokenverifier"
@@ -22,10 +24,19 @@ import (
 // against here as well: a leeway on every time claim, the key set fetched
 // again once a day and at most every five minutes for an unknown key.
 const (
-	leeway            = 30 * time.Second
-	keySetRefresh     = 24 * time.Hour
-	unknownKeyRefresh = 5 * time.Minute
+	leeway        = 30 * time.Second
+	keySetRefresh = 24 * time.Hour
 )
+
+// unknownKeyRefresh is the least time between two refreshes of the key set
+// for a key it does not hold. Tests shorten it.
+var unknownKeyRefresh = 5 * time.Minute
+
+// unknownKeyWait bounds how long a token signed with a key the key set does
+// not hold waits for the refresh limiter before it is refused. The limiter
+// allows one refresh per unknownKeyRefresh, and without the bound a request
+// in the last minute of that window waits for it.
+const unknownKeyWait = time.Second
 
 // DefaultTimeout bounds one request to the API server: the OIDC discovery and
 // each fetch of the key set.
@@ -52,6 +63,10 @@ type Config struct {
 
 	// Timeout bounds one request to the API server; zero is DefaultTimeout.
 	Timeout time.Duration
+
+	// Log receives a failed refresh of the key set, which runs in the
+	// background after NewVerifier returns; nil discards it.
+	Log func(format string, args ...any)
 }
 
 // NewVerifier builds a verifier of ServiceAccount tokens: the signature
@@ -59,10 +74,11 @@ type Config struct {
 // audience, the expiry, and the issue time, as the platform's own Kubernetes
 // verifier checks them.
 //
-// It reads the discovery before it returns, and returns an error when the
-// discovery does not answer within the timeout, so a caller that retries
-// always gets to retry. The key set is fetched under ctx, which has to outlive
-// the verifier: the key set is refreshed in the background until ctx ends.
+// It reads the discovery and the key set before it returns, and returns an
+// error when either does not answer within the timeout, so a verifier it
+// returns holds the cluster's keys, and a caller that retries always gets to
+// retry. The key set is refreshed under ctx, which has to outlive the
+// verifier: the refresh runs in the background until ctx ends.
 func NewVerifier(ctx context.Context, cfg Config) (tokenverifier.Verifier, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = DefaultTimeout
@@ -87,10 +103,21 @@ func NewVerifier(ctx context.Context, cfg Config) (tokenverifier.Verifier, error
 	if err != nil {
 		return nil, err
 	}
-	keyFunc, err := tokenverifier.CreateKeyFunctionFromJwksURL(ctx, jwksURI, tokenverifier.KeyFuncOptions{
-		HttpClient:        client,
-		RefreshInterval:   keySetRefresh,
-		RefreshUnknownKID: rate.NewLimiter(rate.Every(unknownKeyRefresh), 1),
+	failFirst := false
+	keyFunc, err := keyfunc.NewDefaultOverrideCtx(ctx, []string{jwksURI}, keyfunc.Override{
+		Client:                    client,
+		HTTPTimeout:               cfg.Timeout,
+		NoErrorReturnFirstHTTPReq: &failFirst,
+		RateLimitWaitMax:          unknownKeyWait,
+		RefreshInterval:           keySetRefresh,
+		RefreshUnknownKID:         rate.NewLimiter(rate.Every(unknownKeyRefresh), 1),
+		RefreshErrorHandlerFunc: func(u string) func(context.Context, error) {
+			return func(_ context.Context, err error) {
+				if cfg.Log != nil {
+					cfg.Log("refresh the key set at %s: %s", u, strings.Join(strings.Fields(err.Error()), " "))
+				}
+			}
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fetch the key set at %s: %w", jwksURI, err)

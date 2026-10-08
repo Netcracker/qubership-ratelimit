@@ -26,6 +26,7 @@ type cluster struct {
 	server  *httptest.Server
 	key     *rsa.PrivateKey
 	podAuth atomic.Value // the Authorization header of the last discovery request
+	keysOut atomic.Bool  // the key set answers 503 while set
 }
 
 func newCluster(t *testing.T) *cluster {
@@ -40,6 +41,10 @@ func newCluster(t *testing.T) *cluster {
 			"issuer": c.server.URL, "jwks_uri": c.server.URL + "/openid/v1/jwks"})
 	})
 	mux.HandleFunc("/openid/v1/jwks", func(w http.ResponseWriter, _ *http.Request) {
+		if c.keysOut.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]string{
 			"kty": "RSA", "kid": "cluster", "alg": "RS256", "use": "sig",
 			"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
@@ -174,4 +179,45 @@ func TestNewVerifier_refusesAPodTokenWithoutAnIssuer(t *testing.T) {
 	}
 	_, err := NewVerifier(context.Background(), Config{Audience: audience, Token: podToken})
 	assert.ErrorContains(t, err, "carries no issuer")
+}
+
+// A key set that does not answer fails the construction, so the caller keeps
+// retrying and answers 503 meanwhile, rather than holding a verifier without
+// keys that refuses every token with 401.
+func TestNewVerifier_failsWhenTheKeySetDoesNotAnswer(t *testing.T) {
+	c := newCluster(t)
+	c.keysOut.Store(true)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	_, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken, Timeout: time.Second})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fetch the key set")
+}
+
+// A token signed with a key the key set does not hold, such as the identity
+// provider's, is refused without waiting out the refresh limiter: the first
+// one refreshes the key set, and the next ones in the same window are refused
+// within unknownKeyWait.
+func TestNewVerifier_refusesAnUnknownKeyWithoutWaitingForTheRefresh(t *testing.T) {
+	// A window short enough that the limiter's next refresh is within the
+	// one minute it would otherwise wait for it.
+	window := unknownKeyRefresh
+	unknownKeyRefresh = 3 * time.Second
+	t.Cleanup(func() { unknownKeyRefresh = window })
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+	stranger, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	for range 3 {
+		start := time.Now()
+		_, err := verifier.Verify(ctx, c.token(t, stranger, "idp", nil))
+		assert.ErrorIs(t, err, jwt.ErrTokenUnverifiable)
+		assert.Less(t, time.Since(start), unknownKeyWait+500*time.Millisecond,
+			"an unknown key waited on the refresh limiter")
+	}
 }

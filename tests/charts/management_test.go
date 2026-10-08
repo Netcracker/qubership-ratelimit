@@ -112,24 +112,9 @@ func TestServiceChart_theDefaultGatewayDomainIsThePrivateGatewaysDomain(t *testi
 // cluster's OIDC discovery.
 func TestServiceChart_mountsTheServiceAccountTokenForTheManagementAPIAlone(t *testing.T) {
 	const path = "/var/run/secrets/kubernetes.io/serviceaccount"
-	mounted := func(objects []object) (sources []string, at string) {
+	mounted := func(objects []object) ([]string, string) {
 		spec := only(t, objects, "Deployment").at("spec", "template", "spec")
-		for _, volume := range spec.at("volumes").list() {
-			if volume.at("name").str2() != "serviceaccount" {
-				continue
-			}
-			for _, source := range volume.at("projected", "sources").list() {
-				for kind := range source.v.(map[string]any) {
-					sources = append(sources, kind)
-				}
-			}
-		}
-		for _, mount := range spec.at("containers").list()[0].at("volumeMounts").list() {
-			if mount.at("name").str2() == "serviceaccount" {
-				at = mount.at("mountPath").str2()
-			}
-		}
-		return sources, at
+		return projectedSources(spec, "serviceaccount"), mountPathOf(spec, "serviceaccount")
 	}
 
 	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
@@ -156,4 +141,32 @@ func TestServiceChart_refusesTheRemovedIdentityValues(t *testing.T) {
 			"--set", "management.callers={ui-backend}", "--set", value)
 		assert.Error(t, err, "the schema accepts %s", value)
 	}
+}
+
+// projectedSources lists the kinds of the sources of the projected volume name
+// in a pod spec, in order; none when the spec has no such volume.
+func projectedSources(spec node, name string) []string {
+	var sources []string
+	for _, volume := range spec.at("volumes").list() {
+		if volume.at("name").str2() != name {
+			continue
+		}
+		for _, source := range volume.at("projected", "sources").list() {
+			for kind := range source.v.(map[string]any) {
+				sources = append(sources, kind)
+			}
+		}
+	}
+	return sources
+}
+
+// mountPathOf is where the first container mounts the volume name, empty when
+// it does not.
+func mountPathOf(spec node, name string) string {
+	for _, mount := range spec.at("containers").list()[0].at("volumeMounts").list() {
+		if mount.at("name").str2() == name {
+			return mount.at("mountPath").str2()
+		}
+	}
+	return ""
 }

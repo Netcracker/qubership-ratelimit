@@ -1,20 +1,16 @@
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if and .Values.management.enabled .Values.management.authorizationPolicy.enabled }}
-{{- /* The principals: allowedServiceAccounts in NAMESPACE when it is set,
-       the callers otherwise, <name> in NAMESPACE and <namespace>/<name> in
-       its own namespace. */}}
+{{- /* The principals: allowedServiceAccounts when it is set, the callers
+       otherwise. An entry of either list is <name> in NAMESPACE or
+       <namespace>/<name> in its own namespace. */}}
+{{- $entries := .Values.management.authorizationPolicy.allowedServiceAccounts | default .Values.management.callers }}
 {{- $principals := list }}
-{{- range .Values.management.authorizationPolicy.allowedServiceAccounts }}
-{{- $principals = append $principals (printf "cluster.local/ns/%s/sa/%s" $.Values.NAMESPACE .) }}
-{{- end }}
-{{- if not $principals }}
-{{- range .Values.management.callers }}
+{{- range $entries }}
 {{- $parts := splitList "/" . }}
 {{- if eq (len $parts) 2 }}
 {{- $principals = append $principals (printf "cluster.local/ns/%s/sa/%s" (index $parts 0) (index $parts 1)) }}
 {{- else }}
 {{- $principals = append $principals (printf "cluster.local/ns/%s/sa/%s" $.Values.NAMESPACE .) }}
-{{- end }}
 {{- end }}
 {{- end }}
 # Who may reach the management port.

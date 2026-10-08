@@ -27,10 +27,11 @@ api() { curl -sS -H "Authorization: Bearer $TOKEN" "$@"; }
 op()  { api "$@"; }      # every listed caller holds operator
 ```
 
-On the platform the same API is routed through the private gateway under the same prefix, and stays reachable there
-during a store outage whatever the gateway's failure mode (section 1); the port-forward is the path for an operator
-who already holds `kubectl` access. The service verifies the token either way, so a port-forward skips the mesh policy
-on the port and nothing else: the token still has to belong to a listed caller.
+Where the release lists the private gateway in `management.authorizationPolicy.allowedServiceAccounts`, the same API is
+also routed through that gateway under the same prefix, and stays reachable there during a store outage whatever the
+gateway's failure mode (section 1); otherwise only the listed callers' workloads reach the port. The port-forward is the
+path for an operator who already holds `kubectl` access. The service verifies the token either way, so a port-forward
+skips the mesh policy on the port and nothing else: the token still has to belong to a listed caller.
 
 The installation is two Deployments in the namespace. The operator pod reads the policies, writes their status, and
 writes the ConfigMap `ratelimit-config`; the service pods mount that ConfigMap and serve the decisions and the
@@ -206,13 +207,14 @@ ratelimit_store_errors_total{domain="gateway.public",reason="timeout"} 25
 The management API answers every call that needs the store with `RLS-0503`, and the gateway's clients see no `429` at
 all while `failClosed` is off.
 
-The API itself stays reachable through the private gateway, also with `failClosed: true` on it: the service admits
-the checks of `/ratelimit/v1` in the domains of `management.gatewayDomains` of the service chart without reading the
-store, and counts them as `verdict="exempt"`. The endpoints that read no counters, `GET /status`, `/domains`,
-`/domains/{domain}/rules`, and `/openapi.yaml`, return `200` during the outage. A `503` from the API with no `RLS-`
-code in its body is the gateway's: the gateway's domain is missing from `management.gatewayDomains`, or the check
-itself got no answer within `filter.timeout`. The port-forward of section 0 reaches the API past the gateway in both
-cases.
+Where the release routes it through the private gateway (the gateway listed in
+`management.authorizationPolicy.allowedServiceAccounts`), the API itself stays reachable there, also with
+`failClosed: true` on it: the service admits the checks of `/ratelimit/v1` in the domains of `management.gatewayDomains`
+of the service chart without reading the store, and counts them as `verdict="exempt"`. The endpoints that read no
+counters, `GET /status`, `/domains`, `/domains/{domain}/rules`, and `/openapi.yaml`, return `200` during the outage. A
+`503` from the API with no `RLS-` code in its body is the gateway's: the gateway's domain is missing from
+`management.gatewayDomains`, or the check itself got no answer within `filter.timeout`. The port-forward of section 0
+reaches the API past the gateway in both cases.
 
 **Diagnose.**
 
@@ -1036,6 +1038,11 @@ five minutes. A `401` that names the audience is a caller that sends a token for
 `management.m2m.audience` and the caller's token have to agree, which the platform's clients do with
 `KUBERNETES_M2M_ENABLED=true` and the default `netcracker`. A `403` is a caller missing from `management.callers`; the
 start line lists the ones the service read.
+
+**Revoke a caller.** Remove it from `management.callers` and upgrade the release: the service reads the list at start,
+and the upgrade restarts the pods. Until a pod restarts it still admits the caller, and a token already issued stays
+valid until its `exp` even after its ServiceAccount is deleted, because the service verifies tokens offline against the
+cluster's key set.
 
 ## Appendix: the metrics an operator reads
 

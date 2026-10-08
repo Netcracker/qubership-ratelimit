@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MicahParks/jwkset"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 )
@@ -59,7 +60,8 @@ func TestIdentity_answersEachRefusalOfTheVerifierWith401(t *testing.T) {
 		{"another audience", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenInvalidAudience), "not issued for the audience"},
 		{"another issuer", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenInvalidIssuer), "not issued by this cluster"},
 		{"a bad signature", fmt.Errorf("%w: crypto/rsa: verification error", jwt.ErrTokenSignatureInvalid), "signature of the bearer token could not be verified"},
-		{"an unknown key or alg none", fmt.Errorf("%w: key not found", jwt.ErrTokenUnverifiable), "signature of the bearer token could not be verified"},
+		{"a key the cluster does not hold", fmt.Errorf("%w: %w", jwt.ErrTokenUnverifiable, jwkset.ErrKeyNotFound), "signed with a key this cluster does not hold"},
+		{"alg none", fmt.Errorf("%w: 'none' signature type is not allowed", jwt.ErrTokenUnverifiable), "signature of the bearer token could not be verified"},
 		{"anything else", errors.New("boom"), "was not accepted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,11 +139,13 @@ func TestIdentity_readsNoAuxiliaryIdentityHeader(t *testing.T) {
 // code, a token or not, and the API serves without a restart once the
 // construction that kept failing succeeds.
 func TestIdentity_refusesEveryCallUntilTheVerifierIsBuilt(t *testing.T) {
-	first, max := verifierRetryFirst, verifierRetryMax
+	first, longest := verifierRetryFirst, verifierRetryMax
 	verifierRetryFirst, verifierRetryMax = time.Millisecond, 5*time.Millisecond
-	t.Cleanup(func() { verifierRetryFirst, verifierRetryMax = first, max })
+	t.Cleanup(func() { verifierRetryFirst, verifierRetryMax = first, longest })
 
 	h := newTestAPI(t)
+	log := &recordingLogger{}
+	h.api.Log = log
 	h.api.verifier.Store(nil)
 	var failures atomic.Int32
 	release := make(chan struct{})
@@ -151,7 +155,8 @@ func TestIdentity_refusesEveryCallUntilTheVerifierIsBuilt(t *testing.T) {
 			return readingVerifier{}, nil
 		default:
 			failures.Add(1)
-			return nil, errors.New("Get https://kubernetes.default.svc/.well-known/openid-configuration: refused")
+			return nil, errors.New("Get https://kubernetes.default.svc/.well-known/openid-configuration: refused, " +
+				"possible reasons are:\n1. a base image without the CA\n2. no route to the API server")
 		}
 	}
 
@@ -173,6 +178,13 @@ func TestIdentity_refusesEveryCallUntilTheVerifierIsBuilt(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code == http.StatusOK
 	}, 5*time.Second, 5*time.Millisecond, "the API does not serve once the verifier is built")
+
+	// A builder error that spans lines is logged as one record.
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	for _, line := range log.lines {
+		require.NotContains(t, line.message, "\n", "a log record spans several lines")
+	}
 }
 
 func TestRequestID_roundTripsALogSafeValueAndRefusesTheRest(t *testing.T) {
@@ -208,4 +220,9 @@ func TestLogSafe_dropsWhatCouldForgeARecord(t *testing.T) {
 	require.Equal(t, "alicelevel=info", logSafe("alice\nlevel=info"))
 	require.Equal(t, "alice", logSafe("alice\r\t\x00"))
 	require.Len(t, logSafe(strings.Repeat("x", 1000)), maxLoggedValueLength)
+
+	// The longest caller subject, a 63-byte namespace and a 253-byte name,
+	// reaches the audit line whole.
+	longest := "system:serviceaccount:" + strings.Repeat("n", 63) + ":" + strings.Repeat("s", 253)
+	require.Equal(t, longest, logSafe(longest))
 }

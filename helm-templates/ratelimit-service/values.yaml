@@ -158,10 +158,11 @@ management:
   authorizationPolicy:
     enabled: true
 
-    # Service accounts allowed to reach the port, in NAMESPACE. Empty means
-    # the entries of callers, each in its own namespace. Set it when the
-    # callers come through a gateway: the policy then sees the gateway's
-    # workload, not the caller's. Istio's automated deployment names a
+    # Service accounts allowed to reach the port, in the grammar of callers:
+    # <name> in NAMESPACE, <namespace>/<name> elsewhere. Empty means the
+    # entries of callers. Set it when the callers come through a gateway: the
+    # policy then sees the gateway's workload, not the caller's, so list the
+    # gateway here together with any caller that reaches the port directly. Istio's automated deployment names a
     # Gateway API gateway's generated ServiceAccount after the gateway and its
     # class, <gateway>-istio. Check it before listing it:
     #

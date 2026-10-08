@@ -471,17 +471,24 @@ func TestServiceChart_managementPolicyDeniesAllButTheCallers(t *testing.T) {
 }
 
 // An explicit allowedServiceAccounts list replaces the callers as the
-// principals, each in NAMESPACE: the callers then come through a gateway, and
-// the policy sees the gateway's workload rather than theirs.
+// principals, in the callers' grammar: the callers come through a gateway,
+// whose workload the policy then sees, and a caller in another namespace that
+// reaches the port directly is listed beside it. An entry of another shape is
+// refused rather than rendered as a principal nothing holds.
 func TestServiceChart_managementPolicyTakesAnExplicitListOverTheCallers(t *testing.T) {
 	policy := only(t, render(t, serviceChart, "biz", "--set", "management.enabled=true",
 		"--set", "management.callers={ui-backend}",
-		"--set", "management.authorizationPolicy.allowedServiceAccounts={private-gateway-istio}"),
+		"--set", "management.authorizationPolicy.allowedServiceAccounts={private-gateway-istio,platform/ops-backend}"),
 		"AuthorizationPolicy")
 
 	from := policy.at("spec", "rules").list()[0].at("from").list()
-	assert.Equal(t, []string{"cluster.local/ns/biz/sa/private-gateway-istio"},
+	assert.Equal(t, []string{"cluster.local/ns/biz/sa/private-gateway-istio", "cluster.local/ns/platform/sa/ops-backend"},
 		strs(from[0].at("source", "notPrincipals")))
+
+	_, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true",
+		"--set", "management.callers={ui-backend}",
+		"--set", "management.authorizationPolicy.allowedServiceAccounts={a/b/c}")
+	assert.Error(t, err, "the schema accepts an entry that is no ServiceAccount")
 }
 
 // The dashboard opens on its own release's namespace. Domain names repeat

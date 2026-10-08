@@ -213,6 +213,9 @@ func Build(namespace string, options Options) (*Service, error) {
 						return tokensource.GetServiceAccountToken(ctx)
 					},
 					Anonymous: cloudprovidergetter.GetCloudProvider(ctx) == cloudprovidergetter.CloudProviderGKE,
+					Log: func(format string, args ...any) {
+						platform.Errorf("management API token verifier: "+format, args...)
+					},
 				})
 			},
 			Replica:        options.Replica,

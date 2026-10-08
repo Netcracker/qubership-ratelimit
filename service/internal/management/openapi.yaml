@@ -1014,7 +1014,18 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '503':
-          $ref: '#/components/responses/VerifierUnavailable'
+          description: 'Token verification unavailable (RLS-0504) before anything else, while the service cannot verify tokens yet; see the VerifierUnavailable response. Counter store unavailable (RLS-0503): the store did not answer the scan or the read of a counter, and nothing is listed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+          headers:
+            Retry-After:
+              description: Present with RLS-0504; seconds to wait before retrying.
+              schema:
+                type: integer
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
     delete:
       tags:
       - counters
@@ -1273,7 +1284,18 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '503':
-          $ref: '#/components/responses/VerifierUnavailable'
+          description: 'Token verification unavailable (RLS-0504) before anything else, while the service cannot verify tokens yet; see the VerifierUnavailable response. Counter store unavailable (RLS-0503): the store did not answer the idempotency lookup, the read, or the reset. A retry with the SAME Idempotency-Key is safe: it finds the recorded outcome or runs the reset for the first time.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+          headers:
+            Retry-After:
+              description: Present with RLS-0504; seconds to wait before retrying.
+              schema:
+                type: integer
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
   /domains/{domain}/counter-resets:
     post:
       tags:
@@ -1798,7 +1820,18 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '503':
-          $ref: '#/components/responses/VerifierUnavailable'
+          description: 'Token verification unavailable (RLS-0504) before anything else, while the service cannot verify tokens yet; see the VerifierUnavailable response. Counter store unavailable (RLS-0503): the store did not answer the read the simulation judges against; nothing was charged.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+          headers:
+            Retry-After:
+              description: Present with RLS-0504; seconds to wait before retrying.
+              schema:
+                type: integer
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
       parameters:
       - $ref: '#/components/parameters/xRequestId'
   /status:

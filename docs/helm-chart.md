@@ -284,8 +284,8 @@ management:                          # Deployment.yaml, Service.yaml, Authorizat
     audience: netcracker             # the audience a caller's token is issued for; any other gets 401
   authorizationPolicy:               # DENY on that port for every source but the listed service accounts; ztunnel
     enabled: true                    #   enforces it, so it holds only while the pod is in the mesh
-    allowedServiceAccounts: []       # empty = the callers; set it to the gateway's (<gateway>-istio) when the
-                                     #   callers come through one, in NAMESPACE
+    allowedServiceAccounts: []       # empty = the callers; in their grammar, set it to the gateway's
+                                     #   (<gateway>-istio) and any direct caller when the callers come through one
   gatewayDomains: [gateway.private]  # the rate limit domains of the gateways that route to the API: its paths are
                                      #   exempt from the checks of these domains (see "Management API port")
 
@@ -774,16 +774,18 @@ start. The e2e install sets a caller and an audience of its own, so the suite pr
 only the Deployment.
 
 `AuthorizationPolicy.yaml` keeps the port to the callers: a `DENY` on the management port for every source but
-`management.authorizationPolicy.allowedServiceAccounts`, where an empty list means the callers, each rendered as
-`cluster.local/ns/<namespace>/sa/<name>`. When the callers come through a gateway, the policy sees the gateway's
-workload rather than theirs; list its ServiceAccount there, which Istio's automated deployment names after the gateway
-and its class, `<gateway>-istio`, in `NAMESPACE`. `DENY` with `notPrincipals` rather than `ALLOW`, because an `ALLOW`
-policy applies to the whole workload and would have to enumerate the gRPC and metrics ports as well; a port left out of
-that list would stop answering. ztunnel enforces it, so it holds only while the pod is in the mesh: a namespace without
-ambient redirection or a sidecar gets a policy that matches nothing and an open port, behind which the token check
-still holds. `management.authorizationPolicy.enabled: false` is for a deployment where something outside the mesh
-already does the same job, and belongs in a review. A satellite renders none of this: the service chart renders only
-the gateway filters there.
+`management.authorizationPolicy.allowedServiceAccounts`, where an empty list means the callers. An entry of either list
+is `<name>` in `NAMESPACE` or `<namespace>/<name>` in its own namespace, rendered as
+`cluster.local/ns/<namespace>/sa/<name>`, and the schema refuses an entry of another shape. When the callers come
+through a gateway, the policy sees the gateway's workload rather than theirs; list its ServiceAccount there, which
+Istio's automated deployment names after the gateway and its class, `<gateway>-istio`, together with any caller that
+reaches the port directly. `DENY` with `notPrincipals` rather than `ALLOW`, because an `ALLOW` policy applies to the
+whole workload and would have to enumerate the gRPC and metrics ports as well; a port left out of that list would stop
+answering. ztunnel enforces it, so it holds only while the pod is in the mesh: a namespace without ambient redirection
+or a sidecar gets a policy that matches nothing and an open port, behind which the token check still holds.
+`management.authorizationPolicy.enabled: false` is for a deployment where something outside the mesh already does the
+same job, and belongs in a review. A satellite renders none of this: the service chart renders only the gateway filters
+there.
 
 `management.gatewayDomains` (a list of rate limit domains, default `[gateway.private]`) names the domains of the
 gateways that route to the API. The gateway checks a request to the API like any other request it carries, and the
