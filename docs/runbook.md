@@ -517,11 +517,13 @@ kubectl get rlp -n "$NS" "$DOMAIN" -o jsonpath='{range .spec.limits[*]}{.name}{"
 # api mode=All
 #   per-client preset=standard-client behavior=Enforce     <- a stored default over a Shadow preset
 kubectl patch rlp -n "$NS" "$DOMAIN" --type=json \
-  -p '[{"op": "remove", "path": "/spec/limits/0/rules/1/behavior"}]'
+  -p '[{"op": "test", "path": "/spec/limits/0/rules/0/name", "value": "per-client"},
+       {"op": "remove", "path": "/spec/limits/0/rules/0/behavior"}]'
 ```
 
-The index in the path is the position of the rule in the stored list. `kubectl replace -f` with the author's manifest
-does the same for the whole object, since the manifest carries only what the author wrote.
+The index in the path is the position of the rule in the stored list, and the `test` operation makes the patch fail
+when the rule at that position is not the one read, as after an edit in between. `kubectl replace -f` with the
+author's manifest does the same for the whole object, since the manifest carries only what the author wrote.
 
 **Verify.** `Accepted: True` with reason `RulesCompiled`, `Ready` back to `True` within the probe interval (10 s on the
 stand, after the kubelet's projection), and the three numbers agree:

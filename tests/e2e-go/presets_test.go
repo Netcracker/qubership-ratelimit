@@ -34,7 +34,15 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 		// so the window is the longest the schema admits.
 		limit = 2
 	)
-	var applied bool
+	var (
+		applied bool
+
+		// The block names carry the run's suffix, for the reason on runSuffix;
+		// a retry of one spec inside a run keeps the buckets, since the specs
+		// share them on purpose.
+		ordersBlock  = "orders-" + runSuffix
+		catalogBlock = "catalog-" + runSuffix
+	)
 
 	// policy is the policy of the suite: one preset, taken by one rule of
 	// each of two blocks with targets of their own. requests is the window
@@ -50,7 +58,7 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 				Rules: []v1.Rule{{Name: "budget", Preset: "standard"}},
 			}
 		}
-		p := newPolicy(domain, []v1.LimitBlock{block("orders", ordersPath), block("catalog", catalogPath)})
+		p := newPolicy(domain, []v1.LimitBlock{block(ordersBlock, ordersPath), block(catalogBlock, catalogPath)})
 		p.Spec.Presets = &v1.Presets{Rules: []v1.RulePreset{{
 			Name:     "standard",
 			Behavior: behavior,
@@ -123,7 +131,7 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 			g.Expect(p.Status.ObservedGeneration).To(Equal(p.Generation), "the operator has not observed the edit")
 			g.Expect(p.Status.RuleProblems).To(HaveLen(1))
 			g.Expect(p.Status.RuleProblems[0].Reason).To(Equal(v1.ProblemUnresolvedPresetReference))
-			g.Expect(p.Status.RuleProblems[0].Block).To(Equal("catalog"))
+			g.Expect(p.Status.RuleProblems[0].Block).To(Equal(catalogBlock))
 			g.Expect(p.Status.RuleProblems[0].Rule).To(Equal("budget"))
 			g.Expect(p.Status.RuleProblems[0].Message).To(ContainSubstring("standrad"))
 			g.Expect(p.Status.ActiveGeneration).To(Equal(before.Generation),
@@ -153,13 +161,14 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 			"the catalog rule took Shadow from the preset and still refused")
 		Eventually(func() float64 {
 			return counterSum(scrapeAllReplicas(), "ratelimit_decisions_total",
-				map[string]string{"domain": domain, "outcome": "shadow_over_limit", "rule": "catalog/budget"})
+				map[string]string{"domain": domain, "outcome": "shadow_over_limit", "rule": catalogBlock + "/budget"})
 		}).WithTimeout(30*time.Second).Should(BeNumerically(">", 0),
-			"the Shadow rule of catalog recorded no shadow_over_limit outcome")
+			"the Shadow rule of %s recorded no shadow_over_limit outcome", catalogBlock)
 
 		By("removing the written behavior with the JSON patch of the runbook")
 		patch := client.RawPatch(types.JSONPatchType,
-			[]byte(`[{"op": "remove", "path": "/spec/limits/0/rules/0/behavior"}]`))
+			[]byte(`[{"op": "test", "path": "/spec/limits/0/rules/0/name", "value": "budget"},
+			        {"op": "remove", "path": "/spec/limits/0/rules/0/behavior"}]`))
 		Expect(k8s.Patch(ctx, newPolicy(domain, nil), patch)).To(Succeed())
 		waitApplied(domain)
 
@@ -167,9 +176,9 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 			"the orders rule still refuses after its written behavior was removed; the preset's Shadow did not apply")
 		Eventually(func() float64 {
 			return counterSum(scrapeAllReplicas(), "ratelimit_decisions_total",
-				map[string]string{"domain": domain, "outcome": "shadow_over_limit", "rule": "orders/budget"})
+				map[string]string{"domain": domain, "outcome": "shadow_over_limit", "rule": ordersBlock + "/budget"})
 		}).WithTimeout(30*time.Second).Should(BeNumerically(">", 0),
-			"the orders rule recorded no shadow_over_limit outcome after taking Shadow from the preset")
+			"the rule %s recorded no shadow_over_limit outcome after taking Shadow from the preset", ordersBlock)
 	})
 })
 
@@ -200,6 +209,12 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 		// form replaces it.
 		writtenRules   int32
 		writtenVersion string
+
+		// The block names carry the run's suffix, for the reason on runSuffix,
+		// in both forms of the policy, so the two compile to one rule set.
+		ordersBlock  = "orders-" + runSuffix
+		catalogBlock = "catalog-" + runSuffix
+		exportsBlock = "exports-" + runSuffix
 	)
 
 	dayWindow := func(requests int32) []v1.Rate {
@@ -227,10 +242,10 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 		partnerBefore := partner
 		partnerBefore.Before = "per-user"
 		p := withPolicy([]v1.LimitBlock{
-			{Name: "orders", Preset: "cascade", Target: prefix(ordersPath)},
-			{Name: "catalog", Preset: "cascade", Target: prefix(catalogPath),
+			{Name: ordersBlock, Preset: "cascade", Target: prefix(ordersPath)},
+			{Name: catalogBlock, Preset: "cascade", Target: prefix(catalogPath),
 				Rules: []v1.Rule{{Name: "per-user", Rates: dayWindow(perUser + 2)}}},
-			{Name: "exports", Preset: "cascade", Target: prefix(exportsPath),
+			{Name: exportsBlock, Preset: "cascade", Target: prefix(exportsPath),
 				Rules: []v1.Rule{partnerBefore, {Name: "anonymous", Dropped: true}}},
 		})
 		p.Spec.Presets = &v1.Presets{
@@ -252,11 +267,11 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 		perUserCatalog := perUserRule
 		perUserCatalog.Rates = dayWindow(perUser + 2)
 		return withPolicy([]v1.LimitBlock{
-			{Name: "orders", Mode: v1.BlockModeFirstMatch, Target: prefix(ordersPath),
+			{Name: ordersBlock, Mode: v1.BlockModeFirstMatch, Target: prefix(ordersPath),
 				Rules: []v1.Rule{internal, perUserRule, anonymous}},
-			{Name: "catalog", Mode: v1.BlockModeFirstMatch, Target: prefix(catalogPath),
+			{Name: catalogBlock, Mode: v1.BlockModeFirstMatch, Target: prefix(catalogPath),
 				Rules: []v1.Rule{internal, perUserCatalog, anonymous}},
-			{Name: "exports", Mode: v1.BlockModeFirstMatch, Target: prefix(exportsPath),
+			{Name: exportsBlock, Mode: v1.BlockModeFirstMatch, Target: prefix(exportsPath),
 				Rules: []v1.Rule{internal, partner, perUserRule}},
 		})
 	}

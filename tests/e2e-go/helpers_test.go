@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,6 +129,14 @@ func printedRow(resource, name string) string {
 func typeMetaFor(kind string) metav1.TypeMeta {
 	return metav1.TypeMeta{APIVersion: v1.GroupVersion.String(), Kind: kind}
 }
+
+// runSuffix is the second this process started at, since the epoch in base
+// 36, appended to the names of blocks whose counters outlive a run. A counter
+// key carries the block and the rule name, deleting the policy clears no
+// counter in Redis, and a day-long window outlives a second run on the same
+// store, which would be refused on its first request. Base 36 keeps the
+// names inside the pattern of a block name.
+var runSuffix = strconv.FormatInt(time.Now().Unix(), 36)
 
 // newPolicy builds the one policy of a domain. Its name is its domain: object
 // names are unique within a namespace, so that is what makes a second policy
