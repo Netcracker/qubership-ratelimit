@@ -5,7 +5,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,12 +15,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 )
 
-// The alert rules each chart ships behind MONITORING_ENABLED: the set of
-// alerts, every rule scoped to NAMESPACE and carrying a
-// severity and both annotations, and the rendered groups accepted by
-// promtool check rules. promtool is looked up in PROMTOOL, then in bin/,
-// then on PATH; without it the syntax check is skipped, unless
-// CHARTS_TEST_REQUIRE_PROMTOOL is set, which the CI helm job does.
+// alertsOf lists the alerts each chart ships behind MONITORING_ENABLED.
 var alertsOf = map[string][]string{
 	serviceChart: {
 		"RatelimitUnknownDomain",
@@ -42,94 +36,93 @@ var alertsOf = map[string][]string{
 	},
 }
 
+// alertRules lists the rules of every group of a PrometheusRule.
+func alertRules(rule object) []node {
+	groups := rule.at("spec", "groups").list()
+	rules := make([]node, 0, len(groups))
+	for _, group := range groups {
+		rules = append(rules, group.at("rules").list()...)
+	}
+	return rules
+}
+
+// With MONITORING_ENABLED each chart renders its PrometheusRule in NAMESPACE,
+// holding exactly its own alerts, each scoped to NAMESPACE and carrying a
+// severity, a summary, and a description.
 func TestCharts_shipTheAlertRulesBehindMonitoring(t *testing.T) {
 	for chart, wanted := range alertsOf {
 		t.Run(chart, func(t *testing.T) {
 			rule := only(t, render(t, chart, "biz", "--set", "MONITORING_ENABLED=true"), "PrometheusRule")
-			assert.Equal(t, "biz", rule.at("metadata", "namespace").str2())
 
-			names := make([]string, 0, len(wanted))
-			for _, group := range rule.at("spec", "groups").list() {
-				for _, r := range group.at("rules").list() {
-					name := r.at("alert").str2()
-					names = append(names, name)
-					assert.Contains(t, r.at("expr").str2(), `namespace="biz"`,
-						"%s is not scoped to NAMESPACE", name)
-					assert.NotEmpty(t, r.at("labels", "severity").str2(), "%s carries no severity", name)
-					assert.NotEmpty(t, r.at("annotations", "summary").str2(), "%s carries no summary", name)
-					assert.NotEmpty(t, r.at("annotations", "description").str2(), "%s carries no description", name)
-				}
+			assert.Equal(t, "biz", rule.at("metadata", "namespace").str2(), "metadata.namespace of the PrometheusRule")
+			rules := alertRules(rule)
+			names := make([]string, 0, len(rules))
+			for _, r := range rules {
+				name := r.at("alert").str2()
+				names = append(names, name)
+				assert.Contains(t, r.at("expr").str2(), `namespace="biz"`, "expr of %s", name)
+				assert.NotEmpty(t, r.at("labels", "severity").str2(), "severity label of %s", name)
+				assert.NotEmpty(t, r.at("annotations", "summary").str2(), "summary annotation of %s", name)
+				assert.NotEmpty(t, r.at("annotations", "description").str2(), "description annotation of %s", name)
 			}
-			assert.ElementsMatch(t, wanted, names)
-
-			checkRules(t, chart, rule)
+			assert.ElementsMatch(t, wanted, names, "alerts of the PrometheusRule")
 		})
 	}
 }
 
-// Each chart's rules stay on when the other chart's switch is off: the
-// platform passes both switches to both charts, and each chart reads its own.
-func TestCharts_keepTheirAlertRulesWhenTheOtherChartsSwitchIsOff(t *testing.T) {
-	otherOff := map[string]string{operatorChart: "alerts.enabled=false", serviceChart: "policyAlerts.enabled=false"}
-	for chart, off := range otherOff {
-		objects := render(t, chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", off)
-		assert.Contains(t, kinds(objects), "PrometheusRule", "%s with %s", chart, off)
-	}
-}
-
-// The rules are off with the platform parameter, and off on their own
-// switch with the PodMonitor still on.
-func TestCharts_renderNoAlertRulesWhenOff(t *testing.T) {
+// promtool accepts the groups each chart renders with MONITORING_ENABLED, and
+// the chart's rule tests under testdata pass against them. Most rule tests
+// are negative cases (a lone error, a stray check, an idle domain, a Lease
+// changing hands), because an alert set that pages when nothing is wrong is
+// the failure they guard against.
+func TestCharts_alertRulesPassPromtool(t *testing.T) {
+	promtool := promtoolOrSkip(t)
 	for chart := range alertsOf {
-		assert.NotContains(t, kinds(render(t, chart, "biz")), "PrometheusRule", "%s without MONITORING_ENABLED", chart)
-		off := map[string]string{operatorChart: "policyAlerts", serviceChart: "alerts"}[chart] + ".enabled=false"
-		objects := render(t, chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", off)
-		assert.NotContains(t, kinds(objects), "PrometheusRule", "%s with %s", chart, off)
-		assert.Contains(t, kinds(objects), "PodMonitor", "%s keeps its scrape with the alerts off", chart)
+		t.Run(chart, func(t *testing.T) {
+			dir := writeRenderedRules(t, chart)
+
+			t.Run("check rules accepts the groups", func(t *testing.T) {
+				out, err := exec.Command(promtool, "check", "rules", filepath.Join(dir, "rules.yaml")).CombinedOutput()
+
+				require.NoError(t, err, "promtool check rules: %s", out)
+				assert.Contains(t, string(out), "SUCCESS", "output of promtool check rules")
+			})
+			t.Run("the rule tests pass", func(t *testing.T) {
+				cmd := exec.Command(promtool, "test", "rules", chart+".rules.test.yaml")
+				cmd.Dir = dir
+				out, err := cmd.CombinedOutput()
+
+				require.NoError(t, err, "promtool test rules: %s", out)
+				assert.Contains(t, string(out), "SUCCESS", "output of promtool test rules")
+			})
+		})
 	}
 }
 
-// checkRules writes the rendered groups as a rule file, runs promtool check
-// rules over it, and replays the chart's rule tests against it: the drill of
-// the ticket's definition of done, reproduced by CI instead of by a stand.
-// The cases that matter are the negative ones — a lone error, a stray check,
-// an idle domain, a Lease changing hands — since an alert set that pages
-// when nothing is wrong is the failure this pins.
-func checkRules(t *testing.T, chart string, rule object) {
+// writeRenderedRules renders the chart with MONITORING_ENABLED, writes its
+// alert groups as rules.yaml into a new directory, copies the chart's rule
+// tests from testdata beside it, since they name rules.yaml relative to
+// themselves, and returns the directory.
+func writeRenderedRules(t *testing.T, chart string) string {
 	t.Helper()
-	promtool := findPromtool()
-	if promtool == "" {
-		if os.Getenv("CHARTS_TEST_REQUIRE_PROMTOOL") != "" {
-			t.Fatal("promtool is not available and CHARTS_TEST_REQUIRE_PROMTOOL is set")
-		}
-		t.Log("promtool is not available; the rule syntax check and the rule tests are skipped")
-		return
-	}
+	rule := only(t, render(t, chart, "biz", "--set", "MONITORING_ENABLED=true"), "PrometheusRule")
 	groups, err := yaml.Marshal(map[string]any{"groups": rule.at("spec", "groups").v})
 	require.NoError(t, err)
 	dir := t.TempDir()
-	rules := filepath.Join(dir, "rules.yaml")
-	require.NoError(t, os.WriteFile(rules, groups, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), groups, 0o600))
 
-	out, err := exec.Command(promtool, "check", "rules", rules).CombinedOutput()
-	require.NoError(t, err, "promtool check rules: %s", out)
-	assert.Contains(t, string(out), "SUCCESS", "promtool did not report success: %s", out)
-
-	// The rule test file names rules.yaml beside itself, so it is copied
-	// into the directory the rendering was written to.
 	cases, err := os.ReadFile(filepath.Join("testdata", chart+".rules.test.yaml"))
 	require.NoError(t, err)
-	test := filepath.Join(dir, chart+".rules.test.yaml")
-	require.NoError(t, os.WriteFile(test, cases, 0o600))
-
-	cmd := exec.Command(promtool, "test", "rules", filepath.Base(test))
-	cmd.Dir = dir
-	out, err = cmd.CombinedOutput()
-	require.NoError(t, err, "promtool test rules: %s", out)
-	assert.Contains(t, string(out), "SUCCESS", "the rule tests did not pass: %s", out)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, chart+".rules.test.yaml"), cases, 0o600))
+	return dir
 }
 
-func findPromtool() string {
+// promtoolOrSkip returns the path of promtool, looked up in PROMTOOL, then in
+// the repository's bin/, then on PATH. Without one it skips the test, unless
+// CHARTS_TEST_REQUIRE_PROMTOOL is set, which the CI helm job does; then it
+// fails the test.
+func promtoolOrSkip(t *testing.T) string {
+	t.Helper()
 	if p := os.Getenv("PROMTOOL"); p != "" {
 		return p
 	}
@@ -141,7 +134,65 @@ func findPromtool() string {
 	if p, err := exec.LookPath("promtool"); err == nil {
 		return p
 	}
+	if os.Getenv("CHARTS_TEST_REQUIRE_PROMTOOL") != "" {
+		t.Fatal("promtool is not available and CHARTS_TEST_REQUIRE_PROMTOOL is set")
+	}
+	t.Skip("promtool is not available")
 	return ""
+}
+
+// Each chart's rules stay on when the other chart's switch is off: the
+// platform passes both switches to both charts, and each chart reads its own.
+func TestCharts_keepTheirAlertRulesWhenTheOtherChartsSwitchIsOff(t *testing.T) {
+	for _, c := range []struct{ chart, otherOff string }{
+		{operatorChart, "alerts.enabled=false"},
+		{serviceChart, "policyAlerts.enabled=false"},
+	} {
+		t.Run(c.chart, func(t *testing.T) {
+			objects := render(t, c.chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", c.otherOff)
+
+			assert.Contains(t, kinds(objects), "PrometheusRule", "objects rendered with %s", c.otherOff)
+		})
+	}
+}
+
+// Without MONITORING_ENABLED, the platform parameter, neither chart renders
+// its rules.
+func TestCharts_renderNoAlertRulesWithoutMonitoring(t *testing.T) {
+	for _, chart := range namespaceCharts {
+		t.Run(chart, func(t *testing.T) {
+			assert.NotContains(t, kinds(render(t, chart, "biz")), "PrometheusRule")
+		})
+	}
+}
+
+// Each chart's own switch turns its rules off and leaves its PodMonitor on.
+func TestCharts_renderNoAlertRulesWithTheirOwnSwitchOff(t *testing.T) {
+	for _, c := range []struct{ chart, off string }{
+		{operatorChart, "policyAlerts.enabled=false"},
+		{serviceChart, "alerts.enabled=false"},
+	} {
+		t.Run(c.chart, func(t *testing.T) {
+			objects := render(t, c.chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", c.off)
+
+			assert.NotContains(t, kinds(objects), "PrometheusRule", "objects rendered with %s", c.off)
+			assert.Contains(t, kinds(objects), "PodMonitor", "objects rendered with %s", c.off)
+		})
+	}
+}
+
+// seriesName matches the name of a series the binaries publish, all of which
+// start with ratelimit_, as a whole word of a PromQL expression.
+var seriesName = regexp.MustCompile(`(?:^|[^a-z0-9_])(ratelimit_[a-z0-9_]*)`)
+
+// seriesReadBy lists the ratelimit_ series a PromQL expression names.
+func seriesReadBy(expr string) []string {
+	matches := seriesName.FindAllStringSubmatch(expr, -1)
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		names = append(names, match[1])
+	}
+	return names
 }
 
 // The rendered expressions are what the runbook and the dashboard quote, so
@@ -152,20 +203,15 @@ func findPromtool() string {
 func TestCharts_alertExpressionsReadTheSeriesTheCodeDefines(t *testing.T) {
 	defined := registeredSeries()
 	for chart := range alertsOf {
-		rule := only(t, render(t, chart, "biz", "--set", "MONITORING_ENABLED=true"), "PrometheusRule")
-		for _, group := range rule.at("spec", "groups").list() {
-			for _, r := range group.at("rules").list() {
-				expr := r.at("expr").str2()
-				for _, word := range strings.FieldsFunc(expr, func(c rune) bool {
-					return c != '_' && (c < 'a' || c > 'z') && (c < '0' || c > '9')
-				}) {
-					if strings.HasPrefix(word, "ratelimit_") {
-						assert.Contains(t, defined, word,
-							"%s reads %s, which no binary publishes", r.at("alert").str2(), word)
-					}
-				}
+		t.Run(chart, func(t *testing.T) {
+			rule := only(t, render(t, chart, "biz", "--set", "MONITORING_ENABLED=true"), "PrometheusRule")
+
+			for _, r := range alertRules(rule) {
+				read := seriesReadBy(r.at("expr").str2())
+				assert.NotEmpty(t, read, "series the alert %s reads", r.at("alert").str2())
+				assert.Subset(t, defined, read, "the alert %s reads a series no binary publishes", r.at("alert").str2())
 			}
-		}
+		})
 	}
 }
 
@@ -217,20 +263,24 @@ func (c *collecting) Unregister(prometheus.Collector) bool { return false }
 
 // The schema refuses the values that would render a rule which never fires,
 // or a group Prometheus will not load: one bad duration takes every rule of
-// the chart with it.
+// the chart with it. The refusal names the key it refused.
 func TestCharts_refuseAlertValuesThatBreakTheRules(t *testing.T) {
-	for _, bad := range []struct{ chart, set string }{
-		{serviceChart, "alerts.latencyBudgetSeconds=0"},
-		{serviceChart, "alerts.latencyBudgetSeconds=-1"},
-		{serviceChart, "alerts.latencyBudgetSeconds=abc"},
-		{serviceChart, "alerts.keyNotExtractedWindow=0m"},
-		{serviceChart, "alerts.storeErrorsFor=abc"},
-		{serviceChart, "alerts.configAbsentFor=5"},
-		{operatorChart, "policyAlerts.stalledFor=0s"},
-		{operatorChart, "policyAlerts.configWriteErrorsWindow=0m"},
-		{operatorChart, "policyAlerts.checksStoppedWindow=10"},
+	for _, c := range []struct{ chart, set, key string }{
+		{serviceChart, "alerts.latencyBudgetSeconds=0", "latencyBudgetSeconds"},
+		{serviceChart, "alerts.latencyBudgetSeconds=-1", "latencyBudgetSeconds"},
+		{serviceChart, "alerts.latencyBudgetSeconds=abc", "latencyBudgetSeconds"},
+		{serviceChart, "alerts.keyNotExtractedWindow=0m", "keyNotExtractedWindow"},
+		{serviceChart, "alerts.storeErrorsFor=abc", "storeErrorsFor"},
+		{serviceChart, "alerts.configAbsentFor=5", "configAbsentFor"},
+		{operatorChart, "policyAlerts.stalledFor=0s", "stalledFor"},
+		{operatorChart, "policyAlerts.configWriteErrorsWindow=0m", "configWriteErrorsWindow"},
+		{operatorChart, "policyAlerts.checksStoppedWindow=10", "checksStoppedWindow"},
 	} {
-		_, err := renderErr(bad.chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", bad.set)
-		assert.Error(t, err, "%s accepts %s", bad.chart, bad.set)
+		t.Run(c.set, func(t *testing.T) {
+			out, err := renderErr(c.chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", c.set)
+
+			require.Error(t, err, "%s rendered with %s", c.chart, c.set)
+			assert.Contains(t, string(out), c.key, "the refusal names the key it refused")
+		})
 	}
 }

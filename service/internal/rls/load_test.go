@@ -13,13 +13,10 @@ import (
 	"time"
 
 	envoyratelimit "github.com/envoyproxy/go-control-plane/envoy/service/ratelimit/v3"
-	"github.com/go-logr/logr"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
@@ -35,7 +32,7 @@ import (
 // to clear it within.
 //
 // The floor is deliberately far under what the path measures — the engine
-// answers in single-digit microseconds and the store script adds roughly nine
+// decides in single-digit microseconds and the store script adds roughly nine
 // plus four per bucket, so a healthy build clears this by an order of
 // magnitude. That margin is the point: a CI runner is shared hardware, and an
 // assertion pitched near the real number would fail for reasons that have
@@ -117,14 +114,15 @@ func loadCounterStore(t *testing.T) (counters.Store, string) {
 	return redisstore.New(client), "redis at " + addr
 }
 
-// TestLoad_oneReplicaHoldsTheFloor drives the real gRPC server over a real
-// connection and asserts the throughput and latency a single replica owes.
+// TestLoad_oneReplicaServesTheFloorWithinTheLatencyBudget drives the real
+// gRPC server over a real connection and asserts the throughput and latency a
+// single replica owes.
 //
 // It goes through the transport rather than calling ShouldRateLimit directly:
 // the requirement is about what a replica serves, and marshalling and dispatch
 // are part of that. What it leaves out is the network between gateway and pod,
 // which is the deployment's property and not this code's.
-func TestLoad_oneReplicaHoldsTheFloor(t *testing.T) {
+func TestLoad_oneReplicaServesTheFloorWithinTheLatencyBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("the load floor is not a -short test")
 	}
@@ -140,30 +138,8 @@ func TestLoad_oneReplicaHoldsTheFloor(t *testing.T) {
 	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
 		"gateway.public": {Engine: engine.New(snapshot, counterStore), Snapshot: snapshot},
 	}))
-
-	runner := &Runner{
-		Addr:         freeAddr(t),
-		Server:       NewServer(ruleStore, discardLogger{}),
-		DrainTimeout: 5 * time.Second,
-		Log:          logr.Discard(),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	stopped := make(chan error, 1)
-	go func() { stopped <- runner.Start(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-stopped:
-		case <-time.After(10 * time.Second):
-			t.Error("the server did not stop")
-		}
-	})
-	require.Eventually(t, runner.Serving, 10*time.Second, 10*time.Millisecond)
-
-	conn, err := grpc.NewClient(runner.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
-	client := envoyratelimit.NewRateLimitServiceClient(conn)
+	runner, _ := startRunner(t, NewServer(ruleStore, discardLogger{}), 5*time.Second)
+	client := dialRunner(t, runner)
 
 	// A run passes on the first window that clears the floor and the budget
 	// at once: the requirement is one replica holding both. A failure reports
@@ -250,10 +226,10 @@ func runLoad(t *testing.T, client envoyratelimit.RateLimitServiceClient) []time.
 			for ctx.Err() == nil {
 				start := time.Now()
 				if _, err := client.ShouldRateLimit(ctx, req); err != nil {
-					// The window closing mid-call is how the run ends. The
-					// status code is what says so: reading ctx.Err() races the
-					// deadline, and the call in flight when the timer fires
-					// would then be reported as a failure on every run.
+					// The window closing mid-call is how the run ends, and the
+					// status code identifies that end. ctx.Err() races the
+					// deadline, so a check of it reports the call in flight
+					// when the timer fires as a failure on every run.
 					if code := status.Code(err); code != codes.DeadlineExceeded && code != codes.Canceled {
 						t.Errorf("ShouldRateLimit: %v", err)
 					}

@@ -96,7 +96,7 @@ module, and `Check` remains the only door into validation. Two passport invarian
 Every implementation plugs the suite in with one line:
 
 ```go
-func TestContract(t *testing.T) {
+func TestConformsToTheStoreContract(t *testing.T) {
     storetest.Run(t, func(t *testing.T) store.Store { return myimpl.New() })
 }
 ```

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -103,10 +105,21 @@ func payloadSample() v1.RateLimitPolicySpec {
 	}
 }
 
+// gzipped compresses raw the way the operator compresses a payload.
+func gzipped(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
 // TestDecode_readsEverySupportedVersion is the skew guarantee: the service
 // reads the current format and the one before it, so the golden of each has
-// to decode with this reader. A golden that stops decoding is a reader that
-// broke a version it promised to read.
+// to decode with this reader. A golden that stops decoding is a supported
+// version this reader no longer reads.
 func TestDecode_readsEverySupportedVersion(t *testing.T) {
 	for _, version := range SupportedVersions() {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
@@ -116,7 +129,8 @@ func TestDecode_readsEverySupportedVersion(t *testing.T) {
 			m, err := Decode(data)
 			require.NoError(t, err)
 			assert.Equal(t, version, m.FormatVersion)
-			assert.NotEmpty(t, m.Domains, "the golden sample carries domains")
+			assert.Equal(t, []string{"gateway.private", "gateway.public"}, slices.Sorted(maps.Keys(m.Domains)),
+				"the domains of the golden sample")
 		})
 	}
 }
@@ -141,7 +155,7 @@ func TestEncode_matchesTheGoldenOfTheCurrentVersion(t *testing.T) {
 	require.NoError(t, err,
 		"no golden for FormatVersion %d: a new version needs its golden written once with -update and committed",
 		FormatVersion)
-	require.Equal(t, string(want), string(got),
+	assert.Equal(t, string(want), string(got),
 		"the writer's output changed without a version increment: increment FormatVersion, "+
 			"then write the new golden with -update and keep the previous one")
 }
@@ -167,29 +181,31 @@ func TestPayloadFields_matchTheGoldenOfTheCurrentVersion(t *testing.T) {
 	want, err := os.ReadFile(path)
 	require.NoError(t, err,
 		"no field-set golden for FormatVersion %d: write it once with -update and commit it", FormatVersion)
-	require.Equal(t, string(want), got,
+	assert.Equal(t, string(want), got,
 		"the field set of RateLimitPolicySpec changed without a version increment: an older service would "+
 			"refuse the payload as malformed. Increment FormatVersion, then write the new goldens with -update")
 }
 
 // The service reads the payloads of every supported version, so a field of any
 // of them has to stay in RateLimitPolicySpec, under its JSON name, until that
-// version is dropped. The field-set check above sees only the current version,
-// and a field renamed together with a version increment passed it while the
-// service stopped reading the previous version's payloads.
+// version is dropped. The field-set check of the current version sees only that
+// version, and a field renamed together with a version increment passed it while
+// the service stopped reading the previous version's payloads.
 func TestPayloadFields_ofEverySupportedVersionAreStillDefined(t *testing.T) {
 	current := map[string]bool{}
 	for _, path := range FieldPaths(reflect.TypeFor[v1.RateLimitPolicySpec]()) {
 		current[path] = true
 	}
 	for _, version := range SupportedVersions() {
-		raw, err := os.ReadFile(fieldsGolden(version))
-		require.NoError(t, err)
-		for path := range strings.FieldsSeq(string(raw)) {
-			assert.True(t, current[path],
-				"field %s of format version %d is gone from RateLimitPolicySpec; a removed or renamed field "+
-					"stays in the struct under its old JSON name while version %d is supported", path, version, version)
-		}
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			raw, err := os.ReadFile(fieldsGolden(version))
+			require.NoError(t, err)
+			for path := range strings.FieldsSeq(string(raw)) {
+				assert.True(t, current[path],
+					"field %s of format version %d is gone from RateLimitPolicySpec; a removed or renamed field "+
+						"stays in the struct under its old JSON name while version %d is supported", path, version, version)
+			}
+		})
 	}
 }
 
@@ -218,14 +234,9 @@ func TestPayload_ofEverySupportedVersionDecodes(t *testing.T) {
 				assert.True(t, carried[path], "the payload golden of version %d does not set %s", version, path)
 			}
 
-			var compressed bytes.Buffer
-			zw := gzip.NewWriter(&compressed)
-			_, err = zw.Write(raw)
-			require.NoError(t, err)
-			require.NoError(t, zw.Close())
 			var spec v1.RateLimitPolicySpec
-			_, err = DecodePayload(compressed.Bytes(), &spec)
-			require.NoError(t, err, "this reader does not read a payload of version %d", version)
+			_, err = DecodePayload(gzipped(t, raw), &spec)
+			assert.NoError(t, err, "this reader does not read a payload of version %d", version)
 		})
 	}
 }
@@ -320,7 +331,7 @@ func TestGoldens_areOnlyTheSupportedVersions(t *testing.T) {
 	for _, e := range entries {
 		present = append(present, e.Name())
 	}
-	expected := make([]string, 0, 2*len(SupportedVersions()))
+	expected := make([]string, 0, 3*len(SupportedVersions()))
 	for _, v := range SupportedVersions() {
 		expected = append(expected, fmt.Sprintf("v%d.json", v), fmt.Sprintf("v%d.fields.txt", v),
 			fmt.Sprintf("v%d.payload.json", v))
@@ -330,37 +341,47 @@ func TestGoldens_areOnlyTheSupportedVersions(t *testing.T) {
 }
 
 func TestDecode_refusesAnUnknownField(t *testing.T) {
-	data, err := Encode(sample())
-	require.NoError(t, err)
-	skewed := strings.Replace(string(data), `"operatorVersion"`, `"operatorVersion": "x", "burstProfile"`, 1)
+	data := fmt.Sprintf(`{"formatVersion": %d, "operatorVersion": "x", "burstProfile": "flat",
+		"domains": {"gateway.public": {"generation": 7, "uid": "u", "hash": "h"}}}`, FormatVersion)
 
-	_, err = Decode([]byte(skewed))
+	_, err := Decode([]byte(data))
+
 	require.ErrorIs(t, err, ErrMalformed)
-	assert.Contains(t, err.Error(), "burstProfile",
+	assert.ErrorContains(t, err, "burstProfile",
 		"the refusal names the field; it is the only clue a reader of /debug/applied gets")
 }
 
 func TestDecode_refusesAnUnknownDomainField(t *testing.T) {
-	data, err := Encode(sample())
-	require.NoError(t, err)
-	skewed := strings.Replace(string(data), `"generation": 7`, `"generation": 7, "priority": 1`, 1)
+	data := fmt.Sprintf(`{"formatVersion": %d, "operatorVersion": "x",
+		"domains": {"gateway.public": {"generation": 7, "priority": 1, "uid": "u", "hash": "h"}}}`, FormatVersion)
 
-	_, err = Decode([]byte(skewed))
+	_, err := Decode([]byte(data))
+
 	require.ErrorIs(t, err, ErrMalformed)
-	assert.Contains(t, err.Error(), "priority")
+	assert.ErrorContains(t, err, "priority")
 }
 
-func TestDecode_refusesAnUnknownVersion(t *testing.T) {
-	for _, version := range []int{0, FormatVersion + 1, FormatVersion + 7} {
-		data, err := Encode(sample())
-		require.NoError(t, err)
-		skewed := strings.Replace(string(data),
-			fmt.Sprintf(`"formatVersion": %d`, FormatVersion),
-			fmt.Sprintf(`"formatVersion": %d`, version), 1)
+// A version outside SupportedVersions is refused, and the refusal names the
+// version the manifest declared.
+func TestDecode_refusesAnUnsupportedVersion(t *testing.T) {
+	cases := []struct {
+		name    string
+		version int
+	}{
+		{"zero, below the first version", 0},
+		{"one above the current version", FormatVersion + 1},
+		{"seven above the current version", FormatVersion + 7},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			data := fmt.Sprintf(`{"formatVersion": %d, "operatorVersion": "x",
+				"domains": {"gateway.public": {"generation": 7, "uid": "u", "hash": "h"}}}`, c.version)
 
-		_, err = Decode([]byte(skewed))
-		require.ErrorIs(t, err, ErrUnsupportedFormat, "version %d", version)
-		assert.Contains(t, err.Error(), fmt.Sprint(version), "the refusal names the version it met")
+			_, err := Decode([]byte(data))
+
+			require.ErrorIs(t, err, ErrUnsupportedFormat, "formatVersion %d", c.version)
+			assert.ErrorContains(t, err, fmt.Sprint(c.version))
+		})
 	}
 }
 
@@ -370,60 +391,66 @@ func TestDecode_refusesAnUnknownVersion(t *testing.T) {
 // first it would report corruption, and the operator would turn that into the
 // wrong status reason. The version has to be judged before any field is.
 func TestDecode_reportsANewerFormatAsUnsupportedNotMalformed(t *testing.T) {
-	data, err := Encode(sample())
-	require.NoError(t, err)
-	newer := string(data)
-	newer = strings.Replace(newer, fmt.Sprintf(`"formatVersion": %d`, FormatVersion),
-		fmt.Sprintf(`"formatVersion": %d, "checksum": "abc"`, FormatVersion+1), 1)
-	newer = strings.Replace(newer, `"generation": 7`, `"generation": 7, "priority": 1`, 1)
+	data := fmt.Sprintf(`{"formatVersion": %d, "checksum": "abc", "operatorVersion": "x",
+		"domains": {"gateway.public": {"generation": 7, "priority": 1, "uid": "u", "hash": "h"}}}`, FormatVersion+1)
 
-	_, err = Decode([]byte(newer))
+	_, err := Decode([]byte(data))
+
 	require.ErrorIs(t, err, ErrUnsupportedFormat,
-		"a newer format with fields this reader does not define is unsupported, not malformed: %v", err)
+		"a newer format with fields this reader does not define is unsupported, not malformed")
 	assert.NotErrorIs(t, err, ErrMalformed)
-	assert.Contains(t, err.Error(), fmt.Sprint(FormatVersion+1))
+	assert.ErrorContains(t, err, fmt.Sprint(FormatVersion+1))
 }
 
 func TestDecode_refusesAManifestWithoutAVersion(t *testing.T) {
 	_, err := Decode([]byte(`{"operatorVersion": "x", "domains": {}}`))
 	require.ErrorIs(t, err, ErrMalformed)
-	assert.Contains(t, err.Error(), "formatVersion")
+	assert.ErrorContains(t, err, "formatVersion")
 }
 
 func TestDecode_refusesAManifestWithoutDomains(t *testing.T) {
 	_, err := Decode([]byte(`{"formatVersion": 1, "operatorVersion": "x"}`))
-	require.ErrorIs(t, err, ErrMalformed)
+	assert.ErrorIs(t, err, ErrMalformed)
 }
 
-func TestDecode_readsAnEmptyNamespace(t *testing.T) {
-	// No policy is a configuration, not an absence: a replica applying this
-	// is Ready and passes every request as an unknown domain.
+// No policy is a configuration, not an absence: a replica applying an empty
+// domains object is Ready and passes every request as an unknown domain. The
+// absent domains of TestDecode_refusesAManifestWithoutDomains are refused.
+func TestDecode_readsAnEmptyDomainsObjectAsAnEmptyNamespace(t *testing.T) {
+	data := fmt.Sprintf(`{"formatVersion": %d, "operatorVersion": "x", "domains": {}}`, FormatVersion)
+
+	m, err := Decode([]byte(data))
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]Domain{}, m.Domains)
+}
+
+// Encode writes "no domains" as an empty object, so a reader never meets
+// "domains": null.
+func TestEncode_writesNoDomainsAsAnEmptyObject(t *testing.T) {
 	data, err := Encode(Manifest{FormatVersion: FormatVersion, OperatorVersion: "x"})
-	require.NoError(t, err)
-	assert.Contains(t, string(data), `"domains": {}`, "no domains encodes as an empty object, never null")
 
-	m, err := Decode(data)
 	require.NoError(t, err)
-	assert.NotNil(t, m.Domains)
-	assert.Empty(t, m.Domains)
+	assert.Contains(t, string(data), `"domains": {}`)
 }
 
+// The writer produces one version: whatever the caller put in the field is
+// overwritten, so no manifest can claim a version it is not.
 func TestEncode_stampsTheVersionItProduces(t *testing.T) {
-	// The writer produces one version; whatever the caller put in the field
-	// is overwritten, so there is no way to write a manifest that claims a
-	// version it is not.
 	m := sample()
 	m.FormatVersion = FormatVersion + 7
+
 	data, err := Encode(m)
 	require.NoError(t, err)
+
 	decoded, err := Decode(data)
 	require.NoError(t, err)
 	assert.Equal(t, FormatVersion, decoded.FormatVersion)
 }
 
+// The bump check compares bytes, so the writer has to produce the same bytes
+// for the same value: map iteration order must not leak into them.
 func TestEncode_isDeterministic(t *testing.T) {
-	// The bump check compares bytes, so the writer has to produce the same
-	// bytes for the same value: map iteration order must not leak into it.
 	first, err := Encode(sample())
 	require.NoError(t, err)
 	for range 20 {
@@ -440,17 +467,32 @@ type payload struct {
 	Rules  []string `json:"rules"`
 }
 
-func TestPayload_roundTripsAndHashesTheUncompressedJSON(t *testing.T) {
+func TestPayload_decodesIntoTheValueItWasEncodedFrom(t *testing.T) {
 	in := payload{Domain: "gateway.public", Rules: []string{"a", "b"}}
-	compressed, hash, err := EncodePayload(in)
+	compressed, _, err := EncodePayload(in)
 	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(hash, "sha256:"))
 
 	var out payload
-	got, err := DecodePayload(compressed, &out)
+	_, err = DecodePayload(compressed, &out)
+
 	require.NoError(t, err)
 	assert.Equal(t, in, out)
-	assert.Equal(t, hash, got, "the hash the decoder computes is the one the encoder wrote to the manifest")
+}
+
+// The hash Domain.Hash carries is SHA-256 over the JSON before compression,
+// prefixed with the algorithm. The digest in want is shasum -a 256 of
+// {"domain":"gateway.public","rules":["a","b"]}, the JSON of the payload.
+func TestPayload_hashesTheUncompressedJSON(t *testing.T) {
+	const want = "sha256:9e2509f977c69441d206489eb334701d81e326ac4d3204388594a95f4bc4c62f"
+	compressed, encoded, err := EncodePayload(payload{Domain: "gateway.public", Rules: []string{"a", "b"}})
+	require.NoError(t, err)
+
+	var out payload
+	decoded, err := DecodePayload(compressed, &out)
+	require.NoError(t, err)
+
+	assert.Equal(t, want, encoded, "the hash EncodePayload returns")
+	assert.Equal(t, want, decoded, "the hash DecodePayload returns")
 }
 
 func TestPayload_refusesAnUnknownField(t *testing.T) {
@@ -460,55 +502,51 @@ func TestPayload_refusesAnUnknownField(t *testing.T) {
 	var out payload
 	_, err = DecodePayload(compressed, &out)
 	require.ErrorIs(t, err, ErrMalformed)
-	assert.Contains(t, err.Error(), "burst")
+	assert.ErrorContains(t, err, "burst")
 }
 
 func TestPayload_refusesWhatIsNotGzip(t *testing.T) {
 	var out payload
 	_, err := DecodePayload([]byte(`{"domain":"d"}`), &out)
-	require.ErrorIs(t, err, ErrMalformed)
+	assert.ErrorIs(t, err, ErrMalformed)
 }
 
-// gzipOf compresses n bytes of one value: the shape of a decompression
-// bomb, a few hundred kilobytes that expand to whatever n says.
-func gzipOf(t *testing.T, n int) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	_, err := zw.Write(bytes.Repeat([]byte{'0'}, n))
-	require.NoError(t, err)
-	require.NoError(t, zw.Close())
-	return buf.Bytes()
-}
-
+// A stream one byte past MaxPayloadSize is refused for its size, before the
+// JSON decoder sees it. The compressed form is a few kilobytes, which is the
+// point: the bound is on what comes out, not on what went in.
 func TestPayload_refusesAStreamThatDecompressesPastTheLimit(t *testing.T) {
-	// One byte over: refused for the size, before the JSON decoder sees it.
-	// The compressed form is a few kilobytes, which is the point: the bound
-	// is on what comes out, not on what went in.
-	bomb := gzipOf(t, MaxPayloadSize+1)
-	require.Less(t, len(bomb), 64<<10)
+	bomb := gzipped(t, bytes.Repeat([]byte{'0'}, MaxPayloadSize+1))
+	require.Less(t, len(bomb), 64<<10, "the compressed stream is small")
 
 	var out payload
 	_, err := DecodePayload(bomb, &out)
-	require.ErrorIs(t, err, ErrMalformed)
-	assert.Contains(t, err.Error(), fmt.Sprintf("past %d bytes", MaxPayloadSize))
 
-	// At the limit exactly, the size is fine and the content is what is
-	// judged: a run of digits is a JSON number, not a spec.
-	_, err = DecodePayload(gzipOf(t, MaxPayloadSize), &out)
 	require.ErrorIs(t, err, ErrMalformed)
-	assert.NotContains(t, err.Error(), "past")
+	assert.ErrorContains(t, err, fmt.Sprintf("past %d bytes", MaxPayloadSize))
 }
 
-func TestPayloadKey(t *testing.T) {
+// A stream of exactly MaxPayloadSize bytes passes the size check, and its
+// content is what is judged: a run of digits is a JSON number, not a spec.
+// It is the control of TestPayload_refusesAStreamThatDecompressesPastTheLimit.
+func TestPayload_judgesTheContentOfAStreamAtTheLimit(t *testing.T) {
+	atLimit := gzipped(t, bytes.Repeat([]byte{'0'}, MaxPayloadSize))
+
+	var out payload
+	_, err := DecodePayload(atLimit, &out)
+
+	require.ErrorIs(t, err, ErrMalformed)
+	assert.NotContains(t, err.Error(), "past", "the refusal is for the content, not for the size")
+}
+
+// The key is the contract between the operator, which writes binaryData, and
+// the service of another release, which reads it.
+func TestPayloadKey_isTheDomainWithTheGzipJSONSuffix(t *testing.T) {
 	assert.Equal(t, "gateway.public.json.gz", PayloadKey("gateway.public"))
 }
 
-// TestPayload_carriesTheResourceSpec pins what the payload is: the validated
-// spec in the resource's own format, not a compiled snapshot. The strict
-// decode has to accept every field the spec defines and refuse one it does
-// not, which is the skew case of a spec that grew on the operator's side.
-func TestPayload_carriesTheResourceSpec(t *testing.T) {
+// TestPayload_roundTripsTheResourceSpec pins what the payload is: the
+// validated spec in the resource's own format, not a compiled snapshot.
+func TestPayload_roundTripsTheResourceSpec(t *testing.T) {
 	spec := v1.RateLimitPolicySpec{
 		Domain: "gateway.public",
 		Limits: []v1.LimitBlock{{
@@ -526,21 +564,20 @@ func TestPayload_carriesTheResourceSpec(t *testing.T) {
 
 	var out v1.RateLimitPolicySpec
 	got, err := DecodePayload(compressed, &out)
+
 	require.NoError(t, err)
 	assert.Equal(t, spec, out)
-	assert.Equal(t, hash, got)
+	assert.Equal(t, hash, got, "the hash DecodePayload returns is the one EncodePayload wrote to the manifest")
+}
 
-	// A field a newer spec defines and this one does not.
-	raw, err := json.Marshal(spec)
-	require.NoError(t, err)
-	grown := strings.Replace(string(raw), `"domain":"gateway.public"`, `"domain":"gateway.public","tier":"gold"`, 1)
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	_, err = zw.Write([]byte(grown))
-	require.NoError(t, err)
-	require.NoError(t, zw.Close())
+// The strict decode refuses a field the spec does not define, which is the
+// skew case of a spec that grew on the operator's side.
+func TestPayload_refusesASpecFieldThisReaderDoesNotDefine(t *testing.T) {
+	grown := gzipped(t, []byte(`{"domain":"gateway.public","tier":"gold","limits":[{"name":"probe","rules":[]}]}`))
 
-	_, err = DecodePayload(buf.Bytes(), &out)
+	var out v1.RateLimitPolicySpec
+	_, err := DecodePayload(grown, &out)
+
 	require.ErrorIs(t, err, ErrMalformed)
-	assert.Contains(t, err.Error(), "tier")
+	assert.ErrorContains(t, err, "tier")
 }

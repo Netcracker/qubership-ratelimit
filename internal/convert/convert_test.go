@@ -16,55 +16,80 @@ const testDomain = "gateway.public"
 
 // The conversion is a rename, not a translation: the enums are string-typed on
 // both sides and carry the same values. That is a deliberate coupling and a
-// fragile one, so it is asserted rather than trusted — a value renamed on either
-// side would otherwise turn into a silently unmatched rule.
+// fragile one, so it is asserted rather than trusted: a value renamed on either
+// side would otherwise turn into a silently unmatched rule. Whoever adds an
+// enum value on either side adds its row to this table.
+func TestEnumValues_areSpelledTheSameInTheAPIAndTheModel(t *testing.T) {
+	cases := []struct {
+		name       string
+		api, model string
+	}{
+		{"PathMatchExact", string(v1.PathMatchExact), string(model.PathExact)},
+		{"PathMatchPrefix", string(v1.PathMatchPrefix), string(model.PathPrefix)},
+		{"PathMatchTemplate", string(v1.PathMatchTemplate), string(model.PathTemplate)},
 
-func TestModelVocabulary_matchesTheAPI(t *testing.T) {
-	assert.Equal(t, string(model.PathExact), string(v1.PathMatchExact))
-	assert.Equal(t, string(model.PathPrefix), string(v1.PathMatchPrefix))
-	assert.Equal(t, string(model.PathTemplate), string(v1.PathMatchTemplate))
+		{"BlockModeAll", string(v1.BlockModeAll), string(model.ModeAll)},
+		{"BlockModeFirstMatch", string(v1.BlockModeFirstMatch), string(model.ModeFirstMatch)},
 
-	assert.Equal(t, string(model.ModeAll), string(v1.BlockModeAll))
-	assert.Equal(t, string(model.ModeFirstMatch), string(v1.BlockModeFirstMatch))
+		{"RuleBehaviorEnforce", string(v1.RuleBehaviorEnforce), string(model.BehaviorEnforce)},
+		{"RuleBehaviorShadow", string(v1.RuleBehaviorShadow), string(model.BehaviorShadow)},
+		{"RuleBehaviorBypass", string(v1.RuleBehaviorBypass), string(model.BehaviorBypass)},
 
-	assert.Equal(t, string(model.BehaviorEnforce), string(v1.RuleBehaviorEnforce))
-	assert.Equal(t, string(model.BehaviorShadow), string(v1.RuleBehaviorShadow))
-	assert.Equal(t, string(model.BehaviorBypass), string(v1.RuleBehaviorBypass))
+		{"OperatorEquals", string(v1.OperatorEquals), string(model.OperatorEquals)},
+		{"OperatorIn", string(v1.OperatorIn), string(model.OperatorIn)},
+		{"OperatorInGroup", string(v1.OperatorInGroup), string(model.OperatorInGroup)},
+		{"OperatorContains", string(v1.OperatorContains), string(model.OperatorContains)},
+		{"OperatorExists", string(v1.OperatorExists), string(model.OperatorExists)},
+		{"OperatorDoesNotExist", string(v1.OperatorDoesNotExist), string(model.OperatorDoesNotExist)},
 
-	assert.Equal(t, string(model.OperatorEquals), string(v1.OperatorEquals))
-	assert.Equal(t, string(model.OperatorIn), string(v1.OperatorIn))
-	assert.Equal(t, string(model.OperatorInGroup), string(v1.OperatorInGroup))
-	assert.Equal(t, string(model.OperatorContains), string(v1.OperatorContains))
-	assert.Equal(t, string(model.OperatorExists), string(v1.OperatorExists))
-	assert.Equal(t, string(model.OperatorDoesNotExist), string(v1.OperatorDoesNotExist))
+		{"ClaimTypeString", string(v1.ClaimTypeString), string(model.ValueString)},
+		{"ClaimTypeStringArray", string(v1.ClaimTypeStringArray), string(model.ValueStringArray)},
 
-	assert.Equal(t, string(model.ValueString), string(v1.ClaimTypeString))
-	assert.Equal(t, string(model.ValueStringArray), string(v1.ClaimTypeStringArray))
+		{"NormalizeNone", string(v1.NormalizeNone), string(model.NormalizeNone)},
+		{"NormalizeLowercase", string(v1.NormalizeLowercase), string(model.NormalizeLowercase)},
 
-	assert.Equal(t, string(model.NormalizeNone), string(v1.NormalizeNone))
-	assert.Equal(t, string(model.NormalizeLowercase), string(v1.NormalizeLowercase))
-
-	assert.Equal(t, model.KeyPath, v1.KeyPath)
-	assert.Equal(t, model.KeyMethod, v1.KeyMethod)
-	assert.Equal(t, model.KeySub, v1.KeySub)
-	assert.Equal(t, model.KeyToken, v1.KeyToken)
+		{"KeyPath", v1.KeyPath, model.KeyPath},
+		{"KeyMethod", v1.KeyMethod, model.KeyMethod},
+		{"KeySub", v1.KeySub, model.KeySub},
+		{"KeyToken", v1.KeyToken, model.KeyToken},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.api, c.model)
+		})
+	}
 }
 
-func TestProblemVocabulary_matchesTheAPI(t *testing.T) {
-	// The reasons reach the status as the engine spells them, and alerts are
-	// written against those strings.
-	assert.Equal(t, string(enginecompile.ReasonUnresolvedKeyReference), v1.ProblemUnresolvedKeyReference)
-	assert.Equal(t, string(enginecompile.ReasonUnresolvedGroupReference), v1.ProblemUnresolvedGroupReference)
-	assert.Equal(t, string(enginecompile.ReasonIncompatibleOperator), v1.ProblemIncompatibleOperator)
-	assert.Equal(t, string(enginecompile.ReasonInvalidCounterAxis), v1.ProblemInvalidCounterAxis)
-	assert.Equal(t, string(enginecompile.ReasonCaptureShadowsMappedKey), v1.ProblemCaptureShadowsMappedKey)
-	assert.Equal(t, string(enginecompile.ReasonInvalidSpec), v1.ProblemInvalidSpec)
-	assert.Equal(t, string(enginecompile.ReasonInvalidWindow), v1.ProblemInvalidWindow)
-	assert.Equal(t, string(enginecompile.ReasonUnresolvedReplacedRules), v1.ProblemUnresolvedReplacedRules)
-	assert.Equal(t, string(enginecompile.ReasonDomainBudgetExceeded), v1.ProblemDomainBudgetExceeded)
+// The reasons reach the status as the engine spells them, and alerts are
+// written against those strings. Whoever adds a reason on either side adds its
+// row to this table.
+func TestProblemReasons_areSpelledTheSameInTheAPIAndTheCompiler(t *testing.T) {
+	cases := []struct {
+		name          string
+		api, compiler string
+	}{
+		{"UnresolvedKeyReference",
+			v1.ProblemUnresolvedKeyReference, string(enginecompile.ReasonUnresolvedKeyReference)},
+		{"UnresolvedGroupReference",
+			v1.ProblemUnresolvedGroupReference, string(enginecompile.ReasonUnresolvedGroupReference)},
+		{"IncompatibleOperator", v1.ProblemIncompatibleOperator, string(enginecompile.ReasonIncompatibleOperator)},
+		{"InvalidCounterAxis", v1.ProblemInvalidCounterAxis, string(enginecompile.ReasonInvalidCounterAxis)},
+		{"CaptureShadowsMappedKey",
+			v1.ProblemCaptureShadowsMappedKey, string(enginecompile.ReasonCaptureShadowsMappedKey)},
+		{"InvalidSpec", v1.ProblemInvalidSpec, string(enginecompile.ReasonInvalidSpec)},
+		{"InvalidWindow", v1.ProblemInvalidWindow, string(enginecompile.ReasonInvalidWindow)},
+		{"UnresolvedReplacedRules",
+			v1.ProblemUnresolvedReplacedRules, string(enginecompile.ReasonUnresolvedReplacedRules)},
+		{"DomainBudgetExceeded", v1.ProblemDomainBudgetExceeded, string(enginecompile.ReasonDomainBudgetExceeded)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.api, c.compiler)
+		})
+	}
 }
 
-func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
+func TestPolicy_convertsEveryFieldOfTheSpec(t *testing.T) {
 	burst := int32(10)
 	spec := &v1.RateLimitPolicySpec{
 		Domain: testDomain,
@@ -88,8 +113,11 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 				Methods: []v1.HTTPMethod{"GET", "POST"},
 			}}},
 			Rules: []v1.Rule{{
-				Name:          "per-user",
-				Matches:       []v1.Predicate{{Key: "sub", Operator: v1.OperatorIn, Values: []string{"a"}}},
+				Name: "per-user",
+				Matches: []v1.Predicate{
+					{Key: "sub", Operator: v1.OperatorIn, Values: []string{"a"}},
+					{Key: "tenant", Operator: v1.OperatorEquals, Value: "acme"},
+				},
 				Counters:      []string{"sub"},
 				Behavior:      v1.RuleBehaviorShadow,
 				ReplacedRules: []string{"other"},
@@ -100,76 +128,94 @@ func TestModelPolicy_carriesTheWholeSpec(t *testing.T) {
 		}},
 	}
 
-	out := Policy(spec)
+	got := Policy(spec)
 
-	require.NotNil(t, out)
-	assert.Equal(t, testDomain, out.Domain)
-	require.Len(t, out.Groups, 1)
-	assert.Equal(t, []string{"p1", "p2"}, out.Groups[0].Values)
-
-	require.Len(t, out.Mappings, 2)
-	assert.Equal(t, "org_id", out.Mappings[0].Claim)
-	assert.Equal(t, model.NormalizeLowercase, out.Mappings[0].Normalization)
-	assert.Equal(t, []string{"sub"}, out.Mappings[0].Fallbacks)
-	assert.Equal(t, []string{"https://acme.com/entitlements"}, out.Mappings[1].ClaimPath)
-	assert.Equal(t, model.ValueStringArray, out.Mappings[1].Type)
-
-	require.Len(t, out.Blocks, 1)
-	block := out.Blocks[0]
-	assert.Equal(t, model.ModeFirstMatch, block.Mode)
-	require.Len(t, block.Target.Routes, 1)
-	assert.Equal(t, model.PathTemplate, block.Target.Routes[0].Path.Type)
-	assert.Equal(t, []string{"GET", "POST"}, block.Target.Routes[0].Methods)
-
-	require.Len(t, block.Rules, 1)
-	rule := block.Rules[0]
-	assert.Equal(t, model.BehaviorShadow, rule.Behavior)
-	assert.Equal(t, []string{"sub"}, rule.Counters)
-	assert.Equal(t, []string{"other"}, rule.ReplacedRules)
-	require.Len(t, rule.Matches, 1)
-	assert.Equal(t, model.OperatorIn, rule.Matches[0].Operator)
-	require.Len(t, rule.Rates, 1)
-	assert.Equal(t, int64(100), rule.Rates[0].Requests)
-	assert.Equal(t, time.Minute, rule.Rates[0].Period)
-	assert.Equal(t, int64(10), rule.Rates[0].Burst)
-	assert.Equal(t, "GCRA", rule.Rates[0].Algorithm)
+	assert.Equal(t, &model.Policy{
+		Domain: testDomain,
+		Mappings: []model.KeyMapping{{
+			Key:           "tenant",
+			Claim:         "org_id",
+			Type:          model.ValueString,
+			Normalization: model.NormalizeLowercase,
+			Fallbacks:     []string{"sub"},
+		}, {
+			Key:       "entitlements",
+			ClaimPath: []string{"https://acme.com/entitlements"},
+			Type:      model.ValueStringArray,
+		}},
+		Groups: []model.Group{{Name: "partners", Values: []string{"p1", "p2"}}},
+		Blocks: []model.Block{{
+			Name: "api",
+			Mode: model.ModeFirstMatch,
+			Target: model.Target{Routes: []model.Route{{
+				Path:    model.PathMatch{Type: model.PathTemplate, Value: "/api/{id}"},
+				Methods: []string{"GET", "POST"},
+			}}},
+			Rules: []model.Rule{{
+				Name: "per-user",
+				Matches: []model.Predicate{
+					{Key: "sub", Operator: model.OperatorIn, Values: []string{"a"}},
+					{Key: "tenant", Operator: model.OperatorEquals, Value: "acme"},
+				},
+				Counters:      []string{"sub"},
+				Behavior:      model.BehaviorShadow,
+				ReplacedRules: []string{"other"},
+				Rates:         []model.Rate{{Requests: 100, Period: time.Minute, Burst: 10, Algorithm: "GCRA"}},
+			}},
+		}},
+	}, got)
 }
 
-func TestModelRule_anUnsetBurstStaysZero(t *testing.T) {
-	// Zero is how the engine is told "unset", and it applies the documented
-	// default of a full bucket. Spelling that out here would put one rule in two
-	// places, and the two would drift.
-	rule := modelRule(&v1.Rule{
-		Name:  "r",
-		Rates: []v1.Rate{{Requests: 100, PeriodSeconds: 60}},
-	})
-
-	assert.Zero(t, rule.Rates[0].Burst)
+// convertedRate converts a spec whose one rule carries rate, and returns that
+// rule's one converted rate.
+func convertedRate(t *testing.T, rate v1.Rate) model.Rate {
+	t.Helper()
+	policy := Policy(&v1.RateLimitPolicySpec{Domain: testDomain, Limits: []v1.LimitBlock{{
+		Name: "api", Rules: []v1.Rule{{Name: "r", Rates: []v1.Rate{rate}}},
+	}}})
+	require.Len(t, policy.Blocks, 1)
+	require.Len(t, policy.Blocks[0].Rules, 1)
+	require.Len(t, policy.Blocks[0].Rules[0].Rates, 1)
+	return policy.Blocks[0].Rules[0].Rates[0]
 }
 
-// TestModelPolicy_noSpecIsTheEmptyDomain pins how "no policy" reaches the
-// engine: as a nil policy rather than an empty one, which is the built-ins-only
-// domain.
-func TestModelPolicy_noSpecIsTheEmptyDomain(t *testing.T) {
+// Zero is how the engine is told "unset", and it applies the documented
+// default of a full bucket. Spelling that out here would put one rule in two
+// places, and the two would drift. A set burst is converted as it is, in
+// TestPolicy_convertsEveryFieldOfTheSpec.
+func TestPolicy_leavesAnUnsetBurstAtZero(t *testing.T) {
+	rate := convertedRate(t, v1.Rate{Requests: 100, PeriodSeconds: 60})
+
+	assert.Equal(t, int64(0), rate.Burst)
+}
+
+// A nil spec, which is how "no policy" arrives, converts to a nil policy
+// rather than an empty one. compile.Compile reads a nil policy as the empty
+// domain: the built-in keys and no blocks.
+func TestPolicy_convertsANilSpecToANilPolicy(t *testing.T) {
 	assert.Nil(t, Policy(nil))
 }
 
-// TestModelPeriod_isPlainSeconds pins the unit the API moved to: the field name
-// carries it, the way the Kubernetes API conventions ask, so nothing parses a
-// duration string any more.
-func TestModelPeriod_isPlainSeconds(t *testing.T) {
-	cases := map[int32]time.Duration{
-		1:     time.Second,
-		30:    30 * time.Second,
-		60:    time.Minute,
-		3600:  time.Hour,
-		86400: 24 * time.Hour,
+// The API carries the period as whole seconds, with the unit in the field name
+// as the Kubernetes API conventions require, so nothing parses a duration
+// string.
+func TestPolicy_readsThePeriodAsSeconds(t *testing.T) {
+	cases := []struct {
+		name    string
+		seconds int32
+		want    time.Duration
+	}{
+		{"one second", 1, time.Second},
+		{"thirty seconds", 30, 30 * time.Second},
+		{"sixty seconds are a minute", 60, time.Minute},
+		{"3600 seconds are an hour", 3600, time.Hour},
+		{"86400 seconds are a day", 86400, 24 * time.Hour},
 	}
-	for seconds, want := range cases {
-		rule := modelRule(&v1.Rule{
-			Name:  "r",
-			Rates: []v1.Rate{{Requests: 100, PeriodSeconds: seconds}},
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rate := convertedRate(t, v1.Rate{Requests: 100, PeriodSeconds: c.seconds})
+
+			assert.Equal(t, c.want, rate.Period, "PeriodSeconds %d", c.seconds)
 		})
-		assert.Equal(t, want, rule.Rates[0].Period)
 	}
 }

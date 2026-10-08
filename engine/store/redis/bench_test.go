@@ -37,7 +37,7 @@ func BenchmarkRedisDecide(b *testing.B) {
 	buckets := benchBuckets(fmt.Sprintf("serial-%d", time.Now().UnixNano()), 3)
 	for b.Loop() {
 		if _, err := s.Decide(b.Context(), buckets, 1); err != nil {
-			b.Fatal(err)
+			b.Fatalf("Decide(%d buckets): %v", len(buckets), err)
 		}
 	}
 }
@@ -50,7 +50,8 @@ func BenchmarkRedisDecideParallel(b *testing.B) {
 		buckets := benchBuckets(tag, 3)
 		for pb.Next() {
 			if _, err := s.Decide(b.Context(), buckets, 1); err != nil {
-				b.Fatal(err)
+				b.Errorf("Decide(%d buckets): %v", len(buckets), err)
+				return
 			}
 		}
 	})
@@ -65,7 +66,8 @@ func BenchmarkRedisDecideBuckets(b *testing.B) {
 				buckets := benchBuckets(tag, n)
 				for pb.Next() {
 					if _, err := s.Decide(b.Context(), buckets, 1); err != nil {
-						b.Fatal(err)
+						b.Errorf("Decide(%d buckets): %v", len(buckets), err)
+						return
 					}
 				}
 			})
@@ -89,7 +91,7 @@ func seedScanKeys(b *testing.B, prefix string, n int) {
 			pipe.Set(b.Context(), fmt.Sprintf("%sorders/per-client:gcra:3600:client-%06d:", prefix, i), "1", 10*time.Minute)
 		}
 		if _, err := pipe.Exec(b.Context()); err != nil {
-			b.Fatal(err)
+			b.Fatalf("seeding keys %d to %d under %q: %v", start, min(start+chunk, n)-1, prefix, err)
 		}
 	}
 }
@@ -108,7 +110,7 @@ func BenchmarkRedisScanStep(b *testing.B) {
 			for b.Loop() {
 				_, next, err := s.Scan(b.Context(), prefix, cursor, limit)
 				if err != nil {
-					b.Fatal(err)
+					b.Fatalf("Scan(%q, %q, %d): %v", prefix, cursor, limit, err)
 				}
 				cursor = next
 			}
@@ -129,7 +131,7 @@ func BenchmarkRedisScanWalk(b *testing.B) {
 		for {
 			found, next, err := s.Scan(b.Context(), prefix, cursor, 512)
 			if err != nil {
-				b.Fatal(err)
+				b.Fatalf("Scan(%q, %q, 512): %v", prefix, cursor, err)
 			}
 			steps++
 			keys += len(found)

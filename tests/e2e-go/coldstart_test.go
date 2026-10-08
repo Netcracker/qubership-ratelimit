@@ -62,25 +62,27 @@ var _ = Describe("cold start of the service", Ordered, Label("coldstart"), func(
 					continue
 				}
 				fresh++
-				g.Expect(podReady(pod)).To(BeFalse(), "a replica without a configuration turned Ready")
+				g.Expect(podReady(pod)).To(BeFalse(), "replica %s turned Ready without a configuration", pod.Name)
 			}
 			g.Expect(fresh).To(BeNumerically(">", 0), "no replica has started into the empty volume yet")
-		}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+		}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
+			"a replica restarted into the empty volume to log that it stays NotReady")
 
 		// Held, not just observed once: no timeout turns the wait into a
 		// serving replica.
 		Consistently(func(g Gomega) {
 			for _, pod := range servicePods() {
 				if strings.Contains(podLogs(pod.Name, nil), "the replica stays NotReady") {
-					g.Expect(podReady(pod)).To(BeFalse())
+					g.Expect(podReady(pod)).To(BeFalse(), "replica %s turned Ready without a configuration", pod.Name)
 				}
 			}
-		}).WithTimeout(20 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+		}).WithTimeout(20*time.Second).WithPolling(2*time.Second).Should(Succeed(),
+			"every replica without a configuration to stay NotReady")
 		Expect(readyServiceEndpoints()).To(BeNumerically("<=", 1),
 			"a replica without a configuration is in the Endpoints")
 	})
 
-	It("turns Ready on an explicitly empty manifest, and passes every request", func() {
+	It("turns Ready on an explicitly empty manifest", func() {
 		// The operator back, and no policy in the namespace: it writes a
 		// manifest with zero domains, and that is a configuration.
 		scaleDeployment(operatorDeployment(), 1)
@@ -99,21 +101,25 @@ var _ = Describe("cold start of the service", Ordered, Label("coldstart"), func(
 			for _, pod := range pods {
 				g.Expect(podReady(pod)).To(BeTrue(), "replica %s is not Ready on the empty manifest", pod.Name)
 			}
-		}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+		}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
+			"every service replica to turn Ready on the empty manifest")
 		waitRolloutSettled(serviceDeployment())
+	})
 
-		// Every request passes: the domain the gateway sends is unknown to
-		// an empty configuration, and unknown domains are admitted.
+	It("passes every request under an explicitly empty manifest", func() {
+		// The domain the gateway sends is unknown to an empty configuration,
+		// and unknown domains are admitted.
 		since := time.Now()
 		time.Sleep(time.Second)
 		waitGatewayServes("public-gateway", probePath)
-		Expect(burstClean(probePath)).To(BeTrue(), "requests were refused under an empty configuration")
+		Expect(gatewayBurst("public-gateway", probePath, 4, nil)).To(HaveEach(beAdmitted()),
+			"requests were refused under an empty configuration")
 		Eventually(serviceLogsSince(since)).WithTimeout(30*time.Second).
 			Should(ContainSubstring("unknown rate limit domain"),
 				"the empty configuration did not answer the checks as an unknown domain")
 	})
 
-	It("survives a restart with only the ConfigMap to stand on", func() {
+	It("enforces the last-good generation after a restart from the ConfigMap alone", func() {
 		// The breaking edit below leans on the tenant key being unresolved,
 		// so the policy declares no mapping of its own.
 		Expect(apply(newPolicy(domain, prefixLimits(probePath, "total", nil, 1, 1)))).To(Succeed())
@@ -121,9 +127,9 @@ var _ = Describe("cold start of the service", Ordered, Label("coldstart"), func(
 
 		// The good generation has to reach the ConfigMap before the edit
 		// breaks the object; otherwise there is nothing to cold-start from.
-		Eventually(generations(domain)).Should(WithTransform(
-			func(g [2]int64) bool { return g[1] > 0 && g[0] == g[1] }, BeTrue()),
-			"the policy never reached an active generation to fall back to")
+		Eventually(generations(domain)).Should(Satisfy(
+			func(g [2]int64) bool { return g[1] > 0 && g[0] == g[1] }),
+			"the policy never reached an active generation to fall back to; (observed, active)")
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
 		good := p.Status.ActiveGeneration
@@ -136,9 +142,9 @@ var _ = Describe("cold start of the service", Ordered, Label("coldstart"), func(
 
 		Eventually(policyCondition(domain, v1.ConditionReady)).Should(Equal("False"),
 			"the breaking edit was not rejected")
-		Eventually(generations(domain)).Should(WithTransform(
-			func(g [2]int64) bool { return g[0] > good && g[1] == good }, BeTrue()),
-			"the last-good generation did not keep running after the edit")
+		Eventually(generations(domain)).Should(Satisfy(
+			func(g [2]int64) bool { return g[0] > good && g[1] == good }),
+			"the last-good generation %d did not keep running after the edit; (observed, active)", good)
 		Consistently(manifestGeneration(domain)).WithTimeout(10*time.Second).Should(Equal(good),
 			"the broken generation reached the ConfigMap")
 

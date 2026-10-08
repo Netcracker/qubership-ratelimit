@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
@@ -13,6 +14,7 @@ import (
 // The in-process store owns one thing the shared one does not: an injectable
 // clock. Retention is what that clock is for, so these two tests live here
 // rather than in the suite both stores run.
+
 func newRecords() *records.Memory { return records.NewMemory(memory.New()) }
 
 // Retention runs from the outcome, not from acceptance, so a slow command is
@@ -30,7 +32,7 @@ func TestRetention_startsAtTheRecordedOutcome(t *testing.T) {
 		Keys: keys, Command: "command-a", Fencing: "fence-1", LeaseTTL: 2 * time.Hour,
 	})
 	require.NoError(t, err)
-	require.True(t, accepted.OK)
+	require.True(t, accepted.OK, "Accept(command-a) = %+v", accepted)
 
 	// The command runs for an hour and then records what it did.
 	now = now.Add(time.Hour)
@@ -43,12 +45,12 @@ func TestRetention_startsAtTheRecordedOutcome(t *testing.T) {
 	now = now.Add(records.Retention - 30*time.Minute)
 	record, err := commands.Lookup(ctx, keys)
 	require.NoError(t, err)
-	require.True(t, record.Found)
+	assert.True(t, record.Found, "Lookup 30 minutes before the retention from the outcome runs out")
 
 	now = now.Add(time.Hour)
 	record, err = commands.Lookup(ctx, keys)
 	require.NoError(t, err)
-	require.False(t, record.Found)
+	assert.False(t, record.Found, "Lookup 30 minutes after the retention from the outcome ran out")
 }
 
 // A record that never got an outcome expires from acceptance, so an interrupted
@@ -59,10 +61,15 @@ func TestRetention_expiresAnInterruptedRecordFromAcceptance(t *testing.T) {
 
 	commands := newRecords()
 	commands.Now = func() time.Time { return now }
-	require.True(t, acceptWith(t, commands, keys, "command-a", "fence-1", time.Minute).OK)
+	mustAccept(t, commands, keys, "fence-1", time.Minute)
 
-	now = now.Add(records.Retention + time.Minute)
+	now = now.Add(records.Retention - time.Minute)
 	record, err := commands.Lookup(t.Context(), keys)
 	require.NoError(t, err)
-	require.False(t, record.Found)
+	assert.True(t, record.Found, "Lookup a minute before the retention from acceptance runs out")
+
+	now = now.Add(2 * time.Minute)
+	record, err = commands.Lookup(t.Context(), keys)
+	require.NoError(t, err)
+	assert.False(t, record.Found, "Lookup a minute after the retention from acceptance ran out")
 }

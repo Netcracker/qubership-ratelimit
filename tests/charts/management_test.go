@@ -22,14 +22,8 @@ func gatewayDomainsOf(t *testing.T, objects []object) (value string, ok bool) {
 // and reports whether the chart renders it at all.
 func envOf(t *testing.T, objects []object, name string) (value string, ok bool) {
 	t.Helper()
-	containers := only(t, objects, "Deployment").at("spec", "template", "spec", "containers").list()
-	require.Len(t, containers, 1)
-	for _, env := range containers[0].at("env").list() {
-		if env.at("name").str2() == name {
-			return env.at("value").str2(), true
-		}
-	}
-	return "", false
+	variable, ok := keyed(containerOf(t, objects).at("env"), "name")[name]
+	return variable.at("value").str2(), ok
 }
 
 // The service chart hands management.gatewayDomains to the service as one
@@ -69,7 +63,7 @@ func TestServiceChart_refusesAGatewayDomainOffTheDomainPattern(t *testing.T) {
 		"--set", "management.gatewayDomains={Gateway_Private}")
 
 	require.Error(t, err, "helm template with management.gatewayDomains={Gateway_Private}")
-	assert.Contains(t, string(out), "gatewayDomains")
+	assert.Contains(t, string(out), "gatewayDomains", "the refusal names the key it refused")
 }
 
 // The service exempts the API's paths only in a domain a gateway's filter
@@ -77,25 +71,31 @@ func TestServiceChart_refusesAGatewayDomainOffTheDomainPattern(t *testing.T) {
 // chart gives the private gateway's filter.
 func TestServiceChart_theDefaultGatewayDomainIsThePrivateGatewaysDomain(t *testing.T) {
 	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true")
-	var filterDomain string
-	for _, o := range objects {
-		if o.kind() != envoyFilterKind {
+
+	filterDomain := httpFilterDomainFor(t, objects, "private-gateway")
+	value, _ := gatewayDomainsOf(t, objects)
+	assert.Equal(t, filterDomain, value, gatewayDomainsEnv)
+}
+
+// httpFilterDomainFor returns the domain the HTTP filter of the EnvoyFilter
+// that targets gateway sends, and stops the test where no such filter or
+// domain is rendered, or several are.
+func httpFilterDomainFor(t *testing.T, objects []object, gateway string) string {
+	t.Helper()
+	var domains []string
+	for _, filter := range ofKind(objects, envoyFilterKind) {
+		targets := filter.at("spec", "targetRefs").list()
+		require.Len(t, targets, 1, "spec.targetRefs of %s", filter.name())
+		if targets[0].at("name").str2() != gateway {
 			continue
 		}
-		targets := o.at("spec", "targetRefs").list()
-		require.Len(t, targets, 1)
-		if targets[0].at("name").str2() != "private-gateway" {
-			continue
-		}
-		for _, patch := range o.at("spec", "configPatches").list() {
+		for _, patch := range filter.at("spec", "configPatches").list() {
 			if patch.at("applyTo").str2() == "HTTP_FILTER" {
-				filterDomain = patch.at("patch", "value", "typed_config", "domain").str2()
+				domains = append(domains, patch.at("patch", "value", "typed_config", "domain").str2())
 			}
 		}
 	}
-	require.NotEmpty(t, filterDomain, "the chart renders a filter for private-gateway with a domain")
-
-	value, _ := gatewayDomainsOf(t, objects)
-
-	assert.Equal(t, filterDomain, value, gatewayDomainsEnv)
+	require.Len(t, domains, 1, "HTTP filters of the EnvoyFilters that target %s", gateway)
+	require.NotEmpty(t, domains[0], "domain of the HTTP filter that targets %s", gateway)
+	return domains[0]
 }

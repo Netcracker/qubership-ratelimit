@@ -65,14 +65,6 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		probePath string
 	)
 
-	// hourlyGCRA is prefixLimits with GCRA in place of the fixed window, for
-	// the reason on limit above.
-	hourlyGCRA := func(prefix, rule string, requests int32) []v1.LimitBlock {
-		blocks := prefixLimits(prefix, rule, []string{"path"}, requests, 3600)
-		blocks[0].Rules[0].Rates[0].Algorithm = v1.AlgorithmGCRA
-		return blocks
-	}
-
 	BeforeAll(func() {
 		if satellite == "" {
 			Skip("E2E_SATELLITE_NAMESPACE is unset; the stand has no satellite namespace")
@@ -144,16 +136,16 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		waitGatewayServes("public-gateway", probePath)
 		waitGatewayServesIn(satellite, "public-gateway", probePath)
 
-		Expect(apply(newPolicy(domain, hourlyGCRA(probePrefix, "per-path", limit)))).To(Succeed())
+		Expect(apply(newPolicy(domain, hourlyGCRALimits(probePrefix, "per-path", limit)))).To(Succeed())
 		applied = true
 		waitApplied(domain)
 
 		// One request through each gateway spends the two the window allows.
 		// The order is the point: the satellite's request has to land in the
 		// bucket the baseline's request opened.
-		Expect(gatewayGet("public-gateway", probePath, nil)).To(BeNumerically("<", 300),
+		Expect(gatewayGet("public-gateway", probePath, nil)).To(beAdmitted(),
 			"the first request of the window did not pass through the baseline gateway")
-		Expect(gatewayGetIn(satellite, "public-gateway", probePath, nil)).To(BeNumerically("<", 300),
+		Expect(gatewayGetIn(satellite, "public-gateway", probePath, nil)).To(beAdmitted(),
 			"the second request of the window did not pass through the satellite gateway")
 
 		// The third is refused whichever gateway it enters by. Through the
@@ -177,7 +169,7 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		// The path lies outside probePrefix: a path under it would be counted
 		// by the positive spec's rule and refused for the wrong reason.
 		const strayPath = "/e2e-stray"
-		stray := newPolicy(domain, hourlyGCRA(strayPath, "stray", 1))
+		stray := newPolicy(domain, hourlyGCRALimits(strayPath, "stray", 1))
 		stray.Namespace = satellite
 		Expect(apply(stray)).To(Succeed())
 		DeferCleanup(func() {
@@ -187,9 +179,8 @@ var _ = Describe("a composite: a baseline and a satellite", Ordered, Label("sate
 		waitGatewayServesIn(satellite, "public-gateway", strayPath)
 		// The claim is that the traffic passed, so that is what is asserted:
 		// not-429 would hold for three 503s or three transport errors too.
-		codes := gatewayBurstIn(satellite, "public-gateway", strayPath, 3, nil)
-		Expect(codes).To(HaveEach(BeNumerically("<", 300)),
-			"a policy in the satellite affected traffic, or the path did not pass; something compiled it: %v", codes)
+		Expect(gatewayBurstIn(satellite, "public-gateway", strayPath, 3, nil)).To(HaveEach(beAdmitted()),
+			"a policy in the satellite affected traffic, or the path did not pass; something compiled it")
 
 		// And nothing has claimed it. A status would mean a controller saw the
 		// object; a 30 s window covers several probe intervals of the

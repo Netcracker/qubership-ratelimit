@@ -89,12 +89,10 @@ var _ = BeforeSuite(func() {
 		Expect(deployments.Items).NotTo(BeEmpty(),
 			"no %s Deployment in %s; install both charts before running the suite", chart, namespace)
 		name := deployments.Items[0].Name
-		Eventually(func() bool {
+		Eventually(func(g Gomega) {
 			var d appsv1.Deployment
-			if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &d); err != nil {
-				return false
-			}
-			return d.Status.ReadyReplicas == *d.Spec.Replicas
-		}).Should(BeTrue(), "the %s deployment is not ready", name)
+			g.Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &d)).To(Succeed())
+			g.Expect(d.Status.ReadyReplicas).To(Equal(*d.Spec.Replicas), "readyReplicas of %s", name)
+		}).Should(Succeed(), "the %s deployment is not ready", name)
 	}
 })

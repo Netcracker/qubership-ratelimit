@@ -70,21 +70,14 @@ func appliedReport(pod corev1.Pod) applied.Report {
 // a port-forward to its metrics port, and expects a 200.
 func debugGet(pod corev1.Pod, path string) []byte {
 	status, body := debugRequest(pod, path)
-	Expect(status).To(Equal(http.StatusOK), "pod %s answered %d on %s: %s", pod.Name, status, path, body)
+	Expect(status).To(Equal(http.StatusOK), "pod %s on %s answered: %s", pod.Name, path, body)
 	return body
 }
 
 // debugRequest is debugGet without the expectation on the status, for the
 // spec that asserts a 404.
 func debugRequest(pod corev1.Pod, path string) (int, []byte) {
-	port := 0
-	for _, c := range pod.Spec.Containers {
-		for _, p := range c.Ports {
-			if p.Name == contract.MetricsPortName {
-				port = int(p.ContainerPort)
-			}
-		}
-	}
+	port := namedPort(pod, contract.MetricsPortName)
 	Expect(port).NotTo(BeZero(), "pod %s exposes no metrics port", pod.Name)
 
 	addr, stop := forwardToPod(pod.Name, port)
