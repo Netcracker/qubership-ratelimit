@@ -22,11 +22,7 @@ func BenchmarkExtractShapes(b *testing.B) {
 		"aud": "gateway", "exp": 4102444800, "iat": 1700000000, "azp": "web", "scope": "openid profile",
 		"preferred_username": "alice", "email": "alice@example.com", "realm_access": map[string]any{"roles": roles},
 	})
-	var deep any = "x"
-	for range 1500 {
-		deep = []any{deep}
-	}
-	deepToken := token(b, map[string]any{"sub": "alice", "d": deep})
+	deepToken := token(b, map[string]any{"sub": "alice", "d": nestedArray(1500)})
 	dense := map[string]any{"sub": "alice"}
 	for i := 0; len(token(b, dense)) < MaxTokenBytes-64; i++ {
 		dense[fmt.Sprintf("k%d", i)] = 0

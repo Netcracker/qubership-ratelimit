@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,15 +19,49 @@ import (
 // capacity shape: two even generations, an odd capacity rounding down, and
 // the single-generation degenerate case of capacity one.
 func TestTokenCacheNeverExceedsCapacity(t *testing.T) {
-	for _, capacity := range []int{1, 2, 3, 10} {
-		c := newTokenCache(capacity, tokenCacheBytes)
-		for i := range 100 {
-			var h [sha256.Size]byte
-			h[0], h[1] = byte(i), byte(i>>8)
-			c.store(h, cacheEntry{})
-			if got := len(c.cur) + len(c.prev); got > capacity {
-				t.Fatalf("capacity %d: %d entries retained after %d inserts", capacity, got, i+1)
+	for _, c := range []struct {
+		name     string
+		capacity int
+	}{
+		{"capacity 1, a single generation", 1},
+		{"capacity 2", 2},
+		{"capacity 3, rounding the generations down", 3},
+		{"capacity 10", 10},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cache := newTokenCache(c.capacity, tokenCacheBytes)
+			for i := range 100 {
+				cache.store(hashOf(i), cacheEntry{})
+				if got := len(cache.cur) + len(cache.prev); got > c.capacity {
+					t.Fatalf("after %d inserts the cache retains %d entries, want at most %d", i+1, got, c.capacity)
+				}
 			}
+		})
+	}
+}
+
+// hashOf is a distinct token hash for each i below 65536.
+func hashOf(i int) [sha256.Size]byte {
+	var h [sha256.Size]byte
+	h[0], h[1] = byte(i), byte(i>>8)
+	return h
+}
+
+// storeWithinBudget stores 100 entries of size bytes and fails the test as
+// soon as the two generations together hold more than budget.
+func storeWithinBudget(t *testing.T, c *tokenCache, budget, size int) {
+	t.Helper()
+	for i := range 100 {
+		c.store(hashOf(i), cacheEntry{size: size})
+		held := 0
+		for _, e := range c.cur {
+			held += e.size
+		}
+		for _, e := range c.prev {
+			held += e.size
+		}
+		if held > budget {
+			t.Fatalf("after %d inserts of %d bytes the cache retains %d bytes, want at most %d", i+1, size, held, budget)
 		}
 	}
 }
@@ -36,27 +71,17 @@ func TestTokenCacheNeverExceedsCapacity(t *testing.T) {
 // together never hold more than the budget.
 func TestTokenCache_neverExceedsItsByteBudget(t *testing.T) {
 	const budget, size = 10_000, 900
-	for _, capacity := range []int{1, 1000} {
-		c := newTokenCache(capacity, budget)
-		for i := range 100 {
-			var h [sha256.Size]byte
-			h[0] = byte(i)
-			c.store(h, cacheEntry{size: size})
-			held := 0
-			for _, e := range c.cur {
-				held += e.size
-			}
-			for _, e := range c.prev {
-				held += e.size
-			}
-			if held > budget {
-				t.Fatalf("capacity %d: %d bytes retained after %d inserts, budget %d", capacity, held, i+1, budget)
-			}
+	t.Run("a single generation", func(t *testing.T) {
+		storeWithinBudget(t, newTokenCache(1, budget), budget, size)
+	})
+	t.Run("two generations rotated by their bytes", func(t *testing.T) {
+		c := newTokenCache(1000, budget)
+		storeWithinBudget(t, c, budget, size)
+		if len(c.prev) == 0 {
+			t.Errorf("100 entries of %d bytes in a cache of 1000 entries and %d bytes: no generation rotated, "+
+				"want the byte bound to rotate one", size, budget)
 		}
-		if capacity > 1 && len(c.prev) == 0 {
-			t.Fatalf("capacity %d: the byte bound never rotated a generation", capacity)
-		}
-	}
+	})
 }
 
 // rolesEngine is an engine with the token cache and one extracted key, read
@@ -105,16 +130,22 @@ func rolesToken(t *testing.T, size int) (*Engine, string) {
 // bound: an extraction of exactly maxCachedEntryBytes is cached, one byte
 // more is extracted on every request.
 func TestTokenCache_theEntryBoundIsInclusive(t *testing.T) {
-	for _, tc := range []struct {
+	for _, c := range []struct {
+		name string
 		size int
 		hits uint64
-	}{{maxCachedEntryBytes, 1}, {maxCachedEntryBytes + 1, 0}} {
-		e, tok := rolesToken(t, tc.size)
-		e.cachedExtract(tok)
-		e.cachedExtract(tok)
-		if got := e.stats.Hits(); got != tc.hits {
-			t.Errorf("an extraction of %d bytes: %d hits, want %d", tc.size, got, tc.hits)
-		}
+	}{
+		{"an extraction of exactly maxCachedEntryBytes", maxCachedEntryBytes, 1},
+		{"an extraction one byte past maxCachedEntryBytes", maxCachedEntryBytes + 1, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e, tok := rolesToken(t, c.size)
+			e.cachedExtract(tok)
+			e.cachedExtract(tok)
+			if got := e.stats.Hits(); got != c.hits {
+				t.Errorf("an extraction of %d bytes, made twice: %d hits, want %d", c.size, got, c.hits)
+			}
+		})
 	}
 }
 
@@ -139,19 +170,22 @@ func TestTokenCache_skipsCountAgainstTheEntryBound(t *testing.T) {
 	}
 }
 
-// TestNewCacheEntry_holdsOnlyWhatWasExtracted checks that an entry does not
-// share the extraction's map or slices, and that an empty extraction keeps
-// no map at all, whatever capacity identity.Extract gave its own.
-func TestNewCacheEntry_holdsOnlyWhatWasExtracted(t *testing.T) {
-	empty := make(map[string][]string, 400)
-	if e := newCacheEntry(empty, nil, 0); e.keys != nil || e.skips != nil {
-		t.Errorf("an empty extraction kept %v and %v", e.keys, e.skips)
+// An empty extraction keeps no map at all, whatever capacity identity.Extract
+// gave its own.
+func TestNewCacheEntry_keepsNoMapForAnEmptyExtraction(t *testing.T) {
+	if e := newCacheEntry(make(map[string][]string, 400), nil, 0); e.keys != nil || e.skips != nil {
+		t.Errorf("newCacheEntry(an empty map of capacity 400, no skips) holds %#v and %#v, want nil and nil",
+			e.keys, e.skips)
 	}
+}
+
+func TestNewCacheEntry_sharesNoValuesWithTheExtraction(t *testing.T) {
 	keys := map[string][]string{"roles": {"a", "b"}}
 	e := newCacheEntry(keys, nil, 0)
 	keys["roles"][0] = "mutated"
-	if e.keys["roles"][0] != "a" {
-		t.Errorf("the entry shares the extraction's values: %v", e.keys)
+
+	if got, want := e.keys["roles"], []string{"a", "b"}; !slices.Equal(got, want) {
+		t.Errorf("after the extraction's roles changed, the entry holds roles %q, want %q", got, want)
 	}
 }
 
@@ -197,24 +231,25 @@ func TestEntrySize_isNeverUnderTheHeap(t *testing.T) {
 			return keys, nil
 		}},
 	} {
-		const entries = 5000
-		before := heapAlloc()
-		c := newTokenCache(2*entries, 1<<40)
-		estimate := 0
-		for i := range entries {
-			keys, skips := shape.make(i)
-			size := entrySize(keys, skips)
-			estimate += size
-			var h [sha256.Size]byte
-			h[0], h[1] = byte(i), byte(i>>8)
-			c.store(h, newCacheEntry(keys, skips, size))
-		}
-		heap := int(heapAlloc() - before)
-		runtime.KeepAlive(c)
-		t.Logf("%s: estimate %d bytes per entry, heap %d", shape.name, estimate/entries, heap/entries)
-		if estimate < heap || estimate > heap*3/2 {
-			t.Errorf("%s: the estimate is %d bytes per entry, the heap %d", shape.name, estimate/entries, heap/entries)
-		}
+		t.Run(shape.name, func(t *testing.T) {
+			const entries = 5000
+			before := heapAlloc()
+			c := newTokenCache(2*entries, 1<<40)
+			estimate := 0
+			for i := range entries {
+				keys, skips := shape.make(i)
+				size := entrySize(keys, skips)
+				estimate += size
+				c.store(hashOf(i), newCacheEntry(keys, skips, size))
+			}
+			heap := int(heapAlloc() - before)
+			runtime.KeepAlive(c)
+			t.Logf("estimate %d bytes per entry, heap %d", estimate/entries, heap/entries)
+			if estimate < heap || estimate > heap*3/2 {
+				t.Errorf("entrySize estimates %d bytes per entry, the heap holds %d; want from the heap to 1.5 times it",
+					estimate/entries, heap/entries)
+			}
+		})
 	}
 }
 

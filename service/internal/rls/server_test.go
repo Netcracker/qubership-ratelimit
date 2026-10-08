@@ -9,7 +9,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	envoycommon "github.com/envoyproxy/go-control-plane/envoy/extensions/common/ratelimit/v3"
 	envoyratelimit "github.com/envoyproxy/go-control-plane/envoy/service/ratelimit/v3"
@@ -34,9 +33,9 @@ import (
 // credential that must never reach a log line.
 const rawToken = "Bearer eyJhbGciOiJSUzI1NiJ9.super-secret-payload.signature"
 
-// recordingLogger captures every log line, and the context it was written with,
-// so a test can assert on the message and on what the [request_id=] field would
-// resolve to.
+// recorder is a Logger that keeps every line, and the context of the last
+// one, so a test can read the messages and the value the [request_id=] field
+// of the platform format would print.
 type recorder struct {
 	mu    sync.Mutex
 	buf   strings.Builder
@@ -71,261 +70,102 @@ func (r *recorder) requestIDField() string {
 	return logging.GetValueOrPlaceholder(r.lastC, logging.RequestIdContextName)
 }
 
-func recordingLogger() (*recorder, func() string) {
-	r := &recorder{}
-	return r, r.output
-}
-
-func request(domain string, entries map[string]string) *envoyratelimit.RateLimitRequest {
-	descriptor := &envoycommon.RateLimitDescriptor{}
-	// Sorted iteration is unnecessary here: the server keys on the entry name.
-	for key, value := range entries {
-		descriptor.Entries = append(descriptor.Entries, &envoycommon.RateLimitDescriptor_Entry{
-			Key:   key,
-			Value: value,
-		})
-	}
-	return &envoyratelimit.RateLimitRequest{
-		Domain:      domain,
-		Descriptors: []*envoycommon.RateLimitDescriptor{descriptor},
-	}
-}
-
-func TestShouldRateLimit_answersOK(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetOf(t, "gateway.public"))
-	log, _ := recordingLogger()
-
-	resp, err := NewServer(ruleStore, log).ShouldRateLimit(
-		context.Background(),
-		request("gateway.public", map[string]string{"path": "/api/v1/orders", "token": rawToken}),
-	)
-
-	require.NoError(t, err)
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
-}
-
-func TestShouldRateLimit_unknownDomainStillAnswersOK(t *testing.T) {
-	// The stub allows everything, including traffic from a domain no policy
-	// claims. The metric, not the verdict, is what reports the mismatch.
-	log, _ := recordingLogger()
-
-	resp, err := NewServer(store.New(), log).ShouldRateLimit(
-		context.Background(),
-		request("gateway.typo", map[string]string{"path": "/api/v1/orders"}),
-	)
-
-	require.NoError(t, err)
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
-}
-
-func TestShouldRateLimit_reportsAnUnknownDomain(t *testing.T) {
-	// A domain no policy claims means the gateway's filter config and the CR have
-	// drifted apart. Nothing else detects it, so the line has to be there.
-	const domain = "gateway.typo"
-	log, logged := recordingLogger()
-
-	_, err := NewServer(store.New(), log).ShouldRateLimit(context.Background(), request(domain, nil))
-	require.NoError(t, err)
-
-	output := logged()
-	assert.Contains(t, output, "unknown rate limit domain")
-	assert.Contains(t, output, domain)
-}
-
-// The unknown domain is chosen by whoever calls the port, so it is logged
-// the way the path is: no control character can forge a second record, and
-// no length can flood the log.
-func TestShouldRateLimit_sanitizesTheUnknownDomainItLogs(t *testing.T) {
-	log, logged := recordingLogger()
-	forged := "gateway.typo\nINFO unknown rate limit domain: no RateLimitPolicy is bound to it domain=forged"
-	_, err := NewServer(store.New(), log).ShouldRateLimit(context.Background(), request(forged, nil))
-	require.NoError(t, err)
-	output := logged()
-	assert.Equal(t, 1, strings.Count(output, "\n"), "the domain forged a second record: %q", output)
-	assert.Contains(t, output, "domain=gateway.typoINFO", "the control character was not stripped: %q", output)
-
-	log, logged = recordingLogger()
-	_, err = NewServer(store.New(), log).ShouldRateLimit(context.Background(),
-		request("gateway."+strings.Repeat("x", 100_000), nil))
-	require.NoError(t, err)
-	assert.Less(t, len(logged()), 2*maxLoggedValueLength+512, "the domain's length reached the log whole")
-}
-
-func TestShouldRateLimit_saysNothingAboutAKnownDomain(t *testing.T) {
-	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetOf(t, domain))
-	log, logged := recordingLogger()
-
-	_, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), request(domain, nil))
-	require.NoError(t, err)
-
-	assert.NotContains(t, logged(), "unknown rate limit domain")
-}
-
-func TestShouldRateLimit_neverLogsTheToken(t *testing.T) {
-	log, logged := recordingLogger()
-
-	_, err := NewServer(store.New(), log).ShouldRateLimit(
-		context.Background(),
-		request("gateway.public", map[string]string{"path": "/api/v1/orders", "token": rawToken}),
-	)
-	require.NoError(t, err)
-
-	output := logged()
-	assert.NotContains(t, output, rawToken)
-	assert.NotContains(t, output, "super-secret-payload")
-	assert.Contains(t, output, "/api/v1/orders")
-	assert.Contains(t, output, "gateway.public")
-}
-
-func TestShouldRateLimit_deniesPastTheWindowWithRetryAfter(t *testing.T) {
-	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
-
-	first, err := server.ShouldRateLimit(context.Background(), request(domain, nil))
-	require.NoError(t, err)
-	second, err := server.ShouldRateLimit(context.Background(), request(domain, nil))
-	require.NoError(t, err)
-
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode())
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, second.GetOverallCode(),
-		"Envoy turns OVER_LIMIT into 429 for the client")
-	headers := headerMap(second)
-	assert.Equal(t, "1", headers["x-ratelimit-limit"])
-	assert.Equal(t, "0", headers["x-ratelimit-remaining"])
-	assert.NotEmpty(t, headers["retry-after"], "a refusal waiting can cure carries the hint")
-}
-
-func TestShouldRateLimit_doesNotCountAnUnclaimedDomain(t *testing.T) {
-	// No policy means no limit to enforce; denying would punish traffic for a
-	// configuration mistake on our side.
-	log, _ := recordingLogger()
-	server := NewServer(store.New(), log)
-
-	for range 3 {
-		resp, err := server.ShouldRateLimit(context.Background(), request("gateway.typo", nil))
-		require.NoError(t, err)
-		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
-	}
-}
-
-func TestSanitizePath_redactsTheQueryString(t *testing.T) {
-	// Envoy's :path carries the query, and a query routinely carries the very
-	// credential the service must not log.
-	assert.Equal(t, "/api/v1/orders?[redacted]",
-		sanitizePath("/api/v1/orders?access_token=SECRET&api_key=ALSO-SECRET"))
-}
-
-func TestSanitizePath_keepsAPlainPath(t *testing.T) {
-	assert.Equal(t, "/api/v1/orders", sanitizePath("/api/v1/orders"))
-}
-
-func TestSanitizePath_stripsControlCharacters(t *testing.T) {
-	// Without this a caller forges log records by putting a newline in the path.
-	assert.Equal(t, "/apiINFO fake log line",
-		sanitizePath("/api\r\nINFO fake log line"))
-}
-
-func TestSanitizePath_truncatesALongPath(t *testing.T) {
-	long := "/" + strings.Repeat("a", 500)
-
-	got := sanitizePath(long)
-
-	assert.Len(t, got, maxLoggedValueLength+len(valueTruncated))
-	assert.True(t, strings.HasSuffix(got, valueTruncated))
-}
-
-func TestSanitizePath_truncatesOnARuneBoundary(t *testing.T) {
-	// A byte cut through a multi-byte rune would leave an invalid sequence.
-	got := sanitizePath(strings.Repeat("é", 200))
-
-	assert.True(t, utf8.ValidString(got))
-}
-
-func TestLoggableEntries_isEmptyWithoutThoseEntries(t *testing.T) {
-	path, requestID := loggableEntries(request("gateway.public", map[string]string{"token": rawToken}))
-
-	assert.Empty(t, path)
-	assert.Empty(t, requestID)
-}
-
-func TestLoggableEntries_readsThePathAndRequestID(t *testing.T) {
-	path, requestID := loggableEntries(request("gateway.public", map[string]string{
-		"path":       "/api/v1/orders",
-		"request_id": "abc-123",
-		"token":      rawToken,
-	}))
-
-	assert.Equal(t, "/api/v1/orders", path)
-	assert.Equal(t, "abc-123", requestID)
-}
-
-func TestShouldRateLimit_putsTheRequestIDInTheLogContext(t *testing.T) {
-	// The id must reach the [request_id=] field, not the message body, so the
-	// line matches the format every other Qubership service emits.
-	ctxmanager.Register([]ctxmanager.ContextProvider{xrequestid.XRequestIdProvider{}})
-	log, logged := recordingLogger()
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetOf(t, "gateway.public"))
-
-	_, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), request("gateway.public",
-		map[string]string{"path": "/api/v1/orders", "request_id": "corr-42", "token": rawToken}))
-	require.NoError(t, err)
-
-	assert.Equal(t, "corr-42", log.requestIDField())
-	assert.NotContains(t, logged(), rawToken)
-}
-
-func TestSanitizeValue_stripsControlCharactersFromARequestID(t *testing.T) {
-	// x-request-id may be set by the client, so it can carry a forged log record.
-	_, requestID := loggableEntries(request("gateway.public", map[string]string{
-		"request_id": "id\r\nINFO forged",
-	}))
-
-	assert.Equal(t, "idINFO forged", requestID)
-}
-
 // testNamespace stands in for the component's own namespace, which is a
 // segment of every counter key.
 const testNamespace = "biz"
 
-// ruleSetOf builds a rule set of empty-snapshot engines over private
-// in-memory counters — the shape BuildRuleSet produces for the stub CRD.
-func ruleSetOf(t *testing.T, domains ...string) *store.RuleSet {
+// ruleSetOver compiles a copy of p that names domain, and decides the domain
+// over counterStore. A nil p binds the domain with no rules.
+func ruleSetOver(t *testing.T, domain string, p *model.Policy, counterStore counters.Store) *store.RuleSet {
 	t.Helper()
-	built := make(map[string]store.Domain, len(domains))
-	for _, d := range domains {
-		snap, problems := compile.Compile(testNamespace, d, nil)
-		require.Empty(t, problems)
-		built[d] = store.Domain{Engine: engine.New(snap, memory.New()), Snapshot: snap}
+	if p != nil {
+		bound := *p
+		bound.Domain = domain
+		p = &bound
 	}
-	return store.NewRuleSet(built)
+	snap, problems := compile.Compile(testNamespace, domain, p)
+	require.Empty(t, problems, "compile.Compile(%q) of the test policy", domain)
+	return store.NewRuleSet(map[string]store.Domain{
+		domain: {Engine: engine.New(snap, counterStore), Snapshot: snap},
+	})
 }
 
-// onePerHourPolicy admits a single request per hour for the whole domain: the
-// smallest fixture whose second check refuses.
-func onePerHourPolicy() model.Policy {
-	return model.Policy{Domain: "gateway.public", Blocks: []model.Block{{
+// ruleSetWith binds p to gateway.public over in-memory counters.
+func ruleSetWith(t *testing.T, p model.Policy) *store.RuleSet {
+	t.Helper()
+	return ruleSetOver(t, "gateway.public", &p, memory.New())
+}
+
+// newServerOver returns a Server deciding from rules, and the recorder it logs
+// to. A nil rules binds no domain.
+func newServerOver(rules *store.RuleSet, opts ...Option) (*Server, *recorder) {
+	ruleStore := store.New()
+	ruleStore.Replace(rules)
+	log := &recorder{}
+	return NewServer(ruleStore, log, opts...), log
+}
+
+// domainWidePolicy limits every check of its domain with one rule, b/all, of
+// requests per period.
+func domainWidePolicy(requests int64, period time.Duration) model.Policy {
+	return model.Policy{Blocks: []model.Block{{
 		Name:  "b",
-		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
+		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: requests, Period: period}}}},
 	}}}
 }
 
-// ruleSetWith compiles the policies into the shared test domain over
-// private in-memory counters.
-func ruleSetWith(t *testing.T, p model.Policy) *store.RuleSet {
+// perClientPerHourPolicy limits each value of the sub key with one rule,
+// b/each, of requests per hour.
+func perClientPerHourPolicy(requests int64) model.Policy {
+	return model.Policy{Blocks: []model.Block{{
+		Name: "b",
+		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
+			Rates: []model.Rate{{Requests: requests, Period: time.Hour}}}},
+	}}}
+}
+
+// request builds a check of domain that carries one descriptor per entries
+// map, in their order; with no map it carries no descriptor. The order of the
+// entries within a descriptor is the map's, which the server does not depend
+// on: it keys on the entry name.
+func request(domain string, descriptors ...map[string]string) *envoyratelimit.RateLimitRequest {
+	out := &envoyratelimit.RateLimitRequest{Domain: domain}
+	for _, entries := range descriptors {
+		descriptor := &envoycommon.RateLimitDescriptor{}
+		for key, value := range entries {
+			descriptor.Entries = append(descriptor.Entries, &envoycommon.RateLimitDescriptor_Entry{
+				Key: key, Value: value,
+			})
+		}
+		out.Descriptors = append(out.Descriptors, descriptor)
+	}
+	return out
+}
+
+// checkOfClients builds a check of gateway.public that carries n descriptors,
+// each with a sub entry of its own client.
+func checkOfClients(n int) *envoyratelimit.RateLimitRequest {
+	descriptors := make([]map[string]string, 0, n)
+	for i := range n {
+		descriptors = append(descriptors, map[string]string{model.KeySub: fmt.Sprintf("client-%d", i)})
+	}
+	return request("gateway.public", descriptors...)
+}
+
+// tokenWithSub builds a token whose payload carries the sub claim, between
+// placeholder header and signature segments.
+func tokenWithSub(sub string) string {
+	return "h." + base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"`+sub+`"}`)) + ".s"
+}
+
+// shouldRateLimit runs one check that returns a response, not an error.
+func shouldRateLimit(
+	t *testing.T, server *Server, req *envoyratelimit.RateLimitRequest,
+) *envoyratelimit.RateLimitResponse {
 	t.Helper()
-	const domain = "gateway.public"
-	snap, problems := compile.Compile(testNamespace, domain, &p)
-	require.Empty(t, problems, "broken fixture")
-	return store.NewRuleSet(map[string]store.Domain{
-		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
-	})
+	resp, err := server.ShouldRateLimit(context.Background(), req)
+	require.NoError(t, err, "ShouldRateLimit(%v)", req)
+	return resp
 }
 
 func headerMap(resp *envoyratelimit.RateLimitResponse) map[string]string {
@@ -336,228 +176,416 @@ func headerMap(resp *envoyratelimit.RateLimitResponse) map[string]string {
 	return out
 }
 
-func TestShouldRateLimit_reportsTheStrictestRuleInHeaders(t *testing.T) {
-	const domain = "gateway.public"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
-		Name:  "b",
-		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}},
-	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+func TestShouldRateLimit_admitsACheckOfADomainWithoutRules(t *testing.T) {
+	server, _ := newServerOver(ruleSetOver(t, "gateway.public", nil, memory.New()))
 
-	first, err := server.ShouldRateLimit(context.Background(), request(domain, nil))
-	require.NoError(t, err)
-	second, err := server.ShouldRateLimit(context.Background(), request(domain, nil))
-	require.NoError(t, err)
+	resp := shouldRateLimit(t, server,
+		request("gateway.public", map[string]string{"path": "/api/v1/orders", "token": rawToken}))
 
-	assert.Equal(t, "100", headerMap(first)["x-ratelimit-limit"])
-	assert.Equal(t, "99", headerMap(first)["x-ratelimit-remaining"])
-	assert.Equal(t, "1", headerMap(first)["x-ratelimit-reset"],
-		"one charged request of 100/min drains in exactly one rounded-up second")
-	assert.Equal(t, "98", headerMap(second)["x-ratelimit-remaining"])
-	assert.NotContains(t, headerMap(first), "retry-after", "an admitted request carries no retry hint")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
 }
 
-func TestShouldRateLimit_chargesHitsAddend(t *testing.T) {
-	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
-		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
-			Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
-	log, _ := recordingLogger()
+// A domain no policy claims has no limit to enforce, so its traffic passes;
+// the log line and the metrics report the mismatch, not the verdict.
+func TestShouldRateLimit_admitsACheckOfAnUnknownDomain(t *testing.T) {
+	server, _ := newServerOver(nil)
 
-	req := request(domain, map[string]string{"path": "/api"})
-	req.HitsAddend = 5
-	resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), req)
-	require.NoError(t, err)
+	resp := shouldRateLimit(t, server, request("gateway.typo", map[string]string{"path": "/api/v1/orders"}))
 
-	assert.Equal(t, "95", headerMap(resp)["x-ratelimit-remaining"])
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
 }
 
-// A descriptor's own hits_addend is its cost, and it overrides the request's,
-// as the protocol defines it. The descriptor's value used to be ignored, and a
-// caller setting it was charged the request's cost, one by default.
-func TestShouldRateLimit_chargesTheDescriptorsHitsAddend(t *testing.T) {
-	const domain = "gateway.public"
-	for name, tc := range map[string]struct {
+// A check of an unknown domain charges no counter, so repeating it never
+// refuses: the policy mismatch is a configuration mistake on our side, not the
+// caller's.
+func TestShouldRateLimit_admitsEveryRepeatedCheckOfAnUnknownDomain(t *testing.T) {
+	server, _ := newServerOver(nil)
+
+	for i := range 3 {
+		resp := shouldRateLimit(t, server, request("gateway.typo", nil))
+		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "check %d of gateway.typo", i+1)
+	}
+}
+
+// A domain no policy claims means the gateway's filter config and the policies
+// have drifted apart, and this log line is the only report that names the
+// domain.
+func TestShouldRateLimit_logsAnUnknownDomain(t *testing.T) {
+	server, log := newServerOver(nil)
+
+	shouldRateLimit(t, server, request("gateway.typo", nil))
+
+	assert.Contains(t, log.output(), "unknown rate limit domain")
+	assert.Contains(t, log.output(), "domain=gateway.typo")
+}
+
+// A check of a domain a policy claims writes no unknown-domain line.
+// TestShouldRateLimit_logsAnUnknownDomain is the control, where the same check
+// of a domain no policy claims writes it.
+func TestShouldRateLimit_logsNoUnknownDomainLineForAClaimedDomain(t *testing.T) {
+	server, log := newServerOver(ruleSetOver(t, "gateway.public", nil, memory.New()))
+
+	shouldRateLimit(t, server, request("gateway.public", nil))
+
+	assert.NotContains(t, log.output(), "unknown rate limit domain")
+}
+
+// The unknown domain is chosen by whoever calls the port, so it is logged the
+// way the path is: without control characters, so that a newline in it cannot
+// forge a second record.
+func TestShouldRateLimit_stripsControlCharactersFromTheUnknownDomainItLogs(t *testing.T) {
+	server, log := newServerOver(nil)
+
+	shouldRateLimit(t, server, request(
+		"gateway.typo\nINFO unknown rate limit domain: no RateLimitPolicy is bound to it domain=forged", nil))
+
+	output := log.output()
+	assert.Equal(t, 1, strings.Count(output, "\n"), "log lines in %q", output)
+	assert.Contains(t, output, "domain=gateway.typoINFO unknown")
+}
+
+// The unknown domain is logged truncated, the way the path is, so its length
+// cannot flood the log.
+func TestShouldRateLimit_truncatesTheUnknownDomainItLogs(t *testing.T) {
+	server, log := newServerOver(nil)
+
+	shouldRateLimit(t, server, request("gateway."+strings.Repeat("x", 100_000), nil))
+
+	assert.Less(t, len(log.output()), 2*maxLoggedValueLength+512,
+		"length of the log of one check of a domain of 100008 bytes")
+}
+
+// The token entry is a live credential and stays out of every log line. The
+// line still carries the domain and the path, so it was written.
+func TestShouldRateLimit_leavesTheTokenOutOfTheLog(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		rules func(*testing.T) *store.RuleSet
+	}{
+		{"an unknown domain", func(*testing.T) *store.RuleSet { return nil }},
+		{"a domain without rules", func(t *testing.T) *store.RuleSet {
+			return ruleSetOver(t, "gateway.public", nil, memory.New())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, log := newServerOver(tc.rules(t))
+
+			shouldRateLimit(t, server,
+				request("gateway.public", map[string]string{"path": "/api/v1/orders", "token": rawToken}))
+
+			output := log.output()
+			assert.NotContains(t, output, rawToken)
+			assert.NotContains(t, output, "super-secret-payload")
+			assert.Contains(t, output, "domain=gateway.public")
+			assert.Contains(t, output, "path=/api/v1/orders")
+		})
+	}
+}
+
+// One request per hour admits the first check and refuses the second, which
+// Envoy turns into a 429, with a retry hint of the hour the window takes to
+// admit again.
+func TestShouldRateLimit_refusesACheckPastTheLimitWithARetryHint(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
+	first := shouldRateLimit(t, server, request("gateway.public", nil))
+	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode(), "the first check of one per hour")
+
+	second := shouldRateLimit(t, server, request("gateway.public", nil))
+
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, second.GetOverallCode())
+	headers := headerMap(second)
+	assert.Equal(t, "1", headers["x-ratelimit-limit"], "x-ratelimit-limit")
+	assert.Equal(t, "0", headers["x-ratelimit-remaining"], "x-ratelimit-remaining")
+	assert.Equal(t, "3600", headers["retry-after"], "retry-after")
+}
+
+// A refusal leaves a log line that names the domain and the path.
+func TestShouldRateLimit_logsARefusal(t *testing.T) {
+	server, log := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
+	shouldRateLimit(t, server, request("gateway.public", map[string]string{"path": "/api"}))
+
+	shouldRateLimit(t, server, request("gateway.public", map[string]string{"path": "/api"}))
+
+	assert.Contains(t, log.output(), "rate limit refused domain=gateway.public path=/api")
+}
+
+// Envoy's :path carries the query, and a query routinely carries the very
+// credential the service must not log.
+func TestSanitizePath_redactsTheQueryString(t *testing.T) {
+	assert.Equal(t, "/api/v1/orders?[redacted]",
+		sanitizePath("/api/v1/orders?access_token=SECRET&api_key=ALSO-SECRET"))
+}
+
+func TestSanitizePath_keepsAPathWithoutAQueryAsItIs(t *testing.T) {
+	assert.Equal(t, "/api/v1/orders", sanitizePath("/api/v1/orders"))
+}
+
+// A newline in the path forges a second log record, so the logged path keeps
+// no control character.
+func TestSanitizePath_stripsControlCharacters(t *testing.T) {
+	assert.Equal(t, "/apiINFO fake log line", sanitizePath("/api\r\nINFO fake log line"))
+}
+
+// A logged path keeps its first 256 bytes and marks the cut.
+func TestSanitizePath_truncatesAPathPast256Bytes(t *testing.T) {
+	assert.Equal(t, "/"+strings.Repeat("a", 255)+"[truncated]", sanitizePath("/"+strings.Repeat("a", 500)))
+}
+
+// A byte cut through a multi-byte rune leaves an invalid UTF-8 sequence, so a
+// rune that crosses the cut at 256 bytes is dropped whole. An é is two bytes:
+// 200 of them are cut between two runes, and a leading slash moves the cut
+// into the middle of one.
+func TestSanitizePath_truncatesOnARuneBoundary(t *testing.T) {
+	for _, tc := range []struct{ name, path, want string }{
+		{"a cut between two runes", strings.Repeat("é", 200), strings.Repeat("é", 128) + "[truncated]"},
+		{"a cut inside a rune", "/" + strings.Repeat("é", 200), "/" + strings.Repeat("é", 127) + "[truncated]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, sanitizePath(tc.path))
+		})
+	}
+}
+
+func TestLoggableEntries_returnsNothingWithoutAPathOrARequestID(t *testing.T) {
+	path, requestID := loggableEntries(request("gateway.public", map[string]string{"token": rawToken}))
+
+	assert.Empty(t, path, "path")
+	assert.Empty(t, requestID, "request id")
+}
+
+func TestLoggableEntries_returnsThePathAndTheRequestID(t *testing.T) {
+	path, requestID := loggableEntries(request("gateway.public", map[string]string{
+		"path":       "/api/v1/orders",
+		"request_id": "abc-123",
+		"token":      rawToken,
+	}))
+
+	assert.Equal(t, "/api/v1/orders", path, "path")
+	assert.Equal(t, "abc-123", requestID, "request id")
+}
+
+// x-request-id may be set by the client, so it can carry a forged log record.
+func TestLoggableEntries_stripsControlCharactersFromTheRequestID(t *testing.T) {
+	_, requestID := loggableEntries(request("gateway.public", map[string]string{
+		"request_id": "id\r\nINFO forged",
+	}))
+
+	assert.Equal(t, "idINFO forged", requestID)
+}
+
+// The request id reaches the [request_id=] field of the platform format, not
+// the message body, so the line matches the format every other Qubership
+// service emits. The provider registry of ctxmanager is global and has no way
+// to unregister, so the tests that run after this one see the provider too.
+func TestShouldRateLimit_putsTheRequestIDInTheLogContext(t *testing.T) {
+	ctxmanager.Register([]ctxmanager.ContextProvider{xrequestid.XRequestIdProvider{}})
+	server, log := newServerOver(ruleSetOver(t, "gateway.public", nil, memory.New()))
+
+	shouldRateLimit(t, server, request("gateway.public",
+		map[string]string{"path": "/api/v1/orders", "request_id": "corr-42", "token": rawToken}))
+
+	assert.Equal(t, "corr-42", log.requestIDField())
+}
+
+// An admission of 100 per minute leaves 99, and the bucket is full again one
+// second later, rounded up from the 0.6 s one request takes to return.
+func TestShouldRateLimit_anAdmissionCarriesTheXRateLimitHeaders(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+
+	headers := headerMap(shouldRateLimit(t, server, request("gateway.public", nil)))
+
+	assert.Equal(t, "100", headers["x-ratelimit-limit"], "x-ratelimit-limit")
+	assert.Equal(t, "99", headers["x-ratelimit-remaining"], "x-ratelimit-remaining")
+	assert.Equal(t, "1", headers["x-ratelimit-reset"], "x-ratelimit-reset")
+	assert.NotContains(t, headers, "retry-after", "an admission carries no retry hint")
+}
+
+func TestShouldRateLimit_aSecondAdmissionLowersTheRemainingCount(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+	shouldRateLimit(t, server, request("gateway.public", nil))
+
+	second := shouldRateLimit(t, server, request("gateway.public", nil))
+
+	assert.Equal(t, "98", headerMap(second)["x-ratelimit-remaining"], "x-ratelimit-remaining of 100 per minute")
+}
+
+// The request's hits_addend is the cost of every descriptor, and a
+// descriptor's own hits_addend overrides it for that descriptor, as the
+// protocol defines it. The descriptor's value used to be ignored, and a caller
+// setting it was charged the request's cost, one by default.
+func TestShouldRateLimit_chargesTheCostTheHitsAddendSets(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
 		request    uint32
 		descriptor *wrapperspb.UInt64Value
 		remaining  string
 	}{
-		"the descriptor's cost":                    {descriptor: wrapperspb.UInt64(5), remaining: "95"},
-		"the descriptor's cost over the request's": {request: 2, descriptor: wrapperspb.UInt64(5), remaining: "95"},
-		"no descriptor cost keeps the request's":   {request: 7, remaining: "93"},
+		{"the descriptor's cost", 0, wrapperspb.UInt64(5), "95"},
+		{"the descriptor's cost over the request's", 2, wrapperspb.UInt64(5), "95"},
+		{"the request's cost without a descriptor cost", 7, nil, "93"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			ruleStore := store.New()
-			ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
-				Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
-					Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
-			log, _ := recordingLogger()
-
-			req := request(domain, map[string]string{"path": "/api"})
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+			req := request("gateway.public", map[string]string{"path": "/api"})
 			req.HitsAddend = tc.request
 			req.Descriptors[0].HitsAddend = tc.descriptor
-			resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), req)
-			require.NoError(t, err)
-			assert.Equal(t, tc.remaining, headerMap(resp)["x-ratelimit-remaining"])
+
+			resp := shouldRateLimit(t, server, req)
+
+			assert.Equal(t, tc.remaining, headerMap(resp)["x-ratelimit-remaining"],
+				"x-ratelimit-remaining of 100 per minute after a request cost of %d and a descriptor cost of %v",
+				tc.request, tc.descriptor)
 		})
 	}
+}
+
+// zeroCostCheck builds a check of gateway.public whose request cost is 7 and
+// whose one descriptor sets an explicit hits_addend of zero.
+func zeroCostCheck() *envoyratelimit.RateLimitRequest {
+	req := request("gateway.public", map[string]string{"path": "/api"})
+	req.HitsAddend = 7
+	req.Descriptors[0].HitsAddend = wrapperspb.UInt64(0)
+	return req
 }
 
 // A descriptor whose hits_addend is an explicit zero is checked without
-// charging, as the protocol's override reads: the field can be unset, so a
-// zero is the caller's choice and not the default. It used to be charged as
+// charging, as the protocol's override reads: the field can be unset, so a zero
+// is the caller's choice and not the default. After three such checks, two
+// per minute still admit two checks of cost one. A zero used to be charged as
 // one, under the name of the protocol default.
 func TestShouldRateLimit_anExplicitZeroDescriptorCostChargesNothing(t *testing.T) {
-	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
-		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
-			Rates: []model.Rate{{Requests: 2, Period: time.Minute}}}}}}}))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
-	zero := func() *envoyratelimit.RateLimitRequest {
-		req := request(domain, map[string]string{"path": "/api"})
-		req.HitsAddend = 7
-		req.Descriptors[0].HitsAddend = wrapperspb.UInt64(0)
-		return req
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(2, time.Minute)))
+	for i := range 3 {
+		resp := shouldRateLimit(t, server, zeroCostCheck())
+		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
+			"zero-cost check %d of two per minute", i+1)
 	}
 
-	for range 3 {
-		resp, err := server.ShouldRateLimit(context.Background(), zero())
-		require.NoError(t, err)
-		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
-	}
 	for i := range 2 {
-		resp, err := server.ShouldRateLimit(context.Background(), request(domain, map[string]string{"path": "/api"}))
-		require.NoError(t, err)
-		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
-			"request %d was refused: a zero-cost check charged the bucket", i+1)
+		resp := shouldRateLimit(t, server, request("gateway.public", map[string]string{"path": "/api"}))
+		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
+			"check %d of cost one after three zero-cost checks of two per minute", i+1)
 	}
-	resp, err := server.ShouldRateLimit(context.Background(), zero())
-	require.NoError(t, err)
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode(),
-		"a zero-cost check of a spent bucket still reports the refusal")
 }
 
-// The bound on a descriptor cost is the number docs/limits.md documents.
-func TestShouldRateLimit_theDescriptorCostBoundIsOneBillion(t *testing.T) {
-	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
-		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
-			Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
-	log, logged := recordingLogger()
-	server := NewServer(ruleStore, log)
+// A check of zero cost reads the bucket without charging it, so a spent bucket
+// still refuses it.
+func TestShouldRateLimit_refusesAZeroCostCheckOfASpentBucket(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(2, time.Minute)))
+	for i := range 2 {
+		resp := shouldRateLimit(t, server, request("gateway.public", map[string]string{"path": "/api"}))
+		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
+			"check %d of cost one of two per minute", i+1)
+	}
 
-	req := request(domain, map[string]string{"path": "/api"})
-	req.Descriptors[0].HitsAddend = wrapperspb.UInt64(1_000_000_000)
-	_, err := server.ShouldRateLimit(context.Background(), req)
-	require.NoError(t, err)
-	assert.NotContains(t, logged(), "over the limit of", "a cost at the bound was refused as a violation")
+	resp := shouldRateLimit(t, server, zeroCostCheck())
 
-	req = request(domain, map[string]string{"path": "/api"})
-	req.Descriptors[0].HitsAddend = wrapperspb.UInt64(1_000_000_001)
-	resp, err := server.ShouldRateLimit(context.Background(), req)
-	require.NoError(t, err)
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
-	assert.Contains(t, logged(), "over the limit of 1000000000")
 }
 
-// A cost the engine cannot charge is refused as a protocol violation, and
-// charges nothing: a refill request, which would let a caller top up its own
-// counters, and a cost past what Envoy itself sends.
-func TestShouldRateLimit_refusesACostItCannotCharge(t *testing.T) {
-	const domain = "gateway.public"
-	for name, set := range map[string]func(*envoycommon.RateLimitDescriptor){
-		"is_negative_hits":        func(d *envoycommon.RateLimitDescriptor) { d.HitsAddend, d.IsNegativeHits = wrapperspb.UInt64(5), true },
-		"a cost over the maximum": func(d *envoycommon.RateLimitDescriptor) { d.HitsAddend = wrapperspb.UInt64(maxHitsAddend + 1) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			ruleStore := store.New()
-			ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
-				Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
-					Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
-			log, logged := recordingLogger()
-			server := NewServer(ruleStore, log)
+// The bound on a descriptor cost is the number docs/limits.md documents: a
+// cost of 1000000000 is decided like any other, and one more is refused as a
+// protocol violation.
+func TestShouldRateLimit_refusesADescriptorCostOnlyPastOneBillion(t *testing.T) {
+	server, log := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+	atTheBound := request("gateway.public", map[string]string{"path": "/api"})
+	atTheBound.Descriptors[0].HitsAddend = wrapperspb.UInt64(1_000_000_000)
+	pastTheBound := request("gateway.public", map[string]string{"path": "/api"})
+	pastTheBound.Descriptors[0].HitsAddend = wrapperspb.UInt64(1_000_000_001)
 
-			req := request(domain, map[string]string{"path": "/api"})
-			set(req.Descriptors[0])
-			resp, err := server.ShouldRateLimit(context.Background(), req)
-			require.NoError(t, err, "a protocol violation is an answer, not an error")
+	shouldRateLimit(t, server, atTheBound)
+	assert.NotContains(t, log.output(), "over the limit of", "log after a descriptor cost of 1000000000")
+
+	resp := shouldRateLimit(t, server, pastTheBound)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, log.output(), "over the limit of 1000000000")
+}
+
+// invalidCosts lists the descriptor costs the engine cannot charge: a refill
+// request, which would let a caller top up its own counters, and a cost past
+// what Envoy itself sends. Each row sets its cost on a descriptor.
+func invalidCosts() []struct {
+	name string
+	set  func(*envoycommon.RateLimitDescriptor)
+} {
+	return []struct {
+		name string
+		set  func(*envoycommon.RateLimitDescriptor)
+	}{
+		{"is_negative_hits", func(d *envoycommon.RateLimitDescriptor) {
+			d.HitsAddend, d.IsNegativeHits = wrapperspb.UInt64(5), true
+		}},
+		{"a cost over the maximum", func(d *envoycommon.RateLimitDescriptor) {
+			d.HitsAddend = wrapperspb.UInt64(maxHitsAddend + 1)
+		}},
+	}
+}
+
+// A descriptor cost the engine cannot charge is refused as a protocol
+// violation: the response is OVER_LIMIT, not an error.
+func TestShouldRateLimit_refusesADescriptorCostItCannotCharge(t *testing.T) {
+	for _, tc := range invalidCosts() {
+		t.Run(tc.name, func(t *testing.T) {
+			server, log := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+			req := request("gateway.public", map[string]string{"path": "/api"})
+			tc.set(req.Descriptors[0])
+
+			resp := shouldRateLimit(t, server, req)
+
 			assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
-			assert.Contains(t, logged(), "descriptor 0")
-
-			plain, err := server.ShouldRateLimit(context.Background(), request(domain, map[string]string{"path": "/api"}))
-			require.NoError(t, err)
-			assert.Equal(t, "99", headerMap(plain)["x-ratelimit-remaining"], "the refused check charged the counter")
+			assert.Contains(t, log.output(), "descriptor 0")
 		})
 	}
 }
 
-func TestShouldRateLimit_extractsTheClientFromTheToken(t *testing.T) {
-	// A per-client rule keys its bucket by the sub claim of the token
-	// descriptor: two clients must not share a counter.
-	const domain = "gateway.public"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
-		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
-			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
-	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+// A refused cost is refused before any decision, so it charges nothing: the
+// check of cost one after it finds 99 of 100 per minute left.
+func TestShouldRateLimit_aDescriptorCostItCannotChargeLeavesTheCounterUntouched(t *testing.T) {
+	for _, tc := range invalidCosts() {
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+			req := request("gateway.public", map[string]string{"path": "/api"})
+			tc.set(req.Descriptors[0])
+			shouldRateLimit(t, server, req)
 
-	token := func(sub string) string {
-		payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"` + sub + `"}`))
-		return "h." + payload + ".s"
+			plain := shouldRateLimit(t, server, request("gateway.public", map[string]string{"path": "/api"}))
+
+			assert.Equal(t, "99", headerMap(plain)["x-ratelimit-remaining"], "x-ratelimit-remaining of 100 per minute")
+		})
 	}
+}
+
+// A per-client rule keys its bucket by the sub claim of the token entry, so
+// two clients do not share a counter.
+func TestShouldRateLimit_keysAPerClientRuleByTheSubClaimOfTheToken(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(1)))
 	check := func(sub string) envoyratelimit.RateLimitResponse_Code {
-		resp, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api", "token": token(sub)}))
-		require.NoError(t, err)
-		return resp.GetOverallCode()
+		return shouldRateLimit(t, server, request("gateway.public",
+			map[string]string{"path": "/api", "token": tokenWithSub(sub)})).GetOverallCode()
 	}
 
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("alice"))
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("alice"))
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("alice"), "the first check of alice")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("alice"), "the second check of alice")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("bob"),
-		"bob must not inherit alice's exhausted bucket")
+		"the first check of bob after alice's bucket is spent")
 }
 
-func TestShouldRateLimit_acceptsPreExtractedKeys(t *testing.T) {
-	// The direct-consumer form: an entry that is not path, method, token, or
-	// request_id arrives as a ready identity key.
-	const domain = "gateway.public"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
-		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
-			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
-	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
-
+// The direct-consumer form: an entry that is not path, method, token, or
+// request_id arrives as a ready identity key.
+func TestShouldRateLimit_keysAPerClientRuleByAPreExtractedSubEntry(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(1)))
 	check := func(client string) envoyratelimit.RateLimitResponse_Code {
-		resp, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"sub": client}))
-		require.NoError(t, err)
-		return resp.GetOverallCode()
+		return shouldRateLimit(t, server, request("gateway.public", map[string]string{"sub": client})).GetOverallCode()
 	}
 
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("alice"))
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("alice"))
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("bob"))
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("alice"), "the first check of alice")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("alice"), "the second check of alice")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("bob"),
+		"the first check of bob after alice's bucket is spent")
 }
 
-func TestShouldRateLimit_matchesRoutesByMethod(t *testing.T) {
-	const domain = "gateway.public"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+func TestShouldRateLimit_limitsOnlyTheMethodsItsRouteNames(t *testing.T) {
+	p := model.Policy{Blocks: []model.Block{{
 		Name: "b",
 		Target: model.Target{Routes: []model.Route{{
 			Path:    model.PathMatch{Type: model.PathPrefix, Value: "/api/"},
@@ -565,33 +593,42 @@ func TestShouldRateLimit_matchesRoutesByMethod(t *testing.T) {
 		}}},
 		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
-
+	server, _ := newServerOver(ruleSetWith(t, p))
 	check := func(method string) envoyratelimit.RateLimitResponse_Code {
-		resp, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api/x", "method": method}))
-		require.NoError(t, err)
-		return resp.GetOverallCode()
+		return shouldRateLimit(t, server, request("gateway.public",
+			map[string]string{"path": "/api/x", "method": method})).GetOverallCode()
 	}
 
-	require.Equal(t, envoyratelimit.RateLimitResponse_OK, check("POST"))
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("POST"))
+	require.Equal(t, envoyratelimit.RateLimitResponse_OK, check("POST"), "the first POST")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("POST"), "the second POST")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("GET"),
-		"a GET is outside the POST-only target and stays unlimited")
+		"a GET of a POST-only route after the POST bucket is spent")
 }
 
-func TestShouldRateLimit_budgetOverflowDeniesRegardlessOfFallback(t *testing.T) {
-	// The pinned contract: ErrTooManyBuckets is a configuration violation, so
-	// the answer is OVER_LIMIT — never a gRPC error that fail-open would wave
-	// through.
-	//
-	// The compiler refuses a generation over the budget, so the oversized
-	// snapshot here is built by editing a compiled one — the only way an
-	// adapter ever meets this error, and the reason the contract is pinned.
-	const domain = "gateway.public"
+// shadowPolicy limits every check of its domain with one shadow rule, b/trial,
+// of requests per period.
+func shadowPolicy(requests int64, period time.Duration) model.Policy {
+	return model.Policy{Blocks: []model.Block{{
+		Name: "b",
+		Rules: []model.Rule{{Name: "trial", Behavior: model.BehaviorShadow,
+			Rates: []model.Rate{{Requests: requests, Period: period}}}},
+	}}}
+}
+
+// A shadow rule reports what it would refuse and never refuses.
+func TestShouldRateLimit_admitsACheckOverAShadowRuleLimit(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, shadowPolicy(1, time.Hour)))
+
+	for i := range 2 {
+		resp := shouldRateLimit(t, server, request("gateway.public", map[string]string{"path": "/api"}))
+		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
+			"check %d of a shadow rule of one per hour", i+1)
+	}
+}
+
+// rulesFillingTheBucketBudget returns 32 rules of four windows each, the 128
+// buckets one decision may touch; each rule counts by keys.
+func rulesFillingTheBucketBudget(keys ...string) []model.Rule {
 	periods := []time.Duration{time.Minute, time.Hour, 30 * time.Second, 10 * time.Second}
 	rules := make([]model.Rule, 0, 32)
 	for ri := range 32 {
@@ -599,28 +636,35 @@ func TestShouldRateLimit_budgetOverflowDeniesRegardlessOfFallback(t *testing.T) 
 		for _, pd := range periods {
 			rates = append(rates, model.Rate{Requests: 100, Period: pd})
 		}
-		rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Rates: rates})
+		rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Counters: keys, Rates: rates})
 	}
-	oversized := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
+	return rules
+}
 
-	snap, problems := compile.Compile(testNamespace, domain, &oversized)
-	require.Empty(t, problems, "32 rules x 4 rates is exactly the budget")
+// ErrTooManyBuckets is a configuration violation, so the response is
+// OVER_LIMIT, never a gRPC error that fail-open would admit.
+//
+// The compiler refuses a generation over the budget, so the oversized snapshot
+// here is built by adding a block to a compiled one: the only way an adapter
+// ever meets this error.
+func TestShouldRateLimit_refusesADecisionOverTheBucketBudget(t *testing.T) {
+	const domain = "gateway.public"
+	atTheBudget := model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "b", Rules: rulesFillingTheBucketBudget(),
+	}}}
+	snap, problems := compile.Compile(testNamespace, domain, &atTheBudget)
+	require.Empty(t, problems, "32 rules of four windows each are exactly the budget")
 	smuggled := snap.Blocks[0]
 	smuggled.Name, smuggled.Rules = "smuggled", smuggled.Rules[:1]
 	snap.Blocks = append(snap.Blocks, smuggled)
-
-	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
+	server, log := newServerOver(store.NewRuleSet(map[string]store.Domain{
 		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
 	}))
-	log, logged := recordingLogger()
 
-	resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(),
-		request(domain, map[string]string{"path": "/any"}))
+	resp := shouldRateLimit(t, server, request(domain, map[string]string{"path": "/any"}))
 
-	require.NoError(t, err, "the budget violation is an answer, not an error")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
-	assert.Contains(t, logged(), "bucket budget")
+	assert.Contains(t, log.output(), "bucket budget")
 }
 
 // failingCounters refuses every store operation, standing in for an
@@ -639,154 +683,94 @@ func (failingCounters) Reset(context.Context, []string) error {
 	return errors.New("store is down")
 }
 
-func TestShouldRateLimit_storeErrorBecomesAGRPCError(t *testing.T) {
-	// Envoy's failure_mode_deny is the one switch for fail-open versus
-	// fail-closed, so a store outage must surface as a gRPC error — not as a
-	// verdict the adapter invented on its own.
-	const domain = "gateway.public"
-	p := onePerHourPolicy()
-	snap, problems := compile.Compile(testNamespace, domain, &p)
-	require.Empty(t, problems)
-	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
-		domain: {Engine: engine.New(snap, failingCounters{}), Snapshot: snap},
-	}))
-	log, logged := recordingLogger()
+// Envoy's failure_mode_deny is the one switch for fail-open versus
+// fail-closed, so a store outage is a gRPC error and not a verdict the adapter
+// makes up on its own.
+func TestShouldRateLimit_returnsUnavailableWhenTheStoreFails(t *testing.T) {
+	p := domainWidePolicy(1, time.Hour)
+	server, _ := newServerOver(ruleSetOver(t, "gateway.public", &p, failingCounters{}))
 
-	resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(),
-		request(domain, map[string]string{"path": "/api"}))
+	resp, err := server.ShouldRateLimit(context.Background(),
+		request("gateway.public", map[string]string{"path": "/api"}))
 
-	require.Error(t, err)
+	assert.Equal(t, codes.Unavailable, status.Code(err), "status of the error %v", err)
 	assert.Nil(t, resp)
-	assert.Equal(t, codes.Unavailable, status.Code(err))
-	assert.NotContains(t, logged(), "store is down\n429", "the verdict is Envoy's to make")
 }
 
-// requestWith builds a check against the shared test domain carrying one
-// descriptor per map — the multi-descriptor form of the protocol.
-func requestWith(descriptors ...map[string]string) *envoyratelimit.RateLimitRequest {
-	out := &envoyratelimit.RateLimitRequest{Domain: "gateway.public"}
-	for _, entries := range descriptors {
-		descriptor := &envoycommon.RateLimitDescriptor{}
-		for key, value := range entries {
-			descriptor.Entries = append(descriptor.Entries, &envoycommon.RateLimitDescriptor_Entry{
-				Key: key, Value: value,
-			})
-		}
-		out.Descriptors = append(out.Descriptors, descriptor)
-	}
-	return out
-}
-
-func perClientOnePerHourPolicy() model.Policy {
-	return model.Policy{Domain: "gateway.public", Blocks: []model.Block{{
-		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
-			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
-	}}}
-}
-
-func TestShouldRateLimit_decidesEachDescriptorIndependently(t *testing.T) {
-	// Merging two descriptors into one request would hand the rule a
-	// two-valued sub axis, which no rule matches — a silent bypass. Each
-	// descriptor must be its own decision instead.
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, perClientOnePerHourPolicy()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
-
+// Each descriptor is its own decision. Merged into one request, two
+// descriptors would give the rule a two-valued sub key, which no rule matches,
+// and both clients would pass unlimited.
+func TestShouldRateLimit_decidesEachDescriptorOnItsOwn(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(1)))
 	twoClients := func() *envoyratelimit.RateLimitRequest {
-		return requestWith(map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"})
+		return request("gateway.public", map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"})
 	}
 
-	first, err := server.ShouldRateLimit(context.Background(), twoClients())
-	require.NoError(t, err)
-	second, err := server.ShouldRateLimit(context.Background(), twoClients())
-	require.NoError(t, err)
+	first := shouldRateLimit(t, server, twoClients())
+	second := shouldRateLimit(t, server, twoClients())
 
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode())
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode(), "the first check of alice and bob")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, second.GetOverallCode(),
-		"both clients spent their window on the first check")
+		"the second check of alice and bob")
 }
 
-func TestShouldRateLimit_refusesWhenAnyDescriptorRefuses(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, perClientOnePerHourPolicy()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+// One refused descriptor refuses the check, and the response carries the
+// numbers of the refused decision: its retry hint, which the admitted one does
+// not have.
+func TestShouldRateLimit_refusesACheckWhenAnyDescriptorRefuses(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(1)))
+	first := shouldRateLimit(t, server, request("gateway.public", map[string]string{"sub": "alice"}))
+	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode(), "the first check of alice")
 
-	first, err := server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"sub": "alice"}))
-	require.NoError(t, err)
-	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode())
+	mixed := shouldRateLimit(t, server,
+		request("gateway.public", map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"}))
 
-	mixed, err := server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"}))
-	require.NoError(t, err)
-
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, mixed.GetOverallCode(),
-		"alice is exhausted, and one refused descriptor refuses the check")
-	assert.NotEmpty(t, headerMap(mixed)["retry-after"],
-		"the headers come from the refused decision, not the admitted one")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, mixed.GetOverallCode())
+	assert.Equal(t, "3600", headerMap(mixed)["retry-after"], "retry-after of a check of a spent alice and a fresh bob")
 }
 
-func TestShouldRateLimit_noDescriptorsStillHitWholeDomainLimits(t *testing.T) {
-	// A direct consumer sending no descriptors at all must not slip past the
-	// unconditional domain limits.
-	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+// A direct consumer that sends no descriptor at all still meets the
+// domain-wide rules.
+func TestShouldRateLimit_limitsACheckWithoutDescriptorsByTheDomainWideRule(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
 
-	bare := &envoyratelimit.RateLimitRequest{Domain: domain}
-	first, err := server.ShouldRateLimit(context.Background(), bare)
-	require.NoError(t, err)
-	second, err := server.ShouldRateLimit(context.Background(), bare)
-	require.NoError(t, err)
+	first := shouldRateLimit(t, server, request("gateway.public"))
+	second := shouldRateLimit(t, server, request("gateway.public"))
 
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode())
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, second.GetOverallCode())
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode(), "the first bare check")
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, second.GetOverallCode(), "the second bare check")
 }
 
-func TestShouldRateLimit_emptyDescriptorValueMeansAbsence(t *testing.T) {
-	// The identity layer never emits empty values, so an empty entry value
-	// must mean "key absent" — not a distinct shared "" bucket.
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, perClientOnePerHourPolicy()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+// The identity layer never emits an empty value, so an empty entry value means
+// the key is absent, not a shared "" bucket: the per-client rule does not
+// apply. TestShouldRateLimit_keysAPerClientRuleByAPreExtractedSubEntry is the
+// control, where a second check of a non-empty sub is refused.
+func TestShouldRateLimit_treatsAnEmptyDescriptorValueAsAnAbsentKey(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(1)))
 
-	for range 3 {
-		resp, err := server.ShouldRateLimit(context.Background(),
-			requestWith(map[string]string{"sub": ""}))
-		require.NoError(t, err)
-		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
-			"no sub key means the per-client rule does not match")
+	for i := range 3 {
+		resp := shouldRateLimit(t, server, request("gateway.public", map[string]string{"sub": ""}))
+		assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "check %d with an empty sub", i+1)
 	}
 }
 
-func TestShouldRateLimit_tooManyDescriptorsDeny(t *testing.T) {
-	// More descriptors than any sanctioned caller sends is a protocol
-	// violation: an explicit refusal, never an error the fallback policy
-	// could wave through.
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, perClientOnePerHourPolicy()))
-	log, logged := recordingLogger()
+// A check may carry 16 descriptors. One more is a protocol violation, refused
+// with OVER_LIMIT and never with an error the fallback policy could admit. The
+// first violation line in a one-second window reports no suppressed lines.
+func TestShouldRateLimit_refusesACheckOnlyPast16Descriptors(t *testing.T) {
+	atTheBound, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(1)))
+	resp := shouldRateLimit(t, atTheBound, checkOfClients(16))
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "a check of 16 fresh clients")
 
-	descriptors := make([]map[string]string, 0, 17)
-	for i := range 17 {
-		descriptors = append(descriptors, map[string]string{"sub": fmt.Sprintf("c%d", i)})
-	}
-	resp, err := NewServer(ruleStore, log).ShouldRateLimit(context.Background(), requestWith(descriptors...))
-
-	require.NoError(t, err)
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
-	assert.Contains(t, logged(), "over the limit")
+	pastTheBound, log := newServerOver(ruleSetWith(t, perClientPerHourPolicy(1)))
+	resp = shouldRateLimit(t, pastTheBound, checkOfClients(17))
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode(), "a check of 17 fresh clients")
+	assert.Contains(t, log.output(), "carries 17 descriptors, over the limit of 16")
+	assert.Contains(t, log.output(), "suppressed=0")
 }
 
-// failAfterStore delegates to an in-memory store until its call budget runs
-// out, then refuses every operation — a store that dies mid-check.
+// failAfterStore delegates to an in-memory store until its budget of Decide
+// calls runs out, then refuses every Decide: a store that fails mid-check.
 type failAfterStore struct {
 	inner counters.Store
 	limit int
@@ -809,32 +793,21 @@ func (f *failAfterStore) Reset(ctx context.Context, keys []string) error {
 	return f.inner.Reset(ctx, keys)
 }
 
-func TestShouldRateLimit_storeErrorAfterRefusalStillDenies(t *testing.T) {
-	// One descriptor already refused when the store died on the next one: the
-	// answer is known, and returning an error instead would let fail-open
-	// launder a real refusal into an admission.
-	const domain = "gateway.public"
-	perClient := perClientOnePerHourPolicy()
-	snap, problems := compile.Compile(testNamespace, domain, &perClient)
-	require.Empty(t, problems)
-	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
-		domain: {Engine: engine.New(snap, &failAfterStore{inner: memory.New(), limit: 2}), Snapshot: snap},
-	}))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+// One descriptor was already refused when the store failed on the next one.
+// The verdict is known, so the check is refused with the refused decision's
+// headers, and not turned into an error that fail-open would admit. The store
+// serves the first two Decide calls, both alice's, and fails bob's.
+func TestShouldRateLimit_refusesACheckWhenTheStoreFailsAfterADescriptorRefused(t *testing.T) {
+	p := perClientPerHourPolicy(1)
+	server, _ := newServerOver(ruleSetOver(t, "gateway.public", &p, &failAfterStore{inner: memory.New(), limit: 2}))
+	first := shouldRateLimit(t, server, request("gateway.public", map[string]string{"sub": "alice"}))
+	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode(), "the first check of alice")
 
-	first, err := server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"sub": "alice"}))
-	require.NoError(t, err)
-	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode())
+	resp := shouldRateLimit(t, server,
+		request("gateway.public", map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"}))
 
-	resp, err := server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"sub": "alice"}, map[string]string{"sub": "bob"}))
-
-	require.NoError(t, err, "a known refusal is an answer, not an error")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
-	assert.NotEmpty(t, headerMap(resp)["retry-after"], "the refused decision's headers survive the store error")
+	assert.Equal(t, "3600", headerMap(resp)["retry-after"], "retry-after of alice's refusal")
 }
 
 // exemptPrefix and exemptDomain stand in for what the service passes to
@@ -845,29 +818,21 @@ const (
 	exemptDomain = "gateway.private"
 )
 
-// onePerHourRuleSet compiles onePerHourPolicy into the given domain over the
-// given counter store: failingCounters for a store that is down, memory.New
-// for one that counts.
-func onePerHourRuleSet(t *testing.T, domain string, counterStore counters.Store) *store.RuleSet {
+// exemptDomainRules binds one request per hour on every path of exemptDomain,
+// counted in counterStore: failingCounters for a store that is down, so that a
+// check that is decided fails, or memory.New for one that counts.
+func exemptDomainRules(t *testing.T, counterStore counters.Store) *store.RuleSet {
 	t.Helper()
-	p := onePerHourPolicy()
-	p.Domain = domain
-	snap, problems := compile.Compile(testNamespace, domain, &p)
-	require.Empty(t, problems, "broken fixture")
-	return store.NewRuleSet(map[string]store.Domain{
-		domain: {Engine: engine.New(snap, counterStore), Snapshot: snap},
-	})
+	p := domainWidePolicy(1, time.Hour)
+	return ruleSetOver(t, exemptDomain, &p, counterStore)
 }
 
 // The exempt paths are the prefix and everything under it by whole segments,
-// with or without a query string. The domain's one rule covers every path and
-// its counter store is down, so a check that was decided fails, and only an
-// exempt one returns OK.
-func TestShouldRateLimit_exemptPathPassesWhileTheStoreIsDown(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, failingCounters{}))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+// with or without a query string. The counter store of the domain is down, so
+// only a check that is not decided returns OK.
+func TestShouldRateLimit_admitsAnExemptPathWhileTheStoreIsDown(t *testing.T) {
+	server, _ := newServerOver(exemptDomainRules(t, failingCounters{}),
+		WithExemptPath(exemptPrefix, []string{exemptDomain}))
 
 	for _, tc := range []struct{ name, path string }{
 		{"the prefix itself", "/ratelimit/v1"},
@@ -890,11 +855,9 @@ func TestShouldRateLimit_exemptPathPassesWhileTheStoreIsDown(t *testing.T) {
 // A path that shares characters with the prefix, without lying under it by
 // whole segments, is decided like any other path of the domain: with the
 // counter store down the check fails.
-func TestShouldRateLimit_pathOutsideTheExemptPrefixIsDecided(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, failingCounters{}))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+func TestShouldRateLimit_decidesAPathOutsideTheExemptPrefix(t *testing.T) {
+	server, _ := newServerOver(exemptDomainRules(t, failingCounters{}),
+		WithExemptPath(exemptPrefix, []string{exemptDomain}))
 
 	for _, tc := range []struct{ name, path string }{
 		{"a longer last segment", "/ratelimit/v10/status"},
@@ -914,14 +877,13 @@ func TestShouldRateLimit_pathOutsideTheExemptPrefixIsDecided(t *testing.T) {
 	}
 }
 
-// The exemption holds in the domains WithExemptPath names and in no other:
-// the same path in another domain leads to another backend, and is decided.
-func TestShouldRateLimit_exemptPathInAnotherDomainIsDecided(t *testing.T) {
+// The exemption holds in the domains WithExemptPath names and in no other: the
+// same path in another domain leads to another backend, and is decided.
+func TestShouldRateLimit_decidesAnExemptPathInAnotherDomain(t *testing.T) {
 	const otherDomain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(onePerHourRuleSet(t, otherDomain, failingCounters{}))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+	p := domainWidePolicy(1, time.Hour)
+	server, _ := newServerOver(ruleSetOver(t, otherDomain, &p, failingCounters{}),
+		WithExemptPath(exemptPrefix, []string{exemptDomain}))
 
 	_, err := server.ShouldRateLimit(context.Background(),
 		request(otherDomain, map[string]string{"path": "/ratelimit/v1/status"}))
@@ -931,8 +893,8 @@ func TestShouldRateLimit_exemptPathInAnotherDomainIsDecided(t *testing.T) {
 }
 
 // A server exempts nothing unless WithExemptPath gives it both a prefix and a
-// domain. An empty prefix in particular must not turn into every path.
-func TestShouldRateLimit_noPathIsExemptWithoutAPrefixAndADomain(t *testing.T) {
+// domain. An empty prefix in particular does not turn into every path.
+func TestShouldRateLimit_exemptsNoPathWithoutAPrefixAndADomain(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		opts []Option
@@ -942,11 +904,9 @@ func TestShouldRateLimit_noPathIsExemptWithoutAPrefixAndADomain(t *testing.T) {
 		{"no domains", []Option{WithExemptPath(exemptPrefix, nil)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ruleStore := store.New()
-			ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, failingCounters{}))
-			log, _ := recordingLogger()
+			server, _ := newServerOver(exemptDomainRules(t, failingCounters{}), tc.opts...)
 
-			_, err := NewServer(ruleStore, log, tc.opts...).ShouldRateLimit(context.Background(),
+			_, err := server.ShouldRateLimit(context.Background(),
 				request(exemptDomain, map[string]string{"path": "/ratelimit/v1/status"}))
 
 			assert.Equal(t, codes.Unavailable, status.Code(err), "ShouldRateLimit(path=/ratelimit/v1/status)")
@@ -957,16 +917,11 @@ func TestShouldRateLimit_noPathIsExemptWithoutAPrefixAndADomain(t *testing.T) {
 // An exempt check charges no counter. The domain admits one request per hour:
 // two exempt checks leave that request for the first check of another path,
 // and the second check of that path is refused.
-func TestShouldRateLimit_exemptPathChargesNoCounter(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, memory.New()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+func TestShouldRateLimit_anExemptCheckChargesNoCounter(t *testing.T) {
+	server, _ := newServerOver(exemptDomainRules(t, memory.New()),
+		WithExemptPath(exemptPrefix, []string{exemptDomain}))
 	check := func(path string) envoyratelimit.RateLimitResponse_Code {
-		resp, err := server.ShouldRateLimit(context.Background(),
-			request(exemptDomain, map[string]string{"path": path}))
-		require.NoError(t, err, "ShouldRateLimit(path=%q)", path)
-		return resp.GetOverallCode()
+		return shouldRateLimit(t, server, request(exemptDomain, map[string]string{"path": path})).GetOverallCode()
 	}
 
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("/ratelimit/v1/status"), "the first exempt check")
@@ -979,51 +934,46 @@ func TestShouldRateLimit_exemptPathChargesNoCounter(t *testing.T) {
 // its own: the second check is refused because the first one charged the one
 // request per hour for /api.
 func TestShouldRateLimit_decidesTheDescriptorBesideAnExemptOne(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, memory.New()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+	server, _ := newServerOver(exemptDomainRules(t, memory.New()),
+		WithExemptPath(exemptPrefix, []string{exemptDomain}))
 	check := func() envoyratelimit.RateLimitResponse_Code {
-		req := requestWith(map[string]string{"path": "/ratelimit/v1/status"}, map[string]string{"path": "/api"})
-		req.Domain = exemptDomain
-		resp, err := server.ShouldRateLimit(context.Background(), req)
-		require.NoError(t, err)
-		return resp.GetOverallCode()
+		return shouldRateLimit(t, server, request(exemptDomain,
+			map[string]string{"path": "/ratelimit/v1/status"}, map[string]string{"path": "/api"})).GetOverallCode()
 	}
 
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check(), "the first check")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check(), "the second check")
 }
 
-// The bound on a check's cost covers the check as a whole: spreading the
-// largest cost over several descriptors does not multiply it. A request-level
-// hits_addend past the bound is refused the same way.
-func TestShouldRateLimit_theCostBoundCoversTheWholeCheck(t *testing.T) {
-	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, model.Policy{Domain: domain,
-		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "all",
-			Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}))
-	log, logged := recordingLogger()
-	server := NewServer(ruleStore, log)
-
-	split := requestWith(map[string]string{"path": "/a"}, map[string]string{"path": "/b"})
+// The bound on a check's cost covers the check as a whole: the costs of its
+// descriptors add up to at most 1000000000, so spreading the largest cost over
+// several descriptors does not multiply it. A check of the same two
+// descriptors at cost one is the control.
+func TestShouldRateLimit_refusesDescriptorCostsThatAddUpPastOneBillion(t *testing.T) {
+	server, log := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+	split := request("gateway.public", map[string]string{"path": "/a"}, map[string]string{"path": "/b"})
 	split.Descriptors[0].HitsAddend = wrapperspb.UInt64(600_000_000)
 	split.Descriptors[1].HitsAddend = wrapperspb.UInt64(600_000_000)
-	resp, err := server.ShouldRateLimit(context.Background(), split)
-	require.NoError(t, err)
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
-	assert.Contains(t, logged(), "a total cost of 1200000000, over the limit of 1000000000")
 
-	wide := requestWith(map[string]string{"path": "/a"})
+	resp := shouldRateLimit(t, server, split)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode(),
+		"two descriptors of cost 600000000")
+	assert.Contains(t, log.output(), "a total cost of 1200000000, over the limit of 1000000000")
+
+	resp = shouldRateLimit(t, server,
+		request("gateway.public", map[string]string{"path": "/a"}, map[string]string{"path": "/b"}))
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "two descriptors of cost one")
+}
+
+// A request-level hits_addend is the cost of each descriptor, so a request
+// cost of 2000000000, past the bound, is refused the same way.
+func TestShouldRateLimit_refusesARequestCostPastOneBillion(t *testing.T) {
+	server, log := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+	wide := request("gateway.public", map[string]string{"path": "/a"})
 	wide.HitsAddend = 2_000_000_000
-	resp, err = server.ShouldRateLimit(context.Background(), wide)
-	require.NoError(t, err)
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
-	assert.Contains(t, logged(), "a total cost of 2000000000")
 
-	resp, err = server.ShouldRateLimit(context.Background(),
-		requestWith(map[string]string{"path": "/a"}, map[string]string{"path": "/b"}))
-	require.NoError(t, err)
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "two checks of cost one were refused")
+	resp := shouldRateLimit(t, server, wide)
+
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, log.output(), "a total cost of 2000000000")
 }

@@ -7,28 +7,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestSignalContext_endsOnSIGTERM(t *testing.T) {
 	ctx, stop := SignalContext()
 	defer stop()
-	select {
-	case <-ctx.Done():
-		t.Fatal("the context ended before any signal")
-	default:
-	}
+	require.NoError(t, ctx.Err(), "the context ended before any signal")
+
 	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+
 	select {
 	case <-ctx.Done():
 	case <-time.After(5 * time.Second):
-		t.Fatal("the context did not end on SIGTERM")
+		t.Fatal("waited 5s for the context to end on SIGTERM; it is still live")
 	}
 }
 
-// stop ends the context without a signal.
 func TestSignalContext_endsOnStop(t *testing.T) {
 	ctx, stop := SignalContext()
+
 	stop()
-	require.ErrorIs(t, ctx.Err(), context.Canceled)
+
+	assert.ErrorIs(t, ctx.Err(), context.Canceled)
 }

@@ -85,7 +85,7 @@ var _ = AfterSuite(func() {
 	cancel()
 	Eventually(func() error {
 		return testEnv.Stop()
-	}, time.Minute, time.Second).Should(Succeed())
+	}, time.Minute, time.Second).Should(Succeed(), "stopping the API server and etcd of the test environment")
 })
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.

@@ -91,7 +91,8 @@ plane:
   and `prod` profiles; the Lease also covers the overlap of two pods during a rollout. An informer on the
   `RateLimitPolicy` of its own namespace: event → strict decode → compile → size check → a write of the ConfigMap
   `ratelimit-config` and of the policy status. It is the only writer of both. Its chart ships its ServiceAccount
-  with the only Role of the delivery and its own PodMonitor; the CRD has a chart of its own, `ratelimit-crds`.
+  with the only Role of the delivery and, behind `MONITORING_ENABLED`, its own PodMonitor and PrometheusRule; the CRD
+  has a chart of its own, `ratelimit-crds`.
 - **Service** `ratelimit-service`: a Deployment with `REPLICAS` replicas. gRPC `ShouldRateLimit` on all replicas, with
   no coordination; the counter store is a single Redis instance that the DBaaS Redis adapter provisions for the
   release and runs in its own namespace. Every replica mounts the ConfigMap as a whole
@@ -99,25 +100,29 @@ plane:
   strictly, compiles every domain with the engine module, and swaps the in-memory snapshot atomically. All replicas
   compile independently and deterministically; there is no shared state between them. Pod name and namespace come
   from the Downward API. Its chart ships the Service `ratelimit`, a ServiceAccount without a mounted token
-  (`automountServiceAccountToken: false`), the AuthorizationPolicy of the management port, the `InternalDatabase` and
-  the `DatabaseSecretClaim` of its counter store, its own PodMonitor, the Grafana dashboard, and the EnvoyFilters in
-  every mode.
+  (`automountServiceAccountToken: false`), the HorizontalPodAutoscaler, the `InternalDatabase` and the
+  `DatabaseSecretClaim` of its counter store, the AuthorizationPolicy of the management port behind
+  `management.enabled`, its own PodMonitor, PrometheusRule, and Grafana dashboard behind `MONITORING_ENABLED`, and the
+  EnvoyFilters in every mode.
 - **Ready of a replica.** A replica that has never applied a manifest is NotReady and out of Endpoints, without a
   timeout. An explicitly empty manifest is a configuration: the replica is Ready, and every request is an unknown
   domain. After the first apply the replica keeps its snapshot in memory and stays Ready if the files vanish or a
   later manifest is refused.
 - **RBAC** is the operator's namespace-scoped Role: `ratelimitpolicies` get/list/watch, `ratelimitpolicies/status`
-  update/patch, Lease create/update/get, EndpointSlice of the Service `ratelimit` get/list/watch, ConfigMap CRUD, its
-  own Deployment get (the ConfigMap's owner), `events` create/patch. No ClusterRole. The service has no Role and no
+  update, Lease get/create/update, EndpointSlice get/list/watch, ConfigMap create and, by the name `ratelimit-config`,
+  get/list/watch/update, its own Deployment get (the ConfigMap's owner), `events` create/patch; the
+  [Role table](helm-chart.md#roleyaml-operator-chart) carries each rule. No ClusterRole. The service has no Role and no
   token: a depguard rule forbids client-go and controller-runtime under `service/`, and CI reads the build information
   of the service binary and fails when client-go is present.
-- **Contract** is a set of constants in one Go package that both binaries import: the Service `ratelimit`, its gRPC
-  port 9000 named `grpc`, the probe port published on the Service under the name `metrics` (the service's metrics
-  port, 8080), the ConfigMap `ratelimit-config`, the mode rule, and the one namespace for both charts.
-  Satellites compute the RLS address from the Service name, `ratelimit.<BASELINE_ORIGIN>.svc.cluster.local:9000` (or
-  `BASELINE_CONTROLLER` when the platform sets it, read for parity with `control-plane`), and the operator reads its
-  fleet through the same name. A CI test renders both charts and compares the rendered names and ports with the
-  constants, and the [chart document](helm-chart.md) lists the contract.
+- **Contract** is a set of constants in one Go package that both binaries import: the Service `ratelimit`, its gRPC port
+  9000 named `grpc`, the probe port published on the Service under the name `metrics` (the service's metrics port,
+  8080), and the ConfigMap `ratelimit-config`. The mode rule, satellite iff `BASELINE_ORIGIN` is non-empty, is the
+  `ratelimit.mode` helper in the `_helpers.tpl` of each namespace chart, and the two namespace charts are installed in
+  one namespace; the CRD chart has neither. Satellites compute the RLS address from the Service name,
+  `ratelimit.<BASELINE_ORIGIN>.svc.cluster.local:9000` (or `BASELINE_CONTROLLER` when the platform sets it, read for
+  parity with `control-plane`), and the operator reads its fleet through the same name. A CI test renders both charts
+  and compares the rendered names and ports with the constants, and the [chart document](helm-chart.md) lists the
+  contract.
 - **Counter key** carries the service's namespace in the hash tag: `rl:v1:{<namespace>/<domain>}:<block>/<rule>:…`.
   The service substitutes the segment (Downward API), as insurance against two installations connecting to one Redis
   by mistake; filters and gateways take no part in the key shape.
@@ -182,8 +187,13 @@ is updated, while the domain runs on last-good the whole time. A rollout restart
 each of them starts from the ConfigMap; without last-good in it such an edit would mean a wholly unprotected domain. A
 restart of the operator reads the same ConfigMap back, so the last-good entry survives it as well.
 
-The operator emits `Warning` events on the policy on a ConfigMap write error and on `NotCompiled`, one per generation
-change; there are no `Normal` events.
+The operator emits two `Warning` events on the policy and no `Normal` ones. `NotCompiled` is recorded once per
+generation that does not compile, with the message `generation <N> does not compile: <error>`. `LastGoodLost` is
+recorded once, when the operator drops the saved last-good generation, with the reason, `last-good generation <N> does
+not compile with this operator build: <error>` or `last-good generation <N> was saved from a read that did not carry
+every field`, followed by `; the domain enforces nothing until a generation compiles`. A ConfigMap write error raises
+no event: it counts in `ratelimit_config_write_errors_total` by reason, and the operator logs
+`failed to write the configuration`.
 
 ## Status
 
@@ -209,8 +219,9 @@ The policy's conditions follow the Kubernetes API conventions:
 Scaling and rollouts do not make `Ready` flicker: a pod enters the denominator only once it is ready, that is, once it
 has applied the manifest the kubelet mounted at its start, and drops out as soon as it is terminating. Only the
 operator writes the status, and the two no-replica cases differ: when the operator is alive but there are no ready
-endpoints, the result is `Ready: False / NoReplicas`; when the operator has no pod, nobody can write, the status
-freezes, and the age of `lastCheckTime` shows how stale it is. Details and examples are in the
+endpoints, the result is `Ready: False / NoReplicas`; when the operator has no pod, nobody can write and the status
+freezes. The operator rewrites `lastCheckTime` on every status change and otherwise once it is 5 minutes old, so an
+age past 5 minutes and a probe cycle means that no operator is writing. Details and examples are in the
 [specification](ratelimitpolicy-cr-spec.md).
 
 ## Delivery: monorepo, one application
@@ -223,7 +234,7 @@ contents from `BASELINE_ORIGIN`:
 
 | Scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | Deployment (`REPLICAS` replicas, one active), ServiceAccount, Role/RoleBinding; behind `MONITORING_ENABLED`, PodMonitor | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, AuthorizationPolicy of the management port, EnvoyFilters; behind `MONITORING_ENABLED`, PodMonitor and GrafanaDashboard |
+| single namespace | Deployment (`REPLICAS`, one active), SA, Role/RoleBinding; with `MONITORING_ENABLED`, PodMonitor and PrometheusRule | Deployment (`REPLICAS`), Service, SA, HPA, EnvoyFilters; with `redis.dbaas.enabled`, InternalDatabase and DatabaseSecretClaim; with `management.enabled`, AuthorizationPolicy; with `MONITORING_ENABLED`, PodMonitor, PrometheusRule, GrafanaDashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | nothing: an empty release | only EnvoyFilters that target the baseline RLS; no Deployment, no Service, no ServiceAccount |
 
@@ -240,8 +251,9 @@ from the components list of `.github/docker-dev-config*.json`.
 The repository has one version line, and both images and both charts carry it. The ConfigMap format carries its own
 integer `formatVersion` in the manifest: the operator writes version N, and the service reads N and N-1. Any change of
 what the operator writes, a field added to the spec included, increments the version. An upgrade installs the service
-first, then the operator, and a rollback reverses the order. A fresh installation needs no order: the service waits
-NotReady until the operator writes.
+first, then the operator, and a rollback reverses the order. A fresh installation installs the operator chart before
+the service chart: the service stays NotReady until the operator writes, and the service chart's EnvoyFilters are live
+from the moment it is installed.
 
 **The CRD ships in a chart of its own**, `ratelimit-crds`, installed by one release per cluster before the namespace
 charts and upgraded first, to the newest operator version in the cluster. It carries `helm.sh/resource-policy: keep`,
@@ -280,11 +292,12 @@ the satellite namespace" step, run with `make test-e2e-go E2E_SATELLITE_NAMESPAC
 
 The suites cover both halves:
 
-- The data-plane suites (`ratelimit`, `jwt`, `budget`, `failopen`, `redis`, `shadow`, `unknowndomain`, `management`,
+- The data-plane suites (`ratelimit`, `jwt`, `failopen`, `redis`, `shadow`, `unknown-domain`, `management`,
   `management-outage`, `snapshot`) exercise the service through the gateway, the management port, and the diagnostics
   port.
-- The `policy`, `lagging`, `rollout`, `metrics`, and `satellite` suites cover the configuration path: the operator
-  writes the status and the ConfigMap, and a policy change reaches the replicas through the volume.
+- The `policy`, `budget`, `lagging`, `rollout`, `metrics`, and `satellite` suites cover the configuration path: the
+  operator writes the status and the ConfigMap, and a policy change reaches the replicas through the volume; `budget`
+  sends no traffic, since a generation over the decision budget is refused by the operator alone.
 - The operator suite covers its rollout: the one pod is replaced under the Lease, rate limiting continues throughout,
   and the new pod resumes the status writes.
 - The `coldstart` suite covers a service without an operator: a replica started with only the ConfigMap to stand on

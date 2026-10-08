@@ -7,8 +7,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
-	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
@@ -26,7 +27,7 @@ var _ = Describe("the decision budget", Ordered, Label("budget"), func() {
 	// worst-case decision is 4n buckets.
 	rules := func(n int) []v1.LimitBlock {
 		out := make([]v1.Rule, 0, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			out = append(out, v1.Rule{
 				Name: fmt.Sprintf("r%02d", i),
 				Rates: []v1.Rate{
@@ -53,28 +54,25 @@ var _ = Describe("the decision budget", Ordered, Label("budget"), func() {
 	It("refuses a generation over it and keeps the last good one", func() {
 		Expect(apply(newPolicy(domain, rules(33)))).To(Succeed())
 
-		Eventually(func() string {
-			p, err := getPolicy(domain)
-			if err != nil {
-				return ""
-			}
-			c := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionAccepted)
-			if c == nil || c.Status != "False" {
-				return ""
-			}
-			return c.Reason
-		}).Should(Equal(v1.ReasonCompilationFailed),
-			"a generation over the budget must not compile")
+		Eventually(conditionOf(domain, v1.ConditionAccepted)).Should(
+			gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"Status": Equal(metav1.ConditionFalse),
+				"Reason": Equal(v1.ReasonCompilationFailed),
+			}), "a generation over the budget must not compile")
 
+		// The last-good generation keeps serving behind the refused latest one,
+		// so the two generations diverge: a bad edit costs an answer, not the
+		// limits. The first rule problem names the budget.
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(p.Status.ActiveGeneration).NotTo(BeZero(),
-			"the last-good generation keeps serving: a bad edit costs an answer, not the limits")
-		Expect(p.Status.ActiveGeneration).To(BeNumerically("<", p.Status.ObservedGeneration),
-			"the two generations must diverge while the latest one is refused")
-
-		Expect(p.Status.RuleProblems).NotTo(BeEmpty())
-		Expect(p.Status.RuleProblems[0].Reason).To(Equal(v1.ProblemDomainBudgetExceeded))
+		Expect(p.Status).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"ActiveGeneration": And(Not(BeZero()), BeNumerically("<", p.Status.ObservedGeneration)),
+			"RuleProblems": gstruct.MatchElementsWithIndex(gstruct.IndexIdentity, gstruct.IgnoreExtras, gstruct.Elements{
+				"0": gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+					"Reason": Equal(v1.ProblemDomainBudgetExceeded),
+				}),
+			}),
+		}), "the status of the refused generation %d", p.Status.ObservedGeneration)
 
 		Eventually(policyCondition(domain, v1.ConditionStalled)).Should(Equal("True"),
 			"a generation stuck on last-good is what Stalled is for")
@@ -83,12 +81,14 @@ var _ = Describe("the decision budget", Ordered, Label("budget"), func() {
 	It("takes the generation back once it fits again", func() {
 		Expect(apply(newPolicy(domain, rules(16)))).To(Succeed())
 
-		Eventually(policyCondition(domain, v1.ConditionAccepted)).Should(Equal("True"))
+		Eventually(policyCondition(domain, v1.ConditionAccepted)).Should(Equal("True"),
+			"a generation back within the budget must compile")
 		Eventually(policyCondition(domain, v1.ConditionStalled)).Should(Equal("False"),
 			"a generation that compiles again is no longer stuck")
 
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(p.Status.ActiveGeneration).To(Equal(p.Status.ObservedGeneration))
+		Expect(p.Status.ActiveGeneration).To(Equal(p.Status.ObservedGeneration),
+			"the generation that fits again is not the active one")
 	})
 })

@@ -4,11 +4,14 @@ package e2e
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -76,37 +79,36 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 	})
 
 	It("counts checks by domain and verdict", func() {
-		Expect(hasSeries(families, "ratelimit_checks_total",
-			map[string]string{"domain": domain, "verdict": "ok"})).To(BeTrue(),
-			"the scrape carries no admitted checks")
-		Expect(hasSeries(families, "ratelimit_checks_total",
-			map[string]string{"domain": domain, "verdict": "over_limit"})).To(BeTrue(),
-			"the scrape carries no refused checks")
+		Expect(seriesLabels(families, "ratelimit_checks_total")).To(ContainElements(
+			gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{"domain": Equal(domain), "verdict": Equal("ok")}),
+			gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{"domain": Equal(domain), "verdict": Equal("over_limit")}),
+		), "the scrape carries no admitted or no refused checks of %s", domain)
 	})
 
 	It("attributes the refusal to its block/rule identity", func() {
-		Expect(hasSeries(families, "ratelimit_decisions_total",
-			map[string]string{"domain": domain, "outcome": "over_limit", "rule": rule})).To(BeTrue(),
-			"the scrape does not attribute the refusal to %s", rule)
+		Expect(seriesLabels(families, "ratelimit_decisions_total")).To(ContainElement(
+			gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{
+				"domain": Equal(domain), "outcome": Equal("over_limit"), "rule": Equal(rule),
+			})), "the scrape does not attribute the refusal to %s", rule)
 	})
 
 	It("counts the near-limit precursor", func() {
-		Expect(hasSeries(families, "ratelimit_near_limit_total",
-			map[string]string{"domain": domain, "rule": rule})).To(BeTrue(),
+		Expect(seriesLabels(families, "ratelimit_near_limit_total")).To(ContainElement(
+			gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{"domain": Equal(domain), "rule": Equal(rule)})),
 			"the scrape carries no near-limit precursor for %s", rule)
 	})
 
 	It("times checks with the filter-timeout boundary", func() {
 		// The 50ms bucket is the boundary the gateway filter timeout sits on;
 		// "p99 over the budget" reads exactly only while it exists.
-		Expect(histogramBound(families, "ratelimit_check_duration_seconds",
-			map[string]string{"domain": domain}, 0.05)).To(BeTrue(),
+		Expect(histogramBounds(families, "ratelimit_check_duration_seconds",
+			map[string]string{"domain": domain})).To(ContainElement(0.05),
 			"the check duration histogram lost its 0.05 bucket boundary")
 	})
 
 	It("counts the configurations applied", func() {
-		Expect(hasSeries(families, "ratelimit_snapshot_rebuilds_total",
-			map[string]string{"result": "ok"})).To(BeTrue(),
+		Expect(seriesLabels(families, "ratelimit_snapshot_rebuilds_total")).To(ContainElement(
+			gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{"result": Equal("ok")})),
 			"the scrape carries no successful apply")
 	})
 
@@ -127,56 +129,73 @@ var _ = Describe("the metrics endpoint", Ordered, Label("metrics"), func() {
 			return gaugeValue(operator, "ratelimit_policy_ready", map[string]string{"domain": domain, "reason": ""})
 		}).WithTimeout(propagationTimeout).WithPolling(3*time.Second).Should(Equal(1.0),
 			"the operator's scrape does not report %s ready", domain)
-		Expect(gaugeValue(operator, "ratelimit_policy_enforced",
-			map[string]string{"domain": domain})).To(Equal(1.0))
-		Expect(gaugeValue(operator, "ratelimit_policy_replicas",
-			map[string]string{"domain": domain, "state": "applied"})).To(BeNumerically(">", 0),
-			"the operator's scrape carries no fleet")
-		Expect(gaugeValue(operator, "ratelimit_leader", nil)).To(Equal(1.0),
-			"the operator holds the lease and its scrape has to say so")
+		// The same scrape carries the fleet behind the verdict, and the leader
+		// gauge, since the operator holds the lease and its scrape has to say so.
+		gauges := struct{ PolicyEnforced, PolicyReplicasApplied, Leader float64 }{
+			PolicyEnforced: gaugeValue(operator, "ratelimit_policy_enforced", map[string]string{"domain": domain}),
+			PolicyReplicasApplied: gaugeValue(operator, "ratelimit_policy_replicas",
+				map[string]string{"domain": domain, "state": "applied"}),
+			Leader: gaugeValue(operator, "ratelimit_leader", nil),
+		}
+		Expect(gauges).To(gstruct.MatchAllFields(gstruct.Fields{
+			"PolicyEnforced":        Equal(1.0),
+			"PolicyReplicasApplied": BeNumerically(">", 0),
+			"Leader":                Equal(1.0),
+		}), "the gauges of %s on the operator's scrape", domain)
 	})
 
 	It("gauges the domain facts", func() {
-		Expect(hasSeries(families, "ratelimit_domain_decision_buckets",
-			map[string]string{"domain": domain})).To(BeTrue(),
-			"the scrape carries no domain budget gauge")
-		Expect(gaugeValue(families, "ratelimit_domain_blocks",
-			map[string]string{"domain": domain})).To(Equal(1.0))
-		Expect(gaugeValue(families, "ratelimit_domain_rules",
-			map[string]string{"domain": domain})).To(Equal(1.0),
-			"the scrape does not count the rules of the domain")
+		facts := struct {
+			DecisionBucketsSeries []map[string]string
+			Blocks, Rules         float64
+		}{
+			DecisionBucketsSeries: seriesLabels(families, "ratelimit_domain_decision_buckets"),
+			Blocks:                gaugeValue(families, "ratelimit_domain_blocks", map[string]string{"domain": domain}),
+			Rules:                 gaugeValue(families, "ratelimit_domain_rules", map[string]string{"domain": domain}),
+		}
+		Expect(facts).To(gstruct.MatchAllFields(gstruct.Fields{
+			"DecisionBucketsSeries": ContainElement(
+				gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{"domain": Equal(domain)})),
+			"Blocks": Equal(1.0),
+			"Rules":  Equal(1.0),
+		}), "the domain gauges of %s on the service scrape", domain)
 	})
 
 	It("labels the extraction series by domain", func() {
 		// Seeded at zero on apply: the series exists before any token
 		// arrives, and it is the domain's, since a key is declared per
 		// domain and a dead claim path is a fact about one domain's mapping.
-		Expect(hasSeries(families, "ratelimit_extractions_total",
-			map[string]string{"domain": domain, "key": "sub"})).To(BeTrue(),
+		Expect(seriesLabels(families, "ratelimit_extractions_total")).To(ContainElement(
+			gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{"domain": Equal(domain), "key": Equal("sub")})),
 			"the scrape carries no seeded extraction series for the domain's built-in key")
 	})
 
-	It("names its version on both scrapes", func() {
-		for name, scrape := range map[string]map[string]*dto.MetricFamily{
-			"service": families, "operator": operator,
-		} {
-			series := seriesOf(scrape, "ratelimit_build_info", map[string]string{"component": name})
-			Expect(series).NotTo(BeNil(), "the %s scrape carries no build info", name)
-			Expect(series.GetGauge().GetValue()).To(Equal(1.0), name)
-			var version string
-			for _, pair := range series.GetLabel() {
-				if pair.GetName() == "version" {
-					version = pair.GetValue()
-				}
-			}
-			Expect(version).NotTo(BeEmpty(), "the %s scrape names no version", name)
-		}
+	// expectBuildInfo asserts the build info of one component's scrape: a
+	// series of value 1 that names a version.
+	expectBuildInfo := func(scrape map[string]*dto.MetricFamily, component string) {
+		GinkgoHelper()
+		series := seriesOf(scrape, "ratelimit_build_info", map[string]string{"component": component})
+		Expect(series).NotTo(BeNil(), "the %s scrape carries no build info", component)
+		Expect(series.GetGauge().GetValue()).To(Equal(1.0), "ratelimit_build_info on the %s scrape", component)
+		Expect(labelsOf(series)).To(HaveKeyWithValue("version", Not(BeEmpty())),
+			"the %s scrape names no version", component)
+	}
+
+	It("names its version on the service scrape", func() {
+		expectBuildInfo(families, "service")
 	})
 
-	It("carries the Go runtime series on both scrapes", func() {
-		Expect(families).To(HaveKey("go_goroutines"),
+	It("names its version on the operator scrape", func() {
+		expectBuildInfo(operator, "operator")
+	})
+
+	It("carries the Go runtime series on the service scrape", func() {
+		Expect(slices.Sorted(maps.Keys(families))).To(ContainElement("go_goroutines"),
 			"the Go runtime series are not riding along on the service")
-		Expect(operator).To(HaveKey("go_goroutines"),
+	})
+
+	It("carries the Go runtime series on the operator scrape", func() {
+		Expect(slices.Sorted(maps.Keys(operator))).To(ContainElement("go_goroutines"),
 			"the Go runtime series are not riding along on the operator")
 	})
 
@@ -205,14 +224,7 @@ func scrapeAllReplicas() map[string]*dto.MetricFamily {
 // than the pod network, so a scrape reads a pod that a mesh policy has
 // silenced to its peers.
 func mergeScrape(families map[string]*dto.MetricFamily, pod corev1.Pod) {
-	port := 0
-	for _, c := range pod.Spec.Containers {
-		for _, p := range c.Ports {
-			if p.Name == "metrics" {
-				port = int(p.ContainerPort)
-			}
-		}
-	}
+	port := namedPort(pod, "metrics")
 	Expect(port).NotTo(BeZero(), "pod %s exposes no metrics port", pod.Name)
 
 	addr, stop := forwardToPod(pod.Name, port)
@@ -238,12 +250,6 @@ func mergeScrape(families map[string]*dto.MetricFamily, pod corev1.Pod) {
 	}
 }
 
-// hasSeries reports whether the family holds a series carrying every given
-// label pair.
-func hasSeries(families map[string]*dto.MetricFamily, name string, labels map[string]string) bool {
-	return seriesOf(families, name, labels) != nil
-}
-
 // gaugeValue returns the value of the matching gauge series, NaN-free zero
 // when there is none - the mismatch then reads as "not 1" rather than a
 // panic.
@@ -255,41 +261,83 @@ func gaugeValue(families map[string]*dto.MetricFamily, name string, labels map[s
 	return m.GetGauge().GetValue()
 }
 
-// histogramBound reports whether the matching histogram series declares a
-// bucket with the given upper bound.
-func histogramBound(families map[string]*dto.MetricFamily, name string, labels map[string]string, bound float64) bool {
-	m := seriesOf(families, name, labels)
-	if m == nil {
-		return false
+// counterSum adds up every series of the family that carries the given
+// labels - counters arrive per replica, and the union is what a burst
+// touched.
+func counterSum(families map[string]*dto.MetricFamily, name string, labels map[string]string) float64 {
+	family := families[name]
+	if family == nil {
+		return 0
 	}
-	for _, b := range m.GetHistogram().GetBucket() {
-		if b.GetUpperBound() == bound {
-			return true
+	total := 0.0
+	for _, m := range family.Metric {
+		if carries(m, labels) {
+			total += m.GetCounter().GetValue()
 		}
 	}
-	return false
+	return total
 }
 
+// histogramBounds returns the bucket upper bounds of the matching histogram
+// series, nil when there is none.
+func histogramBounds(families map[string]*dto.MetricFamily, name string, labels map[string]string) []float64 {
+	m := seriesOf(families, name, labels)
+	if m == nil {
+		return nil
+	}
+	bounds := make([]float64, 0, len(m.GetHistogram().GetBucket()))
+	for _, b := range m.GetHistogram().GetBucket() {
+		bounds = append(bounds, b.GetUpperBound())
+	}
+	return bounds
+}
+
+// seriesOf returns the first series of the family that carries the given
+// labels, nil when there is none.
 func seriesOf(families map[string]*dto.MetricFamily, name string, labels map[string]string) *dto.Metric {
 	family := families[name]
 	if family == nil {
 		return nil
 	}
 	for _, m := range family.Metric {
-		carried := map[string]string{}
-		for _, pair := range m.Label {
-			carried[pair.GetName()] = pair.GetValue()
-		}
-		matches := true
-		for k, v := range labels {
-			if carried[k] != v {
-				matches = false
-				break
-			}
-		}
-		if matches {
+		if carries(m, labels) {
 			return m
 		}
 	}
 	return nil
+}
+
+// seriesLabels returns the label set of every series of the family, nil when
+// the scrape carries no such family. An assertion over it prints the series
+// the scrape does carry.
+func seriesLabels(families map[string]*dto.MetricFamily, name string) []map[string]string {
+	family := families[name]
+	if family == nil {
+		return nil
+	}
+	sets := make([]map[string]string, 0, len(family.Metric))
+	for _, m := range family.Metric {
+		sets = append(sets, labelsOf(m))
+	}
+	return sets
+}
+
+// carries reports whether the series carries every given label pair.
+func carries(m *dto.Metric, labels map[string]string) bool {
+	carried := labelsOf(m)
+	for k, v := range labels {
+		if carried[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// labelsOf returns the label pairs of one series.
+func labelsOf(m *dto.Metric) map[string]string {
+	carried := make(map[string]string, len(m.GetLabel()))
+	for _, pair := range m.GetLabel() {
+		carried[pair.GetName()] = pair.GetValue()
+	}
+	return carried
 }

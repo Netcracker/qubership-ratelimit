@@ -3,7 +3,6 @@ package controller
 import (
 	"os"
 	"path/filepath"
-	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -11,17 +10,40 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
+
+	ratelimitv1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
+
+// samplesDir holds the sample policies the documentation points at.
+var samplesDir = filepath.Join("..", "..", "..", "config", "samples")
+
+// sampleFiles names the sample policies in samplesDir, leaving out the
+// kustomization that lists them. It runs while the specs are being built, so
+// it reports a failed read as no samples, which the spec that counts them
+// turns into a failure.
+func sampleFiles() []string {
+	paths, err := filepath.Glob(filepath.Join(samplesDir, "*.yaml"))
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, path := range paths {
+		if name := filepath.Base(path); name != "kustomization.yaml" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
 
 // The samples are documentation that runs. A sample the API server rejects
 // teaches the wrong schema to whoever copies it, and nothing else in the build
 // would notice: they are never applied by a test, a chart, or an install.
 var _ = Describe("the samples in config/samples", func() {
 	const namespace = "ratelimit-samples"
+	samples := sampleFiles()
 
 	BeforeEach(func() {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
@@ -31,94 +53,60 @@ var _ = Describe("the samples in config/samples", func() {
 		}
 	})
 
-	It("are accepted by the API server, and reconcile", func() {
-		paths, err := filepath.Glob(filepath.Join("..", "..", "..", "config", "samples", "*.yaml"))
+	// apply creates the sample of file name in the namespace, deletes it when
+	// the spec ends, and returns its key.
+	apply := func(name string) client.ObjectKey {
+		raw, err := os.ReadFile(filepath.Join(samplesDir, name))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(paths).NotTo(BeEmpty(), "no samples were found; has the directory moved?")
+		object := &unstructured.Unstructured{}
+		Expect(yaml.Unmarshal(raw, object)).To(Succeed(), "decoding sample %s", name)
+		Expect(object.GetKind()).To(Equal("RateLimitPolicy"), "the kind of sample %s", name)
+		object.SetNamespace(namespace)
 
-		policies := &RateLimitPolicyReconciler{
-			Client: k8sClient, Scheme: k8sClient.Scheme(), Namespace: namespace,
-		}
+		Expect(k8sClient.Create(ctx, object)).To(Succeed(), "creating sample %s", name)
+		DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, object))).To(Succeed())
+		})
+		return client.ObjectKeyFromObject(object)
+	}
 
-		for _, path := range paths {
-			name := filepath.Base(path)
-			if name == "kustomization.yaml" {
-				continue
+	It("are found", func() {
+		Expect(samples).NotTo(BeEmpty(), "no samples were found in %s; has the directory moved?", samplesDir)
+	})
+
+	// The reconciler has no probe, so the status it writes reports the fleet
+	// unobserved; what the spec establishes is that the API server accepts
+	// that status for the sample.
+	for _, name := range samples {
+		It("reconcile "+name+" once the API server accepts it", func() {
+			key := apply(name)
+			reconciler := &RateLimitPolicyReconciler{
+				Client: k8sClient, Scheme: k8sClient.Scheme(), Namespace: namespace,
 			}
 
-			By("applying " + name)
-			raw, err := os.ReadFile(path)
-			Expect(err).NotTo(HaveOccurred())
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 
-			object := &unstructured.Unstructured{}
-			Expect(yaml.Unmarshal(raw, object)).To(Succeed())
-			object.SetNamespace(namespace)
-
-			Expect(k8sClient.Create(ctx, object)).To(Succeed(), "sample %s", name)
-			DeferCleanup(func() {
-				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, object))).To(Succeed())
-			})
-
-			By("reconciling " + name)
-			Expect(object.GetKind()).To(Equal("RateLimitPolicy"), "unexpected kind in "+name)
-			_, err = policies.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(object)})
-			Expect(err).NotTo(HaveOccurred(), "sample %s", name)
-		}
-	})
-
-	It("compile without a single problem", func() {
-		// Each sample declares the keys its own rules reference, because a domain
-		// is one object. A sample that left a problem behind would be documenting
-		// a policy nobody should copy.
-		for _, name := range []string{
-			"ratelimit_v1_ratelimitpolicy_public.yaml",
-			"ratelimit_v1_ratelimitpolicy_tiered.yaml",
-		} {
-			raw, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "samples", name))
-			Expect(err).NotTo(HaveOccurred())
-
-			object := &unstructured.Unstructured{}
-			Expect(yaml.Unmarshal(raw, object)).To(Succeed())
-			object.SetNamespace(namespace)
-			Expect(k8sClient.Create(ctx, object)).To(Succeed(), "sample %s", name)
-			DeferCleanup(func() {
-				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, object))).To(Succeed())
-			})
-		}
-
-		reconciler := &RateLimitPolicyReconciler{
-			Client: k8sClient, Scheme: k8sClient.Scheme(), Namespace: namespace,
-		}
-		for _, policyName := range []string{"gateway.public", "gateway.partner"} {
-			request := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: namespace, Name: policyName}}
-			_, err := reconciler.Reconcile(ctx, request)
-			Expect(err).NotTo(HaveOccurred())
-
-			reconciled := &unstructured.Unstructured{}
-			reconciled.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "ratelimit.netcracker.com",
-				Version: "v1",
-				Kind:    "RateLimitPolicy",
-			})
-			Expect(k8sClient.Get(ctx, request.NamespacedName, reconciled)).To(Succeed())
-
-			problems, found, err := unstructured.NestedSlice(reconciled.Object, "status", "ruleProblems")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(found && len(problems) > 0).To(BeFalse(),
-				"sample %s reports %v", policyName, describe(problems))
-		}
-	})
-})
-
-// describe renders the problems of a status for a failure message.
-func describe(problems []any) string {
-	var reasons []string
-	for _, problem := range problems {
-		entry, ok := problem.(map[string]any)
-		if !ok {
-			continue
-		}
-		reasons = append(reasons, entry["block"].(string)+"/"+entry["rule"].(string)+": "+entry["reason"].(string))
+			Expect(err).NotTo(HaveOccurred(), "Reconcile of sample %s", name)
+		})
 	}
-	return strings.Join(reasons, "; ")
-}
+
+	// Each sample declares the keys its own rules reference, because a domain
+	// is one object. A sample that left a problem behind would be documenting
+	// a policy nobody should copy.
+	DescribeTable("compile without a single problem",
+		func(name string) {
+			key := apply(name)
+			reconciler := &RateLimitPolicyReconciler{
+				Client: k8sClient, Scheme: k8sClient.Scheme(), Namespace: namespace,
+			}
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred(), "Reconcile of sample %s", name)
+
+			reconciled := &ratelimitv1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, key, reconciled)).To(Succeed())
+			Expect(reconciled.Status.RuleProblems).To(BeEmpty(), "status.ruleProblems of sample %s", name)
+		},
+		Entry("the public sample", "ratelimit_v1_ratelimitpolicy_public.yaml"),
+		Entry("the tiered sample", "ratelimit_v1_ratelimitpolicy_tiered.yaml"),
+	)
+})

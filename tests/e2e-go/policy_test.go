@@ -8,6 +8,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -42,8 +43,8 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		func(mutate func(*v1.RateLimitPolicy)) {
 			p := newPolicy(domain, totalLimits(1, 1))
 			mutate(p)
-			err := k8s.Create(ctx, p, client.DryRunAll)
-			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid rejection, got: %v", err)
+			Expect(k8s.Create(ctx, p, client.DryRunAll)).To(Satisfy(apierrors.IsInvalid),
+				"a dry-run Create of the policy, which has to be refused as Invalid")
 		},
 		Entry("a name that is not the domain", func(p *v1.RateLimitPolicy) {
 			p.Name = "something-else"
@@ -66,13 +67,15 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 			"policy not accepted; is the operator running?")
 
 		// observedGeneration proves the status was written for the spec that
-		// exists now, not left over from an earlier generation.
+		// exists now, not left over from an earlier generation, and the status
+		// publishes the key set the rules resolve against.
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(p.Status.ObservedGeneration).To(Equal(p.Generation))
-		Expect(p.Status.ActiveGeneration).To(Equal(p.Generation))
-		Expect(p.Status.EffectiveKeys).To(ContainElement("sub"),
-			"the status must publish the key set the rules resolve against")
+		Expect(p.Status).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"ObservedGeneration": Equal(p.Generation),
+			"ActiveGeneration":   Equal(p.Generation),
+			"EffectiveKeys":      ContainElement("sub"),
+		}), "the status of generation %d", p.Generation)
 	})
 
 	// The one property no unit test can show: the operator in a real cluster
@@ -84,15 +87,16 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("False"),
 			"a fleet that agrees is not stalled")
 
+		// Total counts the ready endpoints of the Service the operator saw,
+		// Applied the ones enforcing the generation, and the probe time says
+		// the operator is alive.
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(p.Status.Replicas.Total).To(BeNumerically(">", 0),
-			"the operator saw no ready endpoint of the Service")
-		Expect(p.Status.Replicas.Applied).To(Equal(p.Status.Replicas.Total),
-			"Ready is true while %d of %d replicas enforce the generation",
-			p.Status.Replicas.Applied, p.Status.Replicas.Total)
-		Expect(p.Status.Replicas.LastCheckTime).NotTo(BeNil(),
-			"the status carries no probe time, so nothing says the operator is alive")
+		Expect(p.Status.Replicas).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"Total":         BeNumerically(">", 0),
+			"Applied":       Equal(p.Status.Replicas.Total),
+			"LastCheckTime": Not(BeNil()),
+		}), "the replicas of a Ready policy")
 	})
 
 	It("shows the fleet in the printer columns", func() {
@@ -121,7 +125,8 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 				return ""
 			}
 			return p.Status.RuleProblems[0].Reason
-		}).Should(Equal(v1.ProblemUnresolvedKeyReference))
+		}).Should(Equal(v1.ProblemUnresolvedKeyReference),
+			"the reason of the first rule problem of a rule over the undeclared key tenant")
 
 		// Enforced as written or not at all: the conditions have to say so, and
 		// the generation must not be the active one.
@@ -132,18 +137,19 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("True"),
 			"a generation that does not compile is stuck, not merely in progress")
 
-		// The base asserted activeGeneration == 0 here, which a separate
-		// never-valid object made true. One policy per domain means this is an
-		// edit to an object that already has a good generation, so the honest
-		// assertion is that the broken one is not the enforced one.
+		// One policy per domain makes this an edit to an object that already
+		// has a good generation, so the active generation is that earlier one
+		// rather than zero: what has to hold is that the broken generation is
+		// not the enforced one.
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(p.Status.ObservedGeneration).To(Equal(p.Generation))
-		Expect(p.Status.ActiveGeneration).NotTo(Equal(p.Status.ObservedGeneration),
-			"a generation with a blocking problem was enforced")
+		Expect(p.Status).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"ObservedGeneration": Equal(p.Generation),
+			"ActiveGeneration":   Not(Equal(p.Generation)),
+		}), "a generation with a blocking problem was enforced; the status of generation %d", p.Generation)
 	})
 
-	It("revives that rule when the same object declares the key", func() {
+	It("revives a rule over an undeclared key once the same object maps the key", func() {
 		// Extraction and rules live in one object, so this is one edit and one
 		// generation: a request never sees new rules over old extraction.
 		p, err := getPolicy(domain)
@@ -169,9 +175,9 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		// outlives the edit that broke it. Breaking the policy before its
 		// good generation reached the ConfigMap would leave nothing to fall
 		// back to; the waits ARE the test.
-		Eventually(generations(domain)).Should(WithTransform(
-			func(g [2]int64) bool { return g[1] > 0 && g[0] == g[1] }, BeTrue()),
-			"the policy never reached an active generation to fall back to")
+		Eventually(generations(domain)).Should(Satisfy(
+			func(g [2]int64) bool { return g[1] > 0 && g[0] == g[1] }),
+			"the policy never reached an active generation to fall back to; (observed, active)")
 		Eventually(manifestGeneration(domain)).Should(Equal(generations(domain)()[1]),
 			"the last-good generation was never written to %s", contract.ConfigMapName)
 
@@ -186,9 +192,9 @@ var _ = Describe("policy lifecycle", Ordered, Label("policy"), func() {
 		}}}}
 		Expect(k8s.Update(ctx, p)).To(Succeed())
 
-		Eventually(generations(domain)).Should(WithTransform(
-			func(g [2]int64) bool { return g[1] > 0 && g[0] != g[1] }, BeTrue()),
-			"expected an earlier generation to stay active while the edit is refused")
+		Eventually(generations(domain)).Should(Satisfy(
+			func(g [2]int64) bool { return g[1] > 0 && g[0] != g[1] }),
+			"expected an earlier generation to stay active while the edit is refused; (observed, active)")
 		Expect(manifestGeneration(domain)()).To(Equal(generations(domain)()[1]),
 			"the ConfigMap carries a generation other than the active one")
 

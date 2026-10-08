@@ -70,39 +70,35 @@ var _ = Describe("fail-open with the store down", Ordered, Label("failopen"), fu
 
 		// The gateway must keep admitting - fail-open - while the service
 		// reports what is happening: unavailable verdicts and store errors.
-		Eventually(func() bool {
-			codes := gatewayBurst("public-gateway", probePath, 2, nil)
-			for _, code := range codes {
-				if (code < 200 || code > 299) && code != 404 {
-					return false
-				}
-			}
+		unavailable := map[string]string{"domain": domain, "verdict": "unavailable"}
+		storeErrors := map[string]string{"domain": domain}
+		Eventually(func(g Gomega) {
+			g.Expect(gatewayBurst("public-gateway", probePath, 2, nil)).To(HaveEach(beAdmitted()),
+				"a burst through public-gateway with the store down")
 			after := scrapeAllReplicas()
-			return counterSum(after, "ratelimit_checks_total",
-				map[string]string{"domain": domain, "verdict": "unavailable"})-
-				counterSum(before, "ratelimit_checks_total",
-					map[string]string{"domain": domain, "verdict": "unavailable"}) > 0 &&
-				counterSum(after, "ratelimit_store_errors_total", map[string]string{"domain": domain})-
-					counterSum(before, "ratelimit_store_errors_total", map[string]string{"domain": domain}) > 0
-		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(BeTrue(),
+			g.Expect(counterSum(after, "ratelimit_checks_total", unavailable)-
+				counterSum(before, "ratelimit_checks_total", unavailable)).To(BeNumerically(">", 0),
+				`growth of ratelimit_checks_total{domain=%q,verdict="unavailable"}`, domain)
+			g.Expect(counterSum(after, "ratelimit_store_errors_total", storeErrors)-
+				counterSum(before, "ratelimit_store_errors_total", storeErrors)).To(BeNumerically(">", 0),
+				"growth of ratelimit_store_errors_total{domain=%q}", domain)
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
 			"the outage did not surface as admitted traffic with unavailable verdicts and store errors")
 	})
 
-	It("enforces again once the store returns", func() {
+	It("counts against the store again once it returns", func() {
 		mid := scrapeAllReplicas()
 		scaleRedis(1)
 
-		Eventually(func() bool {
-			code := gatewayGet("public-gateway", probePath, nil)
-			if (code < 200 || code > 299) && code != 404 {
-				return false
-			}
+		ok := map[string]string{"domain": domain, "verdict": "ok"}
+		Eventually(func(g Gomega) {
+			g.Expect(gatewayGet("public-gateway", probePath, nil)).To(beAdmitted(),
+				"GET %s through public-gateway after the store returned", probePath)
 			after := scrapeAllReplicas()
-			return counterSum(after, "ratelimit_checks_total",
-				map[string]string{"domain": domain, "verdict": "ok"})-
-				counterSum(mid, "ratelimit_checks_total",
-					map[string]string{"domain": domain, "verdict": "ok"}) > 0
-		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(BeTrue(),
+			g.Expect(counterSum(after, "ratelimit_checks_total", ok)-
+				counterSum(mid, "ratelimit_checks_total", ok)).To(BeNumerically(">", 0),
+				`growth of ratelimit_checks_total{domain=%q,verdict="ok"}`, domain)
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
 			"no ok verdict after the store returned; the service did not reconnect")
 	})
 })
