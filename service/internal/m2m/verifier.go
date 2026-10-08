@@ -128,41 +128,31 @@ func NewVerifier(ctx context.Context, cfg Config) (tokenverifier.Verifier, error
 		jwt.WithIssuer(issuer),
 		jwt.WithAudience(cfg.Audience),
 	)
-	return tokenverifier.NewVerifier(parser, heldKeys{inner: keyFunc}, tokenverifier.ValidateIssuedAt)
+	return tokenverifier.NewVerifier(parser, heldKeys{keySource: keyFunc}, tokenverifier.ValidateIssuedAt)
 }
 
 // heldKeys is the key function the verifier looks keys up through. A token
 // whose key id the cached key set does not hold is refused with
 // [jwkset.ErrKeyNotFound] in its chain, whatever ended the lookup: past the
 // first unknown key id in a refresh window the lookup waits on the refresh
-// limiter, and the limiter's error does not wrap [jwkset.ErrKeyNotFound].
+// limiter, and the limiter's error does not wrap [jwkset.ErrKeyNotFound]. The
+// verifier calls KeyfuncCtx alone; the other methods are the wrapped key
+// function's.
 type heldKeys struct {
-	inner keyfunc.Keyfunc
+	keySource
 }
+
+// keySource names the wrapped key function, so that heldKeys can embed it
+// without a field that shadows its Keyfunc method.
+type keySource = keyfunc.Keyfunc
 
 // KeyfuncCtx implements [keyfunc.Keyfunc]; the verifier looks keys up through it.
 func (k heldKeys) KeyfuncCtx(ctx context.Context) jwt.Keyfunc {
-	lookup := k.inner.KeyfuncCtx(ctx)
+	lookup := k.keySource.KeyfuncCtx(ctx)
 	return func(token *jwt.Token) (any, error) {
 		key, err := lookup(token)
 		return key, k.unknown(ctx, token, err)
 	}
-}
-
-// Keyfunc implements [keyfunc.Keyfunc].
-func (k heldKeys) Keyfunc(token *jwt.Token) (any, error) {
-	key, err := k.inner.Keyfunc(token)
-	return key, k.unknown(context.Background(), token, err)
-}
-
-// Storage implements [keyfunc.Keyfunc].
-func (k heldKeys) Storage() jwkset.Storage {
-	return k.inner.Storage()
-}
-
-// VerificationKeySet implements [keyfunc.Keyfunc].
-func (k heldKeys) VerificationKeySet(ctx context.Context) (jwt.VerificationKeySet, error) {
-	return k.inner.VerificationKeySet(ctx)
 }
 
 // unknown adds [jwkset.ErrKeyNotFound] to err when the token names a key id
@@ -176,7 +166,7 @@ func (k heldKeys) unknown(ctx context.Context, token *jwt.Token, err error) erro
 	if !ok {
 		return err
 	}
-	held, readErr := k.inner.Storage().KeyReadAll(ctx)
+	held, readErr := k.Storage().KeyReadAll(ctx)
 	if readErr != nil {
 		return err
 	}
