@@ -85,7 +85,7 @@ func TestBucketKeepsAColonApartFromItsEscapeSequence(t *testing.T) {
 	w := algo.Window{Requests: 100, Period: time.Minute, Burst: 100}
 
 	colon := bucketOf(id, gcra, w, []string{"a:b"})
-	if spelled := bucketOf(id, gcra, w, []string{"a%3Ab"}); spelled == colon {
+	if bucketOf(id, gcra, w, []string{"a%3Ab"}) == colon {
 		t.Errorf(`Bucket(["a:b"]) and Bucket(["a%%3Ab"]) are both %q, want two keys`, colon)
 	}
 }

@@ -348,25 +348,28 @@ func TestStateIsGoneOnceItsWindowDrains(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(1200 * time.Millisecond)
-	for {
-		var live []string
-		for _, b := range buckets {
-			exists, err := c.Exists(t.Context(), b.Key).Result()
-			if err != nil {
-				t.Fatalf("Exists(%s): %v", b.Key, err)
-			}
-			if exists != 0 {
-				live = append(live, b.Key)
-			}
-		}
-		if len(live) == 0 {
-			return
-		}
+	for live := liveKeys(t, c, buckets); len(live) > 0; live = liveKeys(t, c, buckets) {
 		if time.Now().After(deadline) {
 			t.Fatalf("keys %v exist 1.2 s after the decision, want none once both windows drained", live)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// liveKeys returns the keys of the buckets that still exist in c.
+func liveKeys(t *testing.T, c goredis.UniversalClient, buckets []store.Bucket) []string {
+	t.Helper()
+	var live []string
+	for _, b := range buckets {
+		exists, err := c.Exists(t.Context(), b.Key).Result()
+		if err != nil {
+			t.Fatalf("Exists(%s): %v", b.Key, err)
+		}
+		if exists != 0 {
+			live = append(live, b.Key)
+		}
+	}
+	return live
 }
 
 // waitOutBoundary keeps a test clear of the next boundary of a fixed window
