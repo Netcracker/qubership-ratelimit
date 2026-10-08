@@ -14,12 +14,12 @@ import (
 )
 
 // reset runs one addressed DELETE with an Idempotency-Key.
-func (h *testAPI) reset(t *testing.T, query, idempotencyKey string, roles []string) *testResponse {
+func (h *testAPI) reset(t *testing.T, query, idempotencyKey string, caller string) *testResponse {
 	t.Helper()
 
 	target := BasePath + "/domains/" + testDomain + "/counters?" + query
 	request := httptest.NewRequest(http.MethodDelete, target, strings.NewReader(""))
-	request.Header.Set("Authorization", "Bearer "+testToken("alice@example.com", roles))
+	request.Header.Set("Authorization", "Bearer "+testToken(caller))
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
@@ -35,7 +35,7 @@ func (h *testAPI) remaining(t *testing.T, client string) (int64, bool) {
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&axis.sub="+client,
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 
 	if len(list.Items) == 0 {
 		return 0, false
@@ -49,7 +49,7 @@ func TestReset_dropsTheCountersItAddresses(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", operatorRoles()),
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", listedCaller),
 		http.StatusOK, &response)
 
 	require.False(t, response.DryRun)
@@ -77,7 +77,7 @@ func TestReset_previewChangesNothing(t *testing.T) {
 
 	var preview ResetResponse
 	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler&dryRun=true", "key-1",
-		operatorRoles()), http.StatusOK, &preview)
+		listedCaller), http.StatusOK, &preview)
 
 	require.True(t, preview.DryRun)
 	require.NotNil(t, preview.MatchedCount)
@@ -95,7 +95,7 @@ func TestReset_handlesARuleWithoutAxes(t *testing.T) {
 	h.spend(t, "/anything", nil, 1)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=everything/total", "key-1", operatorRoles()),
+	decode(t, h.reset(t, "ruleId=everything/total", "key-1", listedCaller),
 		http.StatusOK, &response)
 	require.Equal(t, 1, *response.ResetCount)
 	require.Empty(t, response.Axes)
@@ -109,20 +109,20 @@ func TestReset_narrowsToOneWindowOnRequest(t *testing.T) {
 
 	var all ResetResponse
 	decode(t, h.reset(t, "ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&dryRun=true",
-		"key-1", operatorRoles()), http.StatusOK, &all)
+		"key-1", listedCaller), http.StatusOK, &all)
 	require.Len(t, all.Keys, 2, "one key per window")
 
 	var narrowed ResetResponse
 	decode(t, h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=1m&dryRun=true",
-		"key-2", operatorRoles()), http.StatusOK, &narrowed)
+		"key-2", listedCaller), http.StatusOK, &narrowed)
 	require.Len(t, narrowed.Keys, 1)
 
 	// A period is normalized before comparison, so 60s and 1m are one window.
 	var bySeconds ResetResponse
 	decode(t, h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=60&dryRun=true",
-		"key-3", operatorRoles()), http.StatusOK, &bySeconds)
+		"key-3", listedCaller), http.StatusOK, &bySeconds)
 	require.Equal(t, narrowed.Keys, bySeconds.Keys)
 }
 
@@ -132,7 +132,7 @@ func TestReset_refusesAPartialAxisSelection(t *testing.T) {
 	// The rule counts by sub and order_id; naming one would delete every
 	// order of that client, which is a sweep and not this endpoint's job.
 	body := requireError(t, h.reset(t, "ruleId=by-order/each&axis.sub=alice", "key-1",
-		operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 	require.Contains(t, body.Message, "every axis")
 }
 
@@ -177,7 +177,7 @@ func TestReset_refusesWhatItCannotAddress(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			requireError(t, h.reset(t, tc.query, "key-"+strings.ReplaceAll(name, " ", "-"),
-				operatorRoles()), tc.status, tc.code)
+				listedCaller), tc.status, tc.code)
 		})
 	}
 }
@@ -186,12 +186,12 @@ func TestReset_needsALogSafeIdempotencyKey(t *testing.T) {
 	h := newTestAPI(t)
 	query := addressAlice
 
-	requireError(t, h.reset(t, query, "", operatorRoles()),
+	requireError(t, h.reset(t, query, "", listedCaller),
 		http.StatusBadRequest, CodeInvalidRequest)
 
 	// The key lands in the audit journal verbatim, so a value that could forge
 	// a record is refused rather than sanitized.
-	requireError(t, h.reset(t, query, "key\nlevel=info msg=\"reset by nobody\"", operatorRoles()),
+	requireError(t, h.reset(t, query, "key\nlevel=info msg=\"reset by nobody\"", listedCaller),
 		http.StatusBadRequest, CodeInvalidRequest)
 }
 
@@ -199,10 +199,10 @@ func TestReset_pinsTheRuleSetVersionWhenAsked(t *testing.T) {
 	h := newTestAPI(t)
 	query := "ruleId=orders/per-client&axis.sub=alice&expectedRuleSetVersion="
 
-	requireError(t, h.reset(t, query+"000000000000", "key-1", operatorRoles()),
+	requireError(t, h.reset(t, query+"000000000000", "key-1", listedCaller),
 		http.StatusConflict, CodeConflict)
 
-	decode(t, h.reset(t, query+h.version, "key-2", operatorRoles()), http.StatusOK, nil)
+	decode(t, h.reset(t, query+h.version, "key-2", listedCaller), http.StatusOK, nil)
 }
 
 // Under live traffic a re-run would delete counters that did not exist the
@@ -212,13 +212,13 @@ func TestReset_retryReplaysTheRecordedOutcome(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 	query := "ruleId=orders/per-client&axis.sub=crawler"
 
-	first := h.reset(t, query, "key-1", operatorRoles())
+	first := h.reset(t, query, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code)
 
 	// The client spends again between the two calls.
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 2)
 
-	second := h.reset(t, query, "key-1", operatorRoles())
+	second := h.reset(t, query, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, second.Code)
 	require.JSONEq(t, first.Body.String(), second.Body.String())
 
@@ -232,14 +232,14 @@ func TestReset_refusesTheSameKeyForADifferentCommand(t *testing.T) {
 	h := newTestAPI(t)
 
 	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", operatorRoles()).Code)
+		h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", listedCaller).Code)
 
-	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=bob", "key-1", operatorRoles()),
+	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=bob", "key-1", listedCaller),
 		http.StatusConflict, CodeConflict)
 
 	// A preview and its execution are different commands for the same reason.
 	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&dryRun=true",
-		"key-1", operatorRoles()), http.StatusConflict, CodeConflict)
+		"key-1", listedCaller), http.StatusConflict, CodeConflict)
 }
 
 // A refusal before acceptance binds nothing: a corrected repeat may reuse the
@@ -247,11 +247,11 @@ func TestReset_refusesTheSameKeyForADifferentCommand(t *testing.T) {
 func TestReset_aRefusalBindsNothing(t *testing.T) {
 	h := newTestAPI(t)
 
-	requireError(t, h.reset(t, "ruleId=orders/gone&axis.sub=alice", "key-1", operatorRoles()),
+	requireError(t, h.reset(t, "ruleId=orders/gone&axis.sub=alice", "key-1", listedCaller),
 		http.StatusNotFound, CodeNotFound)
 
 	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", operatorRoles()).Code)
+		h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", listedCaller).Code)
 }
 
 // The canonical command normalizes what a client may spell in several ways, so
@@ -262,12 +262,12 @@ func TestReset_normalizesTheCommandBeforeComparingIt(t *testing.T) {
 
 	first := h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=1m&algorithm=GCRA",
-		"key-1", operatorRoles())
+		"key-1", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code)
 
 	second := h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=60&algorithm=gcra",
-		"key-1", operatorRoles())
+		"key-1", listedCaller)
 	require.Equal(t, http.StatusOK, second.Code)
 	require.JSONEq(t, first.Body.String(), second.Body.String())
 }
@@ -280,13 +280,13 @@ func TestReset_scopesTheKeyToItsSubject(t *testing.T) {
 
 	call := func(subject string) *testResponse {
 		request := httptest.NewRequest(http.MethodDelete, target, strings.NewReader(""))
-		request.Header.Set("Authorization", "Bearer "+testToken(subject, operatorRoles()))
+		request.Header.Set("Authorization", "Bearer "+testToken(subject))
 		request.Header.Set("Idempotency-Key", "key-1")
 		return h.send(t, request)
 	}
 
-	require.Equal(t, http.StatusOK, call("alice@example.com").Code)
-	require.Equal(t, http.StatusOK, call("bob@example.com").Code)
+	require.Equal(t, http.StatusOK, call(listedCaller).Code)
+	require.Equal(t, http.StatusOK, call(otherCaller).Code)
 }
 
 func TestReset_reportsAnUnknownDomainAsNotFound(t *testing.T) {
@@ -294,7 +294,7 @@ func TestReset_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 
 	target := BasePath + "/domains/gateway.typo/counters?ruleId=orders/per-client&axis.sub=alice"
 	request := httptest.NewRequest(http.MethodDelete, target, strings.NewReader(""))
-	request.Header.Set("Authorization", "Bearer "+testToken("alice@example.com", operatorRoles()))
+	request.Header.Set("Authorization", "Bearer "+testToken(listedCaller))
 	request.Header.Set("Idempotency-Key", "key-1")
 
 	recorder := h.send(t, request)
@@ -305,7 +305,7 @@ func TestReset_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 func TestReset_recordsTheBodyItAnswered(t *testing.T) {
 	h := newTestAPI(t)
 
-	recorder := h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", operatorRoles())
+	recorder := h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, recorder.Code)
 
 	var response ResetResponse
@@ -330,7 +330,7 @@ func TestReset_replaysTheBodyItRecordedAfterTheRuleSetMoved(t *testing.T) {
 
 	query := addressAlice
 	var first ResetResponse
-	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &first)
+	decode(t, h.reset(t, query, "key-1", listedCaller), http.StatusOK, &first)
 	require.Equal(t, 1, *first.ResetCount)
 	require.NotEmpty(t, first.Keys)
 
@@ -340,7 +340,7 @@ func TestReset_replaysTheBodyItRecordedAfterTheRuleSetMoved(t *testing.T) {
 	require.NotEqual(t, first.RuleSetVersion, h.version, "the fixture must actually move the rule set")
 
 	var replay ResetResponse
-	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &replay)
+	decode(t, h.reset(t, query, "key-1", listedCaller), http.StatusOK, &replay)
 	require.Equal(t, first, replay, "a retry gets the body the command actually produced")
 }
 
@@ -352,12 +352,12 @@ func TestReset_aPinnedRetryStillReplays(t *testing.T) {
 
 	query := addressAlice + "&expectedRuleSetVersion=" + h.version
 	var first ResetResponse
-	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &first)
+	decode(t, h.reset(t, query, "key-1", listedCaller), http.StatusOK, &first)
 
 	h.replaceRules(t, widerOrders()...)
 
 	var replay ResetResponse
-	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &replay)
+	decode(t, h.reset(t, query, "key-1", listedCaller), http.StatusOK, &replay)
 	require.Equal(t, first, replay, "the pin judges a new command, never one already recorded")
 }
 
@@ -369,13 +369,13 @@ func TestReset_replaysEvenWhenTheRuleIsGone(t *testing.T) {
 
 	query := addressAlice
 	var first ResetResponse
-	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &first)
+	decode(t, h.reset(t, query, "key-1", listedCaller), http.StatusOK, &first)
 
 	h.replaceRules(t, wholeDomainBlocks()...)
 
-	requireError(t, h.reset(t, query, "key-2", operatorRoles()), http.StatusNotFound, CodeNotFound)
+	requireError(t, h.reset(t, query, "key-2", listedCaller), http.StatusNotFound, CodeNotFound)
 
 	var replay ResetResponse
-	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &replay)
+	decode(t, h.reset(t, query, "key-1", listedCaller), http.StatusOK, &replay)
 	require.Equal(t, first, replay)
 }

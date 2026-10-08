@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/netcracker/qubership-ratelimit/service/internal/management"
 	"github.com/netcracker/qubership-ratelimit/service/internal/redisconn"
 	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
 )
@@ -81,15 +80,10 @@ func TestSettings_replaceABadValueWithTheDefaultAndSaySo(t *testing.T) {
 	warn := func(format string, args ...any) { warned = append(warned, format) }
 
 	t.Setenv("METRICS_NEAR_LIMIT_RATIO", "1.5")
-	t.Setenv("MANAGEMENT_ROLES_VIEWER", "ro, , auditor,")
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
 
 	assert.Equal(t, rls.DefaultNearLimitRatio, NearLimitRatio(warn))
 	assert.Len(t, warned, 1)
-
-	assert.Equal(t, []string{"ro", "auditor"}, ManagementRoles().Viewer)
-	assert.Equal(t, []string{management.RoleOperator}, ManagementRoles().Operator)
-	assert.Equal(t, management.DefaultClaimNames, ManagementClaims())
 
 	t.Setenv("METRICS_NEAR_LIMIT_RATIO", "0.5")
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
@@ -119,36 +113,38 @@ func TestManagementGatewayDomains_unsetIsNoDomain(t *testing.T) {
 	assert.Empty(t, ManagementGatewayDomains())
 }
 
-// An installation that leaves the operator list empty is read-only. The chart
-// renders the empty list as an empty variable, and reading it back as the
-// default "operator" would grant every mutation to a token carrying that role.
-func TestManagementRoles_anEmptyListGrantsNothing(t *testing.T) {
-	t.Setenv("MANAGEMENT_ROLES_VIEWER", "rl-viewer")
-	t.Setenv("MANAGEMENT_ROLES_OPERATOR", "")
+// MANAGEMENT_CALLERS names ServiceAccounts as <name> in the release's
+// namespace or <namespace>/<name> elsewhere, and each comes back as the sub
+// claim of its tokens. An entry of another shape is reported and left out
+// rather than granting operator to a name nobody can hold.
+func TestManagementCallers_readsBothFormsAsTokenSubjects(t *testing.T) {
+	var warned []string
+	warn := func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+	t.Setenv("MANAGEMENT_CALLERS", "ui-backend, platform/ops-backend,, Bad/Name, a/b/c")
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
 
-	roles := ManagementRoles()
-	assert.Empty(t, roles.Operator)
-	assert.Equal(t, []string{"rl-viewer"}, roles.Viewer)
-
-	t.Setenv("MANAGEMENT_ROLES_VIEWER", "")
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
-	roles = ManagementRoles()
-	assert.Empty(t, roles.Viewer)
-	assert.Empty(t, roles.Operator)
-	// Two empty lists, which the schema refuses and the environment can still
-	// produce, grant nothing only because the mapping is explicit: a mapping
-	// that is not passes the token's roles through as the canonical names.
-	assert.True(t, roles.Explicit, "two empty lists would pass the token's roles through")
+	assert.Equal(t, []string{
+		"system:serviceaccount:biz:ui-backend",
+		"system:serviceaccount:platform:ops-backend",
+	}, ManagementCallers("biz", warn))
+	assert.Len(t, warned, 2)
 }
 
-// An unset list is the canonical name, which is what a deployment that issues
-// viewer and operator verbatim relies on.
-func TestManagementRoles_unsetIsTheCanonicalName(t *testing.T) {
+func TestManagementCallers_unsetIsNoCaller(t *testing.T) {
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
-	roles := ManagementRoles()
-	assert.Equal(t, []string{management.RoleViewer}, roles.Viewer)
-	assert.Equal(t, []string{management.RoleOperator}, roles.Operator)
+
+	assert.Empty(t, ManagementCallers("biz", func(string, ...any) {}))
+}
+
+// The audience defaults to the platform's machine-to-machine convention and
+// is replaced whole by MANAGEMENT_M2M_AUDIENCE.
+func TestManagementAudience_defaultsToThePlatformConvention(t *testing.T) {
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	assert.Equal(t, "netcracker", ManagementAudience())
+
+	t.Setenv("MANAGEMENT_M2M_AUDIENCE", "ratelimit-e2e")
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	assert.Equal(t, "ratelimit-e2e", ManagementAudience())
 }
 
 // RESPONSE_HEADERS_IETF turns the ratelimit-policy and ratelimit fields off

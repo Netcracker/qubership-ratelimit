@@ -123,7 +123,7 @@ func TestCounters_pagesAcrossStoreStepsWithoutLosingOrRepeatingACounter(t *testi
 	target := base
 	for {
 		var page CounterList
-		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
+		decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &page)
 		pages++
 		for _, item := range page.Items {
 			seen = append(seen, item.Axes["sub"])
@@ -148,7 +148,7 @@ func TestCounters_aStretchOfEmptyStepsEndsThePageWithACursor(t *testing.T) {
 	h.api.Counters = stub
 
 	var page CounterList
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", viewerRoles(), nil),
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", listedCaller, nil),
 		http.StatusOK, &page)
 
 	require.Empty(t, page.Items)
@@ -170,7 +170,7 @@ func TestCounters_aCursorTheStoreRefusesIsABadRequest(t *testing.T) {
 
 	body := requireError(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&cursor="+url.QueryEscape(stale),
-		viewerRoles(), nil), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller, nil), http.StatusBadRequest, CodeInvalidRequest)
 
 	require.Contains(t, body.Message, "cannot resume the cursor")
 }
@@ -181,7 +181,7 @@ func TestCounters_aFailedScanIsAnOutageNotABadRequest(t *testing.T) {
 	h := newTestAPI(t)
 	h.api.Counters = failingSteps{Store: h.counters}
 
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", listedCaller, nil),
 		http.StatusServiceUnavailable, CodeStoreDown)
 }
 
@@ -203,7 +203,7 @@ func TestCounters_pagesFollowTheStoreCursorChain(t *testing.T) {
 	target := base
 	for pages := 1; ; pages++ {
 		var page CounterList
-		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
+		decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &page)
 		if page.NextCursor == "" {
 			require.Equal(t, 3, pages, "pages of 4 over 10 counters")
 			break
@@ -231,7 +231,7 @@ func TestCounters_aStepAsksForTheRoomLeftOnThePage(t *testing.T) {
 	var page CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client"+
 		"&pageSize=4&axis.sub=client-01&axis.sub=client-03&axis.sub=client-04"+
-		"&axis.sub=client-05&axis.sub=client-06&axis.sub=client-07", viewerRoles(), nil),
+		"&axis.sub=client-05&axis.sub=client-06&axis.sub=client-07", listedCaller, nil),
 		http.StatusOK, &page)
 
 	clients := make([]string, 0, len(page.Items))
@@ -262,7 +262,7 @@ func TestCounters_aStepOverTheAskOverfillsThePageByThatMuch(t *testing.T) {
 	target := base
 	for {
 		var page CounterList
-		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
+		decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &page)
 		sizes = append(sizes, len(page.Items))
 		for _, item := range page.Items {
 			seen = append(seen, item.Axes["sub"])
@@ -370,7 +370,7 @@ func TestCounters_pagesThroughEveryCounterOfARule(t *testing.T) {
 	target := base
 	for range len(clients) + 1 {
 		var page CounterList
-		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
+		decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &page)
 		for _, item := range page.Items {
 			seen = append(seen, item.Axes["sub"])
 		}

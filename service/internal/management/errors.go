@@ -38,21 +38,29 @@ var (
 	CodeInterrupted = errs.ErrorCode{Code: "RLS-0501", Title: "Command interrupted after acceptance"}
 
 	CodeStoreDown = errs.ErrorCode{Code: "RLS-0503", Title: "Counter store unavailable"}
+
+	// CodeVerifierUnavailable refuses every call while the service cannot
+	// verify tokens yet: the API server's OIDC discovery has not answered
+	// since the listener started. It shares 503 with CodeStoreDown and is told
+	// apart by the code, because the two have different owners: this one is
+	// the cluster's API server, that one the counter store.
+	CodeVerifierUnavailable = errs.ErrorCode{Code: "RLS-0504", Title: "Token verification unavailable"}
 )
 
 // statuses map each code to the HTTP status it is answered with. The status
 // travels in the body too, so a client reading the body alone knows the class.
 var statuses = map[string]int{
-	CodeInvalidRequest.Code: http.StatusBadRequest,
-	CodeUnauthorized.Code:   http.StatusUnauthorized,
-	CodeForbidden.Code:      http.StatusForbidden,
-	CodeNotFound.Code:       http.StatusNotFound,
-	CodeConflict.Code:       http.StatusConflict,
-	CodeGone.Code:           http.StatusGone,
-	CodeWorkLimit.Code:      http.StatusUnprocessableEntity,
-	CodeInternal.Code:       http.StatusInternalServerError,
-	CodeInterrupted.Code:    http.StatusInternalServerError,
-	CodeStoreDown.Code:      http.StatusServiceUnavailable,
+	CodeInvalidRequest.Code:      http.StatusBadRequest,
+	CodeUnauthorized.Code:        http.StatusUnauthorized,
+	CodeForbidden.Code:           http.StatusForbidden,
+	CodeNotFound.Code:            http.StatusNotFound,
+	CodeConflict.Code:            http.StatusConflict,
+	CodeGone.Code:                http.StatusGone,
+	CodeWorkLimit.Code:           http.StatusUnprocessableEntity,
+	CodeInternal.Code:            http.StatusInternalServerError,
+	CodeInterrupted.Code:         http.StatusInternalServerError,
+	CodeStoreDown.Code:           http.StatusServiceUnavailable,
+	CodeVerifierUnavailable.Code: http.StatusServiceUnavailable,
 }
 
 // Conflict kinds. Every 409 carries one, so a generated client can branch on
@@ -134,6 +142,20 @@ func conflict(kind, message string) *apiError {
 // and conflating them would let a retry repeat a destructive command.
 func storeDown(message string) *apiError {
 	return errorf(CodeStoreDown, message)
+}
+
+// verifierRetryAfter is the wait a refusal with CodeVerifierUnavailable asks
+// for: the first retry of the verifier's construction comes sooner, and a
+// client that retries after it meets either a verifier or a log line that says
+// why there is none.
+const verifierRetryAfter = 5 * time.Second
+
+// verifierUnavailable refuses a call the service cannot authenticate yet.
+func verifierUnavailable() *apiError {
+	failure := errorf(CodeVerifierUnavailable,
+		"the service cannot verify tokens yet: the cluster's OIDC discovery has not answered")
+	failure.retryAfter = verifierRetryAfter
+	return failure
 }
 
 // interrupted reports a command an unforeseen error cut after acceptance, with

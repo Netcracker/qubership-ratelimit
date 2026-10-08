@@ -193,7 +193,8 @@ func TestMain(m *testing.M) {
 // The Service of the service chart: the name and the two ports the chart's
 // filters and the operator binary address it by.
 func TestServiceChart_rendersTheServiceOfTheContract(t *testing.T) {
-	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true")
+	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
+		"--set", "management.callers={ui-backend}")
 	service := only(t, objects, "Service")
 	assert.Equal(t, contract.ServiceName, service.name())
 
@@ -267,7 +268,8 @@ func TestCharts_bindEachListenerToItsDeclaredPort(t *testing.T) {
 		},
 	} {
 		t.Run(chart, func(t *testing.T) {
-			objects := render(t, chart, "biz", "--set", "management.enabled=true")
+			objects := render(t, chart, "biz", "--set", "management.enabled=true",
+				"--set", "management.callers={ui-backend}")
 			container := only(t, objects, "Deployment").at("spec", "template", "spec", "containers").list()[0]
 			args := argsOf(container)
 			declared := map[string]float64{}
@@ -318,7 +320,7 @@ func TestServiceChart_filtersAddressTheServiceOfTheContract(t *testing.T) {
 	})
 	t.Run("satellite", func(t *testing.T) {
 		objects := render(t, serviceChart, "sat", "--set", "BASELINE_ORIGIN=base", "--set", "MONITORING_ENABLED=true",
-			"--set", "management.enabled=true")
+			"--set", "management.enabled=true", "--set", "management.callers={ui-backend}")
 		assert.Equal(t, []string{envoyFilterKind}, kinds(objects), "a satellite gets the filters and nothing else")
 		check(t, objects, "base")
 	})
@@ -347,7 +349,8 @@ func TestServiceChart_aDialChangesTheFiltersAlone(t *testing.T) {
 		}
 		return filters, rest
 	}
-	all := []string{"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true"}
+	all := []string{"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true",
+		"--set", "management.callers={ui-backend}"}
 	defaultFilters, defaultRest := split(render(t, serviceChart, "biz", all...))
 	require.Len(t, defaultFilters, 2, "one filter per enabled gateway")
 	for _, dial := range []string{"runtime.enforcedPercent=0", "runtime.enabledPercent=0", "filter.failClosed=true"} {
@@ -435,14 +438,13 @@ func TestCharts_spreadTheirPodsOverTheTopology(t *testing.T) {
 	}
 }
 
-// The management port is safe only behind its AuthorizationPolicy, and the
-// policy is only worth anything in the exact shape it has: DENY on the
-// management port for every principal except the private gateway's service
-// account, which Istio's automated deployment names after the gateway and its
-// class. The check reads the structure, so a policy that keeps the same
-// principal under principals, or turns into an ALLOW, fails here.
-func TestServiceChart_managementPolicyDeniesAllButThePrivateGateway(t *testing.T) {
-	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true")
+// The management port's AuthorizationPolicy is worth something only in the
+// exact shape it has: DENY on the management port for every principal except
+// the callers. The check reads the structure, so a policy that keeps the same
+// principals under principals, or turns into an ALLOW, fails here.
+func TestServiceChart_managementPolicyDeniesAllButTheCallers(t *testing.T) {
+	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
+		"--set", "management.callers={ui-backend,platform/ops-backend}")
 	policy := only(t, objects, "AuthorizationPolicy")
 	deployment := only(t, objects, "Deployment")
 
@@ -462,9 +464,24 @@ func TestServiceChart_managementPolicyDeniesAllButThePrivateGateway(t *testing.T
 
 	from := rules[0].at("from").list()
 	require.Len(t, from, 1)
-	assert.Equal(t, []string{"cluster.local/ns/biz/sa/private-gateway-istio"},
-		strs(from[0].at("source", "notPrincipals")), "the only exception is not the private gateway")
+	assert.Equal(t, []string{"cluster.local/ns/biz/sa/ui-backend", "cluster.local/ns/platform/sa/ops-backend"},
+		strs(from[0].at("source", "notPrincipals")),
+		"a <name> caller is not in NAMESPACE, or a <namespace>/<name> caller not in its own namespace")
 	assert.Nil(t, from[0].at("source", "principals").v, "a principals list turns the exception into the target")
+}
+
+// An explicit allowedServiceAccounts list replaces the callers as the
+// principals, each in NAMESPACE: the callers then come through a gateway, and
+// the policy sees the gateway's workload rather than theirs.
+func TestServiceChart_managementPolicyTakesAnExplicitListOverTheCallers(t *testing.T) {
+	policy := only(t, render(t, serviceChart, "biz", "--set", "management.enabled=true",
+		"--set", "management.callers={ui-backend}",
+		"--set", "management.authorizationPolicy.allowedServiceAccounts={private-gateway-istio}"),
+		"AuthorizationPolicy")
+
+	from := policy.at("spec", "rules").list()[0].at("from").list()
+	assert.Equal(t, []string{"cluster.local/ns/biz/sa/private-gateway-istio"},
+		strs(from[0].at("source", "notPrincipals")))
 }
 
 // The dashboard opens on its own release's namespace. Domain names repeat
@@ -505,7 +522,8 @@ func TestOperatorChart_rendersNothingInASatellite(t *testing.T) {
 // Neither chart renders the ConfigMap: the operator is its only writer.
 func TestCharts_renderNoConfigMap(t *testing.T) {
 	for _, chart := range []string{operatorChart, serviceChart} {
-		objects := render(t, chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true")
+		objects := render(t, chart, "biz", "--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true",
+			"--set", "management.callers={ui-backend}")
 		assert.NotContains(t, kinds(objects), "ConfigMap", chart)
 	}
 }
@@ -624,7 +642,7 @@ func TestCharts_defaultTheOptionalPlatformParameters(t *testing.T) {
 func TestCharts_placeEveryObjectInThePlatformsNamespace(t *testing.T) {
 	for _, chart := range []string{operatorChart, serviceChart} {
 		objects := render(t, chart, "release-ns", "--set", "NAMESPACE=biz", "--set", "MONITORING_ENABLED=true",
-			"--set", "management.enabled=true")
+			"--set", "management.enabled=true", "--set", "management.callers={ui-backend}")
 		for _, o := range objects {
 			assert.Equal(t, "biz", o.at("metadata", "namespace").str2(), "%s %s %s", chart, o.kind(), o.name())
 		}
@@ -685,7 +703,7 @@ func TestOperatorChart_readsReplicasFromTheProfile(t *testing.T) {
 func TestCharts_nameEveryReferenceAfterServiceName(t *testing.T) {
 	objects := render(t, serviceChart, "biz", "-f",
 		filepath.Join("..", "..", "helm-templates", serviceChart, "resource-profiles", "prod.yaml"),
-		"--set", "SERVICE_NAME=rl", "--set", "management.enabled=true")
+		"--set", "SERVICE_NAME=rl", "--set", "management.enabled=true", "--set", "management.callers={ui-backend}")
 	deployment := only(t, objects, "Deployment")
 	pod := deployment.at("spec", "template", "spec")
 	assert.Equal(t, "rl", only(t, objects, "ServiceAccount").name())
@@ -844,7 +862,8 @@ func TestCharts_readTheParametersInEveryObject(t *testing.T) {
 		args := append([]string{"-f", filepath.Join("..", "..", "helm-templates", chart, "resource-profiles", "prod.yaml"),
 			"--set", "NAMESPACE=biz", "--set", "SERVICE_NAME=rl", "--set", "IMAGE_REPOSITORY=registry.example/rl",
 			"--set", "MANAGED_BY=platform", "--set", "DEPLOYMENT_SESSION_ID=session",
-			"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true"}, topologies...)
+			"--set", "MONITORING_ENABLED=true", "--set", "management.enabled=true",
+			"--set", "management.callers={ui-backend}"}, topologies...)
 		objects := render(t, chart, "release-ns", args...)
 		require.NotEmpty(t, objects, chart)
 		for _, o := range objects {

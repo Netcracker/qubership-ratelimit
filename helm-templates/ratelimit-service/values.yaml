@@ -119,12 +119,15 @@ responseHeaders:
 # reset them. Off by default, because turning it on opens a port that can lift a
 # rate limit.
 #
-# The service authenticates nobody. It reads the subject and the roles out of
-# the bearer token without verifying the signature, because the gateway's JWT
-# filter has already verified it. That holds only while nothing but the gateway
-# can reach this port, which is what authorizationPolicy is for. Enabling the
-# port without the policy leaves the endpoints open to every workload in the
-# mesh, so keep them together.
+# Every call carries a Kubernetes ServiceAccount token as its bearer token,
+# and the service verifies it: the signature against the cluster's keys, the
+# issuer, the audience in m2m.audience, the expiry. A caller listed in callers
+# holds the operator role and may call every endpoint; any other verified
+# caller gets 403, and a token that does not verify gets 401. To verify, the
+# pod mounts its own ServiceAccount token, which reads the cluster's OIDC
+# discovery and nothing else: the ServiceAccount has no Role. authorizationPolicy
+# keeps the port to the callers' workloads as well, so a token alone does not
+# open it.
 #
 # The port is exposed on the component's own Service, ratelimit, not on a
 # Service of its own. What keeps the port safe is the AuthorizationPolicy,
@@ -135,38 +138,32 @@ responseHeaders:
 management:
   enabled: false
 
-  # Where the identity is read from in the bearer token. Both are claim
-  # names, and both accept a dotted path for a nested claim: Keycloak issues
-  # the roles under realm_access.roles.
-  claims:
-    subject: sub
-    roles: roles
+  # The ServiceAccounts that may call the API: <name> for one in NAMESPACE,
+  # <namespace>/<name> for one in another namespace. Each holds the operator
+  # role. The schema refuses an empty list while enabled is true. A caller
+  # sends a token the API server issued for its ServiceAccount with the
+  # audience below, which the platform's clients do with
+  # KUBERNETES_M2M_ENABLED=true.
+  callers: []
 
-  # The role names the IdP issues, mapped onto the two this API authorizes
-  # against. Each is a list, and a role on neither grants nothing; an empty
-  # list grants its role to nobody. A read-only deployment sets operator: [];
-  # left out, operator keeps its default. Both lists empty would let nobody in, and the schema
-  # refuses that as a mistake. The defaults are the canonical names, so a
-  # deployment whose IdP already issues viewer and operator configures nothing
-  # here.
-  roles:
-    viewer: [viewer]
-    operator: [operator]
+  # The audience a caller's token is issued for. A token for any other
+  # audience is refused with 401.
+  m2m:
+    audience: netcracker
 
-  # Restrict the port to the gateways that front it. The policy denies every
-  # other source, and it is the half of this feature that makes the other half
-  # safe: turn it off only where something outside the mesh already does the
-  # same job, and say so in a review.
+  # Restrict the port to the workloads that call it. The policy denies every
+  # other source before a token is read, so a token leaked from a listed
+  # caller does not open the port to another workload. Turn it off only where
+  # something outside the mesh does the same job, and say so in a review.
   authorizationPolicy:
     enabled: true
 
-    # Service accounts allowed to reach the port, in NAMESPACE.
-    # Empty means the private gateway alone: the management endpoints belong
-    # behind an internal gateway, never on the path public traffic takes.
-    #
-    # Istio's automated deployment names a Gateway API gateway's generated
-    # ServiceAccount after the gateway and its class, so the default is
-    # <ISTIO_PRIVATE_GATEWAY_NAME>-istio. Check it before overriding:
+    # Service accounts allowed to reach the port, in NAMESPACE. Empty means
+    # the entries of callers, each in its own namespace. Set it when the
+    # callers come through a gateway: the policy then sees the gateway's
+    # workload, not the caller's. Istio's automated deployment names a
+    # Gateway API gateway's generated ServiceAccount after the gateway and its
+    # class, <gateway>-istio. Check it before listing it:
     #
     #   kubectl get pod -l gateway.networking.k8s.io/gateway-name=<gateway> \
     #     -o jsonpath='{.items[0].spec.serviceAccountName}'
@@ -185,7 +182,8 @@ management:
   # gateway's domain exempts nothing. Change the list when the private
   # gateway's domain is not the default, or when another gateway from
   # authorizationPolicy.allowedServiceAccounts routes to the API. An empty
-  # list rate limits the API's requests like any others.
+  # list rate limits the API's requests like any others. A caller that
+  # reaches the port directly needs no entry.
   gatewayDomains: [gateway.private]
 
 # ============== GATEWAY FILTER ============================

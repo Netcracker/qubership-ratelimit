@@ -293,6 +293,7 @@ jobs:
               --set NAMESPACE=satellite --set TAG=ci --set DEPLOYMENT_SESSION_ID=ci \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set MONITORING_ENABLED=true --set management.enabled=true \
+              --set 'management.callers={ui-backend}' \
               --set BASELINE_ORIGIN=baseline)
             kinds=$(echo "$rendered" | grep '^kind:' | sort -u)
             [ "$kinds" = "kind: EnvoyFilter" ] || {
@@ -327,7 +328,7 @@ jobs:
             manifests=$(helm template t helm-templates/$chart \
               -f helm-templates/$chart/resource-profiles/dev.yaml \
               --set NAMESPACE=ci --set TAG=ci --set DEPLOYMENT_SESSION_ID=ci \
-              --set management.enabled=true)
+              --set management.enabled=true --set 'management.callers={ui-backend}')
             echo "$manifests" | grep -q 'management-bind-address' || {
               echo "::error::management.enabled did not render the port in $chart"; exit 1; }
             echo "$manifests" | grep -q 'kind: AuthorizationPolicy' || {
@@ -335,16 +336,18 @@ jobs:
           done
 
       # The management values in every mode. Single and baseline render the
-      # port, the policy, and the identity configuration; a satellite runs no
-      # component, so it renders none of them however the values are set. The
-      # identity values are checked by their rendered names, which are what
-      # the configloader maps onto the properties the service reads.
+      # port, the policy with the callers as its principals, the callers and
+      # the audience, and the projected token the service verifies callers
+      # with; a satellite runs no component, so it renders none of them
+      # however the values are set. The values are checked by their rendered
+      # names, which are what the configloader maps onto the properties the
+      # service reads.
       - name: Check the management values in every mode
         run: |
           set -o pipefail
           identity=(--set management.enabled=true
-            --set management.claims.roles=realm_access.roles
-            --set 'management.roles.viewer={rl-view}' --set 'management.roles.operator={rl-admin}')
+            --set 'management.callers={ui-backend,platform/ops-backend}'
+            --set management.m2m.audience=ci-audience)
           for chart in ratelimit-service; do
             render() {
               helm template t helm-templates/$chart \
@@ -356,7 +359,8 @@ jobs:
               extra=(); [ "$mode" = baseline ] && extra=(--set ORIGIN_NAMESPACE=baseline)
               manifests=$(render "${extra[@]}")
               for want in 'management-bind-address' 'kind: AuthorizationPolicy' \
-                'MANAGEMENT_CLAIMS_ROLES' "value: 'realm_access.roles'" "value: 'rl-view'" "value: 'rl-admin'"; do
+                'MANAGEMENT_CALLERS' "value: 'ui-backend,platform/ops-backend'" "value: 'ci-audience'" \
+                'cluster.local/ns/platform/sa/ops-backend' 'mountPath: /var/run/secrets/kubernetes.io/serviceaccount'; do
                 echo "$manifests" | grep -qF -- "$want" || {
                   echo "::error::$chart in mode $mode did not render: $want"; exit 1; }
               done

@@ -26,15 +26,15 @@ func TestManagement_refusesAnIdentityValueTheNormalizationWouldChange(t *testing
 		response *testResponse
 		field    string
 	}{
-		"listing": {h.call(t, http.MethodGet, counters+"?axis.sub=Alice", viewerRoles(), nil), "axis.sub"},
+		"listing": {h.call(t, http.MethodGet, counters+"?axis.sub=Alice", listedCaller, nil), "axis.sub"},
 		"applicability": {h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?axis.sub=Alice",
-			viewerRoles(), nil), "axis.sub"},
-		"reset": {h.reset(t, "ruleId=orders/per-client&axis.sub=Alice", "key-reset", operatorRoles()),
+			listedCaller, nil), "axis.sub"},
+		"reset": {h.reset(t, "ruleId=orders/per-client&axis.sub=Alice", "key-reset", listedCaller),
 			"axis.sub"},
 		"bulk reset": {h.bulk(t, map[string]any{
 			"selector": map[string]any{"axes": map[string][]string{model.KeySub: {"Alice"}}}, "dryRun": true,
-		}, "key-bulk", operatorRoles()), "selector.axes"},
-		"simulation": {h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+		}, "key-bulk", listedCaller), "selector.axes"},
+		"simulation": {h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 			Domain: testDomain, Path: "/api/orders", Method: "GET",
 			Keys: map[string][]string{model.KeySub: {"Alice"}},
 		}), "keys"},
@@ -47,7 +47,7 @@ func TestManagement_refusesAnIdentityValueTheNormalizationWouldChange(t *testing
 	}
 
 	// The normalized form still addresses the identity.
-	listing := h.call(t, http.MethodGet, counters+"?axis.sub=alice", viewerRoles(), nil)
+	listing := h.call(t, http.MethodGet, counters+"?axis.sub=alice", listedCaller, nil)
 	require.Equal(t, http.StatusOK, listing.Code)
 	require.Contains(t, listing.Body.String(), "alice")
 }
@@ -73,16 +73,16 @@ func TestManagement_comparesACapturedValueAsGiven(t *testing.T) {
 	counters := BasePath + "/domains/" + testDomain + "/counters"
 
 	for name, response := range map[string]*testResponse{
-		"listing":            h.call(t, http.MethodGet, counters+"?axis.plan=Gold", viewerRoles(), nil),
-		"listing by rule":    h.call(t, http.MethodGet, counters+"?ruleId=plans/per-plan&axis.plan=Gold", viewerRoles(), nil),
-		"applicability":      h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?axis.plan=Gold", viewerRoles(), nil),
-		"bulk reset preview": h.bulk(t, map[string]any{"selector": map[string]any{"axes": map[string][]string{"plan": {"Gold"}}}, "dryRun": true}, "key-bulk", operatorRoles()),
+		"listing":            h.call(t, http.MethodGet, counters+"?axis.plan=Gold", listedCaller, nil),
+		"listing by rule":    h.call(t, http.MethodGet, counters+"?ruleId=plans/per-plan&axis.plan=Gold", listedCaller, nil),
+		"applicability":      h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?axis.plan=Gold", listedCaller, nil),
+		"bulk reset preview": h.bulk(t, map[string]any{"selector": map[string]any{"axes": map[string][]string{"plan": {"Gold"}}}, "dryRun": true}, "key-bulk", listedCaller),
 	} {
 		require.Equal(t, http.StatusOK, response.Code, "%s: %s", name, response.Body.String())
 	}
-	listing := h.call(t, http.MethodGet, counters+"?ruleId=plans/per-plan&axis.plan=Gold", viewerRoles(), nil)
+	listing := h.call(t, http.MethodGet, counters+"?ruleId=plans/per-plan&axis.plan=Gold", listedCaller, nil)
 	require.Contains(t, listing.Body.String(), `"Gold"`, "the captured counter is not listed")
-	reset := h.reset(t, "ruleId=plans/per-plan&axis.plan=Gold", "key-reset", operatorRoles())
+	reset := h.reset(t, "ruleId=plans/per-plan&axis.plan=Gold", "key-reset", listedCaller)
 	require.Less(t, reset.Code, 300, "the single reset of the captured counter: %s", reset.Body.String())
 
 	for name, tc := range map[string]struct {
@@ -90,13 +90,13 @@ func TestManagement_comparesACapturedValueAsGiven(t *testing.T) {
 		field    string
 	}{
 		"listing by a mapped rule": {h.call(t, http.MethodGet, counters+"?ruleId=other/per-plan&axis.plan=Gold",
-			viewerRoles(), nil), "axis.plan"},
+			listedCaller, nil), "axis.plan"},
 		"reset of a mapped rule": {h.reset(t, "ruleId=other/per-plan&axis.plan=Gold", "key-reset-other",
-			operatorRoles()), "axis.plan"},
+			listedCaller), "axis.plan"},
 		"bulk reset of a mapped rule": {h.bulk(t, map[string]any{"selector": map[string]any{
 			"ruleIds": []string{"other/per-plan"}, "axes": map[string][]string{"plan": {"Gold"}}}, "dryRun": true},
-			"key-bulk-other", operatorRoles()), "selector.axes"},
-		"simulation": {h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+			"key-bulk-other", listedCaller), "selector.axes"},
+		"simulation": {h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 			Domain: testDomain, Path: "/other", Method: "GET", Keys: map[string][]string{"plan": {"Gold"}},
 		}), "keys"},
 	} {

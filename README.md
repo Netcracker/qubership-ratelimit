@@ -241,10 +241,11 @@ baseline was installed. The CI install names its releases after the charts with 
 release would show.
 
 The management port, when `management.enabled` is set, is exposed on the same `Service` rather than on one of its own.
-The `AuthorizationPolicy` that keeps the port reachable from the private gateway alone is enforced at the pod, so a
-dedicated `Service` would add a name without adding a boundary; the gateway's `HTTPRoute` names the port on the one
-`Service`. The identity the API reads is configured under `management.claims` (the claim names, dotted for a nested
-claim such as `realm_access.roles`) and `management.roles` (the IdP's role names mapped onto `viewer` and `operator`).
+The `AuthorizationPolicy` that keeps the port reachable from its callers alone is enforced at the pod, so a dedicated
+`Service` would add a name without adding a boundary; a gateway's `HTTPRoute` names the port on the one `Service`. The
+API takes Kubernetes ServiceAccount tokens and verifies them in the service: `management.callers` lists the
+ServiceAccounts that may call it, each holding `operator`, and `management.m2m.audience`, `netcracker` by default, is
+the audience their tokens are issued for.
 `management.gatewayDomains` names the rate limit domains of the gateways that route to the API, the private gateway's
 by default. Requests to the API are exempt from the checks of those domains, so the API stays reachable through a
 gateway that fails closed while the counter store is down; the details are in

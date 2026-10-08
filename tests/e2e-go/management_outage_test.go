@@ -60,7 +60,7 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 		if err := k8s.Get(ctx, client.ObjectKey{Namespace: store.namespace, Name: store.service}, &dep); err != nil {
 			Skip("the store at " + store.addr + " is not a Deployment this suite can scale")
 		}
-		viewer = map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")}
+		viewer = map[string]string{"Authorization": "Bearer " + managementToken()}
 
 		// Every change below registers its own undo before it is made, so a
 		// step that fails halfway is still undone, and one undo that fails

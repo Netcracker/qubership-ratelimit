@@ -21,16 +21,16 @@ NS=ratelimit-e2e             # the namespace of the installation
 DOMAIN=gateway.public        # the policy is named after its domain
 kubectl port-forward -n "$NS" svc/ratelimit 8082:8082 &
 BASE=http://127.0.0.1:8082/ratelimit/v1
-TOKEN=<platform token with the viewer role>
-OPTOKEN=<platform token with the operator role>
+CALLER=<a ServiceAccount listed in management.callers>
+TOKEN=$(kubectl create token -n "$NS" "$CALLER" --audience netcracker)   # the release's management.m2m.audience
 api() { curl -sS -H "Authorization: Bearer $TOKEN" "$@"; }
-op()  { curl -sS -H "Authorization: Bearer $OPTOKEN" "$@"; }
+op()  { api "$@"; }      # every listed caller holds operator
 ```
 
 On the platform the same API is routed through the private gateway under the same prefix, and stays reachable there
 during a store outage whatever the gateway's failure mode (section 1); the port-forward is the path for an operator
-who already holds `kubectl` access. The service never verifies the token signature, the gateway
-does, so a port-forward is a shortcut that bypasses that check: use it for diagnosis, not as a habit.
+who already holds `kubectl` access. The service verifies the token either way, so a port-forward skips the mesh policy
+on the port and nothing else: the token still has to belong to a listed caller.
 
 The installation is two Deployments in the namespace. The operator pod reads the policies, writes their status, and
 writes the ConfigMap `ratelimit-config`; the service pods mount that ConfigMap and serve the decisions and the
@@ -994,6 +994,46 @@ after `alerts.configAbsentFor`, 5 minutes by default, past the kubelet's project
 curl -s http://127.0.0.1:8080/debug/applied | jq '.configAbsent'   # through the port-forward of section 0
 kubectl get cm -n "$NS" ratelimit-config -o name
 ```
+
+## 10. The management API refuses every call: `RLS-0504`, `401`, or `403`
+
+Each code names the check that refused the call. `503` with `RLS-0504` means the service cannot verify tokens yet: it
+has not reached the API server's OIDC discovery since the management listener started, refuses every call, and keeps
+retrying; the data path is unaffected, and the API serves without a restart once the discovery answers. `401` with
+`RLS-0401` means the token did not verify, and the message names the check. `403` with `RLS-0403` means the token
+verified and its ServiceAccount is not a listed caller.
+
+**Read.** The discovery first, because nothing else is checked before it. The service logs each failed attempt with the
+call that failed, and the callers and the audience at start:
+
+```bash
+kubectl logs -n "$NS" deploy/ratelimit-service | grep -E 'token verifier|management API callers'
+```
+
+```text
+management API callers=[system:serviceaccount:core:ui-backend] audience=netcracker
+management API token verifier unavailable, retrying in 4s: unexpected issue during oidc call to '...'
+management API token verifier is ready
+```
+
+The discovery runs with the pod's own ServiceAccount token, which every ServiceAccount may use for it, so the same
+call from the API server's side shows whether the endpoint answers:
+
+```bash
+kubectl get --raw /.well-known/openid-configuration | jq .issuer
+kubectl auth can-i get /.well-known/openid-configuration --as="system:serviceaccount:$NS:ratelimit-service"
+```
+
+**Act.** A discovery error that names a certificate (`x509: certificate signed by unknown authority`) is a base image
+without the cluster's ServiceAccount CA in its trust store: the service reaches the discovery over TLS against the
+system trust store. An error that says the token could not be acquired is a pod without the `serviceaccount` volume,
+which the chart renders only with `management.enabled`. A refused connection or a timeout is the network between the
+pod and the API server. A `401` that names the signature for a token the API server just issued, while the verifier is
+ready, is a key set the service could not fetch after the discovery; the service fetches it again on the next unknown
+key, at most every five minutes. A `401` that names the audience is a caller that sends a token for another audience:
+the release's `management.m2m.audience` and the caller's token have to agree, which the platform's clients do with
+`KUBERNETES_M2M_ENABLED=true` and the default `netcracker`. A `403` is a caller missing from `management.callers`;
+the start line lists the ones the service read.
 
 ## Appendix: the metrics an operator reads
 

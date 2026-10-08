@@ -18,7 +18,7 @@ func TestDomains_reportsTheEnforcedSetAndItsVersion(t *testing.T) {
 	h := newTestAPI(t)
 
 	var list DomainList
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil), http.StatusOK, &list)
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil), http.StatusOK, &list)
 
 	require.Len(t, list.Items, 1)
 	summary := list.Items[0]
@@ -34,7 +34,7 @@ func TestRules_reportsTheCompiledSet(t *testing.T) {
 	h := newTestAPI(t)
 
 	var view ruleview.RuleSetView
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", viewerRoles(), nil),
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
 		http.StatusOK, &view)
 
 	require.Equal(t, testDomain, view.Domain)
@@ -67,7 +67,7 @@ func TestRules_filtersByTheEnginesOwnRouteMatcher(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders&method=GET", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders&method=GET", listedCaller, nil),
 		http.StatusOK, &view)
 
 	require.Len(t, view.Blocks, 1)
@@ -77,7 +77,7 @@ func TestRules_filtersByTheEnginesOwnRouteMatcher(t *testing.T) {
 func TestRules_refusesAMethodWithoutAPath(t *testing.T) {
 	h := newTestAPI(t)
 	recorder := h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?method=GET", viewerRoles(), nil)
+		BasePath+"/domains/"+testDomain+"/rules?method=GET", listedCaller, nil)
 
 	body := requireError(t, recorder, http.StatusBadRequest, CodeInvalidRequest)
 	require.Equal(t, []string{"method"}, body.Meta.Fields)
@@ -88,7 +88,7 @@ func TestRules_annotatesAScopedListing(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?axis.sub=prometheus", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?axis.sub=prometheus", listedCaller, nil),
 		http.StatusOK, &view)
 
 	byID := map[string]ruleview.RuleView{}
@@ -185,7 +185,7 @@ func TestRules_judgesACaptureKeyedRuleTheWayADecisionWould(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil), http.StatusOK, &view)
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil), http.StatusOK, &view)
 			require.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
 		})
 	}
@@ -211,7 +211,7 @@ func TestRules_refusesACaptureThatContradictsThePath(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			body := requireError(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil),
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil),
 				http.StatusBadRequest, CodeInvalidRequest)
 			require.Equal(t, []string{tc.field}, body.Meta.Fields, "GET /rules?%s", tc.query)
 		})
@@ -263,7 +263,7 @@ func TestRules_judgesAShadowedKeyByTheRouteThatProducesIt(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil), http.StatusOK, &view)
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil), http.StatusOK, &view)
 			require.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
 		})
 	}
@@ -283,9 +283,9 @@ func TestRules_alwaysAgreesWithTheSimulation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?path="+tc.path+
-				"&method="+tc.method+"&axis.sub=dave", viewerRoles(), nil), http.StatusOK, &view)
+				"&method="+tc.method+"&axis.sub=dave", listedCaller, nil), http.StatusOK, &view)
 			var simulation SimulationResponse
-			decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+			decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 				Domain: testDomain, Path: tc.path, Method: tc.method,
 				Keys: map[string][]string{"sub": {"dave"}},
 			}), http.StatusOK, &simulation)
@@ -318,7 +318,7 @@ func appliedRuleIDs(simulation SimulationResponse) []string {
 
 func TestRules_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules", listedCaller, nil),
 		http.StatusNotFound, CodeNotFound)
 }
 
@@ -329,7 +329,7 @@ func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone", listedCaller, nil),
 		http.StatusOK, &list)
 
 	require.Len(t, list.Items, 2)
@@ -352,8 +352,8 @@ func TestCounters_doNotChargeWhatTheyReport(t *testing.T) {
 
 	target := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 	var first, second CounterList
-	decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &first)
-	decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &second)
+	decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &first)
+	decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &second)
 
 	require.Equal(t, first.Items[0].Remaining, second.Items[0].Remaining)
 }
@@ -366,7 +366,7 @@ func TestCounters_limitedSelectsOnlyTheRefusingOnes(t *testing.T) {
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&limited=true",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 
 	require.Len(t, list.Items, 1)
 	require.Equal(t, map[string]string{"sub": "crawler"}, list.Items[0].Axes)
@@ -377,7 +377,7 @@ func TestCounters_limitedSelectsOnlyTheRefusingOnes(t *testing.T) {
 func TestCounters_refusesAFalseThatPretendsToNarrow(t *testing.T) {
 	h := newTestAPI(t)
 	requireError(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?limited=false", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?limited=false", listedCaller, nil),
 		http.StatusBadRequest, CodeInvalidRequest)
 }
 
@@ -390,7 +390,7 @@ func TestCounters_axisFiltersAreOrWithinANameAndAndBetweenNames(t *testing.T) {
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.sub=carol",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 
 	require.Len(t, list.Items, 2)
 	for _, item := range list.Items {
@@ -405,12 +405,12 @@ func TestCounters_anAxisTheRuleLacksMatchesNothing(t *testing.T) {
 
 	var all, filtered CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters",
-		viewerRoles(), nil), http.StatusOK, &all)
+		listedCaller, nil), http.StatusOK, &all)
 	require.Len(t, all.Items, 1)
 	require.Empty(t, all.Items[0].Axes)
 
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice",
-		viewerRoles(), nil), http.StatusOK, &filtered)
+		listedCaller, nil), http.StatusOK, &filtered)
 	require.Empty(t, filtered.Items)
 }
 
@@ -422,14 +422,14 @@ func TestCounters_pagesWithACursorBoundToItsSelection(t *testing.T) {
 	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 
 	var first CounterList
-	decode(t, h.call(t, http.MethodGet, base+"&pageSize=2", viewerRoles(), nil), http.StatusOK, &first)
+	decode(t, h.call(t, http.MethodGet, base+"&pageSize=2", listedCaller, nil), http.StatusOK, &first)
 	require.Len(t, first.Items, 2)
 	require.NotEmpty(t, first.NextCursor)
 	require.True(t, first.Truncated)
 
 	var second CounterList
 	decode(t, h.call(t, http.MethodGet,
-		base+"&pageSize=2&cursor="+url.QueryEscape(first.NextCursor), viewerRoles(), nil),
+		base+"&pageSize=2&cursor="+url.QueryEscape(first.NextCursor), listedCaller, nil),
 		http.StatusOK, &second)
 	require.Len(t, second.Items, 2)
 	require.Empty(t, second.NextCursor)
@@ -446,13 +446,13 @@ func TestCounters_pagesWithACursorBoundToItsSelection(t *testing.T) {
 	// silently answered with another listing.
 	requireError(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?pageSize=2&cursor="+url.QueryEscape(first.NextCursor),
-		viewerRoles(), nil), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller, nil), http.StatusBadRequest, CodeInvalidRequest)
 }
 
 func TestCounters_refusesAPageSizeOverTheCeiling(t *testing.T) {
 	h := newTestAPI(t)
 	requireError(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?pageSize=5000", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?pageSize=5000", listedCaller, nil),
 		http.StatusBadRequest, CodeInvalidRequest)
 }
 
@@ -460,7 +460,7 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 	h := newTestAPI(t)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
@@ -486,7 +486,7 @@ func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
 	// Nothing was reserved: a listing sees an untouched counter.
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 	require.Empty(t, list.Items)
 }
 
@@ -500,7 +500,7 @@ func TestSimulation_reportsTheEffectiveWindowOfATouchedWindow(t *testing.T) {
 	h.spend(t, "/api/invoices/1", keys, 1)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
@@ -520,7 +520,7 @@ func TestSimulation_namesTheBindingWindowOnARefusal(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/orders",
 		Method: http.MethodGet,
@@ -545,7 +545,7 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 	h := newTestAPI(t)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/orders",
 		Method: http.MethodGet,
@@ -591,7 +591,7 @@ func TestSimulation_refusesTheCombinationsTheFormsForbid(t *testing.T) {
 	}
 	for name, request := range cases {
 		t.Run(name, func(t *testing.T) {
-			requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), request),
+			requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, request),
 				http.StatusBadRequest, CodeInvalidRequest)
 		})
 	}
@@ -603,14 +603,14 @@ func TestSimulation_neverEchoesTheToken(t *testing.T) {
 	h := newTestAPI(t)
 	secret := "eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LXBheWxvYWQ.sig"
 
-	recorder := h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	recorder := h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
 		IdentitySource: identityToken, Token: secret,
 	})
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.NotContains(t, recorder.Body.String(), secret)
 
-	refusal := h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	refusal := h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: "gateway.typo", Path: "/api/orders", Method: http.MethodGet,
 		IdentitySource: identityToken, Token: secret,
 	})
@@ -624,7 +624,7 @@ func TestSimulation_refusesAnUnknownField(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, BasePath+"/simulations",
 		strings.NewReader(`{"domain":"gateway.public","path":"/api","method":"GET","identity":"alice"}`))
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+testToken("alice@example.com", viewerRoles()))
+	request.Header.Set("Authorization", "Bearer "+testToken(listedCaller))
 
 	recorder := h.send(t, request)
 	requireError(t, recorder, http.StatusBadRequest, CodeInvalidRequest)
@@ -632,7 +632,7 @@ func TestSimulation_refusesAnUnknownField(t *testing.T) {
 
 func TestHandler_answersAnUnknownRouteInTheSameShape(t *testing.T) {
 	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/nothing", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/nothing", listedCaller, nil),
 		http.StatusNotFound, CodeNotFound)
 }
 
@@ -645,7 +645,7 @@ func TestRules_aPathWithoutAMethodKeepsMethodRestrictedBlocks(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders", listedCaller, nil),
 		http.StatusOK, &view)
 
 	blocks := make([]string, 0, len(view.Blocks))
@@ -664,7 +664,7 @@ func TestReset_refusesAMisspelledSafetyParameter(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&dryrun=true",
-		"key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+		"key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 	require.Equal(t, []string{"dryrun"}, body.Meta.Fields,
 		"the answer names the parameter, because the caller cannot see the whitelist")
 
@@ -683,9 +683,9 @@ func TestReset_refusesAMisspelledSafetyParameterOnARetryToo(t *testing.T) {
 
 	const selector = "ruleId=orders/per-client&axis.sub=alice"
 	var first ResetResponse
-	decode(t, h.reset(t, selector, "key-1", operatorRoles()), http.StatusOK, &first)
+	decode(t, h.reset(t, selector, "key-1", listedCaller), http.StatusOK, &first)
 
-	body := requireError(t, h.reset(t, selector+"&dryrun=true", "key-1", operatorRoles()),
+	body := requireError(t, h.reset(t, selector+"&dryrun=true", "key-1", listedCaller),
 		http.StatusBadRequest, CodeInvalidRequest)
 	require.Equal(t, []string{"dryrun"}, body.Meta.Fields)
 }
@@ -699,7 +699,7 @@ func TestQueryNames_areWhitelistedOnEveryReadEndpoint(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			requireError(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+target, viewerRoles(), nil),
+				BasePath+"/domains/"+testDomain+target, listedCaller, nil),
 				http.StatusBadRequest, CodeInvalidRequest)
 		})
 	}
@@ -712,5 +712,5 @@ func TestQueryNames_admitTheAxisFamily(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.order_id=4711",
-		viewerRoles(), nil).Code)
+		listedCaller, nil).Code)
 }

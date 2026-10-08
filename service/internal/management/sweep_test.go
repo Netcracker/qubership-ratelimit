@@ -56,7 +56,7 @@ func (h *testAPI) occupy(t *testing.T, ttl time.Duration) {
 func (h *testAPI) accepted(t *testing.T, key string, command bulkCommand, leaseTTL time.Duration) records.Keys {
 	t.Helper()
 
-	name := recordKey(testNamespace, testDomain, endpointResets, "alice@example.com", key)
+	name := recordKey(testNamespace, testDomain, endpointResets, listedCaller, key)
 	keys := commandKeys(testNamespace, testDomain, name, command)
 
 	accepted, err := h.records.Accept(context.Background(), records.Acceptance{
@@ -90,7 +90,7 @@ func TestBulk_refusesASecondSweepInTheDomain(t *testing.T) {
 
 	recorder := h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles())
+	}, "key-1", listedCaller)
 
 	body := requireError(t, recorder, http.StatusConflict, CodeConflict)
 	require.Equal(t, ConflictSweepInFlight, body.Meta.ConflictType)
@@ -100,7 +100,7 @@ func TestBulk_refusesASecondSweepInTheDomain(t *testing.T) {
 	h.records.Now = func() time.Time { return time.Now().Add(time.Minute) }
 	require.Equal(t, http.StatusOK, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()).Code)
+	}, "key-1", listedCaller).Code)
 }
 
 // A retry that meets its own command still in flight is a poll: no body, and a
@@ -111,7 +111,7 @@ func TestBulk_retryOfARunningCommandPolls(t *testing.T) {
 
 	recorder := h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles())
+	}, "key-1", listedCaller)
 
 	require.Equal(t, http.StatusAccepted, recorder.Code)
 	require.Empty(t, recorder.Body.String(), "there is nothing to say yet")
@@ -140,7 +140,7 @@ func TestBulk_retryFinalizesADeadSweep(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+	}, "key-1", listedCaller), http.StatusInternalServerError, CodeInterrupted)
 
 	require.NotNil(t, body.Meta.PartialReset, "a command that may have deleted must disclose")
 	require.Equal(t, 40, body.Meta.PartialReset.Scanned)
@@ -151,7 +151,7 @@ func TestBulk_retryFinalizesADeadSweep(t *testing.T) {
 	// And a later retry replays that outcome rather than finalizing again.
 	replay := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+	}, "key-1", listedCaller), http.StatusInternalServerError, CodeInterrupted)
 	require.Equal(t, body.ID, replay.ID, "a replay is the same error instance")
 	require.Equal(t, 40, replay.Meta.PartialReset.Scanned)
 }
@@ -172,7 +172,7 @@ func TestBulk_deadlineIsRecordedWithItsDisclosure(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	}, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
 
 	require.NotNil(t, body.Meta.PartialReset)
 	require.True(t, body.Meta.PartialReset.DryRun)
@@ -184,7 +184,7 @@ func TestBulk_deadlineIsRecordedWithItsDisclosure(t *testing.T) {
 	// walking again.
 	replay := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	}, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
 	require.Equal(t, body.ID, replay.ID)
 }
 
@@ -201,7 +201,7 @@ func TestBulk_aPreviewWalksEveryStepOfALargeBlock(t *testing.T) {
 	var preview BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusOK, &preview)
+	}, "key-1", listedCaller), http.StatusOK, &preview)
 
 	require.Equal(t, clients, preview.Scanned, "keys the walk examined")
 	require.NotNil(t, preview.MatchedCount)
@@ -221,7 +221,7 @@ func TestBulk_theDeadlineIsCheckedBeforeEveryStep(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	}, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
 
 	require.NotNil(t, body.Meta.PartialReset)
 	require.Equal(t, 0, body.Meta.PartialReset.Scanned, "no key was walked before the deadline")
@@ -236,12 +236,12 @@ func TestBulk_aRecordedFailureReleasesTheDomain(t *testing.T) {
 	h.deadlineAfter(t, 1)
 	requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	}, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
 
 	h.api.Now = nil
 	require.Equal(t, http.StatusOK, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-2", operatorRoles()).Code, "the domain took the next command")
+	}, "key-2", listedCaller).Code, "the domain took the next command")
 }
 
 // Every 409 names its recovery, so a client branches on the field rather than
@@ -251,11 +251,11 @@ func TestBulk_conflictsNameTheirRecovery(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()).Code)
+	}, "key-1", listedCaller).Code)
 
 	mismatch := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"cascade"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusConflict, CodeConflict)
+	}, "key-1", listedCaller), http.StatusConflict, CodeConflict)
 	require.Equal(t, ConflictCommandMismatch, mismatch.Meta.ConflictType)
 
 	preview := h.preview(t, map[string]any{
@@ -265,7 +265,7 @@ func TestBulk_conflictsNameTheirRecovery(t *testing.T) {
 	stale := requireError(t, h.bulk(t, map[string]any{
 		"selector":          map[string]any{"ruleIds": []string{"cascade"}},
 		"confirmationToken": preview.ConfirmationToken,
-	}, "key-3", operatorRoles()), http.StatusConflict, CodeConflict)
+	}, "key-3", listedCaller), http.StatusConflict, CodeConflict)
 	require.Equal(t, ConflictStaleConfirmation, stale.Meta.ConflictType)
 }
 
@@ -276,7 +276,7 @@ func TestReset_versionConflictNamesItsRecovery(t *testing.T) {
 
 	body := requireError(t, h.reset(t,
 		"ruleId=orders/per-client&axis.sub=alice&expectedRuleSetVersion=000000000000",
-		"key-1", operatorRoles()), http.StatusConflict, CodeConflict)
+		"key-1", listedCaller), http.StatusConflict, CodeConflict)
 	require.Equal(t, ConflictStaleRuleSet, body.Meta.ConflictType)
 }
 
@@ -322,7 +322,7 @@ func TestBulk_recordsItsOutcomeWhenShutdownEndsTheWalk(t *testing.T) {
 	var preview BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusOK, &preview)
+	}, "key-1", listedCaller), http.StatusOK, &preview)
 	require.NotEmpty(t, preview.ConfirmationToken, "the preview's token was not stored")
 }
 
@@ -338,7 +338,7 @@ func TestBulk_recordsAFailureWhenShutdownEndsTheWalk(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	}, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
 	require.NotNil(t, body.Meta.PartialReset)
 }
 
@@ -377,7 +377,7 @@ func TestBulk_aFailureInsideABatchDisclosesWhatTheStoreCommitted(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+	}, "key-execute", listedCaller), http.StatusInternalServerError, CodeInterrupted)
 	require.NotNil(t, body.Meta.PartialReset)
 	require.NotNil(t, body.Meta.PartialReset.ResetCount)
 	require.Zero(t, *body.Meta.PartialReset.ResetCount, "the failure names deletions the store refused")
@@ -435,7 +435,7 @@ func TestBulk_aFailureWithoutItsCommittedProgressAnswersThatTheStoreIsDown(t *te
 
 			requireError(t, h.bulk(t, map[string]any{
 				"selector": selector, "confirmationToken": preview.ConfirmationToken,
-			}, "key-execute", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
+			}, "key-execute", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
 			require.True(t, refused, "the sweep never reached the store")
 		})
 	}
@@ -463,5 +463,5 @@ func TestBulk_recordsAFailedMintWhenShutdownEndsTheWalk(t *testing.T) {
 
 	requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+	}, "key-1", listedCaller), http.StatusInternalServerError, CodeInterrupted)
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -58,13 +59,17 @@ type API struct {
 	// reset miss the live counters silently.
 	Namespace string
 
-	// Claims names the token claims the subject and its roles are read from;
-	// the zero value uses DefaultClaimNames. Either name may be a dotted path.
-	Claims ClaimNames
+	// Callers are the ServiceAccounts that may call the API, each as the sub
+	// claim of its tokens, system:serviceaccount:<namespace>:<name>. A listed
+	// caller holds operator; any other verified caller holds no role.
+	Callers []string
 
-	// Roles maps the role names the IdP issues onto viewer and operator. The
-	// zero value expects the canonical names in the token.
-	Roles RoleMapping
+	// NewVerifier builds the verifier of bearer tokens. StartBackground calls
+	// it under the runner's context, which the verifier's key refresh lives
+	// as long as, and calls it again until it succeeds; until then every
+	// request is refused with CodeVerifierUnavailable, and so is every request
+	// when NewVerifier is nil.
+	NewVerifier func(ctx context.Context) (Verifier, error)
 
 	// Replica names this pod for the status endpoint and for the operations it
 	// owns; empty falls back to POD_NAME and then the hostname.
@@ -85,6 +90,8 @@ type API struct {
 
 	mu      sync.Mutex
 	basectx context.Context
+
+	verifier atomic.Pointer[Verifier]
 }
 
 // Logger is the part of the platform logger this package needs. The
@@ -110,15 +117,10 @@ type DomainList struct {
 // identity, immediately in front of the handlers, so nothing routed can be
 // reached without a subject to audit the call against.
 func (a *API) Register(router fiber.Router) {
-	claims := a.Claims
-	if claims.Subject == "" {
-		claims = DefaultClaimNames
-	}
-
 	group := router.Group(BasePath)
 	group.Use(withRequestID)
 	group.Use(recover.New())
-	group.Use(withIdentity(claims, a.Roles))
+	group.Use(a.withIdentity())
 
 	group.Get("/domains", requireRole(RoleViewer, a.handleDomains))
 	group.Get("/domains/:domain/rules", requireRole(RoleViewer, a.handleRules))
@@ -438,11 +440,15 @@ func (a *API) now() time.Time {
 // StartBackground gives the API the context an accepted sweep runs under: the
 // process's lifetime, not the request's. A client that disconnects changes
 // nothing for a command that was already accepted — it runs to a recorded
-// outcome either way — and only shutdown ends it early.
+// outcome either way — and only shutdown ends it early. It also starts
+// building the token verifier under that context, in the background, so a
+// cluster whose OIDC discovery does not answer delays the management API
+// alone.
 func (a *API) StartBackground(ctx context.Context) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.basectx = ctx
+	a.mu.Unlock()
+	go a.buildVerifier(ctx)
 }
 
 // backgroundContext is what an accepted sweep runs under.

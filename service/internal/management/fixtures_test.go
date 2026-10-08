@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
 	errs "github.com/netcracker/qubership-core-lib-go-error-handling/v3/errors"
 	"github.com/stretchr/testify/require"
 
@@ -268,8 +270,11 @@ func newTestAPI(t *testing.T, blocks ...model.Block) *testAPI {
 		Namespace: testNamespace,
 		Counters:  counterStore,
 		Records:   commands,
+		Callers:   []string{listedCaller, otherCaller},
 		Log:       discardLogger{},
 	}
+	verifier := Verifier(readingVerifier{})
+	api.verifier.Store(&verifier)
 	app, err := NewApp(api)
 	require.NoError(t, err)
 
@@ -297,13 +302,17 @@ func (h *testAPI) spend(t *testing.T, path string, keys map[string][]string, tim
 	}
 }
 
-// roles is the token role set every request in these tests carries unless it
-// says otherwise.
-func viewerRoles() []string   { return []string{RoleViewer} }
-func operatorRoles() []string { return []string{RoleOperator} }
+// The callers of these tests, as the sub claims of their tokens. The API lists
+// the first two, so each holds operator; the third is verified and listed
+// nowhere, so it holds no role.
+const (
+	listedCaller   = "system:serviceaccount:" + testNamespace + ":ui-backend"
+	otherCaller    = "system:serviceaccount:" + testNamespace + ":ops-backend"
+	unlistedCaller = "system:serviceaccount:" + testNamespace + ":intruder"
+)
 
 // call runs one request through the whole app, as an authenticated caller.
-func (h *testAPI) call(t *testing.T, method, target string, roles []string, body any) *testResponse {
+func (h *testAPI) call(t *testing.T, method, target string, caller string, body any) *testResponse {
 	t.Helper()
 
 	var reader *strings.Reader
@@ -319,7 +328,7 @@ func (h *testAPI) call(t *testing.T, method, target string, roles []string, body
 	if body != nil {
 		request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	}
-	request.Header.Set(fiber.HeaderAuthorization, "Bearer "+testToken("alice@example.com", roles))
+	request.Header.Set(fiber.HeaderAuthorization, "Bearer "+testToken(caller))
 	return h.send(t, request)
 }
 
@@ -328,7 +337,7 @@ func (h *testAPI) call(t *testing.T, method, target string, roles []string, body
 func (h *testAPI) callWith(
 	t *testing.T,
 	method, target string,
-	roles []string,
+	caller string,
 	body any,
 	prepare func(*http.Request),
 ) *testResponse {
@@ -345,7 +354,7 @@ func (h *testAPI) callWith(
 	if body != nil {
 		request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	}
-	request.Header.Set(fiber.HeaderAuthorization, "Bearer "+testToken("alice@example.com", roles))
+	request.Header.Set(fiber.HeaderAuthorization, "Bearer "+testToken(caller))
 	if prepare != nil {
 		prepare(request)
 	}
@@ -413,24 +422,46 @@ type testResponse struct {
 
 func (r *testResponse) Header() http.Header { return r.header }
 
-// testToken builds an unsigned JWT payload. The service reads the token and
-// never verifies it — the gateway's auth extension did — so a test needs no
-// signing key to exercise the identity middleware.
-func testToken(subject string, roles []string) string {
-	payload, err := json.Marshal(map[string]any{"sub": subject, "roles": roles})
+// testToken builds the token of a ServiceAccount whose sub claim is subject,
+// in the shape the API server issues: sub and the kubernetes.io claim. It is
+// unsigned, because readingVerifier stands in for the signature check.
+func testToken(subject string) string {
+	namespace, name := "", ""
+	if parts := strings.Split(subject, ":"); len(parts) == 4 {
+		namespace, name = parts[2], parts[3]
+	}
+	return tokenWithClaims(map[string]any{
+		"sub": subject,
+		"kubernetes.io": map[string]any{
+			"namespace":      namespace,
+			"serviceaccount": map[string]any{"name": name},
+		},
+	})
+}
+
+// tokenWithClaims builds an unsigned bearer token carrying claims, for the
+// shapes testToken's fixed one cannot express.
+func tokenWithClaims(claims map[string]any) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload, err := json.Marshal(claims)
 	if err != nil {
 		panic(err)
 	}
-	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+	return header + "." + base64.RawURLEncoding.EncodeToString(payload) + "."
 }
 
-// tokenWithClaims builds a bearer token carrying an arbitrary payload, for the
-// claim shapes testToken's fixed one cannot express.
-func tokenWithClaims(t *testing.T, claims map[string]any) string {
-	t.Helper()
-	payload, err := json.Marshal(claims)
-	require.NoError(t, err)
-	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+// readingVerifier accepts every well-formed token and returns its claims, so
+// the tests exercise what the API does with a verified token. Verification
+// itself is the platform library's, and identity_test.go pins how the API
+// answers each of its refusals.
+type readingVerifier struct{}
+
+func (readingVerifier) Verify(_ context.Context, raw string) (*jwt.Token, error) {
+	parsed, _, err := jwt.NewParser().ParseUnverified(raw, jwt.MapClaims{})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", jwt.ErrTokenMalformed, err)
+	}
+	return parsed, nil
 }
 
 // decode reads a JSON response body into v, failing on a status other than the

@@ -70,7 +70,7 @@ func TestFailClosed_anUnreadableRecordRefusesTheCommand(t *testing.T) {
 
 	requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
+	}, "key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
 }
 
 // A 503 at the acceptance write is the one ambiguous answer, and the message
@@ -81,7 +81,7 @@ func TestFailClosed_anAmbiguousAcceptanceNamesItsRecovery(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
+	}, "key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
 	require.Contains(t, body.Message, "retry the same Idempotency-Key")
 }
 
@@ -95,7 +95,7 @@ func TestFailClosed_anUnreadableTokenRefusesTheExecution(t *testing.T) {
 	requireError(t, h.bulk(t, map[string]any{
 		"selector":          map[string]any{"ruleIds": []string{"orders"}},
 		"confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
+	}, "key-execute", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
 }
 
 // The addressed form is one step, so a store that refuses it bound nothing and
@@ -105,7 +105,7 @@ func TestFailClosed_anAddressedResetThatNeverRanCanBeRetried(t *testing.T) {
 	h.breakRecords(&brokenRecords{failReset: true})
 
 	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice",
-		"key-1", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
+		"key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
 	require.Contains(t, body.Message, "nothing was bound")
 }
 
@@ -122,7 +122,7 @@ func TestFailClosed_aLostLeaseAnswersFromTheRecord(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+	}, "key-1", listedCaller), http.StatusInternalServerError, CodeInterrupted)
 	require.NotNil(t, body.Meta.PartialReset)
 	require.Equal(t, "id-stolen", body.ID, "the recorded outcome is the one that stands")
 	require.Equal(t, 7, body.Meta.PartialReset.Scanned)
@@ -165,7 +165,7 @@ func TestLimited_sweepsOnlyTheCountersRefusingRightNow(t *testing.T) {
 	var executed BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusOK, &executed)
+	}, "key-execute", listedCaller), http.StatusOK, &executed)
 	require.Equal(t, 1, *executed.ResetCount)
 
 	_, found := h.remaining(t, "crawler")
@@ -181,7 +181,7 @@ func TestLimited_addressedResetSkipsACounterUnderItsLimit(t *testing.T) {
 
 	var response ResetResponse
 	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&limited=true",
-		"key-1", operatorRoles()), http.StatusOK, &response)
+		"key-1", listedCaller), http.StatusOK, &response)
 	require.Equal(t, 0, *response.ResetCount, "alice is not refusing, so nothing was reset")
 	// keys reports what the command addressed, one per window of the rule;
 	// narrowing it to the refusing subset would leave the body saying the
@@ -199,7 +199,7 @@ func TestLimited_addressedResetDropsARefusingCounter(t *testing.T) {
 
 	var response ResetResponse
 	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler&limited=true",
-		"key-1", operatorRoles()), http.StatusOK, &response)
+		"key-1", listedCaller), http.StatusOK, &response)
 	require.Equal(t, 1, *response.ResetCount)
 
 	_, found := h.remaining(t, "crawler")

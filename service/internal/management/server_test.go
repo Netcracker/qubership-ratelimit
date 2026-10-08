@@ -22,7 +22,7 @@ func TestApp_answersWithExactlyOneRequestID(t *testing.T) {
 	h := newTestAPI(t)
 
 	request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
-	request.Header.Set("Authorization", "Bearer "+testToken("alice@example.com", viewerRoles()))
+	request.Header.Set("Authorization", "Bearer "+testToken(listedCaller))
 	request.Header.Set(RequestIDHeader, "trace-42")
 
 	recorder := h.send(t, request)
@@ -32,7 +32,7 @@ func TestApp_answersWithExactlyOneRequestID(t *testing.T) {
 
 func TestApp_generatesOneRequestIDWhenTheCallerSendsNone(t *testing.T) {
 	h := newTestAPI(t)
-	recorder := h.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil)
+	recorder := h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil)
 
 	values := recorder.Header().Values(RequestIDHeader)
 	require.Len(t, values, 1)
@@ -56,7 +56,7 @@ func TestApp_answersInTheTmfEnvelope(t *testing.T) {
 	h := newTestAPI(t)
 
 	body := requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules",
-		viewerRoles(), nil), http.StatusNotFound, CodeNotFound)
+		listedCaller, nil), http.StatusNotFound, CodeNotFound)
 
 	require.Equal(t, "NC.TMFErrorResponse.v1.0", body.Type)
 	require.Equal(t, "404", body.Status)
@@ -71,9 +71,9 @@ func TestNewApp_isBuildableTwiceInOneProcess(t *testing.T) {
 	second := newTestAPI(t)
 
 	require.Equal(t, http.StatusOK,
-		first.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil).Code)
+		first.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code)
 	require.Equal(t, http.StatusOK,
-		second.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil).Code)
+		second.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code)
 }
 
 // fasthttp cuts an oversized body before any handler runs, so this is two
@@ -113,7 +113,7 @@ func TestDecodeJSON_refusesAnythingAfterTheValue(t *testing.T) {
 	target := BasePath + "/domains/" + testDomain + "/counter-resets"
 	post := func(t *testing.T, body, key string) *testResponse {
 		t.Helper()
-		return h.callWith(t, http.MethodPost, target, operatorRoles(), nil,
+		return h.callWith(t, http.MethodPost, target, listedCaller, nil,
 			func(request *http.Request) {
 				request.Header.Set("Idempotency-Key", key)
 				request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)

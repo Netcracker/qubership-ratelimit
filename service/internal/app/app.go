@@ -16,6 +16,7 @@ import (
 	"time"
 
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
+	"github.com/netcracker/qubership-core-lib-go/v3/security/tokenverifier"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
@@ -192,17 +193,20 @@ func Build(namespace string, options Options) (*Service, error) {
 			platform.Warnf("management API is serving over the in-process counter store; " +
 				"it is correct at one replica only, like the limits themselves")
 		}
-		// The mapping decides who may mutate counters, and an installation
-		// left read-only by an empty operator list shows nowhere else.
-		roles := settings.ManagementRoles()
-		platform.Infof("management API role mapping viewer=%v operator=%v", roles.Viewer, roles.Operator)
+		// The callers decide who may mutate counters, and an installation
+		// that lets nobody in shows nowhere else.
+		callers := settings.ManagementCallers(namespace, platform.Errorf)
+		audience := settings.ManagementAudience()
+		platform.Infof("management API callers=%v audience=%v", callers, audience)
 		api := &management.API{
-			Rules:          rules,
-			Counters:       backend.Store,
-			Records:        backend.Records,
-			Namespace:      namespace,
-			Claims:         settings.ManagementClaims(),
-			Roles:          roles,
+			Rules:     rules,
+			Counters:  backend.Store,
+			Records:   backend.Records,
+			Namespace: namespace,
+			Callers:   callers,
+			NewVerifier: func(ctx context.Context) (management.Verifier, error) {
+				return tokenverifier.NewKubernetesVerifier(ctx, audience)
+			},
 			Replica:        options.Replica,
 			CounterBackend: backend.Description,
 			Log:            platform,
