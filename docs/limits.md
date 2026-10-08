@@ -63,7 +63,7 @@ walls are reached only by a domain that collects many APIs behind one gateway.
 A preset ([the resource specification](ratelimitpolicy-cr-spec.md), "Presets") is written into every block and rule
 that takes it before the policy compiles, so the resolved policy can be larger than the object. The operator bounds
 it at the same 1.5 MiB (1572864 bytes), estimated from the serialized size of the spec as written, with the defaults
-written in, plus the size of each preset once per block or rule that takes it, less the rules that `drop` names,
+written in, plus the size of each preset once per block or rule that takes it, less the preset rules the blocks drop,
 before any preset is written into a block or a rule; a generation above that is `ResolvedPolicyTooLarge`, and the
 last-good generation stays enforced. The estimate counts a field a layer replaces in both layers, so it never falls
 below the resolved size and can refuse a policy whose resolved size is below the wall. Neither the decision budget

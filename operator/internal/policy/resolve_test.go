@@ -84,12 +84,12 @@ func TestResolve_aRuleTakesEveryFieldOfItsPresetAndKeepsItsName(t *testing.T) {
 }
 
 // Every field of a rule except its name and the authoring fields preset,
-// before, and drop is one the rule takes from the preset when it leaves the
+// before, and dropped is one the rule takes from the preset when it leaves the
 // field out. The set of fields is read from the type, so a field added to
 // Rule and left out of the merge fails here rather than being dropped on the
 // way to the engine.
 func TestResolve_aRuleTakesEveryFieldOfTheRuleTypeItLeavesOut(t *testing.T) {
-	own := map[string]bool{"Name": true, "Preset": true, "Before": true, "Drop": true}
+	own := map[string]bool{"Name": true, "Preset": true, "Before": true, "Dropped": true}
 	preset := v1.Rule{Name: "p"}
 	presetValue := reflect.ValueOf(&preset).Elem()
 	for i := range presetValue.NumField() {

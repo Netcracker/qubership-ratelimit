@@ -148,13 +148,13 @@ func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
 			order: []string{"internal", "enterprise", "partner", "vip", "per-user", "anonymous"},
 		},
 		{
-			name:  "drop leaves the preset's rule out",
-			rules: []v1.Rule{{Name: "anonymous", Drop: true}},
+			name:  "dropped leaves the preset's rule out",
+			rules: []v1.Rule{{Name: "anonymous", Dropped: true}},
 			order: []string{"internal", "enterprise", "per-user"},
 		},
 		{
-			name:  "before with drop on the same name replaces the rule in place",
-			rules: []v1.Rule{withBefore(partner, "anonymous"), {Name: "anonymous", Drop: true}},
+			name:  "before with dropped on the same name replaces the rule in place",
+			rules: []v1.Rule{withBefore(partner, "anonymous"), {Name: "anonymous", Dropped: true}},
 			order: []string{"internal", "enterprise", "per-user", "partner"},
 		},
 		{
@@ -167,11 +167,11 @@ func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
 			},
 		},
 		{
-			name: "an override, an insertion, and a drop in one block",
+			name: "an override, an insertion, and a dropped rule in one block",
 			rules: []v1.Rule{
 				{Name: "enterprise", Rates: []v1.Rate{minuteRate(2000)}},
 				withBefore(partner, "per-user"),
-				{Name: "internal", Drop: true},
+				{Name: "internal", Dropped: true},
 			},
 			order: []string{"enterprise", "partner", "per-user", "anonymous"},
 			check: func(t *testing.T, block v1.LimitBlock) {
@@ -190,7 +190,7 @@ func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
 			assert.Equal(t, tc.order, ruleNames(block))
 			for _, rule := range block.Rules {
 				assert.Empty(t, rule.Before, "rule %s still carries before", rule.Name)
-				assert.False(t, rule.Drop, "rule %s still carries drop", rule.Name)
+				assert.False(t, rule.Dropped, "rule %s still carries dropped", rule.Name)
 				assert.Empty(t, rule.Preset, "rule %s still carries preset", rule.Name)
 			}
 			assert.Equal(t, "standard-client", resolved.Presets[RuleRef{Block: "orders", Rule: "per-user"}],
@@ -202,25 +202,25 @@ func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
 	}
 }
 
-// A rule with drop carries nothing beside its name: every other field of
-// Rule, set alone beside drop, is refused. The set of fields is read from
+// A dropped rule carries nothing beside its name: every other field of
+// Rule, set alone beside dropped, is refused. The set of fields is read from
 // the type, so a field added to Rule and left out of the check fails here.
-func TestResolve_aRuleWithDropCarriesNothingBesideItsName(t *testing.T) {
+func TestResolve_aDroppedRuleCarriesNothingBesideItsName(t *testing.T) {
 	for field := range reflect.TypeFor[v1.Rule]().Fields() {
-		if field.Name == "Name" || field.Name == "Drop" {
+		if field.Name == "Name" || field.Name == "Dropped" {
 			continue
 		}
 		t.Run(field.Name, func(t *testing.T) {
-			rule := v1.Rule{Name: "anonymous", Drop: true}
+			rule := v1.Rule{Name: "anonymous", Dropped: true}
 			fill(t, reflect.ValueOf(&rule).Elem().FieldByName(field.Name))
 
 			resolved, problems := Resolve(cascadeSpec(
 				v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{rule}}))
 
 			assert.Nil(t, resolved)
-			require.NotEmpty(t, problems, "drop beside %s was accepted", field.Name)
+			require.NotEmpty(t, problems, "dropped beside %s was accepted", field.Name)
 			assert.Equal(t, v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec,
-				Message: "a rule with drop carries nothing beside name"}, problems[0])
+				Message: "a dropped rule carries nothing beside name"}, problems[0])
 		})
 	}
 }
@@ -274,10 +274,10 @@ func TestResolve_reportsTheReferencesAndShapesOfABlockAtThePointOfUse(t *testing
 				Message: `preset "plan-cascad" is not declared under spec.presets.blocks`},
 		},
 		{
-			name:  "drop of a rule the preset does not hold",
-			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{{Name: "ghost", Drop: true}}},
+			name:  "dropped on a rule the preset does not hold",
+			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{{Name: "ghost", Dropped: true}}},
 			want: v1.RuleProblem{Block: "orders", Rule: "ghost", Reason: v1.ProblemUnresolvedPresetReference,
-				Message: `drop names rule "ghost", which block preset "plan-cascade" does not hold`},
+				Message: `dropped on rule "ghost", which block preset "plan-cascade" does not hold`},
 		},
 		{
 			name: "before of a rule neither in the preset nor written earlier",
@@ -292,21 +292,21 @@ func TestResolve_reportsTheReferencesAndShapesOfABlockAtThePointOfUse(t *testing
 			name:  "before in a block that takes no preset",
 			block: v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "x", Before: "y", Rates: []v1.Rate{minuteRate(1)}}}},
 			want: v1.RuleProblem{Block: "api", Rule: "x", Reason: v1.ProblemInvalidSpec,
-				Message: "before and drop apply in a block that takes a block preset; this block takes none"},
+				Message: "before and dropped apply in a block that takes a block preset; this block takes none"},
 		},
 		{
-			name:  "drop in a block that takes no preset",
-			block: v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "x", Drop: true}}},
+			name:  "dropped in a block that takes no preset",
+			block: v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "x", Dropped: true}}},
 			want: v1.RuleProblem{Block: "api", Rule: "x", Reason: v1.ProblemInvalidSpec,
-				Message: "before and drop apply in a block that takes a block preset; this block takes none"},
+				Message: "before and dropped apply in a block that takes a block preset; this block takes none"},
 		},
 		{
-			name: "drop beside a field",
+			name: "dropped beside a field",
 			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
-				{Name: "anonymous", Drop: true, Rates: []v1.Rate{minuteRate(1)}},
+				{Name: "anonymous", Dropped: true, Rates: []v1.Rate{minuteRate(1)}},
 			}},
 			want: v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec,
-				Message: "a rule with drop carries nothing beside name"},
+				Message: "a dropped rule carries nothing beside name"},
 		},
 		{
 			name: "before on a rule the preset holds",
@@ -380,12 +380,12 @@ func TestResolve_rejectsTheShapeOfABlockPresetNoBlockTakes(t *testing.T) {
 		{
 			name:    "a rule of a block preset with before",
 			presets: []v1.LimitBlock{withRules(v1.Rule{Name: "a", Before: "b", Rates: []v1.Rate{minuteRate(1)}})},
-			message: `rule "a" of block preset "cascade" carries before or drop, which a block that takes the preset carries`,
+			message: `rule "a" of block preset "cascade" carries before or dropped, which a block that takes the preset carries`,
 		},
 		{
-			name:    "a rule of a block preset with drop",
-			presets: []v1.LimitBlock{withRules(v1.Rule{Name: "a", Drop: true})},
-			message: `rule "a" of block preset "cascade" carries before or drop, which a block that takes the preset carries`,
+			name:    "a rule of a block preset with dropped",
+			presets: []v1.LimitBlock{withRules(v1.Rule{Name: "a", Dropped: true})},
+			message: `rule "a" of block preset "cascade" carries before or dropped, which a block that takes the preset carries`,
 		},
 		{
 			name:    "a block preset declared twice",
@@ -415,10 +415,10 @@ func TestResolve_rejectsTheShapeOfABlockPresetNoBlockTakes(t *testing.T) {
 	}
 }
 
-func TestResolve_aRulePresetWithBeforeOrDropIsInvalid(t *testing.T) {
+func TestResolve_aRulePresetWithBeforeOrDroppedIsInvalid(t *testing.T) {
 	cases := map[string]v1.Rule{
-		"before": {Name: "p", Before: "q", Rates: []v1.Rate{minuteRate(1)}},
-		"drop":   {Name: "p", Drop: true},
+		"before":  {Name: "p", Before: "q", Rates: []v1.Rate{minuteRate(1)}},
+		"dropped": {Name: "p", Dropped: true},
 	}
 	for name, preset := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -430,7 +430,7 @@ func TestResolve_aRulePresetWithBeforeOrDropIsInvalid(t *testing.T) {
 			assert.Nil(t, resolved)
 			require.Len(t, problems, 1)
 			assert.Equal(t, v1.RuleProblem{Reason: v1.ProblemInvalidSpec,
-				Message: `rule preset "p" carries before or drop, which a rule of a block that takes a block preset carries`},
+				Message: `rule preset "p" carries before or dropped, which a rule of a block that takes a block preset carries`},
 				problems[0])
 		})
 	}
@@ -442,7 +442,7 @@ func TestCompile_aBlockWithNoRulesAfterResolutionIsInvalid(t *testing.T) {
 	spec := &v1.RateLimitPolicySpec{
 		Domain:  testDomain,
 		Presets: &v1.Presets{Blocks: []v1.LimitBlock{{Name: "one", Rules: []v1.Rule{simpleRule("only")}}}},
-		Limits:  []v1.LimitBlock{{Name: "api", Preset: "one", Rules: []v1.Rule{{Name: "only", Drop: true}}}},
+		Limits:  []v1.LimitBlock{{Name: "api", Preset: "one", Rules: []v1.Rule{{Name: "only", Dropped: true}}}},
 	}
 
 	outcome := compileOf(objectWithSpec(spec)).Policies[key()]
@@ -466,7 +466,7 @@ func TestCompile_aPolicyWithBlockPresetsCompilesLikeThePolicyWrittenOut(t *testi
 		v1.LimitBlock{Name: "catalog", Preset: "plan-cascade", Target: prefixTarget("/api/v1/catalog"),
 			Rules: []v1.Rule{{Name: "per-user", Rates: []v1.Rate{minuteRate(300)}}}},
 		v1.LimitBlock{Name: "exports", Preset: "plan-cascade", Target: prefixTarget("/api/v1/exports"),
-			Rules: []v1.Rule{partnerBefore, {Name: "anonymous", Drop: true}}},
+			Rules: []v1.Rule{partnerBefore, {Name: "anonymous", Dropped: true}}},
 	)
 	withPresets.Mappings = []v1.ClaimMapping{{Key: "plan", Claim: "plan", Normalization: v1.NormalizeLowercase}}
 	withPresets.Groups = []v1.Group{{Name: "partners", Values: []string{"00000000-0000-4000-8000-00000000c001"}}}
@@ -549,13 +549,13 @@ func TestResolve_estimatesABlockPresetOncePerBlockLessTheRulesDropped(t *testing
 		},
 		Limits: []v1.LimitBlock{
 			{Name: "x", Preset: "body"},
-			{Name: "y", Preset: "body", Rules: []v1.Rule{{Name: "a", Drop: true}}},
+			{Name: "y", Preset: "body", Rules: []v1.Rule{{Name: "a", Dropped: true}}},
 		},
 	}
 	writtenWithDefaults := *spec.DeepCopy()
 	writtenWithDefaults.Limits = []v1.LimitBlock{
 		{Name: "x", Preset: "body", Mode: v1.BlockModeAll},
-		{Name: "y", Preset: "body", Mode: v1.BlockModeAll, Rules: []v1.Rule{{Name: "a", Drop: true, Behavior: v1.RuleBehaviorEnforce}}},
+		{Name: "y", Preset: "body", Mode: v1.BlockModeAll, Rules: []v1.Rule{{Name: "a", Dropped: true, Behavior: v1.RuleBehaviorEnforce}}},
 	}
 	bodyWithDefaults := v1.LimitBlock{Name: "body", Mode: v1.BlockModeAll, Rules: []v1.Rule{
 		{Name: "a", Counters: []string{"sub"}, Behavior: v1.RuleBehaviorEnforce,
@@ -583,12 +583,12 @@ func TestResolve_theEstimateIsAtLeastTheResolvedSizeWithBlockPresets(t *testing.
 		"a block preset taken as is by three blocks": cascadeSpec(
 			v1.LimitBlock{Name: "a", Preset: "plan-cascade"}, v1.LimitBlock{Name: "b", Preset: "plan-cascade"},
 			v1.LimitBlock{Name: "c", Preset: "plan-cascade"}),
-		"a block preset with an override, an insertion, and a drop": cascadeSpec(
+		"a block preset with an override, an insertion, and a dropped rule": cascadeSpec(
 			v1.LimitBlock{Name: "a", Preset: "plan-cascade", Rules: []v1.Rule{
-				{Name: "enterprise", Rates: []v1.Rate{minuteRate(2000)}}, partner, {Name: "anonymous", Drop: true}}}),
+				{Name: "enterprise", Rates: []v1.Rate{minuteRate(2000)}}, partner, {Name: "anonymous", Dropped: true}}}),
 		"a block preset every rule of which is dropped but one": cascadeSpec(
 			v1.LimitBlock{Name: "a", Preset: "plan-cascade", Rules: []v1.Rule{
-				{Name: "internal", Drop: true}, {Name: "enterprise", Drop: true}, {Name: "anonymous", Drop: true}}}),
+				{Name: "internal", Dropped: true}, {Name: "enterprise", Dropped: true}, {Name: "anonymous", Dropped: true}}}),
 	}
 	for name, spec := range specs {
 		t.Run(name, func(t *testing.T) {

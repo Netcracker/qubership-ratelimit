@@ -104,8 +104,8 @@ const (
 
 	// ProblemUnresolvedPresetReference marks a preset a rule or a block names
 	// that spec.presets does not hold, a before that names a rule neither in
-	// the block's preset nor written earlier in the list, or a drop that
-	// names a rule the block's preset does not hold. Blocking.
+	// the block's preset nor written earlier in the list, or a dropped rule
+	// the block's preset does not hold. Blocking.
 	ProblemUnresolvedPresetReference = "UnresolvedPresetReference"
 
 	// ProblemIncompatibleOperator marks an operator that cannot apply to the

@@ -193,14 +193,14 @@ responsibility. The compiler adds no normalization of its own.
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string, required | unique among rule presets; the name a rule's `preset` refers to; not part of any counter key |
-| the fields of a rule except `preset`, `before`, `drop` | | each optional; a body may be partial |
+| the fields of a rule except `preset`, `before`, `dropped` | | each optional; a body may be partial |
 
 ### The presets.blocks[] entry
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string, required | unique among block presets; the name a block's `preset` refers to; not part of any counter key |
-| `target`, `mode`, `rules` | as in a block | each optional; the rules may carry `preset` and may not carry `before` or `drop` |
+| `target`, `mode`, `rules` | as in a block | each optional; the rules may carry `preset` and may not carry `before` or `dropped` |
 
 ### The limits[] block
 
@@ -221,7 +221,7 @@ responsibility. The compiler adds no normalization of its own.
 | `name` | string, required | unique within the block; part of the counter key |
 | `preset` | string | the `presets.rules` entry the rule starts from; see "Presets" |
 | `before` | string | only in a block with `preset`, on a new rule: the rule of the preset, or a new rule written earlier, this one goes in front of |
-| `drop` | bool | only in a block with `preset`: leave the preset's rule of this `name` out; no other field beside `name` |
+| `dropped` | bool | only in a block with `preset`: leave the preset's rule of this `name` out; no other field beside `name` |
 | `matches` | list of predicates | a conjunction; the key is `sub`, a `mappings` key, or a capture of its own block (`path`/`method`/`token` are forbidden: routes go in `target`); empty = everyone |
 | `counters` | list of keys | bucket axes: `sub`, `path`, `method`, a scalar `mappings` key, or a capture; empty = one shared bucket |
 | `rates` | list of entries | counting windows; absent in a rule with `behavior: Bypass` |
@@ -335,7 +335,7 @@ spec:
       matches: [ { key: sub, operator: InGroup, value: partners } ]
       counters: [sub]
       rates: [ { requests: 500, periodSeconds: 60 } ]
-    - { name: anonymous, drop: true }
+    - { name: anonymous, dropped: true }
   - name: health                            # a plain block beside the ones that use presets
     target: { routes: [ { path: { type: Exact, value: /health } } ] }
     rules:
@@ -348,7 +348,7 @@ spec:
 `spec.presets.rules[]` holds rule bodies: the fields of a rule, with `name` as the name of the preset. A body may be
 partial. A preset of windows alone is a preset of rates, a preset of predicates alone is a preset of matches. The
 shape of every preset is checked whether a rule uses it or not: a rule preset body carries no `preset`, `before`, or
-`drop`, so rule presets do not chain, and a chain is `InvalidSpec`. The content of a preset is checked through the
+`dropped`, so rule presets do not chain, and a chain is `InvalidSpec`. The content of a preset is checked through the
 rules that use it only: a preset no rule uses can hold a window the math cannot enforce or a key the domain lacks,
 and no problem reports it.
 
@@ -375,7 +375,7 @@ its own `replacedRules`.
 ### Block presets
 
 `spec.presets.blocks[]` holds block bodies: `target`, `mode`, and `rules`, each optional, with `name` as the name of
-the preset. The rules of a block preset may name rule presets and may not carry `before` or `drop`. As with rule
+the preset. The rules of a block preset may name rule presets and may not carry `before` or `dropped`. As with rule
 presets, the shape of every block preset is checked whether a block uses it or not, and the content through the
 blocks that use it.
 
@@ -390,11 +390,11 @@ The rules of the block merge with the rules of the preset by name:
 | --- | --- |
 | a name the preset holds | the written fields replace those of the preset's rule; the rule keeps the preset's position |
 | a name the preset does not hold | a new rule, placed in front of the rule `before` names, or appended after the preset's rules without `before` |
-| a name the preset holds, with `drop: true` and nothing else beside `name` | the preset's rule is left out |
+| a name the preset holds, with `dropped: true` and nothing else beside `name` | the preset's rule is left out |
 
 The merge runs in three passes over the preset's list: overrides first, then insertions in the order written, each
 directly in front of its anchor, then drops. A dropped rule serves as an anchor until the drops run, so `x` with
-`before: b` next to `b` with `drop: true` puts `x` where `b` was, and two rules with the same anchor keep the order
+`before: b` next to `b` with `dropped: true` puts `x` where `b` was, and two rules with the same anchor keep the order
 they are written in. `before` names a rule of the preset or a new rule written earlier in the same list, and is
 accepted on a new rule only: an overridden rule keeps the preset's position. In an `All` block the order carries no
 meaning, and `before` changes the listed order alone. A rule that overrides by name does not write `preset`, and a
@@ -410,7 +410,7 @@ The operator resolves presets after the strict decode of the spec and before the
    that one object could not hold written out, and the payload bound of the service, 8 MiB per domain, keeps resting
    on that. The estimate never falls below the resolved size: it is the serialized size of the spec as written, with
    the defaults of step 4 written in, plus the size of each preset, with its defaults written in, once per rule or
-   block that takes it, less the rules that `drop` names, so a field that a layer replaces is counted twice. The
+   block that takes it, less the preset rules the blocks drop, so a field that a layer replaces is counted twice. The
    estimate can therefore reject a policy whose resolved size is below the wall; that is the price of a check that
    writes no preset into a block or a rule.
 2. Every block with `preset` becomes a copy of its preset, with `target` and `mode` overridden and the rules merged
@@ -420,7 +420,7 @@ The operator resolves presets after the strict decode of the spec and before the
    rule preset, the rule of the block preset, the rule at the point of use.
 4. The compiler's defaults are written into the result, after the last layer: `mode`, `behavior`, and `algorithm`
    absent at every layer become `All`, `Enforce`, and `GCRA`.
-5. The resolved spec, without `presets`, `preset`, `before`, and `drop`, is what every further check reads, what the
+5. The resolved spec, without `presets`, `preset`, `before`, and `dropped`, is what every further check reads, what the
    ConfigMap carries, what last-good holds, and what the service enforces.
 
 What follows for the rest of the object:
@@ -814,10 +814,10 @@ in them) and contain only root causes:
 | `UnresolvedKeyReference`: a key outside the effective set of the domain | blocking |
 | `UnresolvedGroupReference`: `InGroup` on a non-existent group | blocking |
 | `UnresolvedReplacedRules`: `replacedRules` names a rule outside its own block | blocking |
-| `UnresolvedPresetReference`: `preset` names a preset that does not exist; `before` names a rule that is neither in the block preset nor written earlier in the list; `drop` names a rule the block preset does not hold | blocking |
+| `UnresolvedPresetReference`: `preset` names a preset that does not exist; `before` names a rule that is neither in the block preset nor written earlier in the list; `dropped` names a rule the block preset does not hold | blocking |
 | `IncompatibleOperator` / `InvalidCounterAxis`: the key type does not suit the operator or the axis | blocking |
 | `InvalidSpec`: a structural defect invisible to the schema: predicate arity, `Bypass` without `replacedRules` in `All`, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, an empty segment), an unknown field or enum value of a newer schema | blocking |
-| `InvalidSpec` on presets: a preset body that names a preset or carries `before` or `drop`; a preset declared twice or without a name; `before` or `drop` in a block without `preset`; `drop` beside any field other than `name`; `before` on a rule the block preset holds; `preset` on a rule that overrides a rule of its block preset by name; a block with no rules after resolution | blocking |
+| `InvalidSpec` on presets: a preset body that names a preset or carries `before` or `dropped`; a preset declared twice or without a name; `before` or `dropped` in a block without `preset`; `dropped` beside any field other than `name`; `before` on a rule the block preset holds; `preset` on a rule that overrides a rule of its block preset by name; a block with no rules after resolution | blocking |
 | `InvalidWindow`: a window the math cannot enforce | blocking |
 | `DomainBudgetExceeded`: the worst case of a decision above 128 buckets | blocking |
 | `ResolvedPolicyTooLarge`: the estimated serialized size of the resolved policy is above 1.5 MiB (1572864 bytes) | blocking |
@@ -863,7 +863,7 @@ last-good. After the strict decode of the spec, which refuses an object with a f
 and before the compiler's checks, the presets:
 
 - references: `preset` names an entry of `presets.rules` or `presets.blocks`; `before` names a rule of the block
-  preset or a new rule written earlier in the list; `drop` names a rule of the block preset
+  preset or a new rule written earlier in the list; `dropped` names a rule of the block preset
   (`UnresolvedPresetReference`);
 - size (`ResolvedPolicyTooLarge`): the estimated serialized size of the resolved policy is at most 1.5 MiB
   (1572864 bytes), computed from the serialized sizes of the spec as written and of the presets, with the defaults

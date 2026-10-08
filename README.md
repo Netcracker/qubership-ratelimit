@@ -91,7 +91,7 @@ The schema rejects what it can see; the compiler reports what needs the domain t
 | `UnresolvedKeyReference`    | blocking      | nothing produces the key — no built-in, no mapping, no capture               |
 | `UnresolvedGroupReference`  | blocking      | `InGroup` names a group the policy does not define                           |
 | `UnresolvedReplacedRules`   | blocking      | `replacedRules` names a rule outside its own block                           |
-| `UnresolvedPresetReference` | blocking      | `preset`, `before`, or `drop` names a preset or a rule that does not exist   |
+| `UnresolvedPresetReference` | blocking      | `preset`, `before`, or `dropped` names a preset or rule that does not exist  |
 | `IncompatibleOperator`      | blocking      | the operator cannot apply to the type of the key, e.g. `Equals` on an array  |
 | `InvalidCounterAxis`        | blocking      | an array key cannot key a bucket                                             |
 | `InvalidSpec`               | blocking      | a structural defect the schema cannot see, an unknown field among them       |

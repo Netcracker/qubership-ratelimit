@@ -308,7 +308,7 @@ var _ = Describe("RateLimitPolicy", func() {
 				ratelimitv1.LimitBlock{Name: "orders", Preset: "cascade"},
 				ratelimitv1.LimitBlock{Name: "exports", Preset: "cascade", Rules: []ratelimitv1.Rule{
 					{Name: "partner", Before: "total", Rates: []ratelimitv1.Rate{{Requests: 5, PeriodSeconds: 60}}},
-					{Name: "total", Drop: true},
+					{Name: "total", Dropped: true},
 				}})
 			policy.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.LimitBlock{{
 				Name:  "cascade",

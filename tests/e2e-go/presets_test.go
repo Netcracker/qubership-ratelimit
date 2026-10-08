@@ -231,7 +231,7 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 			{Name: "catalog", Preset: "cascade", Target: prefix(catalogPath),
 				Rules: []v1.Rule{{Name: "per-user", Rates: dayWindow(perUser + 2)}}},
 			{Name: "exports", Preset: "cascade", Target: prefix(exportsPath),
-				Rules: []v1.Rule{partnerBefore, {Name: "anonymous", Drop: true}}},
+				Rules: []v1.Rule{partnerBefore, {Name: "anonymous", Dropped: true}}},
 		})
 		p.Spec.Presets = &v1.Presets{
 			Rules: []v1.Rule{

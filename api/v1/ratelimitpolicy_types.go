@@ -255,10 +255,10 @@ type Rule struct {
 	// +kubebuilder:validation:MaxLength=63
 	Before string `json:"before,omitempty" manifest:"-"`
 
-	// drop leaves the rule of this name out of a block that takes a block
-	// preset. A rule with drop carries nothing beside name.
+	// dropped leaves the preset's rule of this name out of a block that takes a
+	// block preset. A dropped rule carries nothing beside name.
 	// +optional
-	Drop bool `json:"drop,omitempty" manifest:"-"`
+	Dropped bool `json:"dropped,omitempty" manifest:"-"`
 
 	// matches is a conjunction of predicates. An empty list matches every
 	// request the block sees.
@@ -315,7 +315,7 @@ type LimitBlock struct {
 	// out, they come from the preset. The rules merge with the preset's by
 	// name: a rule of a name the preset holds overrides that rule field by
 	// field and keeps its position, a rule of a new name is inserted in
-	// front of the rule its before names or appended, and a rule with drop
+	// front of the rule its before names or appended, and a dropped rule
 	// leaves the preset's rule of that name out. name is always the block's
 	// own. A block preset body carries no preset of its own.
 	// +optional
@@ -352,8 +352,8 @@ type LimitBlock struct {
 type Presets struct {
 	// rules holds rule bodies: the fields of a rule, with name as the name of
 	// the preset. A body may be partial, a preset of windows alone or of
-	// predicates alone. It carries no preset, before, or drop: presets do
-	// not chain, and before and drop belong to a block that takes a block
+	// predicates alone. It carries no preset, before, or dropped: presets do
+	// not chain, and before and dropped belong to a block that takes a block
 	// preset. The shape of every body is checked whether a rule takes it or
 	// not; its content is checked through the rules that take it.
 	// +optional
@@ -363,7 +363,7 @@ type Presets struct {
 
 	// blocks holds block bodies: target, mode, and rules, each optional,
 	// with name as the name of the preset. The rules of a body may take rule
-	// presets and carry no before or drop; the body carries no preset of its
+	// presets and carry no before or dropped; the body carries no preset of its
 	// own. The shape of every body is checked whether a block takes it or
 	// not; its content is checked through the blocks that take it.
 	// +optional

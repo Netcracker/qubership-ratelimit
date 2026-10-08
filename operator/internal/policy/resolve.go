@@ -26,7 +26,7 @@ type Resolved struct {
 	// Spec is the resolved spec: every block that took a preset is the merge
 	// of the two, every rule that took a preset likewise, mode, behavior,
 	// and algorithm carry the compiler's defaults where every layer left
-	// them out, and presets, preset, before, and drop are gone. It is what
+	// them out, and presets, preset, before, and dropped are gone. It is what
 	// the engine compiles, what the ConfigMap carries, and what last-good
 	// holds.
 	Spec v1.RateLimitPolicySpec
@@ -45,9 +45,9 @@ type Resolved struct {
 	// EstimatedSize is the estimate the size bound was checked against, in
 	// bytes: the serialized size of the spec as written with the defaults
 	// written in, plus the size of each preset, with its defaults written
-	// in, once per rule or block that takes it, less the rules that drop
-	// names. It is at least the serialized size of Spec, because a field a
-	// layer replaces is counted in both layers.
+	// in, once per rule or block that takes it, less the preset rules the
+	// blocks drop. It is at least the serialized size of Spec, because a
+	// field a layer replaces is counted in both layers.
 	EstimatedSize int
 }
 
@@ -58,13 +58,13 @@ type Resolved struct {
 // Every problem is blocking, and a spec with one resolves to nothing. A
 // preset a rule or a block names that spec.presets does not hold, a before
 // that names a rule neither in the block's preset nor written earlier in the
-// list, and a drop that names a rule the block's preset does not hold are
+// list, and a dropped rule the block's preset does not hold are
 // UnresolvedPresetReference. A resolved policy estimated above
 // [MaxResolvedSize] is ResolvedPolicyTooLarge. A preset declared twice or
 // without a name, a preset body that names a preset or carries before or
-// drop, before or drop in a block without a preset, drop beside any field
-// other than name, before on a rule the block's preset holds, and preset on
-// a rule that overrides a rule of the block's preset by name are
+// dropped, before or dropped in a block without a preset, dropped beside
+// any field other than name, before on a rule the block's preset holds, and
+// preset on a rule that overrides a rule of the block's preset by name are
 // InvalidSpec. The estimate, [Resolved.EstimatedSize], is made before any
 // preset is written into a block or a rule and never falls below the
 // resolved size, so it can refuse a policy whose resolved size is below the
@@ -145,9 +145,9 @@ func (r *resolver) declareRulePresets(spec *v1.RateLimitPolicySpec) {
 			r.fail("", "", v1.ProblemInvalidSpec,
 				"rule preset %q names preset %q; a preset body carries no preset of its own", preset.Name, preset.Preset)
 		}
-		if preset.Before != "" || preset.Drop {
+		if preset.Before != "" || preset.Dropped {
 			r.fail("", "", v1.ProblemInvalidSpec,
-				"rule preset %q carries before or drop, which a rule of a block that takes a block preset carries", preset.Name)
+				"rule preset %q carries before or dropped, which a rule of a block that takes a block preset carries", preset.Name)
 		}
 		r.rulePresets[preset.Name] = preset
 	}
@@ -155,7 +155,7 @@ func (r *resolver) declareRulePresets(spec *v1.RateLimitPolicySpec) {
 
 // declareBlockPresets indexes the block presets by name and checks the shape
 // of each, whether a block takes it or not: a body carries no preset, and
-// its rules carry no before or drop. A rule preset its rules name is a
+// its rules carry no before or dropped. A rule preset its rules name is a
 // reference, checked through the blocks that take the body.
 func (r *resolver) declareBlockPresets(spec *v1.RateLimitPolicySpec) {
 	if spec.Presets == nil {
@@ -176,9 +176,9 @@ func (r *resolver) declareBlockPresets(spec *v1.RateLimitPolicySpec) {
 				"block preset %q names preset %q; a preset body carries no preset of its own", preset.Name, preset.Preset)
 		}
 		for _, rule := range preset.Rules {
-			if rule.Before != "" || rule.Drop {
+			if rule.Before != "" || rule.Dropped {
 				r.fail("", "", v1.ProblemInvalidSpec,
-					"rule %q of block preset %q carries before or drop, which a block that takes the preset carries",
+					"rule %q of block preset %q carries before or dropped, which a block that takes the preset carries",
 					rule.Name, preset.Name)
 			}
 		}
@@ -187,7 +187,7 @@ func (r *resolver) declareBlockPresets(spec *v1.RateLimitPolicySpec) {
 }
 
 // presetUses is what the size estimate needs: how many times each preset is
-// taken, and the serialized size of the preset rules that drop leaves out.
+// taken, and the serialized size of the preset rules the blocks drop.
 type presetUses struct {
 	rules   map[string]int
 	blocks  map[string]int
@@ -202,9 +202,9 @@ func (r *resolver) checkReferences(spec *v1.RateLimitPolicySpec) presetUses {
 	for _, block := range spec.Limits {
 		if block.Preset == "" {
 			for _, rule := range block.Rules {
-				if rule.Before != "" || rule.Drop {
+				if rule.Before != "" || rule.Dropped {
 					r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
-						"before and drop apply in a block that takes a block preset; this block takes none")
+						"before and dropped apply in a block that takes a block preset; this block takes none")
 				}
 				r.checkRulePreset(block.Name, &rule, &uses)
 			}
@@ -240,11 +240,11 @@ func (r *resolver) checkRulePreset(block string, rule *v1.Rule, uses *presetUses
 }
 
 // checkBlockUse checks the rules a block writes against the block preset it
-// takes: an override carries no before and no preset, a drop carries nothing
-// beside its name and names a rule of the preset, and a new rule's before
-// names a rule of the preset or a new rule written earlier. The rule presets
-// the preset's own rules take count once per block that takes the preset,
-// less the rules the block drops.
+// takes: an override carries no before and no preset, a dropped rule
+// carries nothing beside its name and names a rule of the preset, and a new
+// rule's before names a rule of the preset or a new rule written earlier.
+// The rule presets the preset's own rules take count once per block that
+// takes the preset, less the rules the block drops.
 func (r *resolver) checkBlockUse(block *v1.LimitBlock, preset *v1.LimitBlock, uses *presetUses) {
 	held := map[string]*v1.Rule{}
 	for i := range preset.Rules {
@@ -255,13 +255,13 @@ func (r *resolver) checkBlockUse(block *v1.LimitBlock, preset *v1.LimitBlock, us
 	for _, rule := range block.Rules {
 		presetRule, inPreset := held[rule.Name]
 		switch {
-		case rule.Drop && !inPreset:
+		case rule.Dropped && !inPreset:
 			r.fail(block.Name, rule.Name, v1.ProblemUnresolvedPresetReference,
-				"drop names rule %q, which block preset %q does not hold", rule.Name, block.Preset)
-		case rule.Drop:
-			if !dropOnly(&rule) {
+				"dropped on rule %q, which block preset %q does not hold", rule.Name, block.Preset)
+		case rule.Dropped:
+			if !droppedOnly(&rule) {
 				r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
-					"a rule with drop carries nothing beside name")
+					"a dropped rule carries nothing beside name")
 			}
 			dropped[rule.Name] = true
 			uses.dropped += serializedSize(presetRule)
@@ -298,8 +298,8 @@ func (r *resolver) checkBlockUse(block *v1.LimitBlock, preset *v1.LimitBlock, us
 	}
 }
 
-// dropOnly reports a rule that carries nothing beside its name and drop.
-func dropOnly(rule *v1.Rule) bool {
+// droppedOnly reports a rule that carries nothing beside its name and dropped.
+func droppedOnly(rule *v1.Rule) bool {
 	return rule.Preset == "" && rule.Before == "" && rule.Matches == nil && rule.Counters == nil &&
 		rule.Rates == nil && rule.Behavior == "" && rule.ReplacedRules == nil
 }
@@ -355,7 +355,7 @@ func serializedSize(v any) int {
 // insertions, in the order written, each directly in front of the rule its
 // before names or at the end. Then the drops, so a dropped rule serves as an
 // anchor until then. The result carries the block's own name, no preset, and
-// rules with no before and no drop.
+// rules with no before and no dropped.
 func mergeBlock(use, preset *v1.LimitBlock) v1.LimitBlock {
 	written := use.DeepCopy()
 	out := preset.DeepCopy()
@@ -373,13 +373,13 @@ func mergeBlock(use, preset *v1.LimitBlock) v1.LimitBlock {
 	}
 	for i := range written.Rules {
 		rule := &written.Rules[i]
-		if at := index(rule.Name); at >= 0 && !rule.Drop {
+		if at := index(rule.Name); at >= 0 && !rule.Dropped {
 			out.Rules[at] = overrideRule(rule, &out.Rules[at])
 		}
 	}
 	for i := range written.Rules {
 		rule := &written.Rules[i]
-		if rule.Drop || index(rule.Name) >= 0 {
+		if rule.Dropped || index(rule.Name) >= 0 {
 			continue
 		}
 		inserted := *rule
@@ -391,7 +391,7 @@ func mergeBlock(use, preset *v1.LimitBlock) v1.LimitBlock {
 		}
 	}
 	for _, rule := range written.Rules {
-		if rule.Drop {
+		if rule.Dropped {
 			if at := index(rule.Name); at >= 0 {
 				out.Rules = slices.Delete(out.Rules, at, at+1)
 			}
@@ -414,14 +414,14 @@ func overrideRule(written, base *v1.Rule) v1.Rule {
 // preset with every field the rule wrote on top, whole. A list the rule
 // wrote empty is a value and replaces the preset's list; a list it left out
 // is nil and keeps it. The result carries the rule's own name and no preset,
-// before, or drop.
+// before, or dropped.
 func mergeRule(use, preset *v1.Rule) v1.Rule {
 	written := use.DeepCopy()
 	out := preset.DeepCopy()
 	out.Name = written.Name
 	out.Preset = ""
 	out.Before = ""
-	out.Drop = false
+	out.Dropped = false
 	if written.Matches != nil {
 		out.Matches = written.Matches
 	}
