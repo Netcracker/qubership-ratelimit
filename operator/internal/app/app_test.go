@@ -158,11 +158,10 @@ var _ = Describe("the operator, built without a Deployment to adopt", Ordered, C
 		Eventually(conditionsOf(client.ObjectKeyFromObject(lost))).WithTimeout(20*time.Second).
 			Should(readyWithReason(v1.ReasonNotCompiled), "the Ready condition of gateway.lost to carry NotCompiled")
 		store := config.New(k8sClient, testNamespace, nil, "0.0.0-test", logf.Log)
-		Expect(store.Save(ctx, map[string]operatorpolicy.Bundle{"gateway.lost": {
+		saved := map[string]operatorpolicy.Bundle{"gateway.lost": {
 			UID: string(lost.UID), GoodGeneration: 1, GoodSpec: lost.Spec,
-		}}, operatorpolicy.ConfigMapLimit)).To(Succeed())
-
-		Eventually(func() []string {
+		}}
+		lostEvents := func() []string {
 			var list eventsv1.EventList
 			if err := k8sClient.List(ctx, &list, client.InNamespace(testNamespace)); err != nil {
 				return nil
@@ -174,9 +173,17 @@ var _ = Describe("the operator, built without a Deployment to adopt", Ordered, C
 				}
 			}
 			return notes
-		}).WithTimeout(20*time.Second).Should(ContainElement(
-			ContainSubstring("Warning: last-good generation 1 does not compile with this operator build")),
-			"a LastGoodLost event on gateway.lost")
+		}
+
+		// A pass of the writer that read the ConfigMap before this save
+		// writes it back without the saved generation and reports nothing,
+		// so the save repeats until a pass reads it.
+		Eventually(func(g Gomega) {
+			g.Expect(store.Save(ctx, saved, operatorpolicy.ConfigMapLimit)).To(Succeed())
+			g.Eventually(lostEvents).WithTimeout(5*time.Second).Should(ContainElement(
+				ContainSubstring("Warning: last-good generation 1 does not compile with this operator build")),
+				"a LastGoodLost event on gateway.lost")
+		}).WithTimeout(30*time.Second).Should(Succeed(), "the writer to report the saved generation it dropped")
 	})
 
 	It("answers the readiness probe", func() {
