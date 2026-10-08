@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/xrequestid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/model"
@@ -17,7 +18,7 @@ import (
 
 // Every mutation is audited, and the journal is the primary carrier: who
 // called, which key they used, what they addressed, and what came of it. These
-// tests hold that line to its contract — including the part of it the logger
+// tests hold that line to its contract, including the part of it the logger
 // contributes, since the request id reaches the line through the context rather
 // than through a field the handler writes.
 
@@ -66,8 +67,8 @@ func TestAudit_recordsWhatTheMutationDid(t *testing.T) {
 	h.api.Log = log
 
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
-	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", operatorRoles()).Code)
+	reset := h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", operatorRoles())
+	require.Equal(t, http.StatusOK, reset.Code, "body: %s", reset.Body.String())
 
 	line := log.find(t, "management mutation ")
 	for _, part := range []string{
@@ -76,11 +77,11 @@ func TestAudit_recordsWhatTheMutationDid(t *testing.T) {
 		"domain=" + testDomain,
 		"endpoint=counters",
 		"ruleId=orders/per-client",
-		"crawler",
+		`axes={"sub":"crawler"}`,
 		"outcome=reset",
 		"count=1",
 	} {
-		require.Contains(t, line.message, part)
+		assert.Contains(t, line.message, part)
 	}
 }
 
@@ -95,17 +96,17 @@ func TestAudit_cannotBeForgedThroughAnAxisValue(t *testing.T) {
 
 	// Lower case, because the sub key is lowercased and a value in another
 	// case addresses no counter; the forged line is what the test is about.
-	planted := strings.ToLower("crawler\nmanagement mutation subject=someone-else idempotencyKey=k domain=" +
-		testDomain + " endpoint=counters ruleId=orders/per-client axes=map[] dryRun=false outcome=reset count=9")
+	const planted = "crawler\nmanagement mutation subject=someone-else idempotencykey=k domain=gateway.public " +
+		"endpoint=counters ruleid=orders/per-client axes=map[] dryrun=false outcome=reset count=9"
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {planted}}, 3)
-	require.Equal(t, http.StatusOK, h.reset(t,
-		"ruleId=orders/per-client&axis.sub="+url.QueryEscape(planted), "key-1", operatorRoles()).Code)
+	reset := h.reset(t, "ruleId=orders/per-client&axis.sub="+url.QueryEscape(planted), "key-1", operatorRoles())
+	require.Equal(t, http.StatusOK, reset.Code, "body: %s", reset.Body.String())
 
 	line := log.find(t, "management mutation ")
-	require.NotContains(t, line.message, "\n", "a control character from the axis reached the journal")
-	require.Contains(t, line.message, `axes={"sub":"crawler\nmanagement mutation subject=someone-else`,
-		"the axis value is not recorded as escaped JSON: %s", line.message)
-	require.Contains(t, line.message, "subject=alice@example.com")
+	assert.NotContains(t, line.message, "\n", "a control character from the axis reached the journal")
+	assert.Contains(t, line.message, `axes={"sub":"crawler\nmanagement mutation subject=someone-else`,
+		"the axis value is not recorded as escaped JSON")
+	assert.Contains(t, line.message, "subject=alice@example.com")
 }
 
 // The bulk journal entry is written at acceptance, because acceptance is the
@@ -126,30 +127,30 @@ func TestAudit_recordsABulkAcceptance(t *testing.T) {
 		"endpoint=counter-resets",
 		"command=preview-selector",
 		"dryRun=true",
-		"orders",
+		`selector={"ruleIds":["orders"]}`,
 	} {
-		require.Contains(t, line.message, part)
+		assert.Contains(t, line.message, part)
 	}
 }
 
 // The request id is not a field the handlers write. It reaches the line through
 // the context the platform's logger reads it from, which is the same value the
-// response header carries — so quoting one finds the other.
+// response header carries, so quoting one finds the other.
 func TestAudit_carriesTheRequestIDThroughItsContext(t *testing.T) {
 	h := newTestAPI(t)
 	log := &recordingLogger{}
 	h.api.Log = log
 
 	recorder := h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", operatorRoles())
-	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, http.StatusOK, recorder.Code, "body: %s", recorder.Body.String())
 
 	line := log.find(t, "management mutation ")
-	require.NotContains(t, line.message, "requestId=",
+	assert.NotContains(t, line.message, "requestId=",
 		"the id belongs to the logger's own field, not to the message")
 
 	id, err := xrequestid.Of(line.ctx)
 	require.NoError(t, err, "the line was written under a context carrying the id")
-	require.Equal(t, recorder.Header().Get(RequestIDHeader), id.GetRequestId())
+	assert.Equal(t, recorder.Header().Get(RequestIDHeader), id.GetRequestId())
 }
 
 // A caller-supplied id runs through unchanged, which is what makes it worth
@@ -166,9 +167,9 @@ func TestAudit_carriesTheCallersRequestID(t *testing.T) {
 			request.Header.Set("Idempotency-Key", "key-1")
 			request.Header.Set(RequestIDHeader, "trace-42")
 		})
-	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, http.StatusOK, recorder.Code, "body: %s", recorder.Body.String())
 
 	id, err := xrequestid.Of(log.find(t, "management mutation ").ctx)
-	require.NoError(t, err)
-	require.Equal(t, "trace-42", id.GetRequestId())
+	require.NoError(t, err, "the line was written under a context carrying the id")
+	assert.Equal(t, "trace-42", id.GetRequestId())
 }
