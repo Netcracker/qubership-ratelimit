@@ -185,30 +185,38 @@ type presetUses struct {
 // the size estimate.
 func (r *resolver) checkReferences(spec *v1.RateLimitPolicySpec) presetUses {
 	uses := presetUses{rules: map[string]int{}, blocks: map[string]int{}}
-	for _, block := range spec.Limits {
-		if block.Preset == "" {
-			for _, rule := range block.Rules {
-				if rule.Before != "" || rule.Dropped {
-					r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
-						"before and dropped apply in a block that takes a block preset; this block takes none")
-				}
-				r.checkRulePreset(block.Name, &rule, &uses)
-			}
-			continue
-		}
+	for i := range spec.Limits {
+		block := &spec.Limits[i]
 		preset, ok := r.blockPresets[block.Preset]
-		if !ok {
+		switch {
+		case block.Preset == "":
+			r.checkPlainBlock(block, &uses)
+		case !ok:
 			r.fail(block.Name, "", v1.ProblemUnresolvedPresetReference,
 				"preset %q is not declared under spec.presets.blocks", block.Preset)
-			for _, rule := range block.Rules {
-				r.checkRulePreset(block.Name, &rule, &uses)
+			for j := range block.Rules {
+				r.checkRulePreset(block.Name, &block.Rules[j], &uses)
 			}
-			continue
+		default:
+			uses.blocks[block.Preset]++
+			r.checkBlockUse(block, preset, &uses)
 		}
-		uses.blocks[block.Preset]++
-		r.checkBlockUse(&block, preset, &uses)
 	}
 	return uses
+}
+
+// checkPlainBlock checks the rules of a block that takes no block preset:
+// before and dropped are refused there, and each rule preset a rule names is
+// checked and counted.
+func (r *resolver) checkPlainBlock(block *v1.LimitBlock, uses *presetUses) {
+	for i := range block.Rules {
+		rule := &block.Rules[i]
+		if rule.Before != "" || rule.Dropped {
+			r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
+				"before and dropped apply in a block that takes a block preset; this block takes none")
+		}
+		r.checkRulePreset(block.Name, rule, uses)
+	}
 }
 
 // checkRulePreset reports a rule preset the rule names that is not declared,
@@ -236,31 +244,33 @@ func (r *resolver) checkBlockUse(block *v1.LimitBlock, preset *v1.BlockPreset, u
 	for i := range preset.Rules {
 		held[preset.Rules[i].Name] = &preset.Rules[i]
 	}
+	dropped := r.checkWrittenRules(block, held, uses)
+	r.countPresetRules(block, preset, dropped, uses)
+}
+
+// checkWrittenRules checks each rule the block writes against held, the
+// rules of its block preset by name, and returns the names of the rules the
+// block drops.
+func (r *resolver) checkWrittenRules(block *v1.LimitBlock, held map[string]*v1.Rule,
+	uses *presetUses) map[string]bool {
 	dropped := map[string]bool{}
 	earlier := map[string]bool{}
-	for _, rule := range block.Rules {
+	for i := range block.Rules {
+		rule := &block.Rules[i]
 		presetRule, inPreset := held[rule.Name]
 		switch {
 		case rule.Dropped && !inPreset:
 			r.fail(block.Name, rule.Name, v1.ProblemUnresolvedPresetReference,
 				"dropped on rule %q, which block preset %q does not hold", rule.Name, block.Preset)
 		case rule.Dropped:
-			if !droppedOnly(&rule) {
+			if !droppedOnly(rule) {
 				r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
 					"a dropped rule carries nothing beside name")
 			}
 			dropped[rule.Name] = true
 			uses.dropped += serializedSize(presetRule)
 		case inPreset:
-			if rule.Before != "" {
-				r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
-					"before on rule %q, which block preset %q holds; an overridden rule keeps the preset's position",
-					rule.Name, block.Preset)
-			}
-			if rule.Preset != "" {
-				r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
-					"preset on rule %q, which overrides a rule of block preset %q by name", rule.Name, block.Preset)
-			}
+			r.checkOverride(block, rule)
 		default:
 			if rule.Before != "" && held[rule.Before] == nil && !earlier[rule.Before] {
 				r.fail(block.Name, rule.Name, v1.ProblemUnresolvedPresetReference,
@@ -268,9 +278,31 @@ func (r *resolver) checkBlockUse(block *v1.LimitBlock, preset *v1.BlockPreset, u
 					rule.Before, block.Preset)
 			}
 			earlier[rule.Name] = true
-			r.checkRulePreset(block.Name, &rule, uses)
+			r.checkRulePreset(block.Name, rule, uses)
 		}
 	}
+	return dropped
+}
+
+// checkOverride reports the fields a rule that overrides a rule of the block
+// preset by name may not carry: before and preset.
+func (r *resolver) checkOverride(block *v1.LimitBlock, rule *v1.Rule) {
+	if rule.Before != "" {
+		r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
+			"before on rule %q, which block preset %q holds; an overridden rule keeps the preset's position",
+			rule.Name, block.Preset)
+	}
+	if rule.Preset != "" {
+		r.fail(block.Name, rule.Name, v1.ProblemInvalidSpec,
+			"preset on rule %q, which overrides a rule of block preset %q by name", rule.Name, block.Preset)
+	}
+}
+
+// countPresetRules counts the rule presets the block preset's own rules take,
+// once for this block, and reports one that is not declared; a rule in
+// dropped counts nowhere.
+func (r *resolver) countPresetRules(block *v1.LimitBlock, preset *v1.BlockPreset, dropped map[string]bool,
+	uses *presetUses) {
 	for _, rule := range preset.Rules {
 		if dropped[rule.Name] || rule.Preset == "" {
 			continue
@@ -376,37 +408,59 @@ func mergeBlock(use, preset *v1.LimitBlock) v1.LimitBlock {
 	if written.Mode != "" {
 		out.Mode = written.Mode
 	}
+	overrideRules(out, written.Rules)
+	insertRules(out, written.Rules)
+	dropRules(out, written.Rules)
+	return *out
+}
 
-	index := func(name string) int {
-		return slices.IndexFunc(out.Rules, func(rule v1.Rule) bool { return rule.Name == name })
-	}
-	for i := range written.Rules {
-		rule := &written.Rules[i]
-		if at := index(rule.Name); at >= 0 && !rule.Dropped {
-			out.Rules[at] = overrideRule(rule, &out.Rules[at])
+// ruleIndex is the position of the rule named name in rules, or -1.
+func ruleIndex(rules []v1.Rule, name string) int {
+	return slices.IndexFunc(rules, func(rule v1.Rule) bool { return rule.Name == name })
+}
+
+// overrideRules is the first pass of [mergeBlock]: each written rule of a
+// name the block holds, other than a dropped one, replaces that rule in
+// place.
+func overrideRules(block *v1.LimitBlock, written []v1.Rule) {
+	for i := range written {
+		rule := &written[i]
+		if at := ruleIndex(block.Rules, rule.Name); at >= 0 && !rule.Dropped {
+			block.Rules[at] = overrideRule(rule, &block.Rules[at])
 		}
 	}
-	for i := range written.Rules {
-		rule := &written.Rules[i]
-		if rule.Dropped || index(rule.Name) >= 0 {
+}
+
+// insertRules is the second pass of [mergeBlock]: each written rule the block
+// does not hold yet goes in, in the order written, directly in front of the
+// rule its before names, or at the end.
+func insertRules(block *v1.LimitBlock, written []v1.Rule) {
+	for i := range written {
+		rule := &written[i]
+		if rule.Dropped || ruleIndex(block.Rules, rule.Name) >= 0 {
 			continue
 		}
 		inserted := *rule
 		inserted.Before = ""
-		if at := index(rule.Before); rule.Before != "" && at >= 0 {
-			out.Rules = slices.Insert(out.Rules, at, inserted)
+		if at := ruleIndex(block.Rules, rule.Before); rule.Before != "" && at >= 0 {
+			block.Rules = slices.Insert(block.Rules, at, inserted)
 		} else {
-			out.Rules = append(out.Rules, inserted)
+			block.Rules = append(block.Rules, inserted)
 		}
 	}
-	for _, rule := range written.Rules {
-		if rule.Dropped {
-			if at := index(rule.Name); at >= 0 {
-				out.Rules = slices.Delete(out.Rules, at, at+1)
-			}
+}
+
+// dropRules is the last pass of [mergeBlock]: each rule a written rule drops
+// leaves the block.
+func dropRules(block *v1.LimitBlock, written []v1.Rule) {
+	for _, rule := range written {
+		if !rule.Dropped {
+			continue
+		}
+		if at := ruleIndex(block.Rules, rule.Name); at >= 0 {
+			block.Rules = slices.Delete(block.Rules, at, at+1)
 		}
 	}
-	return *out
 }
 
 // overrideRule is a rule of the point of use over the rule of the same name
