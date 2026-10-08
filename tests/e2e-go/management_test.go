@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,7 +13,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +39,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		domain   = "gateway.management"
 		route    = "e2e-management"
 		outsider = "e2e-management-outsider"
+		unlisted = "e2e-management-unlisted"
 		basePath = "/ratelimit/v1"
 	)
 	var (
@@ -91,7 +93,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		// passed it.
 		Eventually(func() []string {
 			body, code := gatewayGetBody("private-gateway", basePath+"/domains",
-				map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")})
+				map[string]string{"Authorization": "Bearer " + managementToken()})
 			if code != http.StatusOK {
 				return nil
 			}
@@ -107,6 +109,8 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			_ = k8s.Delete(ctx, managementRoute(route, basePath, port))
 			_ = k8s.Delete(ctx, &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: outsider}})
+			_ = k8s.Delete(ctx, &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: unlisted}})
 			deletePolicies(domain)
 		}
 		// Last, because the cleanup wait inside can fail and end this closure:
@@ -117,9 +121,9 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		}
 	})
 
-	It("answers a viewer through the gateway and lists the domain", func() {
+	It("lists the domain to a viewer through the gateway", func() {
 		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
-			map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")})
+			map[string]string{"Authorization": "Bearer " + managementToken()})
 		Expect(code).To(Equal(http.StatusOK),
 			"the gateway did not reach the management port; body: %s", body)
 
@@ -141,7 +145,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		// neither code may come back.
 		code, body := httpProbeFromPod(outsider,
 			fmt.Sprintf("http://%s:%d%s/domains", serviceHost(), port, basePath),
-			"Authorization: Bearer "+managementToken("outsider@example.com", "viewer"))
+			"Authorization: Bearer "+managementToken())
 
 		Expect(code).NotTo(Equal(http.StatusOK),
 			"a pod outside the allowed list read the enforced rule set; body: %s", body)
@@ -150,13 +154,44 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		// of its own, and so does the API for a token without the role. What
 		// separates them is the body, because every answer the API writes is
 		// either a listing or a TMF error carrying an RLS code. A refusal that
-		// carries neither never reached the service.
-		if code != 0 {
-			Expect(body).NotTo(ContainSubstring(errorCodePrefix),
-				"the refusal came from the API, so the port is open to the whole mesh")
-			Expect(body).NotTo(ContainSubstring(`"items"`),
-				"the API answered a pod outside the allowed list")
-		}
+		// carries neither never reached the service. For a connection the
+		// mesh reset, code 0, the body is curl's error line, which carries
+		// neither as well.
+		Expect(body).NotTo(ContainSubstring(errorCodePrefix),
+			"the refusal came from the API, so the port is open to the whole mesh")
+		Expect(body).NotTo(ContainSubstring(`"items"`),
+			"the API answered a pod outside the allowed list")
+	})
+
+	// The service verifies every token itself. Each request below reaches the
+	// API through the gateway the policy admits, so the answer is the API's,
+	// and its code says which check refused the token.
+	It("refuses a ServiceAccount the release does not list", func() {
+		token := serviceAccountToken(namespace, unlisted, readManagementCaller().audience)
+		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
+			map[string]string{"Authorization": "Bearer " + token})
+
+		Expect(code).To(Equal(http.StatusForbidden), "body: %s", body)
+		Expect(body).To(ContainSubstring(`"RLS-0403"`), "the refusal is not the API's; body: %s", body)
+	})
+
+	It("refuses a listed caller's token issued for another audience", func() {
+		caller := readManagementCaller()
+		token := serviceAccountToken(caller.namespace, caller.name, "e2e-another-audience")
+		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
+			map[string]string{"Authorization": "Bearer " + token})
+
+		Expect(code).To(Equal(http.StatusUnauthorized), "body: %s", body)
+		Expect(body).To(ContainSubstring(`"RLS-0401"`), "the refusal is not the API's; body: %s", body)
+		Expect(body).To(ContainSubstring("audience"), "the refusal does not name the audience; body: %s", body)
+	})
+
+	It("refuses an unsigned token of the shape it read before it verified tokens", func() {
+		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
+			map[string]string{"Authorization": "Bearer " + unsignedToken(map[string]any{"sub": "e2e@example.com", "roles": []string{"operator"}})})
+
+		Expect(code).To(Equal(http.StatusUnauthorized), "body: %s", body)
+		Expect(body).To(ContainSubstring(`"RLS-0401"`), "the refusal is not the API's; body: %s", body)
 	})
 
 	// The reset flows. Each spends a path's budget through the private
@@ -164,11 +199,11 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 	// proves the lift by the gateway admitting the path again. That last step
 	// is the point: an API answer alone says what the API believes it did,
 	// the gateway says what the counters now are.
-	It("runs the bulk flow: preview, execute, retry", func() {
+	It("lifts a spent budget through a previewed, executed, and retried bulk reset", func() {
 		probePath := spendBudget(limitedDomain, limitedPrefix, limitedRule, limit, &limitedApplied)
 
 		operator := map[string]string{
-			"Authorization": "Bearer " + managementToken("e2e@example.com", "operator")}
+			"Authorization": "Bearer " + managementToken()}
 		resets := basePath + "/domains/" + limitedDomain + "/counter-resets"
 		selector := `{"selector":{"ruleIds":["` + limitedRule + `"]}`
 
@@ -180,11 +215,11 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			selector+`,"dryRun":true}`, with(operator, "Idempotency-Key", previewKey))
 		Expect(code).To(Equal(http.StatusOK), "the preview did not answer 200; body: %s", body)
 		preview := decodeBulk(body)
-		Expect(preview.DryRun).To(BeTrue())
-		Expect(preview.ConfirmationToken).NotTo(BeEmpty(), "the preview minted no confirmation token")
-		Expect(preview.MatchedCount).NotTo(BeNil())
-		Expect(*preview.MatchedCount).To(BeNumerically(">=", 1),
-			"the preview matched no counter, so there was nothing to reset: %s", body)
+		Expect(preview).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"DryRun":            BeTrue(),
+			"ConfirmationToken": Not(BeEmpty()),
+			"MatchedCount":      gstruct.PointTo(BeNumerically(">=", 1)),
+		}), "the preview answer: %s", body)
 
 		// Step two, the execution, with the previewed token and a key of its
 		// own.
@@ -194,9 +229,10 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			with(operator, "Idempotency-Key", executeKey))
 		Expect(code).To(Equal(http.StatusOK), "the execution did not answer 200; body: %s", body)
 		executed := decodeBulk(body)
-		Expect(executed.DryRun).To(BeFalse())
-		Expect(executed.ResetCount).NotTo(BeNil())
-		Expect(*executed.ResetCount).To(BeNumerically(">=", 1), "the execution reset nothing: %s", body)
+		Expect(executed).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"DryRun":     BeFalse(),
+			"ResetCount": gstruct.PointTo(BeNumerically(">=", 1)),
+		}), "the execution answer: %s", body)
 
 		// The retry: the same key and the same command answer the recorded
 		// outcome, not a second sweep. The token was consumed by the
@@ -209,15 +245,15 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			"the retry answered a different outcome than the one recorded")
 
 		// And the gateway agrees: the budget is whole again.
-		Expect(gatewayGet("private-gateway", probePath, nil)).To(BeNumerically("<", 300),
-			"the private gateway still refuses the path after the bulk reset")
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(beAdmitted(),
+			"GET %s through private-gateway after the bulk reset", probePath)
 	})
 
-	It("runs the addressed DELETE", func() {
+	It("lifts a spent budget through an addressed DELETE of its counter", func() {
 		probePath := spendBudget(limitedDomain, limitedPrefix, limitedRule, limit, &limitedApplied)
 
 		operator := map[string]string{
-			"Authorization": "Bearer " + managementToken("e2e@example.com", "operator")}
+			"Authorization": "Bearer " + managementToken()}
 
 		// One rule, one value for each of its axes: the keys are computed
 		// from the snapshot, never scanned, and a partial axis set is refused.
@@ -233,13 +269,14 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			ResetCount *int     `json:"resetCount"`
 		}
 		Expect(json.Unmarshal([]byte(body), &reset)).To(Succeed(), "body: %s", body)
-		Expect(reset.RuleID).To(Equal(limitedRule))
-		Expect(reset.Keys).NotTo(BeEmpty(), "the DELETE addressed no key")
-		Expect(reset.ResetCount).NotTo(BeNil())
-		Expect(*reset.ResetCount).To(BeNumerically(">=", 1), "the DELETE reset nothing: %s", body)
+		Expect(reset).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"RuleID":     Equal(limitedRule),
+			"Keys":       Not(BeEmpty()),
+			"ResetCount": gstruct.PointTo(BeNumerically(">=", 1)),
+		}), "the DELETE answer: %s", body)
 
-		Expect(gatewayGet("private-gateway", probePath, nil)).To(BeNumerically("<", 300),
-			"the private gateway still refuses the path after the addressed reset")
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(beAdmitted(),
+			"GET %s through private-gateway after the addressed reset", probePath)
 	})
 })
 
@@ -251,8 +288,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 // another call already spent would prove nothing.
 func spendBudget(domain, prefix, rule string, limit int32, applied *bool) string {
 	if !*applied {
-		blocks := prefixLimits(prefix, "per-path", []string{"path"}, limit, 3600)
-		blocks[0].Rules[0].Rates[0].Algorithm = v1.AlgorithmGCRA
+		blocks := hourlyGCRALimits(prefix, "per-path", limit)
 		Expect(apply(newPolicy(domain, blocks))).To(Succeed())
 		*applied = true
 		waitApplied(domain)
@@ -268,19 +304,17 @@ func spendBudget(domain, prefix, rule string, limit int32, applied *bool) string
 	return path
 }
 
-// decodeBulk reads the fields of a bulk answer the flows assert on.
-func decodeBulk(body string) struct {
+// bulkAnswer holds the fields of a bulk answer the flows assert on.
+type bulkAnswer struct {
 	DryRun            bool   `json:"dryRun"`
 	ConfirmationToken string `json:"confirmationToken"`
 	MatchedCount      *int   `json:"matchedCount"`
 	ResetCount        *int   `json:"resetCount"`
-} {
-	var result struct {
-		DryRun            bool   `json:"dryRun"`
-		ConfirmationToken string `json:"confirmationToken"`
-		MatchedCount      *int   `json:"matchedCount"`
-		ResetCount        *int   `json:"resetCount"`
-	}
+}
+
+// decodeBulk reads a bulk answer.
+func decodeBulk(body string) bulkAnswer {
+	var result bulkAnswer
 	Expect(json.Unmarshal([]byte(body), &result)).To(Succeed(), "body: %s", body)
 	return result
 }
@@ -302,8 +336,6 @@ func with(headers map[string]string, name, value string) map[string]string {
 	return out
 }
 
-// managementPort reports the container port the release exposes for the
-// management API, 0 when the chart rendered without it.
 // listedDomains reads the domain names out of a listing body.
 func listedDomains(body string) ([]string, error) {
 	var listing struct {
@@ -321,17 +353,12 @@ func listedDomains(body string) ([]string, error) {
 	return domains, nil
 }
 
+// managementPort reports the container port the release exposes for the
+// management API, 0 when the chart rendered without it.
 func managementPort() int32 {
 	pods := servicePods()
 	Expect(pods).NotTo(BeEmpty(), "no running replica to read the ports of")
-	for _, c := range pods[0].Spec.Containers {
-		for _, p := range c.Ports {
-			if p.Name == "management" {
-				return p.ContainerPort
-			}
-		}
-	}
-	return 0
+	return int32(namedPort(pods[0], "management"))
 }
 
 // serviceHost is the contract's Service, which is what an in-mesh caller
@@ -369,93 +396,62 @@ func managementRoute(name, prefix string, port int32) *unstructured.Unstructured
 	return route
 }
 
-// managementIdentity is how the release told the service to read a token:
-// the claim the subject is in, the claim the roles are in (a dotted path for
-// a nested claim), and the IdP's names for the two canonical roles. Read from
-// the running pod's environment, which is what the chart rendered, so the
-// tokens this suite mints are shaped the way the service was configured to
-// read them - and the suite proves the values reached the service, not only
-// the Deployment. Absent variables mean the service's defaults.
-type managementIdentity struct {
-	subjectClaim string
-	rolesClaim   string
-	viewer       string
-	operator     string
+// managementCaller is whom the release told the service to accept: the first
+// ServiceAccount of MANAGEMENT_CALLERS, in its own namespace, and the audience
+// of MANAGEMENT_M2M_AUDIENCE. Read from the running pod's environment, which
+// is what the chart rendered, so the tokens this suite mints are the ones the
+// service was configured to accept, and the suite proves the values reached
+// the service, not only the Deployment.
+type managementCaller struct {
+	namespace string
+	name      string
+	audience  string
 }
 
-func readManagementIdentity() managementIdentity {
+func readManagementCaller() managementCaller {
 	pods := servicePods()
-	Expect(pods).NotTo(BeEmpty(), "no running replica to read the identity of")
-	identity := managementIdentity{
-		subjectClaim: "sub", rolesClaim: "roles", viewer: "viewer", operator: "operator"}
+	Expect(pods).NotTo(BeEmpty(), "no running replica to read the callers of")
+	caller := managementCaller{audience: "netcracker"}
 	for _, c := range pods[0].Spec.Containers {
 		for _, env := range c.Env {
-			first := func(csv string) string { return strings.SplitN(csv, ",", 2)[0] }
 			switch env.Name {
-			case "MANAGEMENT_CLAIMS_SUBJECT":
-				identity.subjectClaim = env.Value
-			case "MANAGEMENT_CLAIMS_ROLES":
-				identity.rolesClaim = env.Value
-			case "MANAGEMENT_ROLES_VIEWER":
-				identity.viewer = first(env.Value)
-			case "MANAGEMENT_ROLES_OPERATOR":
-				identity.operator = first(env.Value)
+			case "MANAGEMENT_CALLERS":
+				first := strings.TrimSpace(strings.SplitN(env.Value, ",", 2)[0])
+				caller.namespace, caller.name = namespace, first
+				if ns, name, qualified := strings.Cut(first, "/"); qualified {
+					caller.namespace, caller.name = ns, name
+				}
+			case "MANAGEMENT_M2M_AUDIENCE":
+				caller.audience = env.Value
 			}
 		}
 	}
-	return identity
+	Expect(caller.name).NotTo(BeEmpty(), "the release lists no management caller")
+	return caller
 }
 
-// managementToken builds the alg-none token the management API reads. The
-// service never verifies the signature - the gateway's JWT filter does - so
-// the suite needs no signing key, and the AuthorizationPolicy is what keeps
-// that from being a way in.
-//
-// roles are the canonical names, viewer and operator. They are translated to
-// the names the release configured and placed under the claim the release
-// configured, so a service that ignored its identity configuration would
-// refuse every token this suite sends when CI installs non-default values.
-func managementToken(subject string, roles ...string) string {
-	identity := readManagementIdentity()
-	issued := make([]string, 0, len(roles))
-	for _, role := range roles {
-		switch role {
-		case "viewer":
-			issued = append(issued, identity.viewer)
-		case "operator":
-			issued = append(issued, identity.operator)
-		default:
-			issued = append(issued, role)
-		}
-	}
-
-	payload := map[string]any{}
-	setClaim(payload, identity.subjectClaim, subject)
-	setClaim(payload, identity.rolesClaim, issued)
-
-	seg := func(v any) string {
-		raw, err := json.Marshal(v)
-		Expect(err).NotTo(HaveOccurred())
-		return base64.RawURLEncoding.EncodeToString(raw)
-	}
-	header := seg(map[string]string{"alg": "none", "typ": "JWT"})
-	return header + "." + seg(payload) + "."
+// managementToken is a token the API server issues for the release's first
+// caller with the release's audience: the credential every listed caller
+// presents.
+func managementToken() string {
+	caller := readManagementCaller()
+	return serviceAccountToken(caller.namespace, caller.name, caller.audience)
 }
 
-// setClaim writes a value at a dotted path, creating the objects along it:
-// realm_access.roles becomes {"realm_access":{"roles":...}}.
-func setClaim(claims map[string]any, path string, value any) {
-	parts := strings.Split(path, ".")
-	node := claims
-	for _, part := range parts[:len(parts)-1] {
-		child, ok := node[part].(map[string]any)
-		if !ok {
-			child = map[string]any{}
-			node[part] = child
-		}
-		node = child
+// serviceAccountToken creates the ServiceAccount when it does not exist and
+// returns a token the API server issues for it with the audience, valid for
+// an hour, as a projected token is.
+func serviceAccountToken(ns, name, audience string) string {
+	account := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+	if err := k8s.Create(ctx, account); err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred(), "create the ServiceAccount %s/%s", ns, name)
 	}
-	node[parts[len(parts)-1]] = value
+	expiration := int64(3600)
+	issued, err := clientset.CoreV1().ServiceAccounts(ns).CreateToken(ctx, name, &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{Audiences: []string{audience}, ExpirationSeconds: &expiration},
+	}, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "issue a token for %s/%s", ns, name)
+	return issued.Status.Token
 }
 
 // errorCodePrefix opens every code the API puts in a TMF error, which is how
@@ -502,10 +498,9 @@ func runInNamespace(name string, command []string) string {
 		},
 	}
 	_ = k8s.Delete(ctx, pod)
-	Eventually(func() bool {
-		err := k8s.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})
-		return apierrors.IsNotFound(err)
-	}).WithTimeout(time.Minute).Should(BeTrue(), "the previous probe pod never went away")
+	Eventually(func() error {
+		return k8s.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})
+	}).WithTimeout(time.Minute).Should(Satisfy(apierrors.IsNotFound), "the previous probe pod %s never went away", name)
 	Expect(k8s.Create(ctx, pod)).To(Succeed())
 
 	var finished corev1.Pod

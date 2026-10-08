@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,22 +19,35 @@ import (
 	"github.com/netcracker/qubership-ratelimit/engine/store"
 )
 
-func TestStateCollector_rendersThePublishedView(t *testing.T) {
-	// The collector emits exactly the current view of the domains and the
-	// policies published one at a time: a policy that changed its reason or
-	// disappeared leaves no stale series, which is the property a plain
-	// gauge vector could not give.
+// sampleCount reads how many observations the series of labels holds in a
+// histogram vector. Reading a series the vector does not hold creates it
+// empty.
+func sampleCount(t *testing.T, vec *prometheus.HistogramVec, labels ...string) int {
+	t.Helper()
+	metric, ok := vec.WithLabelValues(labels...).(prometheus.Metric)
+	require.True(t, ok, "the histogram series %v is not a prometheus.Metric", labels)
+	var out dto.Metric
+	require.NoError(t, metric.Write(&out))
+	return int(out.GetHistogram().GetSampleCount())
+}
+
+// The collector emits exactly the current view of the domains and the
+// policies published one at a time, which is the property a plain gauge
+// vector could not give.
+func TestStateCollector_rendersThePublishedDomainsAndPolicies(t *testing.T) {
+	t.Cleanup(func() {
+		PublishState(nil)
+		DropPolicy("gateway.public")
+		DropPolicy("gateway.private")
+	})
 	PublishState(&StateView{
 		Domains: []DomainView{{
 			Domain: "gateway.public", Blocks: 3, Rules: 5, DecisionBuckets: 65, AppliedGeneration: 7,
 		}},
 	})
-	defer PublishState(nil)
 	PublishPolicy(PolicyView{Domain: "gateway.public", Ready: true, Enforced: true, InfoProblems: 1})
 	PublishPolicy(PolicyView{Domain: "gateway.private", Reason: "NotCompiled", Enforced: true,
 		GenerationLag: 1, BlockingProblems: 2})
-	defer DropPolicy("gateway.public")
-	defer DropPolicy("gateway.private")
 
 	expected := `
 # HELP ratelimit_domain_blocks Compiled blocks of the domain. Observed rather than bounded: watch the target scan, do not cap it.
@@ -66,27 +81,48 @@ ratelimit_policy_rule_problems{domain="gateway.private",severity="info"} 0
 ratelimit_policy_rule_problems{domain="gateway.public",severity="blocking"} 0
 ratelimit_policy_rule_problems{domain="gateway.public",severity="info"} 1
 `
-	require.NoError(t, testutil.CollectAndCompare(stateCollector{}, strings.NewReader(expected)))
-
-	// A dropped policy leaves no series behind; the domain series stay.
-	DropPolicy("gateway.private")
-	DropPolicy("gateway.public")
-	assert.Equal(t, 4, testutil.CollectAndCount(stateCollector{}), "the domain series alone remain")
-
-	// And a policy is reported whether or not the service published a view:
-	// the operator's scrape carries no domains at all.
-	PublishState(nil)
-	PublishPolicy(PolicyView{Domain: "gateway.lonely", Ready: true})
-	defer DropPolicy("gateway.lonely")
-	assert.Equal(t, 5, testutil.CollectAndCount(stateCollector{}), "ready, enforced, lag, and two problem severities")
+	assert.NoError(t, testutil.CollectAndCompare(stateCollector{}, strings.NewReader(expected)))
 }
 
+// A policy that disappeared leaves no stale series, and the domain series,
+// which a dropped policy does not own, stay.
+func TestStateCollector_dropsTheSeriesOfADroppedPolicy(t *testing.T) {
+	t.Cleanup(func() { PublishState(nil) })
+	PublishState(&StateView{Domains: []DomainView{{Domain: "gateway.public", Blocks: 3, Rules: 5}}})
+	PublishPolicy(PolicyView{Domain: "gateway.public", Ready: true, Enforced: true})
+	PublishPolicy(PolicyView{Domain: "gateway.private", Reason: "NotCompiled", Enforced: true})
+
+	DropPolicy("gateway.private")
+	DropPolicy("gateway.public")
+
+	assert.NoError(t, testutil.CollectAndCompare(stateCollector{}, strings.NewReader(""),
+		"ratelimit_policy_ready", "ratelimit_policy_enforced", "ratelimit_policy_generation_lag",
+		"ratelimit_policy_rule_problems"), "the series of the dropped policies")
+	assert.Equal(t, 4, testutil.CollectAndCount(stateCollector{},
+		"ratelimit_domain_blocks", "ratelimit_domain_rules", "ratelimit_domain_decision_buckets",
+		"ratelimit_policy_applied_generation"), "the series of the published domain")
+}
+
+// The operator's scrape carries no domains at all, and a policy is reported
+// there all the same.
+func TestStateCollector_reportsAPolicyWithoutADomainView(t *testing.T) {
+	t.Cleanup(func() { DropPolicy("gateway.lonely") })
+	PublishState(nil)
+
+	PublishPolicy(PolicyView{Domain: "gateway.lonely", Ready: true})
+
+	assert.Equal(t, 5, testutil.CollectAndCount(stateCollector{}),
+		"ready, enforced, lag, and two problem severities")
+}
+
+// The collector emits no series while no view and no policy is published. Its
+// control is TestStateCollector_rendersThePublishedDomainsAndPolicies.
 func TestStateCollector_isSilentBeforeTheFirstRebuild(t *testing.T) {
 	PublishState(nil)
 	assert.Zero(t, testutil.CollectAndCount(stateCollector{}))
 }
 
-// stubStore answers immediately, or fails with the given error.
+// stubStore returns one allowed verdict at once, or the given error.
 type stubStore struct {
 	err error
 }
@@ -104,81 +140,111 @@ func (s stubStore) Peek(context.Context, []store.Bucket, int64) ([]store.Verdict
 
 func (s stubStore) Reset(context.Context, []string) error { return s.err }
 
-func TestInstrumentStore_observesTheRoundtrip(t *testing.T) {
+func TestInstrumentStore_observesTheRoundtripOfADecision(t *testing.T) {
 	instrumented := InstrumentStore("roundtrip.domain", stubStore{})
+	before := sampleCount(t, StoreRoundtrip, "roundtrip.domain")
 
-	before := testutil.CollectAndCount(StoreRoundtrip)
 	_, err := instrumented.Decide(context.Background(), nil, 1)
-	require.NoError(t, err)
 
-	assert.Equal(t, before+1, testutil.CollectAndCount(StoreRoundtrip),
-		"the domain's roundtrip series must appear after the first decision")
+	require.NoError(t, err)
+	assert.Equal(t, before+1, sampleCount(t, StoreRoundtrip, "roundtrip.domain"),
+		"observations of roundtrip.domain")
 }
 
-func TestInstrumentStore_classifiesErrors(t *testing.T) {
+// The reason separates what an operator does about a failed decision: timeout
+// is load or distance, server is the store answering an error, which no retry
+// cures, and other is connectivity. A new reason adds a row.
+func TestInstrumentStore_countsAFailedDecisionByReason(t *testing.T) {
 	cases := []struct {
+		name   string
+		domain string
 		err    error
 		reason string
 	}{
-		{context.DeadlineExceeded, "timeout"},
-		{fmt.Errorf("dial: %w", &net.DNSError{IsTimeout: true}), "timeout"},
-		{goredis.ErrNoScript, "server"},
-		{errors.New("connection refused"), "other"},
+		{"a deadline is a timeout", "errors.deadline", context.DeadlineExceeded, "timeout"},
+		{"a network timeout is a timeout", "errors.net-timeout",
+			fmt.Errorf("dial: %w", &net.DNSError{IsTimeout: true}), "timeout"},
+		{"a redis error is a server answer", "errors.redis", goredis.ErrNoScript, "server"},
+		{"a wrapped redis error is a server answer", "errors.wrapped-redis",
+			fmt.Errorf("decide: %w", goredis.ErrNoScript), "server"},
+		{"any other error is other", "errors.refused", errors.New("connection refused"), "other"},
 	}
 	for _, c := range cases {
-		domain := fmt.Sprintf("errors.%s", c.reason)
-		instrumented := InstrumentStore(domain, stubStore{err: c.err})
-		before := testutil.ToFloat64(StoreErrors.WithLabelValues(domain, c.reason))
+		t.Run(c.name, func(t *testing.T) {
+			instrumented := InstrumentStore(c.domain, stubStore{err: c.err})
+			before := testutil.ToFloat64(StoreErrors.WithLabelValues(c.domain, c.reason))
 
-		_, err := instrumented.Decide(context.Background(), nil, 1)
-		require.Error(t, err)
+			_, err := instrumented.Decide(context.Background(), nil, 1)
 
-		got := testutil.ToFloat64(StoreErrors.WithLabelValues(domain, c.reason))
-		assert.Equal(t, before+1, got, "error %v must count as %s", c.err, c.reason)
+			require.ErrorIs(t, err, c.err)
+			assert.Equal(t, before+1, testutil.ToFloat64(StoreErrors.WithLabelValues(c.domain, c.reason)),
+				"store errors of reason %s after a decision failing with %v", c.reason, c.err)
+		})
 	}
 }
 
-func TestStoreErrorReason_reportsAServerAnswer(t *testing.T) {
-	// A redis error value is the store answering an error — a script or
-	// command problem no retry cures — and must not read as connectivity.
-	assert.Equal(t, "server", storeErrorReason(fmt.Errorf("decide: %w", goredis.ErrNoScript)))
+// Peek and Reset belong to the management API, not to the traffic the store
+// series describe: their errors reach the caller and leave the error counter
+// alone. The decision that does count is in
+// TestInstrumentStore_countsAFailedDecisionByReason.
+func TestInstrumentStore_passesAFailedPeekThroughUncounted(t *testing.T) {
+	failure := errors.New("management path")
+	instrumented := InstrumentStore("peek.domain", stubStore{err: failure})
+
+	_, err := instrumented.Peek(context.Background(), nil, 1)
+
+	assert.ErrorIs(t, err, failure)
+	assert.Zero(t, testutil.ToFloat64(StoreErrors.WithLabelValues("peek.domain", "other")),
+		"store errors of peek.domain")
+}
+
+// Reset belongs to the management API as Peek does: its error reaches the
+// caller and leaves the error counter alone.
+func TestInstrumentStore_passesAFailedResetThroughUncounted(t *testing.T) {
+	failure := errors.New("management path")
+	instrumented := InstrumentStore("reset.domain", stubStore{err: failure})
+
+	err := instrumented.Reset(context.Background(), nil)
+
+	assert.ErrorIs(t, err, failure)
+	assert.Zero(t, testutil.ToFloat64(StoreErrors.WithLabelValues("reset.domain", "other")),
+		"store errors of reset.domain")
 }
 
 func TestCacheStatsCollectors_startAtZero(t *testing.T) {
 	collectors := CacheStatsCollectors(&engine.CacheStats{})
 	require.Len(t, collectors, 2)
 	for _, c := range collectors {
-		assert.Zero(t, testutil.ToFloat64(c))
+		assert.Zero(t, testutil.ToFloat64(c), "%v", c.(prometheus.Metric).Desc())
 	}
 }
 
-func TestInstrumentStore_delegatesTheManagementPath(t *testing.T) {
-	failure := errors.New("management path")
-	instrumented := InstrumentStore("mgmt.domain", stubStore{err: failure})
+// A dead claim path never increments, so an unseeded key has no series to
+// alert on.
+func TestSeedExtractions_createsAZeroSeriesForEveryDeclaredKey(t *testing.T) {
+	before := testutil.CollectAndCount(Extractions)
 
-	_, peekErr := instrumented.Peek(context.Background(), nil, 1)
-	assert.ErrorIs(t, peekErr, failure)
-	assert.ErrorIs(t, instrumented.Reset(context.Background(), nil), failure)
-	// Neither call is traffic: the error counter must not move.
-	assert.Zero(t, testutil.ToFloat64(StoreErrors.WithLabelValues("mgmt.domain", "other")))
+	SeedExtractions(map[string][]string{"seed.domain": {"seeded_dead", "seeded_quiet"}})
+
+	assert.Equal(t, before+2, testutil.CollectAndCount(Extractions), "series of the extraction counter")
+	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("seed.domain", "seeded_dead")), "seeded_dead")
+	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("seed.domain", "seeded_quiet")), "seeded_quiet")
 }
 
-func TestSeedExtractions_makesZeroObservableWithoutResettingLiveSeries(t *testing.T) {
-	before := testutil.CollectAndCount(Extractions)
-	SeedExtractions(map[string][]string{"seed.domain": {"seeded_dead", "seeded_live"}})
-	assert.Equal(t, before+2, testutil.CollectAndCount(Extractions),
-		"seeding has to create the series: a dead claim path never increments, so an unseeded key has no series to alert on")
-	assert.Zero(t, testutil.ToFloat64(Extractions.WithLabelValues("seed.domain", "seeded_dead")))
+func TestSeedExtractions_keepsTheValueOfASeriesItSeedsAgain(t *testing.T) {
+	SeedExtractions(map[string][]string{"reseed.domain": {"seeded_live"}})
+	Extractions.WithLabelValues("reseed.domain", "seeded_live").Inc()
+	before := testutil.ToFloat64(Extractions.WithLabelValues("reseed.domain", "seeded_live"))
 
-	Extractions.WithLabelValues("seed.domain", "seeded_live").Inc()
-	SeedExtractions(map[string][]string{"seed.domain": {"seeded_live"}})
-	assert.Equal(t, 1.0, testutil.ToFloat64(Extractions.WithLabelValues("seed.domain", "seeded_live")),
+	SeedExtractions(map[string][]string{"reseed.domain": {"seeded_live"}})
+
+	assert.Equal(t, before, testutil.ToFloat64(Extractions.WithLabelValues("reseed.domain", "seeded_live")),
 		"reseeding an existing series is a no-op, not a reset")
 }
 
-// The operator's series. They are absent from the service's scrape, and on
-// an operator pod without the Lease they say so, which is why
-// ratelimit_leader exists: it says which scrape is the one carrying them.
+// The operator's series. The service's scrape carries none of them. An
+// operator pod without the Lease carries ratelimit_leader 0 and no fleet
+// series, so a query finds the scrape that carries them by ratelimit_leader.
 func TestFleetCollector_reportsWhatTheOperatorSaw(t *testing.T) {
 	t.Cleanup(func() {
 		DropFleet("gateway.public")
@@ -206,15 +272,16 @@ ratelimit_policy_replicas{domain="gateway.public",state="total"} 3
 ratelimit_policy_stalled{domain="gateway.private",reason="ReplicaStale"} 1
 ratelimit_policy_stalled{domain="gateway.public",reason="Progressing"} 0
 `
-	require.NoError(t, testutil.CollectAndCompare(fleetCollector{}, strings.NewReader(expected)))
+	assert.NoError(t, testutil.CollectAndCompare(fleetCollector{}, strings.NewReader(expected)))
 }
 
 // A deleted policy has to take its series with it: an alert on a stalled
-// domain would otherwise fire forever on an object nobody can fix.
+// domain would otherwise fire forever on an object nobody can fix. The leader
+// series stays, at 0 on a pod that does not hold the Lease.
 func TestFleetCollector_forgetsADeletedDomain(t *testing.T) {
-	t.Cleanup(func() { SetLeader(false) })
-
+	SetLeader(false)
 	PublishFleet("gateway.retired", FleetSample{Applied: 1, Total: 1, Reason: "Progressing"})
+
 	DropFleet("gateway.retired")
 
 	expected := `
@@ -222,5 +289,5 @@ func TestFleetCollector_forgetsADeletedDomain(t *testing.T) {
 # TYPE ratelimit_leader gauge
 ratelimit_leader 0
 `
-	require.NoError(t, testutil.CollectAndCompare(fleetCollector{}, strings.NewReader(expected)))
+	assert.NoError(t, testutil.CollectAndCompare(fleetCollector{}, strings.NewReader(expected)))
 }

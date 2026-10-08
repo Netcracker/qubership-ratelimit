@@ -5,12 +5,14 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 )
 
 // The thing the service exists for: a gateway calls it on every request and
@@ -40,7 +42,7 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 	// into the suites that need the domain unclaimed.
 	AfterAll(func() { deletePolicies(publicDomain, privateDomain) })
 
-	It("is what the gateway is configured to call", func() {
+	It("points the public gateway's filter at the ratelimit Service", func() {
 		// A wrong cluster name fails exactly like an unreachable service, so
 		// assert the configuration rather than inferring it from behaviour.
 		// The address is the Service's, and the Service has a fixed name:
@@ -52,10 +54,11 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 		expected := "outbound|9000||" + serviceHost()
 		Eventually(func() string {
 			return rateLimitClusterOf(gatewayPod("public-gateway").Name)
-		}).WithTimeout(time.Minute).WithPolling(5 * time.Second).Should(Equal(expected))
+		}).WithTimeout(time.Minute).WithPolling(5*time.Second).Should(Equal(expected),
+			"the rate limit cluster in the config dump of public-gateway")
 	})
 
-	It("receives the four descriptor entries", func() {
+	It("configures the gateway to send the four descriptor entries", func() {
 		// The descriptor the gateway sends is the service's input contract.
 		keys := descriptorKeysOf(gatewayPod("public-gateway").Name)
 		Expect(keys).To(ContainElements("path", "method", "token", "request_id"),
@@ -72,8 +75,8 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 			"the first request of a burst was refused; the window did not reset between tests")
 		Expect(codes).To(ContainElement(429),
 			"no request in the burst was refused; the declared limit is not being enforced")
-		Expect(codes).NotTo(ContainElements(0, 503),
-			"a request did not reach a routing verdict: %v", codes)
+		Expect(codes).NotTo(ContainElement(BeElementOf(0, 503)),
+			"a request did not reach a routing verdict")
 	})
 
 	It("answers with the rate limit headers of the rule that bound the request", func() {
@@ -91,19 +94,25 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 		Expect(codes[0]).NotTo(Equal(429), "the first request of a burst was refused")
 		Expect(codes).To(ContainElement(429), "no request in the burst was refused")
 
+		// An admission carries no retry hint; a refusal that waiting cures
+		// carries one.
 		policy := `"everything/total";q=1;w=1`
-		admitted := answered[0]
-		Expect(admitted.Get("ratelimit-policy")).To(Equal(policy))
-		Expect(admitted.Get("ratelimit")).To(Equal(fmt.Sprintf(`"everything/total";r=%s;t=%s`,
-			admitted.Get("x-ratelimit-remaining"), admitted.Get("x-ratelimit-reset"))))
-		Expect(admitted.Get("retry-after")).To(BeEmpty(), "an admission carries no retry hint")
+		admitted := rateLimitHeaders(answered[0])
+		Expect(admitted).To(gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{
+			"ratelimit-policy": Equal(policy),
+			"ratelimit": Equal(fmt.Sprintf(`"everything/total";r=%s;t=%s`,
+				admitted["x-ratelimit-remaining"], admitted["x-ratelimit-reset"])),
+			"retry-after": BeEmpty(),
+		}), "the headers of the first request, which was admitted")
 
-		refused := answered[slices.Index(codes, 429)]
-		Expect(refused.Get("x-ratelimit-limit")).To(Equal("1"))
-		Expect(refused.Get("x-ratelimit-remaining")).To(Equal("0"))
-		Expect(refused.Get("retry-after")).NotTo(BeEmpty(), "a refusal waiting cures carries the hint")
-		Expect(refused.Get("ratelimit-policy")).To(Equal(policy))
-		Expect(refused.Get("ratelimit")).To(Equal(`"everything/total";r=0;t=` + refused.Get("x-ratelimit-reset")))
+		refused := rateLimitHeaders(answered[slices.Index(codes, 429)])
+		Expect(refused).To(gstruct.MatchKeys(gstruct.IgnoreExtras, gstruct.Keys{
+			"x-ratelimit-limit":     Equal("1"),
+			"x-ratelimit-remaining": Equal("0"),
+			"retry-after":           Not(BeEmpty()),
+			"ratelimit-policy":      Equal(policy),
+			"ratelimit":             Equal(`"everything/total";r=0;t=` + refused["x-ratelimit-reset"]),
+		}), "the headers of the first refused request")
 	})
 
 	It("admits traffic again once the window reopens", func() {
@@ -118,13 +127,13 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 		// admission, not merely not-429: a 503 would mean the probe never
 		// reached a rate limit verdict at all.
 		nextWindow()
-		gatewayBurst("public-gateway", probePath, 3, nil)
-		code := gatewayGet("private-gateway", probePath, nil)
-		Expect((code >= 200 && code < 300) || code == 404).To(BeTrue(),
-			"the private gateway did not admit while only the public one was exhausted (got %d)", code)
+		Expect(gatewayBurst("public-gateway", probePath, 3, nil)).To(ContainElement(429),
+			"the burst that has to exhaust the window of the public gateway")
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(beAdmitted(),
+			"the private gateway did not admit while only the public one was exhausted")
 	})
 
-	It("logs each check without ever logging the token", func() {
+	It("logs each check with its request id, never with its bearer token", func() {
 		// The per-check line is Debug; the e2e install runs with
 		// LOG_LEVEL=debug precisely so this contract stays observable.
 		since := time.Now()
@@ -155,9 +164,25 @@ var _ = Describe("rate limiting through the gateways", Ordered, Label("ratelimit
 
 	// The unknown-domain path is deliberately not tested here: proving it
 	// means removing every policy that claims gateway.public, which in a
-	// shared namespace would disrupt whatever else uses the gateway.
-	// service/internal/rls covers it.
+	// shared namespace would disrupt whatever else uses the gateway. The
+	// unknown-domain suite proves it on gateway.private, and
+	// service/internal/rls covers it in unit tests.
 })
+
+// rateLimitHeaders reads the rate limit headers of one answer by their
+// lowercase names, "" where the answer carries none, so that a grouped
+// assertion prints every header that differs.
+func rateLimitHeaders(h http.Header) map[string]string {
+	names := []string{
+		"x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset",
+		"retry-after", "ratelimit-policy", "ratelimit",
+	}
+	out := make(map[string]string, len(names))
+	for _, name := range names {
+		out[name] = h.Get(name)
+	}
+	return out
+}
 
 // rateLimitClusterOf digs the ratelimit filter's cluster name out of the
 // Envoy config dump - the jq of the bash suite, spelled in Go.

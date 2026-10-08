@@ -31,9 +31,10 @@ no list needs `maxItems`.
 | | GCRA: resolution | `requests ≤ periodSeconds × 10⁶` (≤ 1 million/s) | whole microseconds in Lua | the compiler, `algo.Check` |
 | | GCRA: divisibility | with an emission interval < 100 µs, the period divides evenly by `requests` | emission rounding ≤ 1 % | the compiler, `algo.Check` |
 | | GCRA: depth | `burst × emission ≤ 10¹⁵ µs` | int64 protection | the compiler, `algo.Check` |
-| **Names** | domain, block, rule, group | ≤ 63, DNS-1123 pattern / `[a-z0-9._-]` | counter key segments without `:`/`{`/`}`/`/` | pattern, `maxLength` |
-| | descriptor keys: `mappings[].key`, placeholders, `matches[].key`, `counters[]` | ≤ 63, one pattern `^[a-z][a-zA-Z0-9_]*$` (camelCase allowed) | one pattern wherever a key is mentioned; enters the counter key as a segment | pattern, `maxLength` |
-| | predicate values, group values, claim paths | ≤ 256 | the engine's sanitary limit on an extracted value (`MaxValueBytes`): a longer literal can never match | `maxLength` |
+| **Names** | domain | ≤ 63, `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` | the hash tag of every counter key of the domain, without `:`, `{`, `}`, `/` | pattern, `maxLength` |
+| | block, rule, group | ≤ 63, `^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$` | block and rule names are counter key segments; a group name enters no key | pattern, `maxLength` |
+| | descriptor keys: `mappings[].key`, placeholders, `matches[].key`, `counters[]` | ≤ 63, one pattern `^[a-z][a-zA-Z0-9_]*$` (camelCase allowed) | one pattern wherever a key is mentioned; the key's value, not its name, enters the counter key as a segment | pattern, `maxLength` |
+| | predicate values, group values, claim paths | ≤ 256 characters | the engine skips an extracted value longer than 256 bytes (`MaxValueBytes`), so a non-ASCII literal past 256 bytes passes the schema and never matches | `maxLength` |
 | **Key** | axis values | escaped; token sanity limits | engine constants | the engine |
 
 ## Object size: the physical walls
@@ -153,9 +154,17 @@ the rule; last-good holds the traffic.
 ## Store and key capacity
 
 - **Redis** does not bound the keys: their number is determined by the axes (`counters: [sub]` gives one counter
-  per client), and the TTL by the window period. All keys of a domain share one slot (hash tag `{ns/domain}`): the
-  domain's throughput is bounded by one shard; the reference point is ~80 k decisions/s with one bucket, ~38 k/s with
-  four.
+  per client), and the TTL by the window: a fixed-window key expires at the window boundary, at most `periodSeconds`
+  away, and a GCRA key when its bucket drains, at most `burst × periodSeconds / requests` away, so the period alone
+  bounds it only at the default `burst = requests`; the depth cap of 10¹⁵ µs holds for any `burst`. All keys of a
+  domain share one slot (hash tag `{ns/domain}`), so the domain's throughput is bounded by one shard, and the service
+  connects to one standalone Redis, the one DBaaS provisions, so every domain of an installation shares that server.
+  Two reference points, measured and not guaranteed: the loopback benchmark of the [engine](engine.md) (a laptop-class
+  core, Redis 8 on one core, the store script's time alone) puts one domain at about 80000 decisions/s with one bucket
+  and 38000/s with four; a load case run on 2026-09-29 (1000 clients, 5 API groups, minute, hour, and day windows,
+  three buckets per decision, Redis 8 in Docker on the same machine) measured 30 to 36 µs of Redis CPU per decision
+  with the network round trip included, a ceiling of 28000 to 30000 decisions/s for one domain, and a p99 of about
+  4 ms at 5000 decisions/s.
 - **Key** `rl:v1:{<namespace>/<domain>}:<block>/<rule>:<algorithm>:<window>:<axes…>:`: block and rule names are ≤ 63,
   the domain is ≤ 63, axis values are escaped; the raw token never enters the key.
 - **Token sanitary limits** are engine constants, not configuration fields: an extracted value ≤ 256 bytes

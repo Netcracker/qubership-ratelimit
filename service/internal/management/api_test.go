@@ -2,64 +2,84 @@ package management
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 	"github.com/netcracker/qubership-ratelimit/service/internal/ruleview"
 )
 
-func TestDomains_reportsTheEnforcedSetAndItsVersion(t *testing.T) {
+func TestDomains_summarizesTheEnforcedDomain(t *testing.T) {
 	h := newTestAPI(t)
 
 	var list DomainList
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil), http.StatusOK, &list)
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil), http.StatusOK, &list)
 
-	require.Len(t, list.Items, 1)
+	require.Len(t, list.Items, 1, "GET /domains over a rule set of one domain")
 	summary := list.Items[0]
-	require.Equal(t, testDomain, summary.Domain)
-	require.Equal(t, h.version, summary.RuleSetVersion)
-	require.Equal(t, 3, summary.Blocks)
-	require.Equal(t, 6, summary.Rules)
-	require.Contains(t, summary.EffectiveKeys, "plan")
-	require.Equal(t, []string{"roles"}, summary.ListValuedKeys)
+	assert.Equal(t, testDomain, summary.Domain)
+	assert.Equal(t, h.version, summary.RuleSetVersion)
+	assert.Equal(t, 3, summary.Blocks)
+	assert.Equal(t, 6, summary.Rules)
+	assert.Subset(t, summary.EffectiveKeys, []string{"plan", "roles"}, "the keys the policy maps")
+	assert.Equal(t, []string{"roles"}, summary.ListValuedKeys)
+}
+
+// blockNames returns the names of the listed blocks, in listing order.
+func blockNames(view ruleview.RuleSetView) []string {
+	out := make([]string, 0, len(view.Blocks))
+	for _, block := range view.Blocks {
+		out = append(out, block.Block)
+	}
+	return out
 }
 
 func TestRules_reportsTheCompiledSet(t *testing.T) {
 	h := newTestAPI(t)
 
 	var view ruleview.RuleSetView
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", viewerRoles(), nil),
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
 		http.StatusOK, &view)
 
-	require.Equal(t, testDomain, view.Domain)
-	require.Equal(t, h.version, view.RuleSetVersion)
-	require.Len(t, view.Blocks, 3)
-
+	assert.Equal(t, testDomain, view.Domain)
+	assert.Equal(t, h.version, view.RuleSetVersion)
 	// Blocks come in the order the one policy authored them; there is no
 	// second object to order against.
-	require.Equal(t, []string{"cascade", "orders", "by-order"},
-		[]string{view.Blocks[0].Block, view.Blocks[1].Block, view.Blocks[2].Block})
+	require.Equal(t, []string{"cascade", "orders", "by-order"}, blockNames(view))
 
 	cascade := view.Blocks[0]
-	require.Equal(t, "FirstMatch", cascade.Mode, "block mode mirrors the custom resource")
-	require.Equal(t, "bypass", cascade.Rules[0].Mode, "rule mode is the runtime vocabulary")
-	require.Equal(t, []string{"sub"}, cascade.Rules[2].Axes)
-	require.Equal(t, int64(60), cascade.Rules[2].Rates[0].PeriodSeconds)
-	require.Equal(t, "1m0s", cascade.Rules[2].Rates[0].Period)
+	require.Len(t, cascade.Rules, 3, "rules of the cascade block")
+	assert.Equal(t, "FirstMatch", cascade.Mode, "block mode mirrors the custom resource")
+	assert.Equal(t, "bypass", cascade.Rules[0].Mode, "rule mode is the runtime vocabulary")
+	everyone := cascade.Rules[2]
+	assert.Equal(t, []string{"sub"}, everyone.Axes, "axes of %s", everyone.ID)
+	require.Len(t, everyone.Rates, 1, "rates of %s", everyone.ID)
+	assert.Equal(t, int64(60), everyone.Rates[0].PeriodSeconds, "the rate of %s", everyone.ID)
+	assert.Equal(t, "1m0s", everyone.Rates[0].Period, "the rate of %s", everyone.ID)
+}
 
-	// Unscoped, no rule is annotated: an annotation without a question would be
-	// an assertion about every possible client.
-	for _, block := range view.Blocks {
-		for _, rule := range block.Rules {
-			require.Empty(t, rule.Applicability)
-		}
-	}
+// Unscoped, no rule is annotated: an annotation without a question would be an
+// assertion about every possible client.
+func TestRules_annotatesNoRuleWithoutAnIdentityScope(t *testing.T) {
+	h := newTestAPI(t)
+
+	var view ruleview.RuleSetView
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
+		http.StatusOK, &view)
+
+	assert.Equal(t, map[string]annotation{
+		"cascade/internal":  {},
+		"cascade/premium":   {},
+		"cascade/everyone":  {},
+		"orders/per-client": {},
+		"orders/support":    {},
+		"by-order/each":     {},
+	}, annotationsByID(view))
 }
 
 func TestRules_filtersByTheEnginesOwnRouteMatcher(t *testing.T) {
@@ -67,20 +87,19 @@ func TestRules_filtersByTheEnginesOwnRouteMatcher(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders&method=GET", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders&method=GET", listedCaller, nil),
 		http.StatusOK, &view)
 
-	require.Len(t, view.Blocks, 1)
-	require.Equal(t, "orders", view.Blocks[0].Block)
+	assert.Equal(t, []string{"orders"}, blockNames(view), "GET /rules?path=/api/orders&method=GET")
 }
 
 func TestRules_refusesAMethodWithoutAPath(t *testing.T) {
 	h := newTestAPI(t)
 	recorder := h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?method=GET", viewerRoles(), nil)
+		BasePath+"/domains/"+testDomain+"/rules?method=GET", listedCaller, nil)
 
 	body := requireError(t, recorder, http.StatusBadRequest, CodeInvalidRequest)
-	require.Equal(t, []string{"method"}, body.Meta.Fields)
+	assert.Equal(t, []string{"method"}, body.Meta.Fields)
 }
 
 func TestRules_annotatesAScopedListing(t *testing.T) {
@@ -88,17 +107,12 @@ func TestRules_annotatesAScopedListing(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?axis.sub=prometheus", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?axis.sub=prometheus", listedCaller, nil),
 		http.StatusOK, &view)
 
-	byID := map[string]ruleview.RuleView{}
-	for _, block := range view.Blocks {
-		for _, rule := range block.Rules {
-			byID[rule.ID] = rule
-		}
-	}
-	require.Equal(t, ruleview.ApplicabilityAlways, byID["cascade/internal"].Applicability)
-	require.Equal(t, ruleview.ApplicabilityNever, byID["cascade/everyone"].Applicability)
+	annotations := annotationsByID(view)
+	assert.Equal(t, ruleview.ApplicabilityAlways, annotations["cascade/internal"].Applicability, "cascade/internal")
+	assert.Equal(t, ruleview.ApplicabilityNever, annotations["cascade/everyone"].Applicability, "cascade/everyone")
 }
 
 // annotation is the part of a rule view the applicability tests compare.
@@ -129,6 +143,16 @@ func TestRules_judgesACaptureKeyedRuleTheWayADecisionWould(t *testing.T) {
 	const items, perClient = "order-ops/items-per-order", "order-ops/orders-per-client"
 	always := annotation{Applicability: ruleview.ApplicabilityAlways}
 	never := annotation{Applicability: ruleview.ApplicabilityNever}
+	open := map[string]annotation{
+		items: {
+			Applicability: ruleview.ApplicabilityConditional,
+			ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateUndecidedCondition, Key: "order_id"}},
+		},
+		perClient: {
+			Applicability: ruleview.ApplicabilityConditional,
+			ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateMayBePreempted, Rule: items}},
+		},
+	}
 
 	cases := map[string]struct {
 		query string
@@ -148,16 +172,7 @@ func TestRules_judgesACaptureKeyedRuleTheWayADecisionWould(t *testing.T) {
 		},
 		"no path leaves the capture open": {
 			query: "axis.sub=dave",
-			want: map[string]annotation{
-				items: {
-					Applicability: ruleview.ApplicabilityConditional,
-					ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateUndecidedCondition, Key: "order_id"}},
-				},
-				perClient: {
-					Applicability: ruleview.ApplicabilityConditional,
-					ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateMayBePreempted, Rule: items}},
-				},
-			},
+			want:  open,
 		},
 		"known-absent decides it without a path": {
 			query: "axis.sub=dave&absent=order_id",
@@ -169,24 +184,15 @@ func TestRules_judgesACaptureKeyedRuleTheWayADecisionWould(t *testing.T) {
 		},
 		"no method leaves a capture the routes disagree on open": {
 			query: "path=/api/orders/42/items&axis.sub=dave",
-			want: map[string]annotation{
-				items: {
-					Applicability: ruleview.ApplicabilityConditional,
-					ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateUndecidedCondition, Key: "order_id"}},
-				},
-				perClient: {
-					Applicability: ruleview.ApplicabilityConditional,
-					ConditionalOn: []ruleview.ApplicabilityGate{{Reason: ruleview.GateMayBePreempted, Rule: items}},
-				},
-			},
+			want:  open,
 		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil), http.StatusOK, &view)
-			require.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil), http.StatusOK, &view)
+			assert.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
 		})
 	}
 }
@@ -211,9 +217,9 @@ func TestRules_refusesACaptureThatContradictsThePath(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			body := requireError(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil),
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil),
 				http.StatusBadRequest, CodeInvalidRequest)
-			require.Equal(t, []string{tc.field}, body.Meta.Fields, "GET /rules?%s", tc.query)
+			assert.Equal(t, []string{tc.field}, body.Meta.Fields, "GET /rules?%s", tc.query)
 		})
 	}
 }
@@ -263,8 +269,8 @@ func TestRules_judgesAShadowedKeyByTheRouteThatProducesIt(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil), http.StatusOK, &view)
-			require.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil), http.StatusOK, &view)
+			assert.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
 		})
 	}
 }
@@ -275,22 +281,32 @@ func TestRules_judgesAShadowedKeyByTheRouteThatProducesIt(t *testing.T) {
 func TestRules_alwaysAgreesWithTheSimulation(t *testing.T) {
 	h := newTestAPI(t, orderCascadeBlocks()...)
 
-	cases := map[string]struct{ path, method string }{
-		"through the prefix route":   {path: "/api/orders", method: http.MethodPost},
-		"through the template route": {path: "/api/orders/42/items", method: http.MethodGet},
+	cases := map[string]struct {
+		path, method string
+		want         []string
+	}{
+		"through the prefix route": {
+			path: "/api/orders", method: http.MethodPost, want: []string{"order-ops/orders-per-client"},
+		},
+		"through the template route": {
+			path: "/api/orders/42/items", method: http.MethodGet, want: []string{"order-ops/items-per-order"},
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?path="+tc.path+
-				"&method="+tc.method+"&axis.sub=dave", viewerRoles(), nil), http.StatusOK, &view)
+				"&method="+tc.method+"&axis.sub=dave", listedCaller, nil), http.StatusOK, &view)
 			var simulation SimulationResponse
-			decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+			decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 				Domain: testDomain, Path: tc.path, Method: tc.method,
 				Keys: map[string][]string{"sub": {"dave"}},
 			}), http.StatusOK, &simulation)
 
-			require.Equal(t, appliedRuleIDs(simulation), alwaysRuleIDs(view), "%s %s", tc.method, tc.path)
+			assert.Equal(t, tc.want, alwaysRuleIDs(view), "the rules the listing marks always for %s %s",
+				tc.method, tc.path)
+			assert.Equal(t, tc.want, appliedRuleIDs(simulation), "the rules the simulation applies to %s %s",
+				tc.method, tc.path)
 		})
 	}
 }
@@ -318,8 +334,30 @@ func appliedRuleIDs(simulation SimulationResponse) []string {
 
 func TestRules_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules", listedCaller, nil),
 		http.StatusNotFound, CodeNotFound)
+}
+
+// counterState is the part of a listed counter that says whose counter it is
+// and what it would do to the next request.
+type counterState struct {
+	RuleID    string
+	Axes      map[string]string
+	Mode      string
+	Limit     int64
+	Remaining int64
+	Limited   bool
+}
+
+func statesOf(items []CounterView) []counterState {
+	out := make([]counterState, 0, len(items))
+	for _, item := range items {
+		out = append(out, counterState{
+			RuleID: item.RuleID, Axes: item.Axes, Mode: item.Mode,
+			Limit: item.Limit, Remaining: item.Remaining, Limited: item.Limited,
+		})
+	}
+	return out
 }
 
 func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
@@ -329,36 +367,41 @@ func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone", listedCaller, nil),
 		http.StatusOK, &list)
 
-	require.Len(t, list.Items, 2)
-	require.Equal(t, 2, list.Scanned)
-	require.Empty(t, list.NextCursor)
-
-	alice := list.Items[0]
-	require.Equal(t, "cascade/everyone", alice.RuleID)
-	require.Equal(t, map[string]string{"sub": "alice"}, alice.Axes)
-	require.Equal(t, "enforce", alice.Mode)
-	require.Equal(t, int64(100), alice.Limit)
-	require.Equal(t, int64(96), alice.Remaining)
-	require.False(t, alice.Limited)
+	assert.ElementsMatch(t, []counterState{
+		{
+			RuleID: "cascade/everyone", Axes: map[string]string{"sub": "alice"}, Mode: "enforce",
+			Limit: 100, Remaining: 96, Limited: false,
+		},
+		{
+			RuleID: "cascade/everyone", Axes: map[string]string{"sub": "bob"}, Mode: "enforce",
+			Limit: 100, Remaining: 99, Limited: false,
+		},
+	}, statesOf(list.Items))
+	assert.Equal(t, 2, list.Scanned)
+	assert.Empty(t, list.NextCursor, "a listing that reached the end")
 }
 
-// Reading must not spend anyone's budget: the listing goes through Peek.
-func TestCounters_doNotChargeWhatTheyReport(t *testing.T) {
+// Reading must not spend anyone's budget: the listing goes through Peek, so two
+// listings in a row report the budget the one request left.
+func TestCounters_aListingChargesNothing(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	target := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 	var first, second CounterList
-	decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &first)
-	decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &second)
+	decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &first)
+	decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &second)
 
-	require.Equal(t, first.Items[0].Remaining, second.Items[0].Remaining)
+	require.Len(t, first.Items, 1, "the first listing")
+	require.Len(t, second.Items, 1, "the second listing")
+	assert.Equal(t, int64(99), first.Items[0].Remaining, "remaining in the first listing")
+	assert.Equal(t, int64(99), second.Items[0].Remaining, "remaining in the second listing")
 }
 
-func TestCounters_limitedSelectsOnlyTheRefusingOnes(t *testing.T) {
+func TestCounters_limitedListsOnlyTheRefusingCounters(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
@@ -366,22 +409,23 @@ func TestCounters_limitedSelectsOnlyTheRefusingOnes(t *testing.T) {
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&limited=true",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 
-	require.Len(t, list.Items, 1)
-	require.Equal(t, map[string]string{"sub": "crawler"}, list.Items[0].Axes)
-	require.True(t, list.Items[0].Limited)
-	require.Positive(t, list.Items[0].RetryAfterSeconds)
+	require.Len(t, list.Items, 1, "counters listed with limited=true")
+	assert.Equal(t, map[string]string{"sub": "crawler"}, list.Items[0].Axes)
+	assert.True(t, list.Items[0].Limited, "limited of the counter of crawler")
+	assert.Positive(t, list.Items[0].RetryAfterSeconds, "retryAfterSeconds of the counter of crawler")
 }
 
 func TestCounters_refusesAFalseThatPretendsToNarrow(t *testing.T) {
 	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?limited=false", viewerRoles(), nil),
+	body := requireError(t, h.call(t, http.MethodGet,
+		BasePath+"/domains/"+testDomain+"/counters?limited=false", listedCaller, nil),
 		http.StatusBadRequest, CodeInvalidRequest)
+	assert.Equal(t, []string{"limited"}, body.Meta.Fields)
 }
 
-func TestCounters_axisFiltersAreOrWithinANameAndAndBetweenNames(t *testing.T) {
+func TestCounters_repeatedValuesOfOneAxisSelectEitherValue(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol"} {
 		h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {client}}, 1)
@@ -390,12 +434,9 @@ func TestCounters_axisFiltersAreOrWithinANameAndAndBetweenNames(t *testing.T) {
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.sub=carol",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 
-	require.Len(t, list.Items, 2)
-	for _, item := range list.Items {
-		require.Contains(t, []string{"alice", "carol"}, item.Axes["sub"])
-	}
+	assert.ElementsMatch(t, []string{"alice", "carol"}, subsOf(list.Items))
 }
 
 // A counter whose rule does not declare the named axis never matches.
@@ -405,89 +446,103 @@ func TestCounters_anAxisTheRuleLacksMatchesNothing(t *testing.T) {
 
 	var all, filtered CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters",
-		viewerRoles(), nil), http.StatusOK, &all)
-	require.Len(t, all.Items, 1)
-	require.Empty(t, all.Items[0].Axes)
+		listedCaller, nil), http.StatusOK, &all)
+	require.Len(t, all.Items, 1, "the unfiltered listing of a rule without axes")
+	require.Empty(t, all.Items[0].Axes, "the unfiltered listing of a rule without axes")
 
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice",
-		viewerRoles(), nil), http.StatusOK, &filtered)
-	require.Empty(t, filtered.Items)
+		listedCaller, nil), http.StatusOK, &filtered)
+	assert.Empty(t, filtered.Items, "the listing with axis.sub=alice")
 }
 
-func TestCounters_pagesWithACursorBoundToItsSelection(t *testing.T) {
+// Two pages of two hold the four counters of a rule, each once, in whatever
+// order the store walks them.
+func TestCounters_pagesThroughTheCountersOfARuleWithACursor(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol", "dave"} {
 		h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {client}}, 1)
 	}
-	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 
-	var first CounterList
-	decode(t, h.call(t, http.MethodGet, base+"&pageSize=2", viewerRoles(), nil), http.StatusOK, &first)
-	require.Len(t, first.Items, 2)
-	require.NotEmpty(t, first.NextCursor)
-	require.True(t, first.Truncated)
+	pages := h.listPages(t, BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone&pageSize=2")
 
-	var second CounterList
-	decode(t, h.call(t, http.MethodGet,
-		base+"&pageSize=2&cursor="+url.QueryEscape(first.NextCursor), viewerRoles(), nil),
-		http.StatusOK, &second)
-	require.Len(t, second.Items, 2)
-	require.Empty(t, second.NextCursor)
+	require.Len(t, pages, 2, "pages of 2 over 4 counters")
+	assert.Len(t, pages[0].Items, 2, "items on the first page")
+	assert.True(t, pages[0].Truncated, "truncated of the first page")
+	assert.Len(t, pages[1].Items, 2, "items on the last page")
+	assert.ElementsMatch(t, []string{"alice", "bob", "carol", "dave"},
+		append(subsOf(pages[0].Items), subsOf(pages[1].Items)...))
+}
 
-	// The two pages together are the four counters, each once, in whatever
-	// order the store walks them.
-	clients := make([]string, 0, 4)
-	for _, item := range append(first.Items, second.Items...) {
-		clients = append(clients, item.Axes["sub"])
+// The same cursor under a different selection is refused rather than silently
+// answered with another listing.
+func TestCounters_refusesACursorPresentedUnderAnotherSelection(t *testing.T) {
+	h := newTestAPI(t)
+	for _, client := range []string{"alice", "bob", "carol", "dave"} {
+		h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {client}}, 1)
 	}
-	require.ElementsMatch(t, []string{"alice", "bob", "carol", "dave"}, clients)
+	var first CounterList
+	decode(t, h.call(t, http.MethodGet,
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone&pageSize=2", listedCaller, nil),
+		http.StatusOK, &first)
+	require.NotEmpty(t, first.NextCursor, "the first page of 2 over 4 counters")
 
-	// The same cursor under a different selection is refused rather than
-	// silently answered with another listing.
-	requireError(t, h.call(t, http.MethodGet,
+	body := requireError(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?pageSize=2&cursor="+url.QueryEscape(first.NextCursor),
-		viewerRoles(), nil), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller, nil), http.StatusBadRequest, CodeInvalidRequest)
+	assert.Equal(t, []string{"cursor"}, body.Meta.Fields)
 }
 
 func TestCounters_refusesAPageSizeOverTheCeiling(t *testing.T) {
 	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?pageSize=5000", viewerRoles(), nil),
+	body := requireError(t, h.call(t, http.MethodGet,
+		BasePath+"/domains/"+testDomain+"/counters?pageSize=5000", listedCaller, nil),
 		http.StatusBadRequest, CodeInvalidRequest)
+	assert.Equal(t, []string{"pageSize"}, body.Meta.Fields)
 }
 
-func TestSimulation_reportsTheDecisionWithoutCharging(t *testing.T) {
+func TestSimulation_reportsTheDecisionOfTheMatchingRule(t *testing.T) {
 	h := newTestAPI(t)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
 		Keys:   map[string][]string{model.KeySub: {"alice"}},
 	}), http.StatusOK, &response)
 
-	require.True(t, response.Allowed)
-	require.Empty(t, response.RefusalReason)
-	require.NotNil(t, response.Headers)
-	require.Equal(t, "cascade", response.Headers.Block)
-	require.Equal(t, "everyone", response.Headers.Rule)
-	require.Equal(t, "gcra", response.Headers.Algorithm)
-	require.Equal(t, int64(60), response.Headers.PeriodSeconds)
-	require.Nil(t, response.Headers.EffectiveWindowSeconds,
+	assert.True(t, response.Allowed, "allowed of a request under every limit")
+	assert.Empty(t, response.RefusalReason)
+	assert.Equal(t, []string{"sub"}, response.ExtractedKeys)
+	require.NotNil(t, response.Headers, "the answer names the binding window")
+	assert.Equal(t, "cascade", response.Headers.Block)
+	assert.Equal(t, "everyone", response.Headers.Rule)
+	assert.Equal(t, "gcra", response.Headers.Algorithm)
+	assert.Equal(t, int64(60), response.Headers.PeriodSeconds)
+	assert.Nil(t, response.Headers.EffectiveWindowSeconds,
 		"the simulation judges the untouched window before the charge, at its whole capacity")
-	require.Equal(t, []string{"sub"}, response.ExtractedKeys)
 
-	require.Len(t, response.Rules, 1)
-	require.Equal(t, "cascade/everyone", response.Rules[0].ID)
-	require.Equal(t, "enforce", response.Rules[0].Mode)
-	require.True(t, response.Rules[0].Allowed)
+	require.Len(t, response.Rules, 1, "the rules the simulation applies")
+	assert.Equal(t, "cascade/everyone", response.Rules[0].ID)
+	assert.Equal(t, "enforce", response.Rules[0].Mode)
+	assert.True(t, response.Rules[0].Allowed, "allowed of cascade/everyone")
+}
 
-	// Nothing was reserved: a listing sees an untouched counter.
+// Nothing a simulation judges is reserved: a listing after it sees no counter.
+func TestSimulation_chargesNothing(t *testing.T) {
+	h := newTestAPI(t)
+
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
+		Domain: testDomain,
+		Path:   "/api/invoices/1",
+		Method: http.MethodGet,
+		Keys:   map[string][]string{model.KeySub: {"alice"}},
+	}), http.StatusOK, nil)
+
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters",
-		viewerRoles(), nil), http.StatusOK, &list)
-	require.Empty(t, list.Items)
+		listedCaller, nil), http.StatusOK, &list)
+	assert.Empty(t, list.Items, "counters listed after the simulation")
 }
 
 // A window the request has touched before holds less than its capacity, so
@@ -500,18 +555,19 @@ func TestSimulation_reportsTheEffectiveWindowOfATouchedWindow(t *testing.T) {
 	h.spend(t, "/api/invoices/1", keys, 1)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
 		Keys:   keys,
 	}), http.StatusOK, &response)
 
-	require.True(t, response.Allowed)
+	assert.True(t, response.Allowed, "allowed of a request under every limit")
+	require.NotNil(t, response.Headers, "the answer names the binding window")
 	require.NotNil(t, response.Headers.EffectiveWindowSeconds, "a touched window has a next request to wait for")
-	require.Positive(t, *response.Headers.EffectiveWindowSeconds)
-	require.NotNil(t, response.Headers.ResetAfterSeconds)
-	require.LessOrEqual(t, *response.Headers.EffectiveWindowSeconds, *response.Headers.ResetAfterSeconds,
+	require.NotNil(t, response.Headers.ResetAfterSeconds, "a touched window resets")
+	assert.Positive(t, *response.Headers.EffectiveWindowSeconds)
+	assert.LessOrEqual(t, *response.Headers.EffectiveWindowSeconds, *response.Headers.ResetAfterSeconds,
 		"the effective window outlasts the reset")
 }
 
@@ -520,23 +576,26 @@ func TestSimulation_namesTheBindingWindowOnARefusal(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/orders",
 		Method: http.MethodGet,
 		Keys:   map[string][]string{model.KeySub: {"crawler"}},
 	}), http.StatusOK, &response)
 
-	require.False(t, response.Allowed)
-	require.Equal(t, ReasonRateLimited, response.RefusalReason)
-	require.NotNil(t, response.Headers.RetryAfterSeconds)
-	require.Positive(t, *response.Headers.RetryAfterSeconds)
-	require.NotNil(t, response.Headers.EffectiveWindowSeconds)
-	require.Equal(t, *response.Headers.RetryAfterSeconds, *response.Headers.EffectiveWindowSeconds,
+	assert.False(t, response.Allowed, "allowed of a request over its limit")
+	assert.Equal(t, ReasonRateLimited, response.RefusalReason)
+	require.NotNil(t, response.Headers, "the answer names the binding window")
+	assert.Equal(t, "orders", response.Headers.Block)
+	assert.Equal(t, "per-client", response.Headers.Rule)
+	require.NotNil(t, response.Headers.RetryAfterSeconds, "a refusal that waiting cures carries a retry hint")
+	require.NotNil(t, response.Headers.EffectiveWindowSeconds, "a refused window has a next request to wait for")
+	assert.Positive(t, *response.Headers.RetryAfterSeconds)
+	assert.Equal(t, *response.Headers.RetryAfterSeconds, *response.Headers.EffectiveWindowSeconds,
 		"a refusal of cost 1 waits one effective window")
-	require.Equal(t, response.Rules[0].ID, response.Headers.Block+"/"+response.Headers.Rule,
-		"the headers do not name the refusing rule")
-	require.Equal(t, ReasonRateLimited, response.Rules[0].RefusalReason)
+	require.Len(t, response.Rules, 1, "the rules the simulation applies")
+	assert.Equal(t, "orders/per-client", response.Rules[0].ID)
+	assert.Equal(t, ReasonRateLimited, response.Rules[0].RefusalReason)
 }
 
 // A cost no window can ever hold is refused permanently, and no retry hint may
@@ -545,7 +604,7 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 	h := newTestAPI(t)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/orders",
 		Method: http.MethodGet,
@@ -553,46 +612,65 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 		Cost:   1_000_000,
 	}), http.StatusOK, &response)
 
-	require.False(t, response.Allowed)
-	require.Equal(t, ReasonCapacityExceeded, response.RefusalReason)
-	require.Nil(t, response.Headers.RetryAfterSeconds)
-	require.Nil(t, response.Headers.EffectiveWindowSeconds, "a window at its full capacity has no next request")
-	require.Equal(t, response.Rules[0].ID, response.Headers.Block+"/"+response.Headers.Rule,
-		"the headers do not name the refusing rule")
-	require.Equal(t, ReasonCapacityExceeded, response.Rules[0].RefusalReason)
-	require.Nil(t, response.Rules[0].RetryAfterSeconds)
+	assert.False(t, response.Allowed, "allowed of a cost over every window's capacity")
+	assert.Equal(t, ReasonCapacityExceeded, response.RefusalReason)
+	require.NotNil(t, response.Headers, "the answer names the binding window")
+	assert.Equal(t, "orders", response.Headers.Block)
+	assert.Equal(t, "per-client", response.Headers.Rule)
+	assert.Nil(t, response.Headers.RetryAfterSeconds, "retryAfterSeconds of the headers")
+	assert.Nil(t, response.Headers.EffectiveWindowSeconds, "a window at its full capacity has no next request")
+	require.Len(t, response.Rules, 1, "the rules the simulation applies")
+	assert.Equal(t, "orders/per-client", response.Rules[0].ID)
+	assert.Equal(t, ReasonCapacityExceeded, response.Rules[0].RefusalReason)
+	assert.Nil(t, response.Rules[0].RetryAfterSeconds, "retryAfterSeconds of orders/per-client")
 }
 
 func TestSimulation_refusesTheCombinationsTheFormsForbid(t *testing.T) {
 	h := newTestAPI(t)
 
-	cases := map[string]SimulationRequest{
-		"no domain": {Path: "/api/orders", Method: http.MethodGet},
-		"no path":   {Domain: testDomain, Method: http.MethodGet},
-		"no method": {Domain: testDomain, Path: "/api/orders"},
+	cases := map[string]struct {
+		request SimulationRequest
+		field   string
+	}{
+		"no domain": {request: SimulationRequest{Path: "/api/orders", Method: http.MethodGet}, field: "domain"},
+		"no path":   {request: SimulationRequest{Domain: testDomain, Method: http.MethodGet}, field: "path"},
+		"no method": {request: SimulationRequest{Domain: testDomain, Path: "/api/orders"}, field: "method"},
 		"the token form carrying keys": {
-			Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
-			IdentitySource: identityToken, Token: "t",
-			Keys: map[string][]string{model.KeySub: {"alice"}},
+			request: SimulationRequest{
+				Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
+				IdentitySource: identityToken, Token: "t",
+				Keys: map[string][]string{model.KeySub: {"alice"}},
+			},
+			field: "keys",
 		},
 		"the keys form carrying a token": {
-			Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
-			IdentitySource: identityKeys, Token: "t",
-			Keys: map[string][]string{model.KeySub: {"alice"}},
+			request: SimulationRequest{
+				Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
+				IdentitySource: identityKeys, Token: "t",
+				Keys: map[string][]string{model.KeySub: {"alice"}},
+			},
+			field: "token",
 		},
 		"an unknown identity source": {
-			Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
-			IdentitySource: "guess",
+			request: SimulationRequest{
+				Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
+				IdentitySource: "guess",
+			},
+			field: "identitySource",
 		},
-		"an oversized token": {
-			Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
-			Token: strings.Repeat("x", maxSimulationToken+1),
+		"a token one byte over the limit": {
+			request: SimulationRequest{
+				Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
+				Token: strings.Repeat("x", maxSimulationToken+1),
+			},
+			field: "token",
 		},
 	}
-	for name, request := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), request),
+			body := requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, tc.request),
 				http.StatusBadRequest, CodeInvalidRequest)
+			assert.Equal(t, []string{tc.field}, body.Meta.Fields)
 		})
 	}
 }
@@ -601,43 +679,47 @@ func TestSimulation_refusesTheCombinationsTheFormsForbid(t *testing.T) {
 // be quoted in a refusal either.
 func TestSimulation_neverEchoesTheToken(t *testing.T) {
 	h := newTestAPI(t)
-	secret := "eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LXBheWxvYWQ.sig"
+	const secret = "eyJhbGciOiJIUzI1NiJ9.c2VjcmV0LXBheWxvYWQ.sig"
 
-	recorder := h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
-		Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
-		IdentitySource: identityToken, Token: secret,
-	})
-	require.Equal(t, http.StatusOK, recorder.Code)
-	require.NotContains(t, recorder.Body.String(), secret)
+	cases := []struct {
+		name   string
+		domain string
+		status int
+	}{
+		{name: "an answer", domain: testDomain, status: http.StatusOK},
+		{name: "a refusal", domain: "gateway.typo", status: http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
+				Domain: tc.domain, Path: "/api/orders", Method: http.MethodGet,
+				IdentitySource: identityToken, Token: secret,
+			})
 
-	refusal := h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
-		Domain: "gateway.typo", Path: "/api/orders", Method: http.MethodGet,
-		IdentitySource: identityToken, Token: secret,
-	})
-	require.Equal(t, http.StatusNotFound, refusal.Code)
-	require.NotContains(t, refusal.Body.String(), secret)
+			require.Equal(t, tc.status, recorder.Code, "body: %s", recorder.Body.String())
+			assert.NotContains(t, recorder.Body.String(), secret)
+		})
+	}
 }
 
 func TestSimulation_refusesAnUnknownField(t *testing.T) {
 	h := newTestAPI(t)
 
-	request := httptest.NewRequest(http.MethodPost, BasePath+"/simulations",
-		strings.NewReader(`{"domain":"gateway.public","path":"/api","method":"GET","identity":"alice"}`))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+testToken("alice@example.com", viewerRoles()))
+	recorder := h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, map[string]any{
+		"domain": testDomain, "path": "/api", "method": "GET", "identity": "alice",
+	})
 
-	recorder := h.send(t, request)
 	requireError(t, recorder, http.StatusBadRequest, CodeInvalidRequest)
 }
 
-func TestHandler_answersAnUnknownRouteInTheSameShape(t *testing.T) {
+func TestAPI_reportsAnUnknownRouteAsNotFound(t *testing.T) {
 	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/nothing", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/nothing", listedCaller, nil),
 		http.StatusNotFound, CodeNotFound)
 }
 
 // A path filter with no method means "any method". Reading it as the engine
-// does - where a request always carries one - drops every block whose routes
+// does, where a request always carries one, drops every block whose routes
 // name their methods, and an operator asking which rules guard /api/orders is
 // told the path is unlimited while two rules count it.
 func TestRules_aPathWithoutAMethodKeepsMethodRestrictedBlocks(t *testing.T) {
@@ -645,14 +727,10 @@ func TestRules_aPathWithoutAMethodKeepsMethodRestrictedBlocks(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders", listedCaller, nil),
 		http.StatusOK, &view)
 
-	blocks := make([]string, 0, len(view.Blocks))
-	for _, block := range view.Blocks {
-		blocks = append(blocks, block.Block)
-	}
-	require.Contains(t, blocks, "orders",
+	assert.Equal(t, []string{"orders"}, blockNames(view),
 		"the orders block targets this prefix for GET and POST; a listing without a method must show it")
 }
 
@@ -664,43 +742,44 @@ func TestReset_refusesAMisspelledSafetyParameter(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&dryrun=true",
-		"key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
-	require.Equal(t, []string{"dryrun"}, body.Meta.Fields,
+		"key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
+	assert.Equal(t, []string{"dryrun"}, body.Meta.Fields,
 		"the answer names the parameter, because the caller cannot see the whitelist")
 
 	remaining, found := h.remaining(t, "alice")
-	require.True(t, found, "a refused command must not have deleted the counter")
-	require.Equal(t, int64(2), remaining)
+	assert.True(t, found, "a refused command deleted the counter")
+	assert.Equal(t, int64(2), remaining, "the remaining budget of alice")
 }
 
 // The whitelist is checked ahead of the replay, so a retry carrying an unknown
 // parameter is refused exactly as the first call would have been. Answering it
 // from the record instead would make the same query legal or illegal depending
 // on whether the key had been seen.
-func TestReset_refusesAMisspelledSafetyParameterOnARetryToo(t *testing.T) {
+func TestReset_refusesAMisspelledSafetyParameterOnARetry(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	const selector = "ruleId=orders/per-client&axis.sub=alice"
-	var first ResetResponse
-	decode(t, h.reset(t, selector, "key-1", operatorRoles()), http.StatusOK, &first)
+	decode(t, h.reset(t, selector, "key-1", listedCaller), http.StatusOK, nil)
 
-	body := requireError(t, h.reset(t, selector+"&dryrun=true", "key-1", operatorRoles()),
+	body := requireError(t, h.reset(t, selector+"&dryrun=true", "key-1", listedCaller),
 		http.StatusBadRequest, CodeInvalidRequest)
-	require.Equal(t, []string{"dryrun"}, body.Meta.Fields)
+	assert.Equal(t, []string{"dryrun"}, body.Meta.Fields)
 }
 
 func TestQueryNames_areWhitelistedOnEveryReadEndpoint(t *testing.T) {
 	h := newTestAPI(t)
 
-	for name, target := range map[string]string{
-		"the rule listing":    "/rules?path=/api/orders&methods=GET",
-		"the counter listing": "/counters?ruleId=orders/per-client&pagesize=10",
-	} {
+	cases := map[string]struct{ target, field string }{
+		"the rule listing":    {target: "/rules?path=/api/orders&methods=GET", field: "methods"},
+		"the counter listing": {target: "/counters?ruleId=orders/per-client&pagesize=10", field: "pagesize"},
+	}
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			requireError(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+target, viewerRoles(), nil),
+			body := requireError(t, h.call(t, http.MethodGet,
+				BasePath+"/domains/"+testDomain+tc.target, listedCaller, nil),
 				http.StatusBadRequest, CodeInvalidRequest)
+			assert.Equal(t, []string{tc.field}, body.Meta.Fields, "GET %s", tc.target)
 		})
 	}
 }
@@ -710,7 +789,7 @@ func TestQueryNames_areWhitelistedOnEveryReadEndpoint(t *testing.T) {
 func TestQueryNames_admitTheAxisFamily(t *testing.T) {
 	h := newTestAPI(t)
 
-	require.Equal(t, http.StatusOK, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.order_id=4711",
-		viewerRoles(), nil).Code)
+	response := h.call(t, http.MethodGet,
+		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.order_id=4711", listedCaller, nil)
+	assert.Equal(t, http.StatusOK, response.Code, "body: %s", response.Body.String())
 }

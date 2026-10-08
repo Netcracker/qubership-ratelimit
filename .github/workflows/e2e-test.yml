@@ -181,9 +181,9 @@ jobs:
           # A profile is mandatory: values.yaml carries no resource keys, so a
           # chart is always installed the way it is in production.
           #
-          # The operator first, the way a fresh installation is documented,
-          # though the order does not matter to a fresh one: the service waits
-          # NotReady until the operator writes. Neither release is named after
+          # The operator first, the way a fresh installation is documented:
+          # the service waits NotReady until the operator writes, and the
+          # service chart's EnvoyFilters are live from its install. Neither release is named after
           # its chart. The Service has a fixed name that satellites compute
           # their RLS address from, and with the release named ratelimit the
           # two coincide and nothing in the suite can tell a fixed name from a
@@ -198,12 +198,13 @@ jobs:
             --set TAG=e2e \
             --wait --timeout 5m
 
-          # The management identity is not the default either: the roles
-          # under a nested claim and IdP role names of their own. The suite
-          # reads what the release configured off the pod and mints its
-          # tokens to match, so a service that ignored these values would
-          # refuse every token the suite sends. With the defaults the same
-          # run passes whether the values are read or not.
+          # The management identity is not the default either: a caller of
+          # its own and an audience other than netcracker. The suite reads
+          # both off the pod and mints its tokens through the TokenRequest API
+          # for that caller and audience, so a service that ignored either
+          # value would refuse every token the suite sends. The suite reaches
+          # the API through the private gateway, so the policy admits the
+          # gateway's workload rather than the caller's.
           helm upgrade --install ratelimit-service-baseline helm-templates/ratelimit-service \
             --namespace "${E2E_NAMESPACE}" \
             --set NAMESPACE="${E2E_NAMESPACE}" \
@@ -214,9 +215,9 @@ jobs:
             --set TAG=e2e \
             --set redis.dbaas.enabled=false \
             --set management.enabled=true \
-            --set management.claims.roles=realm_access.roles \
-            --set 'management.roles.viewer={rl-viewer}' \
-            --set 'management.roles.operator={rl-operator}'
+            --set 'management.callers={e2e-management-caller}' \
+            --set management.m2m.audience=ratelimit-e2e \
+            --set 'management.authorizationPolicy.allowedServiceAccounts={private-gateway-istio}'
           kubectl get service ratelimit -n "${E2E_NAMESPACE}" >/dev/null
 
       # The workflow then does what dbaas-operator does for the chart's

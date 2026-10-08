@@ -289,7 +289,7 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 		var version string
 		Eventually(func() string {
 			body, code := gatewayGetBody("private-gateway", basePath+"/domains",
-				map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")})
+				map[string]string{"Authorization": "Bearer " + managementToken()})
 			if code != http.StatusOK {
 				return ""
 			}

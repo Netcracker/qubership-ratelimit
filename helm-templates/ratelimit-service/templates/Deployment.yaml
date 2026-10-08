@@ -64,9 +64,8 @@ spec:
     spec:
       serviceAccountName: '{{ .Values.SERVICE_NAME }}'
       # The process that parses tokens from the internet reaches no API
-      # server object: no Role, and no token in the pod to try one with. What
-      # it knows of the cluster is the mounted directory below and the
-      # Downward API.
+      # server object: the ServiceAccount has no Role, and the pod mounts its
+      # token only for the management API, in the volume serviceaccount below.
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -133,17 +132,14 @@ spec:
             - name: RESPONSE_HEADERS_IETF
               value: '{{ .Values.responseHeaders.ietf }}'
             {{- if .Values.management.enabled }}
-            # The identity configuration of the management API. Read through
-            # the configloader, which maps MANAGEMENT_CLAIMS_SUBJECT onto
-            # management.claims.subject; the lists are comma-separated.
-            - name: MANAGEMENT_CLAIMS_SUBJECT
-              value: '{{ .Values.management.claims.subject }}'
-            - name: MANAGEMENT_CLAIMS_ROLES
-              value: '{{ .Values.management.claims.roles }}'
-            - name: MANAGEMENT_ROLES_VIEWER
-              value: '{{ join "," .Values.management.roles.viewer }}'
-            - name: MANAGEMENT_ROLES_OPERATOR
-              value: '{{ join "," .Values.management.roles.operator }}'
+            # Who may call the management API, comma-separated, and the
+            # audience their tokens are issued for. Read through the
+            # configloader, which maps MANAGEMENT_M2M_AUDIENCE onto
+            # management.m2m.audience.
+            - name: MANAGEMENT_CALLERS
+              value: '{{ join "," .Values.management.callers }}'
+            - name: MANAGEMENT_M2M_AUDIENCE
+              value: '{{ .Values.management.m2m.audience }}'
             # The domains in which a check of the API's own paths is exempt,
             # comma-separated.
             - name: MANAGEMENT_GATEWAY_DOMAINS
@@ -200,6 +196,11 @@ spec:
             - name: redis
               mountPath: '/etc/secrets/dbaas-secrets/{{ .Values.SERVICE_NAME }}-redis'
               readOnly: true
+            {{- if .Values.management.enabled }}
+            - name: serviceaccount
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            {{- end }}
           securityContext:
             runAsNonRoot: true
             {{- if eq .Values.PAAS_PLATFORM "KUBERNETES" }}
@@ -260,6 +261,29 @@ spec:
         - name: redis
           secret:
             secretName: '{{ .Values.SERVICE_NAME }}-redis'
+        {{- if .Values.management.enabled }}
+        # The pod's own ServiceAccount token, in the layout the API server's
+        # automount would give it, for the management API alone: the service
+        # reads the cluster's token issuer from it and authenticates the OIDC
+        # discovery and key-set requests it verifies callers' tokens with. The
+        # ServiceAccount has no Role, so the token reads nothing else.
+        - name: serviceaccount
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3607
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        {{- end }}
       # Long enough for the gRPC drain (--rls-drain-timeout, 10s by default) to
       # finish before the kubelet sends SIGKILL.
       terminationGracePeriodSeconds: 30

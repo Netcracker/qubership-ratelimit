@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -25,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/netcracker/qubership-ratelimit/api/contract"
-	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
@@ -47,10 +48,14 @@ func unitScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
+func fakeClient(t *testing.T, objects ...client.Object) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(unitScheme(t)).WithObjects(objects...).Build()
+}
+
 func storeOver(t *testing.T, objects ...client.Object) *Store {
 	t.Helper()
-	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithObjects(objects...).Build()
-	return New(c, unitNamespace, nil, "0.0.0-unit", logr.Discard())
+	return New(fakeClient(t, objects...), unitNamespace, nil, "0.0.0-unit", logr.Discard())
 }
 
 func goodSpec(domain string) v1.RateLimitPolicySpec {
@@ -58,215 +63,320 @@ func goodSpec(domain string) v1.RateLimitPolicySpec {
 		Name: "a", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}}
 }
 
-// written renders an object the way Save would, then lets a test damage it.
+// resolvedGoodSpec is goodSpec as the writer saves it: the resolver fills in
+// the mode, the behavior, and the algorithm the author left out.
+func resolvedGoodSpec(domain string) v1.RateLimitPolicySpec {
+	return v1.RateLimitPolicySpec{Domain: domain, Limits: []v1.LimitBlock{{
+		Name: "a", Mode: v1.BlockModeAll, Rules: []v1.Rule{{Name: "total", Behavior: v1.RuleBehaviorEnforce,
+			Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}}}}}}}
+}
+
+// readConfigMap reads the namespace's ConfigMap through c.
+func readConfigMap(t *testing.T, c client.Client) *corev1.ConfigMap {
+	t.Helper()
+	var object corev1.ConfigMap
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: unitNamespace, Name: contract.ConfigMapName},
+		&object))
+	return &object
+}
+
+// written is the object Save writes for the state, ready to be put in
+// another client, or damaged first.
 func written(t *testing.T, state map[string]policy.Bundle) *corev1.ConfigMap {
 	t.Helper()
-	s := New(nil, unitNamespace, nil, "0.0.0-unit", logr.Discard())
-	data, binaryData, err := s.render(state, policy.ConfigMapLimit)
-	require.NoError(t, err)
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: contract.ConfigMapName},
-		Data:       data,
-		BinaryData: binaryData,
-	}
+	c := fakeClient(t)
+	require.NoError(t, New(c, unitNamespace, nil, "0.0.0-unit", logr.Discard()).
+		Save(t.Context(), state, policy.ConfigMapLimit))
+	object := readConfigMap(t, c)
+	object.ResourceVersion = ""
+	return object
 }
 
 func TestLoad_anAbsentObjectIsAColdStart(t *testing.T) {
-	bundles, err := storeOver(t).Load(context.Background(), []string{"gateway.public"})
-	require.NoError(t, err)
-	assert.Empty(t, bundles)
+	bundles, err := storeOver(t).Load(t.Context(), []string{"gateway.public"})
+
+	assert.NoError(t, err)
+	assert.Empty(t, bundles, "Load(gateway.public) with no ConfigMap")
 }
 
+// A manifest nobody here can read is not an outage: the next write replaces
+// it, and until then nothing is last-good.
 func TestLoad_aManifestThatDoesNotDecodeStartsFromNothing(t *testing.T) {
-	object := written(t, map[string]policy.Bundle{"gateway.public": {UID: "u", GoodGeneration: 1, GoodSpec: goodSpec("gateway.public")}})
+	object := written(t, map[string]policy.Bundle{
+		"gateway.public": {UID: "u", GoodGeneration: 1, GoodSpec: goodSpec("gateway.public")}})
 	object.Data[contract.ManifestKey] = `{"formatVersion": 99, "domains": {}}`
 
-	bundles, err := storeOver(t, object).Load(context.Background(), []string{"gateway.public"})
-	require.NoError(t, err, "a manifest nobody here can read is not an outage; the next write replaces it")
-	assert.Empty(t, bundles)
+	bundles, err := storeOver(t, object).Load(t.Context(), []string{"gateway.public"})
+
+	assert.NoError(t, err)
+	assert.Empty(t, bundles, "Load(gateway.public) with formatVersion 99")
 }
 
-func TestLoad_skipsTheDamagedEntryAndKeepsTheRest(t *testing.T) {
-	state := map[string]policy.Bundle{
+// One corrupt entry costs its own domain the fallback, not the namespace. Of
+// the four domains the manifest names, gateway.a lost its payload, the payload
+// of gateway.b is not gzip, gateway.c holds the payload of gateway.d, so the
+// hash disagrees, and gateway.d is intact; gateway.absent is not in the
+// manifest at all.
+func TestLoad_aDamagedEntryCostsOnlyItsOwnDomain(t *testing.T) {
+	object := written(t, map[string]policy.Bundle{
 		"gateway.a": {UID: "ua", GoodGeneration: 1, GoodSpec: goodSpec("gateway.a")},
 		"gateway.b": {UID: "ub", GoodGeneration: 2, GoodSpec: goodSpec("gateway.b")},
 		"gateway.c": {UID: "uc", GoodGeneration: 3, GoodSpec: goodSpec("gateway.c")},
 		"gateway.d": {UID: "ud", GoodGeneration: 4, GoodSpec: goodSpec("gateway.d")},
-	}
-	object := written(t, state)
-	// a: the payload is gone; b: the payload is not gzip; c: the payload is
-	// somebody else's, so the hash disagrees; d: intact.
-	delete(object.BinaryData, manifest.PayloadKey("gateway.a"))
-	object.BinaryData[manifest.PayloadKey("gateway.b")] = []byte("not gzip")
-	object.BinaryData[manifest.PayloadKey("gateway.c")] = object.BinaryData[manifest.PayloadKey("gateway.d")]
+	})
+	delete(object.BinaryData, "gateway.a.json.gz")
+	object.BinaryData["gateway.b.json.gz"] = []byte("not gzip")
+	object.BinaryData["gateway.c.json.gz"] = object.BinaryData["gateway.d.json.gz"]
 
-	bundles, err := storeOver(t, object).Load(context.Background(),
+	bundles, err := storeOver(t, object).Load(t.Context(),
 		[]string{"gateway.a", "gateway.b", "gateway.c", "gateway.d", "gateway.absent"})
-	require.NoError(t, err)
-	assert.Equal(t, []string{"gateway.d"}, keysOf(bundles),
-		"one corrupt entry costs its own domain the fallback, not the namespace")
-	assert.Equal(t, int64(4), bundles["gateway.d"].GoodGeneration)
-	assert.Equal(t, "ud", bundles["gateway.d"].UID)
+
+	assert.NoError(t, err)
+	assert.Equal(t, map[string]policy.Bundle{
+		"gateway.d": {UID: "ud", GoodGeneration: 4, GoodSpec: goodSpec("gateway.d")},
+	}, bundles)
 }
 
+// An outage is not an empty state: the caller must not compile from nothing.
 func TestLoad_reportsAReadThatFails(t *testing.T) {
+	unreachable := errors.New("api server unreachable")
 	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			return errors.New("api server unreachable")
+			return unreachable
 		}}).Build()
-	_, err := New(c, unitNamespace, nil, "v", logr.Discard()).Load(context.Background(), []string{"gateway.public"})
-	require.Error(t, err, "an outage is not an empty state: the caller must not compile from nothing")
+
+	_, err := New(c, unitNamespace, nil, "v", logr.Discard()).Load(t.Context(), []string{"gateway.public"})
+
+	assert.ErrorIs(t, err, unreachable)
 }
 
-func TestSave_replacesTheObjectWholeAndKeepsTheOwner(t *testing.T) {
-	stale := written(t, map[string]policy.Bundle{"gateway.old": {UID: "uo", GoodGeneration: 1, GoodSpec: goodSpec("gateway.old")}})
+// The object is replaced, not merged: a retired domain's payload and a label
+// nobody set do not linger, and the owner is written onto the object.
+func TestSave_replacesAnExistingObjectWhole(t *testing.T) {
+	stale := written(t, map[string]policy.Bundle{
+		"gateway.old": {UID: "uo", GoodGeneration: 1, GoodSpec: goodSpec("gateway.old")}})
 	stale.Labels = map[string]string{"stale": "label"}
-	store := storeOver(t, stale)
+	c := fakeClient(t, stale)
+	store := New(c, unitNamespace, nil, "0.0.0-unit", logr.Discard())
 	store.SetOwner(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "op", UID: "op-uid"}}, "apps/v1", "Deployment")
 
-	require.NoError(t, store.Save(context.Background(),
+	require.NoError(t, store.Save(t.Context(),
 		map[string]policy.Bundle{"gateway.new": {UID: "un", GoodGeneration: 1, GoodSpec: goodSpec("gateway.new")}},
 		policy.ConfigMapLimit))
 
-	var object corev1.ConfigMap
-	require.NoError(t, store.client.Get(context.Background(), store.key(), &object))
-	assert.Equal(t, []string{manifest.PayloadKey("gateway.new")}, keysOf(object.BinaryData),
-		"a retired domain's payload does not linger: the object is replaced, not merged")
-	assert.NotContains(t, object.Labels, "stale")
-	require.Len(t, object.OwnerReferences, 1)
-	assert.Equal(t, "op", object.OwnerReferences[0].Name)
+	object := readConfigMap(t, c)
+	assert.Equal(t, []string{"gateway.new.json.gz"}, slices.Sorted(maps.Keys(object.BinaryData)), "BinaryData keys")
+	assert.Empty(t, object.Labels, "Labels")
+	assert.Equal(t, []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "op", UID: "op-uid"}},
+		object.OwnerReferences, "OwnerReferences")
 }
 
-func TestSave_sparesTheWriteWhenTheObjectAlreadyHoldsIt(t *testing.T) {
-	state := map[string]policy.Bundle{"gateway.same": {UID: "us", GoodGeneration: 1, GoodSpec: goodSpec("gateway.same")}}
-	updates := 0
-	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
-		Update: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
-			updates++
-			return c.Update(ctx, object, opts...)
+// saveSettings is what one Save runs with: the store's labels, the UID of the
+// Deployment "op" that owns the object, and the state.
+type saveSettings struct {
+	labels   map[string]string
+	ownerUID types.UID
+	state    map[string]policy.Bundle
+}
+
+// saveWith saves settings.state over c through a store with the settings'
+// labels and owner.
+func saveWith(t *testing.T, c client.Client, settings saveSettings) {
+	t.Helper()
+	store := New(c, unitNamespace, settings.labels, "0.0.0-unit", logr.Discard())
+	store.SetOwner(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "op", UID: settings.ownerUID}},
+		"apps/v1", "Deployment")
+	require.NoError(t, store.Save(t.Context(), settings.state, policy.ConfigMapLimit))
+}
+
+// countingUpdates is a client that counts the updates sent through it.
+func countingUpdates(t *testing.T) (c client.Client, updates *int) {
+	t.Helper()
+	updates = new(int)
+	c = fake.NewClientBuilder().WithScheme(unitScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(
+			ctx context.Context, inner client.WithWatch, object client.Object, opts ...client.UpdateOption,
+		) error {
+			*updates++
+			return inner.Update(ctx, object, opts...)
 		}}).Build()
-	store := New(c, unitNamespace, map[string]string{"managed": "yes"}, "0.0.0-unit", logr.Discard())
-	owner := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "op", UID: "op-uid"}}
-	store.SetOwner(owner, "apps/v1", "Deployment")
+	return c, updates
+}
 
-	// The first write creates; the second, of the same state, finds the
-	// object as it would write it and does not touch it. Every status write
-	// of the probe cycle reaches Save this way.
-	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
-	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
-	assert.Equal(t, 0, updates, "an identical write is spared, not sent to be a no-op at the API server")
+// An identical write is a no-op at the API server, and Save spares it the
+// request; anything Save owns that differs is written. Every status write of
+// the probe cycle reaches Save, so the identical case is the common one.
+func TestSave_writesOnlyWhatDiffersFromTheObject(t *testing.T) {
+	same := map[string]policy.Bundle{
+		"gateway.same": {UID: "us", GoodGeneration: 1, GoodSpec: goodSpec("gateway.same")}}
+	more := map[string]policy.Bundle{
+		"gateway.same": {UID: "us", GoodGeneration: 1, GoodSpec: goodSpec("gateway.same")},
+		"gateway.more": {UID: "um", GoodGeneration: 1, GoodSpec: goodSpec("gateway.more")}}
+	first := saveSettings{labels: map[string]string{"managed": "yes"}, ownerUID: "op-uid", state: same}
 
-	// Anything Save owns that differs is written: a payload, a label, the owner.
-	state["gateway.more"] = policy.Bundle{UID: "um", GoodGeneration: 1, GoodSpec: goodSpec("gateway.more")}
-	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
-	assert.Equal(t, 1, updates)
-	store.labels = map[string]string{"managed": "still"}
-	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
-	assert.Equal(t, 2, updates)
-	store.SetOwner(&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "op", UID: "op-reborn"}}, "apps/v1", "Deployment")
-	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
-	assert.Equal(t, 3, updates, "a Deployment recreated under a new UID takes the object over")
-	require.NoError(t, store.Save(context.Background(), state, policy.ConfigMapLimit))
-	assert.Equal(t, 3, updates)
+	tests := []struct {
+		name        string
+		second      saveSettings
+		wantUpdates int
+	}{
+		{"the state the object holds is spared",
+			saveSettings{labels: map[string]string{"managed": "yes"}, ownerUID: "op-uid", state: same}, 0},
+		{"a payload the object lacks is written",
+			saveSettings{labels: map[string]string{"managed": "yes"}, ownerUID: "op-uid", state: more}, 1},
+		{"a label the object lacks is written",
+			saveSettings{labels: map[string]string{"managed": "still"}, ownerUID: "op-uid", state: same}, 1},
+		{"an owner recreated under a new UID is written",
+			saveSettings{labels: map[string]string{"managed": "yes"}, ownerUID: "op-reborn", state: same}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, updates := countingUpdates(t)
+			saveWith(t, c, first)
+
+			saveWith(t, c, tt.second)
+
+			assert.Equal(t, tt.wantUpdates, *updates, "updates sent by the second Save")
+		})
+	}
+}
+
+// An update leaves the object as Save would write it, so the same state saved
+// once more is spared.
+func TestSave_sparesTheStateItsLastUpdateWrote(t *testing.T) {
+	same := map[string]policy.Bundle{
+		"gateway.same": {UID: "us", GoodGeneration: 1, GoodSpec: goodSpec("gateway.same")}}
+	c, updates := countingUpdates(t)
+	saveWith(t, c, saveSettings{labels: map[string]string{"managed": "yes"}, ownerUID: "op-uid", state: same})
+	reborn := saveSettings{labels: map[string]string{"managed": "yes"}, ownerUID: "op-reborn", state: same}
+	saveWith(t, c, reborn)
+	require.Equal(t, 1, *updates, "updates sent by the Save under the new owner")
+
+	saveWith(t, c, reborn)
+
+	assert.Equal(t, 1, *updates, "updates sent after the same Save once more")
 }
 
 func TestSave_refusesAStateTheObjectCannotHold(t *testing.T) {
-	store := storeOver(t)
-	err := store.Save(context.Background(),
+	err := storeOver(t).Save(t.Context(),
 		map[string]policy.Bundle{"gateway.big": {UID: "ub", GoodGeneration: 1, GoodSpec: goodSpec("gateway.big")}}, 16)
-	require.ErrorIs(t, err, ErrTooLarge)
-	assert.Contains(t, err.Error(), "the limit is 16")
+
+	assert.ErrorIs(t, err, ErrTooLarge)
+	assert.ErrorContains(t, err, "the limit is 16")
 }
 
 func TestSave_reportsAWriteThatFails(t *testing.T) {
-	boom := errors.New("write refused")
+	refused := errors.New("write refused")
 	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
-		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error { return boom },
+		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error { return refused },
 	}).Build()
-	err := New(c, unitNamespace, nil, "v", logr.Discard()).Save(context.Background(), nil, policy.ConfigMapLimit)
-	require.ErrorIs(t, err, boom)
+
+	err := New(c, unitNamespace, nil, "v", logr.Discard()).Save(t.Context(), nil, policy.ConfigMapLimit)
+
+	assert.ErrorIs(t, err, refused)
 }
 
-func TestAdoptDeployment_namesTheOwnerOrSaysWhyNot(t *testing.T) {
-	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: "ratelimit-operator", UID: "d-uid"}}
-	store := storeOver(t, deployment)
+func TestAdoptDeployment_ownsTheObjectThroughTheDeployment(t *testing.T) {
+	c := fakeClient(t, &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: "ratelimit-operator", UID: "d-uid"}})
+	store := New(c, unitNamespace, nil, "0.0.0-unit", logr.Discard())
 
-	require.NoError(t, store.AdoptDeployment(context.Background(), store.client, "ratelimit-operator"))
-	require.NotNil(t, store.owner)
-	assert.Equal(t, "Deployment", store.owner.Kind)
-	assert.Equal(t, "d-uid", string(store.owner.UID))
+	require.NoError(t, store.AdoptDeployment(t.Context(), c, "ratelimit-operator"))
+	require.NoError(t, store.Save(t.Context(), nil, policy.ConfigMapLimit))
 
-	// A Deployment the operator cannot read: no owner, and the error names
-	// the consequence so the log line does.
-	other := storeOver(t)
-	err := other.AdoptDeployment(context.Background(), other.client, "ratelimit-operator")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "written without an owner")
-	assert.Nil(t, other.owner)
+	assert.Equal(t, []metav1.OwnerReference{
+		{APIVersion: "apps/v1", Kind: "Deployment", Name: "ratelimit-operator", UID: "d-uid"},
+	}, readConfigMap(t, c).OwnerReferences)
 }
 
+// A Deployment the operator cannot read leaves the object without an owner
+// rather than unwritten, and the error names that consequence, so the
+// startup warning does.
+func TestAdoptDeployment_leavesTheObjectUnownedWhenTheDeploymentIsMissing(t *testing.T) {
+	c := fakeClient(t)
+	store := New(c, unitNamespace, nil, "0.0.0-unit", logr.Discard())
+
+	err := store.AdoptDeployment(t.Context(), c, "ratelimit-operator")
+	require.NoError(t, store.Save(t.Context(), nil, policy.ConfigMapLimit))
+
+	assert.ErrorContains(t, err, "written without an owner")
+	assert.Empty(t, readConfigMap(t, c).OwnerReferences, "OwnerReferences")
+}
+
+// The ConfigMap informer is scoped to the one object by name, or it caches
+// every ConfigMap of the namespace, and to the namespace, or the Role is not
+// enough. The controller's own cache rules still hold.
 func TestCacheOptions_watchTheOneConfigMapByName(t *testing.T) {
 	options := CacheOptions("biz")
+
 	// ByObject is keyed by object pointer, so the entry is found by type.
-	var entry cache.ByObject
-	ok := false
+	var entry *cache.ByObject
 	for object, byObject := range options.ByObject {
 		if _, isConfigMap := object.(*corev1.ConfigMap); isConfigMap {
-			entry, ok = byObject, true
+			entry = &byObject
 		}
 	}
-	require.True(t, ok, "the ConfigMap informer has to be scoped, or it caches every ConfigMap of the namespace")
-	config, ok := entry.Namespaces["biz"]
-	require.True(t, ok, "and scoped to the namespace, or the Role is not enough")
-	require.NotNil(t, config.FieldSelector)
-	assert.Equal(t, "metadata.name="+contract.ConfigMapName, config.FieldSelector.String())
-	assert.True(t, options.ReaderFailOnMissingInformer, "the controller's cache rules still hold")
-}
-
-func keysOf[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
+	require.NotNil(t, entry, "CacheOptions(biz).ByObject has no ConfigMap entry")
+	require.Contains(t, entry.Namespaces, "biz", "ByObject[ConfigMap].Namespaces")
+	selector := entry.Namespaces["biz"].FieldSelector
+	require.NotNil(t, selector, "ByObject[ConfigMap].Namespaces[biz].FieldSelector")
+	assert.Equal(t, "metadata.name=ratelimit-config", selector.String(), "FieldSelector")
+	assert.True(t, options.ReaderFailOnMissingInformer, "ReaderFailOnMissingInformer")
 }
 
 // The reconciler's error paths: a read that fails and a write that fails
 // both come back as errors, so controller-runtime retries them with backoff
 // rather than the object staying as it was in silence.
+
 func TestReconcile_returnsAReadFailure(t *testing.T) {
+	unreachable := errors.New("api server unreachable")
 	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
 		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-			return errors.New("api server unreachable")
+			return unreachable
 		}}).Build()
 	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: New(c, unitNamespace, nil, "v", logr.Discard())}
 
-	_, err := r.Reconcile(context.Background(), reconcileRequest())
-	require.Error(t, err)
+	_, err := r.Reconcile(t.Context(), reconcileRequest())
+
+	assert.ErrorIs(t, err, unreachable)
 }
 
-func TestReconcile_returnsAWriteFailure(t *testing.T) {
+// A write the size refused is counted under its reason, which is what the
+// dashboard's panel watches. A limit nothing fits makes the fit set the
+// generation back to an empty bundle, and the write still carries a manifest
+// the limit refuses.
+func TestReconcile_returnsAWriteFailureCountedUnderItsReason(t *testing.T) {
 	object := &v1.RateLimitPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: "gateway.public", UID: "u", Generation: 1},
 		Spec:       goodSpec("gateway.public"),
 	}
-	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithObjects(object).Build()
-	// A limit nothing fits, so the fit sets the generation back to an empty
-	// bundle and the write still carries a manifest the limit refuses.
+	c := fakeClient(t, object)
 	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: New(c, unitNamespace, nil, "v", logr.Discard()), Limit: 8}
-
 	before := testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues("size"))
-	_, err := r.Reconcile(context.Background(), reconcileRequest())
-	require.ErrorIs(t, err, ErrTooLarge)
+
+	_, err := r.Reconcile(t.Context(), reconcileRequest())
+
+	assert.ErrorIs(t, err, ErrTooLarge)
 	assert.Equal(t, before+1, testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues("size")),
-		"a write the size refused is counted under its reason, which is what the dashboard's panel watches")
+		`ratelimit_config_write_errors_total{reason="size"}`)
 }
 
 func TestWriteErrorReason_namesTheCause(t *testing.T) {
-	assert.Equal(t, "size", writeErrorReason(fmt.Errorf("wrapped: %w", ErrTooLarge)))
-	assert.Equal(t, "api", writeErrorReason(fmt.Errorf("update: %w",
-		apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "ratelimit-config", errors.New("no")))))
-	assert.Equal(t, "other", writeErrorReason(errors.New("connection refused")))
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"a state the object cannot hold", fmt.Errorf("wrapped: %w", ErrTooLarge), "size"},
+		{"an answer of the API server", fmt.Errorf("update: %w",
+			apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, "ratelimit-config", errors.New("no"))),
+			"api"},
+		{"a client that could not reach the API server", errors.New("connection refused"), "other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, writeErrorReason(tt.err), "writeErrorReason(%v)", tt.err)
+		})
+	}
 }
 
 func TestReconcile_writesTheNamespace(t *testing.T) {
@@ -274,15 +384,18 @@ func TestReconcile_writesTheNamespace(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: "gateway.public", UID: "u", Generation: 1},
 		Spec:       goodSpec("gateway.public"),
 	}
-	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithObjects(object).Build()
+	c := fakeClient(t, object)
 	store := New(c, unitNamespace, nil, "v", logr.Discard())
 	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: store}
 
-	_, err := r.Reconcile(context.Background(), reconcileRequest())
+	_, err := r.Reconcile(t.Context(), reconcileRequest())
+
 	require.NoError(t, err)
-	bundles, err := store.Load(context.Background(), []string{"gateway.public"})
+	bundles, err := store.Load(t.Context(), []string{"gateway.public"})
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), bundles["gateway.public"].GoodGeneration)
+	assert.Equal(t, map[string]policy.Bundle{
+		"gateway.public": {UID: "u", GoodGeneration: 1, GoodSpec: resolvedGoodSpec("gateway.public")},
+	}, bundles)
 }
 
 func reconcileRequest() ctrl.Request {

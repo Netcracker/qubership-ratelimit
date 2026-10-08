@@ -65,7 +65,7 @@ var _ = Describe("the shared counter store", Ordered, Label("redis"), func() {
 		}
 	})
 
-	It("selected Redis rather than falling back", func() {
+	It("selects Redis rather than the in-memory fallback", func() {
 		// A wrong address, an unreachable host or a typo in the values would
 		// leave the service counting in memory, and every limit would still
 		// look enforced on one replica. The startup line tells the two apart.

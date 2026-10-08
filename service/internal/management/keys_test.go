@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/algo"
@@ -19,35 +20,40 @@ import (
 
 func TestParseCounterKey_roundTripsWhatTheKeyPackageBuilds(t *testing.T) {
 	gcra, ok := algo.ByID(algo.GCRAID)
-	require.True(t, ok)
+	require.True(t, ok, "algo.ByID(%q)", algo.GCRAID)
 	window := algo.Window{Requests: 100, Period: time.Minute, Burst: 100}
 
 	cases := []struct {
-		name  string
-		ident key.Ident
-		axes  []string
+		name   string
+		ident  key.Ident
+		axes   []string
+		ruleID string
 	}{
 		{
-			name:  "one axis",
-			ident: key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "cascade", Rule: "everyone"},
-			axes:  []string{"alice"},
+			name:   "one axis",
+			ident:  key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "cascade", Rule: "everyone"},
+			axes:   []string{"alice"},
+			ruleID: "cascade/everyone",
 		},
 		{
-			name:  "no axes at all",
-			ident: key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "everything", Rule: "total"},
+			name:   "no axes at all",
+			ident:  key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "everything", Rule: "total"},
+			ruleID: "everything/total",
 		},
 		{
-			name:  "several axes",
-			ident: key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "by-order", Rule: "each"},
-			axes:  []string{"alice", "4711"},
+			name:   "several axes",
+			ident:  key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "by-order", Rule: "each"},
+			axes:   []string{"alice", "4711"},
+			ruleID: "by-order/each",
 		},
 		{
 			// The characters the key schema reserves are exactly the ones a
 			// claim value can carry, and an axis that forged a segment
 			// boundary would address another client's counter.
-			name:  "values carrying the reserved characters",
-			ident: key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "by-order", Rule: "each"},
-			axes:  []string{"tenant:one/two", "%3A{}"},
+			name:   "values carrying the reserved characters",
+			ident:  key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "by-order", Rule: "each"},
+			axes:   []string{"tenant:one/two", "%3A{}"},
+			ruleID: "by-order/each",
 		},
 	}
 
@@ -57,15 +63,17 @@ func TestParseCounterKey_roundTripsWhatTheKeyPackageBuilds(t *testing.T) {
 			built := key.Bucket(prefix, tc.axes)
 
 			parsed, err := parseCounterKey(testNamespace, testDomain, built)
-			require.NoError(t, err)
+			require.NoError(t, err, "parseCounterKey(%q)", built)
 
-			require.Equal(t, tc.ident.Block, parsed.Block)
-			require.Equal(t, tc.ident.Rule, parsed.Rule)
-			require.Equal(t, ruleID(tc.ident.Block, tc.ident.Rule), parsed.RuleID)
-			require.Equal(t, "gcra", parsed.Algorithm)
-			require.Equal(t, int64(60), parsed.PeriodSeconds)
-			require.Equal(t, prefix, parsed.RatePrefix)
-			require.Equal(t, tc.axes, parsed.Axes)
+			assert.Equal(t, counterKey{
+				RuleID:        tc.ruleID,
+				Block:         tc.ident.Block,
+				Rule:          tc.ident.Rule,
+				Algorithm:     "gcra",
+				PeriodSeconds: 60,
+				RatePrefix:    prefix,
+				Axes:          tc.axes,
+			}, parsed, "parseCounterKey(%q)", built)
 		})
 	}
 }
@@ -86,43 +94,47 @@ func TestParseCounterKey_refusesWhatItCannotRead(t *testing.T) {
 	for name, k := range cases {
 		t.Run(name, func(t *testing.T) {
 			_, err := parseCounterKey(testNamespace, testDomain, k)
-			require.Error(t, err)
+			assert.Error(t, err, "parseCounterKey(%q)", k)
 		})
 	}
 }
 
+// A rule redefined under a live counter declares a different number of axes
+// than the key carries values, and pairing the two is refused.
 func TestNamedAxes_refusesARuleThatDisagreesWithItsCounter(t *testing.T) {
 	parsed := counterKey{RuleID: "orders/per-client", Axes: []string{"alice"}}
 
 	axes, err := parsed.namedAxes([]string{model.KeySub})
-	require.NoError(t, err)
-	require.Equal(t, map[string]string{model.KeySub: "alice"}, axes)
+	require.NoError(t, err, "namedAxes([sub]) of a counter carrying one value")
+	require.Equal(t, map[string]string{model.KeySub: "alice"}, axes,
+		"namedAxes([sub]) of a counter carrying one value")
 
-	// A rule redefined under a live counter: two axes now, one value in the key.
 	_, err = parsed.namedAxes([]string{model.KeySub, "order_id"})
-	require.Error(t, err)
+	assert.Error(t, err, "namedAxes([sub order_id]) of a counter carrying one value")
 }
 
 // The management side keeps its records, sweep lease, and confirmation tokens
 // beside the counters they act on: the batch script deletes counter keys and
 // advances the record in one call. On a cluster that is legal only while both
-// hash to one slot, and a second hand-written spelling of the tag is exactly
-// how they drift apart - standalone Redis stays green the whole time.
+// hash to one slot, and a second hand-written spelling of the tag is how they
+// drift apart while a standalone Redis stays green.
 func TestRecordKeys_shareTheSlotOfTheCountersTheyActOn(t *testing.T) {
 	gcra, ok := algo.ByID(algo.GCRAID)
-	require.True(t, ok)
+	require.True(t, ok, "algo.ByID(%q)", algo.GCRAID)
 
 	counter := key.RatePrefix(
 		key.Ident{Namespace: testNamespace, Domain: testDomain, Block: "orders", Rule: "per-client"},
 		gcra, algo.Window{Requests: 100, Period: time.Minute, Burst: 100})
 	tag := key.DomainTag(testNamespace, testDomain)
-	require.Contains(t, counter, tag)
+	require.Contains(t, counter, tag, "the counter key does not carry the domain's hash tag")
 
 	for name, k := range map[string]string{
 		"the idempotency record": recordKey(testNamespace, testDomain, endpointResets, "alice", "key-1"),
 		"the sweep lease":        leaseKey(testNamespace, testDomain),
 		"the confirmation token": tokenKey(testNamespace, testDomain, "ct-0123456789ab"),
 	} {
-		require.Contains(t, k, tag, "%s must hash to the domain's slot", name)
+		t.Run(name, func(t *testing.T) {
+			assert.Contains(t, k, tag)
+		})
 	}
 }

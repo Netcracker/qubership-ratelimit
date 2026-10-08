@@ -4,7 +4,9 @@ The management API of the rate limit service: read the enforced state, inspect a
 request. Resets go through `DELETE` for the addressed form and an action resource for the bulk forms; the error format
 is NC.TMFErrorResponse.v1.0 (qubership-core-lib-go-error-handling). The canonical specification is the OpenAPI document
 embedded in the binary, [`service/internal/management/openapi.yaml`](../service/internal/management/openapi.yaml),
-served by `GET /openapi.yaml`. Worked scenarios are in the [cookbook](management-api-cookbook.md).
+served by `GET /ratelimit/v1/openapi.yaml`. The API is off by default; `management.enabled=true` in the service chart
+turns it on ([Management API port](helm-chart.md#management-api-port)). Worked scenarios are in the
+[cookbook](management-api-cookbook.md).
 
 ## Principles
 
@@ -17,8 +19,8 @@ served by `GET /openapi.yaml`. Worked scenarios are in the [cookbook](management
 4. The destructive radius is bounded by construction: DELETE addresses one rule; anything wider goes through
    counter-resets, whose execution exists only with a single-use confirmation token from a mandatory preview; the
    sweep's work is bounded server-side: a deadline plus one sweep per domain.
-5. The base path /ratelimit/v1 is a security boundary: authentication is the gateway's auth extension (a bearer JWT of
-   the platform IdP), and authorization is role-based RBAC in the service itself, per path+verb pair.
+5. The base path /ratelimit/v1 is a security boundary: the service verifies every bearer token as a Kubernetes
+   ServiceAccount token and authorizes the caller against the ServiceAccounts the release lists, per path+verb pair.
 
 ## Surface
 
@@ -181,22 +183,32 @@ correlation: the client neither parses nor constructs it, and its format is outs
 
 X-Request-Id is a global contract: an optional request header on every operation (outside the log-safe pattern it is
 0400, without sanitizing), a mandatory header on every response (round-tripped or generated), carried through to the
-log, the audit journal, and the meta.requestId of every error body. 401 is an explicit response on all operations with a
+log, the audit journal, and the meta.requestId of every error body. The one response without it is the refusal of a body
+over 1 MiB (1048576 bytes): the HTTP server's body limit refuses it before the request-id middleware runs, so that 400
+carries no X-Request-Id header and an empty meta.requestId. 401 is an explicit response on all operations with a
 mandatory WWW-Authenticate: Bearer.
 
+Two refusals are not tied to one endpoint. A body over 1 MiB (1048576 bytes) is 0400 with `the request body is larger
+than the 1048576 bytes this API accepts`. On GET /rules, GET /counters, and DELETE /counters, a query parameter the
+endpoint does not define is 0400 with `the query carries parameters this endpoint does not define: <names>`, never
+ignored (names are case-sensitive: `dryrun` is not `dryRun`).
+
 Errors are NC.TMFErrorResponse.v1.0: id (the instance UUID), code (the contract for branching), reason (the code's
-title), message (detail, not a contract), status (as a string), a mandatory meta.requestId, an optional meta.fields
-(validation) and meta.partialReset (the partial disclosure of a failed bulk). The code catalog:
+title), message (detail, not a contract), status (as a string), meta.requestId (mandatory except on the oversized-body
+refusal above), an optional meta.fields (validation) and meta.partialReset (the partial disclosure of a failed bulk).
+The code catalog:
 
 - RLS-0400 invalid request (query/body/cursor/header patterns)
-- RLS-0401 authentication required
+- RLS-0401 authentication required: no bearer token, or one the service does not accept (not well formed, expired or
+  not valid yet, issued for another audience or by another issuer, a signature that does not verify, or not a
+  Kubernetes ServiceAccount token); the message names which, and never quotes the token
 - RLS-0403 access denied
 - RLS-0404 unknown resource (domain/rule/window; per endpoint, only what the endpoint actually validates: bulk and the
   listing, the domain only; DELETE, domain/rule/window)
-- RLS-0409 conflict (a stale If-Match; the same Idempotency-Key with a different canonical command; a confirmation token
-  whose selection/domain/subject/rule version no longer match; a mismatched expectedRuleSetVersion; a second concurrent
+- RLS-0409 conflict (the same Idempotency-Key with a different canonical command; a confirmation token whose
+  selection/domain/subject/rule version no longer match; a mismatched expectedRuleSetVersion; a second concurrent
   sweep of the domain, refused BEFORE acceptance with Retry-After); meta.conflictType on every 409 names the recovery:
-  command_mismatch / stale_confirmation / stale_rule_set / sweep_in_flight / stale_if_match
+  command_mismatch / stale_confirmation / stale_rule_set / sweep_in_flight
 - RLS-0410 confirmation token expired or already used
 - RLS-0422 selection exceeds the synchronous work limit: the sweep hit the server deadline; a failed outcome with
   partialReset, replayed; narrow the selection or reset per rule (422, not 413: the excess is the selection inside the
@@ -212,6 +224,9 @@ title), message (detail, not a contract), status (as a string), a mandatory meta
   outcome: the record stays accepted, and recovery runs on the lease: the retry sees 202 while the lease is live and
   finalizes 0501 after it expires; a 0503 AT THE ACCEPTANCE WRITE is ambiguous, since the write may have landed: it is
   resolved by a retry with the SAME key, never a new one)
+- RLS-0504 token verification unavailable: the service has not yet reached the API server's OIDC discovery, which it
+  needs to verify tokens, so it refuses every request, with or without a token, with 503 and `Retry-After: 5`; it keeps
+  retrying the discovery and serves without a restart once it succeeds. The data path is not affected
 
 ## Simulation
 
@@ -252,23 +267,46 @@ arrive only with a new API version.
 
 ## Security
 
-Authentication is at the perimeter: the gateway's auth extension validates the bearer JWT of the platform IdP
-(signature, expiry, issuer); unauthenticated traffic does not reach the service, and the service's ingress is restricted
-to the gateway by a mesh policy. Authorization is in the service itself, and its trust boundary is explicit: identity is
-read FROM EXACTLY ONE source, the bearer token in Authorization, whose signature the gateway has already verified; no
-auxiliary identity headers (X-Forwarded-User and the like) are ever read, so there is nothing to forge. The safety of
-this unverified read is a DEPLOYMENT REQUIREMENT, not an assumption: the mesh must restrict the service's ingress to the
-gateway; a deployment that cannot do so must enable signature verification in the service itself. RLS applies the role
-model per path+verb pair. The role model: viewer gets all GETs plus POST /simulations; operator gets the mutations
-(DELETE /counters, POST /counter-resets) plus everything viewer has. The canonical names are viewer/operator; the
-mapping to the actual IdP roles and claim names (subject, roles) is deployment configuration. The service needs the
-subject unconditionally: the audit journal, the Idempotency-Key scope (subject, domain, endpoint), and the confirmation
-token binding. A request without a bearer token is 401 (a TMF body), but that is hygiene, not protection: the service
-does not verify signatures, and with a broken ingress requirement a forged token would pass; the model's security rests
-on the requirement itself (or on in-service validation where the mesh does not provide it); an invalid token is normally
-rejected earlier, at the gateway, in the perimeter's format. The management API has no cluster-scoped Kubernetes objects
-at all. Roles are not narrowed to axis values: a viewer holder sees the values (client id) by design, a documented
-property of the access model. Axis values and the Idempotency-Key land in the log verbatim, hence the log-safe patterns.
+Every request carries a Kubernetes ServiceAccount token as its bearer token: a JWT the cluster's API server issued for
+the caller's ServiceAccount with the audience the release sets in `management.m2m.audience`, `netcracker` by default.
+The service verifies the token itself against the API server's OIDC discovery: the signature, the issuer, the audience,
+the expiry, and the issue time. A token that fails any check, a token without the `kubernetes.io` claim (such as one of
+the identity provider), and a request without a token get 401 (RLS-0401), and the message names the check that failed.
+The caller is the verified token's `sub` claim, `system:serviceaccount:<namespace>:<name>`, read from that one place: no
+header that names a user (X-Forwarded-User and the like) is read, so there is nothing to forge.
+
+Authorization is an allowlist: every ServiceAccount listed in the chart's `management.callers` holds `operator`, and a
+verified caller listed nowhere gets 403 (RLS-0403). The role model stays per path+verb pair: viewer gets all GETs plus
+POST /simulations; operator gets the mutations (DELETE /counters, POST /counter-resets) plus everything viewer has. The
+subject feeds the audit journal, the Idempotency-Key scope (subject, domain, endpoint), and the confirmation token
+binding. The chart's AuthorizationPolicy keeps port 8082 to the callers' workloads, or to the gateway named in
+`management.authorizationPolicy.allowedServiceAccounts` when the callers come through one, so a token copied out of a
+listed caller does not open the port to another workload. The management API has no cluster-scoped Kubernetes objects
+at all, and the pod's own ServiceAccount, whose token it mounts to read the OIDC discovery, has no Role. Roles are not
+narrowed to axis values: a listed caller sees the values (client id) by design, a documented property of the access
+model. Axis values and the Idempotency-Key land in the log verbatim, hence the log-safe patterns.
+
+Access is revoked by expiry and by a restart, not at once. The service verifies a token offline, against the cluster's
+key set, so a token stays valid until its `exp` after its ServiceAccount or its pod is deleted; a projected token
+expires after the `expirationSeconds` of its volume, an hour by default. The service reads `management.callers` at
+start, so a caller removed from the list keeps calling until the pods restart, which a `helm upgrade` that changes the
+list does on its own. A legacy ServiceAccount token from a Secret, which carries no `exp`, is refused.
+
+### What a caller owes
+
+A caller is usually a backend acting for its own users, such as the platform's user interface, and the service sees
+the backend's ServiceAccount, never the user. The caller therefore:
+
+- runs with `KUBERNETES_M2M_ENABLED=true`, so the platform's REST client sends the ServiceAccount token with the
+  `netcracker` audience; without it the client sends a token of the identity provider, which gets 401;
+- checks its user's roles before it calls: every listed caller holds `operator`, so the service cannot tell one user's
+  rights from another's;
+- generates a distinct Idempotency-Key for each user's command: the key is scoped to the ServiceAccount, so two users
+  who reuse a key collide (409 `command_mismatch`) or replay each other's outcome;
+- binds a preview's confirmation token to the user who requested it, and executes only for that user: the service binds
+  the token to the ServiceAccount, which every user of the caller shares;
+- keeps its own record of which user asked, and sends an `X-Request-Id`, which this service carries into its log and
+  its audit journal, so the two records join.
 
 ## What the API does not do
 
@@ -327,7 +365,7 @@ property of the access model. Axis values and the Idempotency-Key land in the lo
   counters are correctness state, not a cache, and memory pressure must surface as a write failure rather than as a
   silently lost key after which a retry would repeat a destructive sweep. Acceptance is one atomic write in one slot,
   so the token and the record cannot be lost separately; after a failover the residual window is only the unreplicated
-  acceptances, and a deployment can close it by requiring replica acknowledgement (`WAIT`) on the acceptance write.
+  acceptances.
 - **Sharding by domain.** The record scope (subject, domain, endpoint) contains the domain, and there are no
   cross-domain commands, so records and tokens carry the same `{ns/domain}` hash tag as the counters: one slot,
   single-slot Lua legal on a cluster, and the independence of records between domains is the physical layout.
@@ -337,20 +375,21 @@ property of the access model. Axis values and the Idempotency-Key land in the lo
   silent.
   Bulk still works fully there, since preview and execution are one pod.
 - **The applicability evaluator** statically evaluates a rule against a partial identity: conditions over the supplied
-  values (groups are resolved by compilation), availability of the counting axes (a block's captures are present for any
-  request that reached a `Template` route), FirstMatch preemption (shadow does not decide, bypass cuts off), and
-  `replacedRules`. Its property: `applicability: always` holds exactly when every simulation with a completed identity
-  applies the rule, and `never` exactly when none does.
-- **The identity middleware** takes the subject and the roles from the token the gateway forwarded, without
-  cryptographic validation (trust through the mesh; validation is the auth extension's); the claim names are
-  configurable, and without an identity the request fails closed with 401.
-- **The OpenAPI document is embedded in the binary** (`go:embed`) and served by `GET /openapi.yaml`; a test checks the
-  registered routes against the spec.
-- **Deployment.** The API lives on the service, on a port of its own behind an AuthorizationPolicy that admits the
-  private gateway alone ([chart](helm-chart.md)); the counters, the enforced set, and the command records are its
-  state. The actual IdP role and claim names are deployment configuration, the chart values `management.claims` and
-  `management.roles`. Requests to the API are not rate limited in the rate limit domains listed in the chart value
-  `management.gatewayDomains`, the private gateway's by default: the service admits their checks without reading the
-  rules or the counter store, so the API stays reachable through a gateway that fails closed while the store is down,
-  and a policy of those domains does not apply to the API's paths. `POST /simulations` does not model the
-  exemption: for a path under `/ratelimit/v1` in such a domain it reports the decision the policy's rules make.
+  values (groups are resolved by compilation), availability of the counting axes (a capture every route of the block
+  produces is present; one only some routes produce is decided by `path`), FirstMatch preemption (shadow does not
+  decide, bypass cuts off), and `replacedRules`. Its property: `applicability: always` holds exactly when every
+  simulation with a completed identity applies the rule, and `never` exactly when none does.
+- **The identity middleware** verifies the bearer token as a Kubernetes ServiceAccount token against the cluster's OIDC
+  discovery, with a verifier built when the listener starts, and takes the subject from its `sub` claim; a listed caller
+  holds operator. Without a verified identity the request fails closed with 401, and before the verifier exists with 503
+  `RLS-0504`.
+- **The OpenAPI document is embedded in the binary** (`go:embed`) and served by `GET /ratelimit/v1/openapi.yaml`; a
+  test checks the registered routes against the spec.
+- **Deployment.** The API lives on the service, on a port of its own behind an AuthorizationPolicy that admits its
+  callers ([chart](helm-chart.md)); the counters, the enforced set, and the command records are its state. Who may call
+  and with which audience are the chart values `management.callers` and `management.m2m.audience`. Requests to the API
+  are not rate limited in the rate limit domains listed in the chart value `management.gatewayDomains`, the private
+  gateway's by default: the service admits their checks without reading the rules or the counter store, so the API stays
+  reachable through a gateway that fails closed while the store is down, and a policy of those domains does not apply to
+  the API's paths. `POST /simulations` does not model the exemption: for a path under `/ratelimit/v1` in such a domain
+  it reports the decision the policy's rules make.

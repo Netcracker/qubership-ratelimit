@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/algo"
@@ -18,39 +19,42 @@ import (
 	counters "github.com/netcracker/qubership-ratelimit/engine/store"
 )
 
+// orderCounterKeys returns count keys of orders/per-client, one per client,
+// numbered from client-000000 in the order the store walks them.
+func orderCounterKeys(count int) []string {
+	keys := make([]string, 0, count)
+	for i := range count {
+		keys = append(keys, fmt.Sprintf("rl:v1:{%s/%s}:orders/per-client:gcra:3600:client-%06d:",
+			testNamespace, testDomain, i))
+	}
+	return keys
+}
+
 // A page that spends its whole budget without matching anything still has to
 // say where it stopped. The contract makes a missing nextCursor the end of the
 // listing, so minting the cursor only when a candidate was kept would report a
-// counter that exists as absent - and a narrow filter over a busy domain is the
+// counter that exists as absent, and a narrow filter over a busy domain is the
 // ordinary support query, not a corner. The cursor is the store's cursor after
 // the last step examined, so the next page examines the keys the first one did
 // not and no others.
 func TestSelectCandidates_carriesACursorWhenTheBudgetFillsWithNoMatch(t *testing.T) {
 	h := newTestAPI(t)
-
 	// More keys than the budget, none of which the selection admits.
-	keys := make([]string, 0, scanBudget+50)
-	for i := range scanBudget + 50 {
-		keys = append(keys, fmt.Sprintf("rl:v1:{%s/%s}:orders/per-client:gcra:3600:client-%06d:",
-			testNamespace, testDomain, i))
-	}
-	seedCounters(t, h.counters, keys)
-	sel, apiErr := parseSelector(url.Values{"axis.sub": {"nobody"}})
-	require.Nil(t, apiErr)
+	seedCounters(t, h.counters, orderCounterKeys(scanBudget+50))
+	sel := mustSelector(t, "axis.sub=nobody")
 	inspector := h.counters.(counters.Inspector)
 
 	page, err := h.api.selectCandidates(t.Context(), h.snapshot, inspector, sel, 100, "")
-	require.NoError(t, err)
-
+	require.NoError(t, err, "the first page")
 	require.Empty(t, page.candidates, "the fixture selects nothing on purpose")
-	require.Equal(t, scanBudget, page.scanned)
-	require.True(t, page.more, "the walk stopped at the budget with keys left")
+	assert.Equal(t, scanBudget, page.scanned, "keys examined by the first page")
+	assert.True(t, page.more, "the walk stopped at the budget with keys left")
 	require.NotEmpty(t, page.resume, "the cursor of the next step")
 
 	rest, err := h.api.selectCandidates(t.Context(), h.snapshot, inspector, sel, 100, page.resume)
-	require.NoError(t, err)
-	require.Equal(t, 50, rest.scanned, "keys examined by the page after the budget")
-	require.False(t, rest.more, "the second page reached the end")
+	require.NoError(t, err, "the page after the budget")
+	assert.Equal(t, 50, rest.scanned, "keys examined by the page after the budget")
+	assert.False(t, rest.more, "the second page reached the end")
 }
 
 // The budget binds the last step of a page as the page size binds the others:
@@ -58,20 +62,14 @@ func TestSelectCandidates_carriesACursorWhenTheBudgetFillsWithNoMatch(t *testing
 // one of 24, and examines the budget of 12000 keys exactly, not all 12050.
 func TestSelectCandidates_theBudgetBindsTheLastStepOfThePage(t *testing.T) {
 	h := newTestAPI(t)
-	keys := make([]string, 0, scanBudget+50)
-	for i := range scanBudget + 50 {
-		keys = append(keys, fmt.Sprintf("rl:v1:{%s/%s}:orders/per-client:gcra:3600:client-%06d:",
-			testNamespace, testDomain, i))
-	}
-	seedCounters(t, h.counters, keys)
-	sel, apiErr := parseSelector(url.Values{"axis.sub": {"nobody"}})
-	require.Nil(t, apiErr)
+	seedCounters(t, h.counters, orderCounterKeys(scanBudget+50))
+	sel := mustSelector(t, "axis.sub=nobody")
 
 	page, err := h.api.selectCandidates(t.Context(), h.snapshot, h.counters.(counters.Inspector), sel, 499, "")
 	require.NoError(t, err)
 
-	require.Equal(t, scanBudget, page.scanned)
-	require.True(t, page.more, "50 keys remain")
+	assert.Equal(t, scanBudget, page.scanned, "keys examined by a page of 499")
+	assert.True(t, page.more, "50 keys remain")
 }
 
 // A page of one over ten keys reads one step of one key, and the next page
@@ -79,29 +77,21 @@ func TestSelectCandidates_theBudgetBindsTheLastStepOfThePage(t *testing.T) {
 // did not, and finds no further candidate.
 func TestSelectCandidates_resumesAtTheCursorOfTheLastStep(t *testing.T) {
 	h := newTestAPI(t)
-
-	keys := make([]string, 0, 10)
-	for i := range 10 {
-		keys = append(keys, fmt.Sprintf("rl:v1:{%s/%s}:orders/per-client:gcra:3600:client-%02d:",
-			testNamespace, testDomain, i))
-	}
-	seedCounters(t, h.counters, keys)
-	sel, apiErr := parseSelector(url.Values{"axis.sub": {"client-00"}})
-	require.Nil(t, apiErr)
+	seedCounters(t, h.counters, orderCounterKeys(10))
+	sel := mustSelector(t, "axis.sub=client-000000")
 	inspector := h.counters.(counters.Inspector)
 
 	page, err := h.api.selectCandidates(t.Context(), h.snapshot, inspector, sel, 1, "")
-	require.NoError(t, err)
-
-	require.Len(t, page.candidates, 1)
-	require.Equal(t, 1, page.scanned, "the first step is one key, the room on a page of one")
-	require.True(t, page.more)
+	require.NoError(t, err, "the first page")
+	assert.Len(t, page.candidates, 1, "candidates of the first page")
+	assert.Equal(t, 1, page.scanned, "the first step is one key, the room on a page of one")
+	require.True(t, page.more, "the first page of one over ten keys ended the walk")
 
 	rest, err := h.api.selectCandidates(t.Context(), h.snapshot, inspector, sel, 1, page.resume)
-	require.NoError(t, err)
-	require.Empty(t, rest.candidates, "client-00 was returned by the first page")
-	require.Equal(t, 9, rest.scanned, "keys examined by the second page")
-	require.False(t, rest.more)
+	require.NoError(t, err, "the second page")
+	assert.Empty(t, rest.candidates, "client-000000 was returned by the first page")
+	assert.Equal(t, 9, rest.scanned, "keys examined by the second page")
+	assert.False(t, rest.more, "the second page reached the end")
 }
 
 // A page holds whole steps sized to the room left on it, and the next page
@@ -117,26 +107,14 @@ func TestCounters_pagesAcrossStoreStepsWithoutLosingOrRepeatingACounter(t *testi
 		want = append(want, client)
 	}
 
-	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=orders/per-client&pageSize=500"
-	seen := make([]string, 0, clients)
-	pages := 0
-	target := base
-	for {
-		var page CounterList
-		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
-		pages++
-		for _, item := range page.Items {
-			seen = append(seen, item.Axes["sub"])
-		}
-		if page.NextCursor == "" {
-			break
-		}
-		require.LessOrEqual(t, pages, 10, "the listing did not end")
-		target = base + "&cursor=" + url.QueryEscape(page.NextCursor)
-	}
+	pages := h.listPages(t, BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&pageSize=500")
 
-	require.Equal(t, 3, pages, "pages of 500 over 1300 counters")
-	require.ElementsMatch(t, want, seen, "paging skipped or repeated a counter")
+	assert.Len(t, pages, 3, "pages of 500 over 1300 counters")
+	seen := make([]string, 0, clients)
+	for _, page := range pages {
+		seen = append(seen, subsOf(page.Items)...)
+	}
+	assert.ElementsMatch(t, want, seen, "paging skipped or repeated a counter")
 }
 
 // The budget counts keys the store returned, so a stretch of steps that return
@@ -148,14 +126,14 @@ func TestCounters_aStretchOfEmptyStepsEndsThePageWithACursor(t *testing.T) {
 	h.api.Counters = stub
 
 	var page CounterList
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", viewerRoles(), nil),
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", listedCaller, nil),
 		http.StatusOK, &page)
 
-	require.Empty(t, page.Items)
-	require.Equal(t, 0, page.Scanned)
-	require.True(t, page.Truncated)
-	require.NotEmpty(t, page.NextCursor, "a page that stopped short of the end says where")
-	require.Equal(t, maxScanSteps, stub.calls, "store round trips of one page")
+	assert.Empty(t, page.Items)
+	assert.Equal(t, 0, page.Scanned)
+	assert.True(t, page.Truncated, "truncated of a page cut by the step cap")
+	assert.NotEmpty(t, page.NextCursor, "a page that stopped short of the end says where")
+	assert.Equal(t, maxScanSteps, stub.calls, "store round trips of one page")
 }
 
 // The listing vouches for the fingerprint and the age of a cursor; the store
@@ -163,25 +141,26 @@ func TestCounters_aStretchOfEmptyStepsEndsThePageWithACursor(t *testing.T) {
 // error rather than an outage: RLS-0400 naming the cursor, never RLS-0503.
 func TestCounters_aCursorTheStoreRefusesIsABadRequest(t *testing.T) {
 	h := newTestAPI(t)
-	h.api.Counters = refusingSteps{Store: h.counters}
-	sel, apiErr := parseSelector(url.Values{"ruleId": {"orders/per-client"}})
-	require.Nil(t, apiErr)
-	stale := encodeCursor("a-node-that-left@7", sel, time.Now())
+	store := &refusingSteps{Store: h.counters}
+	h.api.Counters = store
+	stale := encodeCursor("a-node-that-left@7", mustSelector(t, "ruleId=orders/per-client"), time.Now())
 
 	body := requireError(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&cursor="+url.QueryEscape(stale),
-		viewerRoles(), nil), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller, nil), http.StatusBadRequest, CodeInvalidRequest)
 
-	require.Contains(t, body.Message, "cannot resume the cursor")
+	assert.Equal(t, []string{"cursor"}, body.Meta.Fields)
+	assert.Equal(t, []string{"a-node-that-left@7"}, store.presented,
+		"the store cursors the listing presented; the refusal came before the store")
 }
 
 // A store that fails the scan for any other reason is an outage, and the
 // answer stays RLS-0503: only the store's refusal of a cursor is the caller's.
-func TestCounters_aFailedScanIsAnOutageNotABadRequest(t *testing.T) {
+func TestCounters_reportsAFailedScanAsAnOutage(t *testing.T) {
 	h := newTestAPI(t)
 	h.api.Counters = failingSteps{Store: h.counters}
 
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", listedCaller, nil),
 		http.StatusServiceUnavailable, CodeStoreDown)
 }
 
@@ -199,21 +178,12 @@ func TestCounters_pagesFollowTheStoreCursorChain(t *testing.T) {
 	chain := &cursorChain{Store: h.counters, step: 3}
 	h.api.Counters = chain
 
-	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=orders/per-client&pageSize=4"
-	target := base
-	for pages := 1; ; pages++ {
-		var page CounterList
-		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
-		if page.NextCursor == "" {
-			require.Equal(t, 3, pages, "pages of 4 over 10 counters")
-			break
-		}
-		require.LessOrEqual(t, pages, 10, "the listing did not end")
-		target = base + "&cursor=" + url.QueryEscape(page.NextCursor)
-	}
+	pages := h.listPages(t, BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&pageSize=4")
 
-	require.Equal(t, "", chain.presented[0], "the first page starts the walk")
-	require.Equal(t, chain.returned[:len(chain.returned)-1], chain.presented[1:],
+	assert.Len(t, pages, 3, "pages of 4 over 10 counters")
+	require.NotEmpty(t, chain.presented, "the listing never asked the store for a step")
+	assert.Equal(t, "", chain.presented[0], "the first page starts the walk")
+	assert.Equal(t, chain.returned[:len(chain.returned)-1], chain.presented[1:],
 		"every later step presents the cursor the store returned for it")
 }
 
@@ -231,15 +201,11 @@ func TestCounters_aStepAsksForTheRoomLeftOnThePage(t *testing.T) {
 	var page CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client"+
 		"&pageSize=4&axis.sub=client-01&axis.sub=client-03&axis.sub=client-04"+
-		"&axis.sub=client-05&axis.sub=client-06&axis.sub=client-07", viewerRoles(), nil),
+		"&axis.sub=client-05&axis.sub=client-06&axis.sub=client-07", listedCaller, nil),
 		http.StatusOK, &page)
 
-	clients := make([]string, 0, len(page.Items))
-	for _, item := range page.Items {
-		clients = append(clients, item.Axes["sub"])
-	}
-	require.Equal(t, []string{"client-01", "client-03", "client-04", "client-05"}, clients)
-	require.NotEmpty(t, page.NextCursor, "two selected clients remain")
+	assert.Equal(t, []string{"client-01", "client-03", "client-04", "client-05"}, subsOf(page.Items))
+	assert.NotEmpty(t, page.NextCursor, "two selected clients remain")
 }
 
 // A store whose step is a hint may return more keys than the step asked for,
@@ -256,26 +222,16 @@ func TestCounters_aStepOverTheAskOverfillsThePageByThatMuch(t *testing.T) {
 	}
 	h.api.Counters = &cursorChain{Store: h.counters, over: 2}
 
-	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=orders/per-client&pageSize=4"
-	var sizes []int
-	seen := make([]string, 0, 10)
-	target := base
-	for {
-		var page CounterList
-		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
-		sizes = append(sizes, len(page.Items))
-		for _, item := range page.Items {
-			seen = append(seen, item.Axes["sub"])
-		}
-		if page.NextCursor == "" {
-			break
-		}
-		require.LessOrEqual(t, len(sizes), 10, "the listing did not end")
-		target = base + "&cursor=" + url.QueryEscape(page.NextCursor)
-	}
+	pages := h.listPages(t, BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&pageSize=4")
 
-	require.Equal(t, []int{6, 4}, sizes, "items per page")
-	require.ElementsMatch(t, want, seen, "paging skipped or repeated a counter")
+	sizes := make([]int, 0, len(pages))
+	seen := make([]string, 0, 10)
+	for _, page := range pages {
+		sizes = append(sizes, len(page.Items))
+		seen = append(seen, subsOf(page.Items)...)
+	}
+	assert.Equal(t, []int{6, 4}, sizes, "items per page")
+	assert.ElementsMatch(t, want, seen, "paging skipped or repeated a counter")
 }
 
 // cursorChain wraps the in-process store, records the cursors a listing
@@ -326,10 +282,15 @@ func (failingSteps) Scan(_ context.Context, _, _ string, _ int) ([]string, strin
 }
 
 // refusingSteps is a store that rejects every cursor it is handed, the way
-// the Redis store refuses one minted for a node it no longer has.
-type refusingSteps struct{ counters.Store }
+// the Redis store refuses one minted for a node it no longer has, and records
+// the cursors it was presented in call order.
+type refusingSteps struct {
+	counters.Store
+	presented []string
+}
 
-func (refusingSteps) Scan(_ context.Context, _, cursor string, _ int) ([]string, string, error) {
+func (s *refusingSteps) Scan(_ context.Context, _, cursor string, _ int) ([]string, string, error) {
+	s.presented = append(s.presented, cursor)
 	if cursor != "" {
 		return nil, "", fmt.Errorf("stub: %w", counters.ErrBadCursor)
 	}
@@ -351,8 +312,8 @@ func seedCounters(t *testing.T, s counters.Store, keys []string) {
 // Paging end to end: each page carries a cursor, and following it reaches the
 // counters the earlier pages did not return.
 //
-// The budget case - a page that fills scanBudget without keeping anything, and
-// still has to carry a cursor - is not reachable from here: pageSize stops the
+// The budget case, a page that fills scanBudget without keeping anything and
+// still has to carry a cursor, is not reachable from here: pageSize stops the
 // walk only after a candidate, so producing an empty page needs 12000 keys
 // that match nothing, or 128 of them at a pageSize of 1, the step cap.
 // TestSelectCandidates_carriesACursorWhenTheBudgetFillsWithNoMatch and
@@ -364,23 +325,16 @@ func TestCounters_pagesThroughEveryCounterOfARule(t *testing.T) {
 		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
 	}
 
-	base := BasePath + "/domains/" + testDomain + "/counters?ruleId=orders/per-client&pageSize=1"
+	pages := h.listPages(t, BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&pageSize=1")
 
-	seen := []string{}
-	target := base
-	for range len(clients) + 1 {
-		var page CounterList
-		decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &page)
-		for _, item := range page.Items {
-			seen = append(seen, item.Axes["sub"])
-		}
-		if page.NextCursor == "" {
-			break
-		}
-		require.True(t, page.Truncated, "a page that carries a cursor stopped early")
-		target = base + "&cursor=" + url.QueryEscape(page.NextCursor)
+	for i, page := range pages[:len(pages)-1] {
+		assert.True(t, page.Truncated, "truncated of page %d, which carries a cursor", i+1)
 	}
-	require.ElementsMatch(t, clients, seen, "paging skipped or repeated a counter")
+	seen := make([]string, 0, len(clients))
+	for _, page := range pages {
+		seen = append(seen, subsOf(page.Items)...)
+	}
+	assert.ElementsMatch(t, clients, seen, "paging skipped or repeated a counter")
 }
 
 // A scan that cannot narrow walks the whole domain, and on a busy one that is
@@ -406,9 +360,9 @@ func TestScanPrefix_narrowsToWhatTheSelectionNames(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := scanPrefix(testNamespace, testDomain, selector{RuleIDs: tc.ids})
-			require.Equal(t, tc.want, got)
-			require.True(t, strings.HasPrefix(got, domainWide),
-				"every scan stays inside the domain it was asked about")
+			assert.Equal(t, tc.want, got, "scanPrefix(%q)", tc.ids)
+			assert.True(t, strings.HasPrefix(got, domainWide),
+				"scanPrefix(%q) = %q leaves the domain prefix %q", tc.ids, got, domainWide)
 		})
 	}
 }

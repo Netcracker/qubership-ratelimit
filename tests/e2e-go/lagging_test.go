@@ -4,11 +4,11 @@ package e2e
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -74,7 +74,7 @@ var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"
 		}
 	})
 
-	It("reports the silent replica stale, and names it", func() {
+	It("reports the silenced replicas as ReplicaStale by pod name", func() {
 		operator := leaseHolderPod()
 		Expect(operator).NotTo(BeEmpty(), "no operator pod holds the lease")
 
@@ -110,32 +110,40 @@ var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"
 			p, err := getPolicy(domain)
 			g.Expect(err).NotTo(HaveOccurred())
 
-			stalled := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionStalled)
-			g.Expect(stalled).NotTo(BeNil())
-			g.Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(stalled.Reason).To(Equal(v1.ReasonReplicaStale))
+			g.Expect(meta.FindStatusCondition(p.Status.Conditions, v1.ConditionStalled)).To(
+				gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+					"Status": Equal(metav1.ConditionTrue),
+					"Reason": Equal(v1.ReasonReplicaStale),
+				})), "the Stalled condition")
 
 			ready := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionReady)
-			g.Expect(ready).NotTo(BeNil())
-			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			g.Expect(ready.Reason).To(Equal(v1.ReasonReplicaStale))
-			g.Expect(ready.Message).To(ContainSubstring("did not answer"))
-			g.Expect(namesOneOf(ready.Message, denied)).To(BeTrue(),
-				"the message names none of the silenced pods %v: %q", denied, ready.Message)
+			g.Expect(ready).To(gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"Status":  Equal(metav1.ConditionFalse),
+				"Reason":  Equal(v1.ReasonReplicaStale),
+				"Message": ContainSubstring("did not answer"),
+			})), "the Ready condition")
+			g.Expect(ready.Message).To(Or(ContainSubstring(denied[0]), ContainSubstring(denied[1])),
+				"the Ready message names none of the silenced pods %v", denied)
 
 			g.Expect(p.Status.Replicas.Applied).To(BeNumerically("<", p.Status.Replicas.Total),
 				"a stale fleet reported whole: %s", p.Status.Replicas.Summary)
-		}).WithTimeout(3 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+		}).WithTimeout(3*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
+			"the operator to report the silenced replicas as ReplicaStale")
 	})
 
 	It("publishes the stall on the operator's scrape", func() {
 		holder := leaseHolderPod()
 		Expect(holder).NotTo(BeEmpty())
 		families := scrapePod(holder)
-		Expect(gaugeValue(families, "ratelimit_policy_stalled",
-			map[string]string{"domain": domain, "reason": v1.ReasonReplicaStale})).To(Equal(1.0),
-			"the operator's scrape does not carry the stall")
-		Expect(gaugeValue(families, "ratelimit_leader", nil)).To(Equal(1.0))
+		gauges := struct{ PolicyStalled, Leader float64 }{
+			PolicyStalled: gaugeValue(families, "ratelimit_policy_stalled",
+				map[string]string{"domain": domain, "reason": v1.ReasonReplicaStale}),
+			Leader: gaugeValue(families, "ratelimit_leader", nil),
+		}
+		Expect(gauges).To(gstruct.MatchAllFields(gstruct.Fields{
+			"PolicyStalled": Equal(1.0),
+			"Leader":        Equal(1.0),
+		}), "the gauges on the scrape of %s, the lease holder", holder)
 	})
 
 	It("recovers once the replica is reachable again", func() {
@@ -147,13 +155,15 @@ var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"
 		Eventually(func(g Gomega) {
 			p, err := getPolicy(domain)
 			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(readyReason(domain)()).To(Equal(v1.ReasonAllReplicas))
-			g.Expect(p.Status.Replicas.Summary).To(Equal("3/3"))
+			g.Expect(readyReason(domain)()).To(Equal(v1.ReasonAllReplicas), "the reason of the Ready condition")
+			g.Expect(p.Status.Replicas.Summary).To(Equal("3/3"), "the replica summary")
 
-			stalled := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionStalled)
-			g.Expect(stalled).NotTo(BeNil())
-			g.Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
-		}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+			g.Expect(meta.FindStatusCondition(p.Status.Conditions, v1.ConditionStalled)).To(
+				gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+					"Status": Equal(metav1.ConditionFalse),
+				})), "the Stalled condition")
+		}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
+			"the fleet to report every replica again once the DENY is gone")
 	})
 })
 
@@ -189,31 +199,6 @@ func labelPod(pod corev1.Pod, key, value string) {
 	pod.Labels[key] = value
 	Expect(k8s.Patch(ctx, &pod, client.MergeFrom(before))).To(Succeed(),
 		"could not label pod %s", pod.Name)
-}
-
-// readyReason returns the reason of the Ready condition, "" while absent.
-func readyReason(name string) func() string {
-	return func() string {
-		p, err := getPolicy(name)
-		if err != nil {
-			return ""
-		}
-		c := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionReady)
-		if c == nil {
-			return ""
-		}
-		return c.Reason
-	}
-}
-
-// namesOneOf reports whether the message mentions at least one of the pods.
-func namesOneOf(message string, pods []string) bool {
-	for _, pod := range pods {
-		if strings.Contains(message, pod) {
-			return true
-		}
-	}
-	return false
 }
 
 // scrapePod fetches and parses /metrics from one pod of either chart by name.

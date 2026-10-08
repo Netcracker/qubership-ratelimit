@@ -176,8 +176,11 @@ func requestIDOf(c *fiber.Ctx) string {
 	return id.GetRequestId()
 }
 
-// maxLoggedValueLength bounds a caller-supplied value once it is recorded.
-const maxLoggedValueLength = 256
+// maxLoggedValueLength bounds a caller-supplied value once it is recorded, in
+// bytes. It holds the longest caller subject whole:
+// system:serviceaccount:<namespace>:<name> with a 63-byte namespace and a
+// 253-byte name is 339 bytes.
+const maxLoggedValueLength = 512
 
 // logSafe makes a caller-controlled string safe to record.
 //

@@ -40,14 +40,13 @@ var _ = Describe("an unknown domain", Ordered, Label("unknown-domain"), func() {
 		// domain, a probe can still be refused by the snapshot that policy
 		// lived in - so wait until a probe demonstrably lands in the
 		// unknown-domain counter before measuring anything.
-		Eventually(func() bool {
+		Eventually(func(g Gomega) {
 			before := counterSum(scrapeAllReplicas(), "ratelimit_unknown_domain_checks_total", nil)
-			code := gatewayGet("private-gateway", probePath, nil)
-			if (code < 200 || code > 299) && code != 404 {
-				return false
-			}
-			return counterSum(scrapeAllReplicas(), "ratelimit_unknown_domain_checks_total", nil) > before
-		}).WithTimeout(time.Minute).WithPolling(2*time.Second).Should(BeTrue(),
+			g.Expect(gatewayGet("private-gateway", probePath, nil)).To(beAdmitted(),
+				"GET %s through private-gateway", probePath)
+			g.Expect(counterSum(scrapeAllReplicas(), "ratelimit_unknown_domain_checks_total", nil)).
+				To(BeNumerically(">", before), "ratelimit_unknown_domain_checks_total after one probe")
+		}).WithTimeout(time.Minute).WithPolling(2*time.Second).Should(Succeed(),
 			"the engines never started treating %s as unknown", domain)
 	})
 
@@ -55,11 +54,8 @@ var _ = Describe("an unknown domain", Ordered, Label("unknown-domain"), func() {
 		before := scrapeAllReplicas()
 		since := time.Now()
 
-		codes := gatewayBurst("private-gateway", probePath, 3, nil)
-		for i, code := range codes {
-			Expect((code >= 200 && code < 300) || code == 404).To(BeTrue(),
-				"request %d was not admitted (got %d); unknown-domain traffic passes unlimited", i+1, code)
-		}
+		Expect(gatewayBurst("private-gateway", probePath, 3, nil)).To(HaveEach(beAdmitted()),
+			"unknown-domain traffic passes unlimited")
 
 		Eventually(func() float64 {
 			after := scrapeAllReplicas()

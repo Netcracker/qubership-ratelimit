@@ -787,11 +787,34 @@
     "management": {
       "type": "object",
       "title": "Management API",
-      "description": "The operator interface. The port and its AuthorizationPolicy belong together: the service does not verify the token signature, so the policy is what keeps the endpoints off the rest of the mesh.",
+      "description": "The operator interface. The service verifies every bearer token as a Kubernetes ServiceAccount token issued for m2m.audience and grants operator to the callers listed in callers; the AuthorizationPolicy keeps the port to those callers' workloads.",
       "properties": {
         "enabled": {
           "type": "boolean",
           "default": false
+        },
+        "callers": {
+          "type": "array",
+          "title": "Callers",
+          "description": "The ServiceAccounts that may call the API: <name> for one in NAMESPACE, <namespace>/<name> for one in another namespace. Each holds the operator role; a caller listed nowhere is refused with 403. At least one while enabled is true.",
+          "items": {
+            "type": "string",
+            "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?/)?[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$"
+          },
+          "default": []
+        },
+        "m2m": {
+          "type": "object",
+          "title": "Machine-to-machine tokens",
+          "properties": {
+            "audience": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The audience a caller's token is issued for; a token for any other audience is refused with 401. The platform's machine-to-machine tokens use netcracker.",
+              "default": "netcracker"
+            }
+          },
+          "additionalProperties": false
         },
         "authorizationPolicy": {
           "type": "object",
@@ -803,9 +826,10 @@
             "allowedServiceAccounts": {
               "type": "array",
               "items": {
-                "type": "string"
+                "type": "string",
+                "pattern": "^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?/)?[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$"
               },
-              "description": "Service accounts allowed to reach the port, in NAMESPACE. Empty means the private gateway alone.",
+              "description": "Service accounts allowed to reach the port, in the grammar of callers: <name> in NAMESPACE, <namespace>/<name> elsewhere. Empty means the entries of callers; set it when callers come through a gateway, whose ServiceAccount is then the one the policy sees, together with any caller that reaches the port directly.",
               "default": []
             }
           },
@@ -824,77 +848,29 @@
           "default": [
             "gateway.private"
           ]
-        },
-        "claims": {
-          "type": "object",
-          "title": "Identity claims",
-          "description": "The claims the subject and the roles are read from. Both accept a dotted path for a nested claim, such as realm_access.roles.",
-          "properties": {
-            "subject": {
-              "type": "string",
-              "minLength": 1,
-              "default": "sub"
-            },
-            "roles": {
-              "type": "string",
-              "minLength": 1,
-              "default": "roles"
-            }
-          },
-          "additionalProperties": false
-        },
-        "roles": {
-          "type": "object",
-          "title": "Role mapping",
-          "description": "The role names the IdP issues, mapped onto viewer and operator. A role on neither list grants nothing, and an empty list grants its role to nobody. A read-only deployment sets operator to an empty list: left out, it keeps its default, operator, and a token carrying that role keeps every mutation. Both lists empty would let nobody in, and the schema refuses that as a mistake.",
-          "properties": {
-            "viewer": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "default": [
-                "viewer"
-              ]
-            },
-            "operator": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "default": [
-                "operator"
-              ]
-            }
-          },
-          "additionalProperties": false,
-          "anyOf": [
-            {
-              "properties": {
-                "viewer": {
-                  "minItems": 1
-                }
-              },
-              "required": [
-                "viewer"
-              ]
-            },
-            {
-              "properties": {
-                "operator": {
-                  "minItems": 1
-                }
-              },
-              "required": [
-                "operator"
-              ]
-            }
-          ]
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "then": {
+        "properties": {
+          "callers": {
+            "minItems": 1
+          }
+        },
+        "required": [
+          "callers"
+        ]
+      }
     },
     "BASELINE_ORIGIN": {
       "$id": "#/properties/BASELINE_ORIGIN",

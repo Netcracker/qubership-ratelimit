@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/model"
@@ -42,13 +43,16 @@ func (h *testAPI) occupy(t *testing.T, ttl time.Duration) {
 	t.Helper()
 
 	accepted, err := h.records.Accept(context.Background(), records.Acceptance{
-		Keys:     records.Keys{Record: recordTag(testNamespace, testDomain) + "idem:other", Lease: leaseKey(testNamespace, testDomain)},
+		Keys: records.Keys{
+			Record: recordTag(testNamespace, testDomain) + "idem:other",
+			Lease:  leaseKey(testNamespace, testDomain),
+		},
 		Command:  "someone-elses-command",
 		Fencing:  "someone-elses-fencing",
 		LeaseTTL: ttl,
 	})
 	require.NoError(t, err)
-	require.True(t, accepted.OK)
+	require.True(t, accepted.OK, "Accept of someone else's command: %+v", accepted)
 }
 
 // accepted plants a record for the command this test will send, as though an
@@ -56,7 +60,7 @@ func (h *testAPI) occupy(t *testing.T, ttl time.Duration) {
 func (h *testAPI) accepted(t *testing.T, key string, command bulkCommand, leaseTTL time.Duration) records.Keys {
 	t.Helper()
 
-	name := recordKey(testNamespace, testDomain, endpointResets, "alice@example.com", key)
+	name := recordKey(testNamespace, testDomain, endpointResets, listedCaller, key)
 	keys := commandKeys(testNamespace, testDomain, name, command)
 
 	accepted, err := h.records.Accept(context.Background(), records.Acceptance{
@@ -66,11 +70,12 @@ func (h *testAPI) accepted(t *testing.T, key string, command bulkCommand, leaseT
 		LeaseTTL: leaseTTL,
 	})
 	require.NoError(t, err)
-	require.True(t, accepted.OK)
+	require.True(t, accepted.OK, "Accept of the planted command: %+v", accepted)
 	return keys
 }
 
-// previewCommand is the command the helpers below plant records for.
+// previewCommand is the preview of the orders block that accepted and
+// plantDeadSweep plant records for.
 func previewCommand(t *testing.T) bulkCommand {
 	t.Helper()
 
@@ -78,44 +83,70 @@ func previewCommand(t *testing.T) bulkCommand {
 		Selector: &SelectorBody{RuleIDs: []string{"orders"}},
 		DryRun:   new(true),
 	})
-	require.Nil(t, apiErr)
+	require.Nil(t, apiErr, "parseBulk of a preview of the orders block")
 	return command
 }
 
-// One sweep per domain, and the refusal happens before anything binds — so the
-// caller's key and its token are both still spendable.
+// One sweep per domain. The refusal names its recovery, and Retry-After is
+// what the other sweep's lease has left.
 func TestBulk_refusesASecondSweepInTheDomain(t *testing.T) {
 	h := newTestAPI(t)
+	h.clock(t)
 	h.occupy(t, 30*time.Second)
 
 	recorder := h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles())
+	}, "key-1", listedCaller)
 
 	body := requireError(t, recorder, http.StatusConflict, CodeConflict)
-	require.Equal(t, ConflictSweepInFlight, body.Meta.ConflictType)
-	require.NotEmpty(t, recorder.Header().Get("Retry-After"), "the caller is told how long to wait")
+	assert.Equal(t, ConflictSweepInFlight, body.Meta.ConflictType)
+	assert.Equal(t, "30", recorder.Header().Get("Retry-After"), "the seconds left on the other sweep's lease")
+}
 
-	// Nothing bound: the same key works once the domain is free.
-	h.records.Now = func() time.Time { return time.Now().Add(time.Minute) }
-	require.Equal(t, http.StatusOK, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()).Code)
+// The refusal of a second sweep happens before anything binds, so the caller's
+// key is still spendable once the domain is free.
+func TestBulk_aSweepRefusedForABusyDomainBindsNothing(t *testing.T) {
+	h := newTestAPI(t)
+	now := h.clock(t)
+	h.occupy(t, 30*time.Second)
+	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
+	requireError(t, h.bulk(t, body, "key-1", listedCaller), http.StatusConflict, CodeConflict)
+
+	*now = now.Add(time.Minute)
+
+	again := h.bulk(t, body, "key-1", listedCaller)
+	assert.Equal(t, http.StatusOK, again.Code, "the same key once the lease expired: %s", again.Body.String())
 }
 
 // A retry that meets its own command still in flight is a poll: no body, and a
-// Retry-After naming when the outcome can be had.
+// Retry-After of the poll interval rather than the 30 seconds the lease has
+// left, since a sweep ends in seconds.
 func TestBulk_retryOfARunningCommandPolls(t *testing.T) {
 	h := newTestAPI(t)
+	h.clock(t)
 	h.accepted(t, "key-1", previewCommand(t), 30*time.Second)
 
 	recorder := h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles())
+	}, "key-1", listedCaller)
 
-	require.Equal(t, http.StatusAccepted, recorder.Code)
-	require.Empty(t, recorder.Body.String(), "there is nothing to say yet")
-	require.NotEmpty(t, recorder.Header().Get("Retry-After"))
+	require.Equal(t, http.StatusAccepted, recorder.Code, "body: %s", recorder.Body.String())
+	assert.Empty(t, recorder.Body.String(), "there is nothing to say yet")
+	assert.Equal(t, "5", recorder.Header().Get("Retry-After"))
+}
+
+// plantDeadSweep leaves the record of a preview of the orders block under
+// key-1 accepted, with the progress a walker committed before it died, and
+// moves the clock past its lease.
+func (h *testAPI) plantDeadSweep(t *testing.T, progress records.Progress) {
+	t.Helper()
+
+	now := h.clock(t)
+	keys := h.accepted(t, "key-1", previewCommand(t), 30*time.Second)
+	require.NoError(t, h.records.Batch(context.Background(), records.Batch{
+		Keys: keys, Fencing: "the-original-walker", Progress: progress,
+	}))
+	*now = now.Add(time.Minute)
 }
 
 // A walker that never came back leaves an accepted record with a dead lease. The
@@ -123,43 +154,49 @@ func TestBulk_retryOfARunningCommandPolls(t *testing.T) {
 // the batches had committed.
 func TestBulk_retryFinalizesADeadSweep(t *testing.T) {
 	h := newTestAPI(t)
-	now := h.clock(t)
-
-	command := previewCommand(t)
-	keys := h.accepted(t, "key-1", command, 30*time.Second)
-
-	// The walker got through part of the selection and then died.
-	require.NoError(t, h.records.Batch(context.Background(), records.Batch{
-		Keys: keys, Fencing: "the-original-walker",
-		Progress: records.Progress{
-			Scanned: 40, Matched: 12, Rules: map[string]int{"orders/per-client": 12},
-			Keys: []string{"rl:v1:{gateway.public}:orders/per-client:gcra:3600:alice:"},
-		},
-	}))
-	*now = now.Add(time.Minute)
+	h.plantDeadSweep(t, records.Progress{
+		Scanned: 40, Matched: 12, Rules: map[string]int{"orders/per-client": 12},
+		Keys: []string{"rl:v1:{gateway.public}:orders/per-client:gcra:3600:alice:"},
+	})
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+	}, "key-1", listedCaller), http.StatusInternalServerError, CodeInterrupted)
 
 	require.NotNil(t, body.Meta.PartialReset, "a command that may have deleted must disclose")
-	require.Equal(t, 40, body.Meta.PartialReset.Scanned)
-	require.NotNil(t, body.Meta.PartialReset.MatchedCount)
-	require.Equal(t, 12, *body.Meta.PartialReset.MatchedCount)
-	require.Len(t, body.Meta.PartialReset.Rules, 1)
+	assert.Equal(t, PartialReset{
+		DryRun:       true,
+		Scanned:      40,
+		MatchedCount: new(12),
+		Rules:        []BulkRuleCount{{RuleID: "orders/per-client", MatchedCount: new(12)}},
+		Keys:         []string{"rl:v1:{gateway.public}:orders/per-client:gcra:3600:alice:"},
+	}, *body.Meta.PartialReset)
+}
 
-	// And a later retry replays that outcome rather than finalizing again.
-	replay := requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
-	require.Equal(t, body.ID, replay.ID, "a replay is the same error instance")
-	require.Equal(t, 40, replay.Meta.PartialReset.Scanned)
+// A later retry replays the outcome the first retry finalized rather than
+// finalizing again.
+func TestBulk_retryAfterTheFinalizationReplaysIt(t *testing.T) {
+	h := newTestAPI(t)
+	h.plantDeadSweep(t, records.Progress{
+		Scanned: 40, Matched: 12, Rules: map[string]int{"orders/per-client": 12},
+		Keys: []string{"rl:v1:{gateway.public}:orders/per-client:gcra:3600:alice:"},
+	})
+	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
+	finalized := requireError(t, h.bulk(t, body, "key-1", listedCaller),
+		http.StatusInternalServerError, CodeInterrupted)
+
+	replay := requireError(t, h.bulk(t, body, "key-1", listedCaller),
+		http.StatusInternalServerError, CodeInterrupted)
+
+	assert.Equal(t, finalized.ID, replay.ID, "a replay is the same error instance")
+	require.NotNil(t, replay.Meta.PartialReset, "a replay of an interrupted command discloses")
+	assert.Equal(t, 40, replay.Meta.PartialReset.Scanned)
 }
 
 // The deadline is the server's bound on synchronous work. Hitting it is a
 // recorded failure with its own code, because its recovery differs: narrow the
 // selection, do not repeat the same width.
-func TestBulk_deadlineIsRecordedWithItsDisclosure(t *testing.T) {
+func TestBulk_aSweepPastTheDeadlineDisclosesWhatItWalked(t *testing.T) {
 	h := newTestAPI(t)
 	for _, client := range []string{"alice", "bob", "carol"} {
 		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
@@ -172,20 +209,31 @@ func TestBulk_deadlineIsRecordedWithItsDisclosure(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	}, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
 
-	require.NotNil(t, body.Meta.PartialReset)
-	require.True(t, body.Meta.PartialReset.DryRun)
-	require.Equal(t, 1, body.Meta.PartialReset.Scanned, "keys walked before the deadline")
-	require.NotNil(t, body.Meta.PartialReset.MatchedCount)
-	require.Contains(t, body.Message, "narrow")
+	assert.Contains(t, body.Message, "narrow")
+	require.NotNil(t, body.Meta.PartialReset, "a failure after acceptance discloses")
+	assert.True(t, body.Meta.PartialReset.DryRun, "dryRun of the disclosure of a preview")
+	assert.Equal(t, 1, body.Meta.PartialReset.Scanned, "keys walked before the deadline")
+	assert.NotNil(t, body.Meta.PartialReset.MatchedCount, "the disclosure of a preview carries matchedCount")
+}
 
-	// The outcome is recorded: a retry of the same command replays it instead of
-	// walking again.
-	replay := requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
-	require.Equal(t, body.ID, replay.ID)
+// The deadline failure is recorded: a retry of the same command replays it
+// instead of walking again.
+func TestBulk_retryReplaysTheDeadlineFailure(t *testing.T) {
+	h := newTestAPI(t)
+	for _, client := range []string{"alice", "bob", "carol"} {
+		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {client}}, 1)
+	}
+	h.deadlineAfter(t, 3)
+	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
+	failed := requireError(t, h.bulk(t, body, "key-1", listedCaller),
+		http.StatusUnprocessableEntity, CodeWorkLimit)
+
+	replay := requireError(t, h.bulk(t, body, "key-1", listedCaller),
+		http.StatusUnprocessableEntity, CodeWorkLimit)
+
+	assert.Equal(t, failed.ID, replay.ID, "a replay is the same error instance")
 }
 
 // The walk reads the store step by step and carries its batch across the
@@ -201,11 +249,11 @@ func TestBulk_aPreviewWalksEveryStepOfALargeBlock(t *testing.T) {
 	var preview BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusOK, &preview)
+	}, "key-1", listedCaller), http.StatusOK, &preview)
 
-	require.Equal(t, clients, preview.Scanned, "keys the walk examined")
-	require.NotNil(t, preview.MatchedCount)
-	require.Equal(t, clients, *preview.MatchedCount, "counters the selection matched")
+	assert.Equal(t, clients, preview.Scanned, "keys the walk examined")
+	require.NotNil(t, preview.MatchedCount, "the answer of a preview carries matchedCount")
+	assert.Equal(t, clients, *preview.MatchedCount, "counters the selection matched")
 }
 
 // A step that returns no key gives the per-key check nothing to run on, so
@@ -221,10 +269,10 @@ func TestBulk_theDeadlineIsCheckedBeforeEveryStep(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	}, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
 
-	require.NotNil(t, body.Meta.PartialReset)
-	require.Equal(t, 0, body.Meta.PartialReset.Scanned, "no key was walked before the deadline")
+	require.NotNil(t, body.Meta.PartialReset, "a failure after acceptance discloses")
+	assert.Equal(t, 0, body.Meta.PartialReset.Scanned, "no key was walked before the deadline")
 }
 
 // A failed sweep frees the domain: the lease is released with the outcome, so
@@ -232,52 +280,14 @@ func TestBulk_theDeadlineIsCheckedBeforeEveryStep(t *testing.T) {
 func TestBulk_aRecordedFailureReleasesTheDomain(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
 
 	h.deadlineAfter(t, 1)
-	requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
+	requireError(t, h.bulk(t, body, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
 
 	h.api.Now = nil
-	require.Equal(t, http.StatusOK, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-2", operatorRoles()).Code, "the domain took the next command")
-}
-
-// Every 409 names its recovery, so a client branches on the field rather than
-// on prose.
-func TestBulk_conflictsNameTheirRecovery(t *testing.T) {
-	h := newTestAPI(t)
-
-	require.Equal(t, http.StatusOK, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()).Code)
-
-	mismatch := requireError(t, h.bulk(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"cascade"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusConflict, CodeConflict)
-	require.Equal(t, ConflictCommandMismatch, mismatch.Meta.ConflictType)
-
-	preview := h.preview(t, map[string]any{
-		"selector": map[string]any{"ruleIds": []string{"orders"}},
-	}, "key-2")
-
-	stale := requireError(t, h.bulk(t, map[string]any{
-		"selector":          map[string]any{"ruleIds": []string{"cascade"}},
-		"confirmationToken": preview.ConfirmationToken,
-	}, "key-3", operatorRoles()), http.StatusConflict, CodeConflict)
-	require.Equal(t, ConflictStaleConfirmation, stale.Meta.ConflictType)
-}
-
-// The addressed DELETE pins the rule-set version the same way, and its conflict
-// names the same kind of recovery.
-func TestReset_versionConflictNamesItsRecovery(t *testing.T) {
-	h := newTestAPI(t)
-
-	body := requireError(t, h.reset(t,
-		"ruleId=orders/per-client&axis.sub=alice&expectedRuleSetVersion=000000000000",
-		"key-1", operatorRoles()), http.StatusConflict, CodeConflict)
-	require.Equal(t, ConflictStaleRuleSet, body.Meta.ConflictType)
+	next := h.bulk(t, body, "key-2", listedCaller)
+	assert.Equal(t, http.StatusOK, next.Code, "the next command in the domain: %s", next.Body.String())
 }
 
 // contextBoundRecords refuses a write under a done context, the way the Redis
@@ -322,8 +332,8 @@ func TestBulk_recordsItsOutcomeWhenShutdownEndsTheWalk(t *testing.T) {
 	var preview BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusOK, &preview)
-	require.NotEmpty(t, preview.ConfirmationToken, "the preview's token was not stored")
+	}, "key-1", listedCaller), http.StatusOK, &preview)
+	assert.Regexp(t, `^ct-[0-9a-f]{12}$`, preview.ConfirmationToken, "the token of the preview")
 }
 
 // The failure of such a sweep is recorded as well, with its own code rather
@@ -338,8 +348,8 @@ func TestBulk_recordsAFailureWhenShutdownEndsTheWalk(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusUnprocessableEntity, CodeWorkLimit)
-	require.NotNil(t, body.Meta.PartialReset)
+	}, "key-1", listedCaller), http.StatusUnprocessableEntity, CodeWorkLimit)
+	assert.NotNil(t, body.Meta.PartialReset, "a failure after acceptance discloses")
 }
 
 // batchRefusingRecords cancels the sweeps' context when the first batch is
@@ -377,14 +387,14 @@ func TestBulk_aFailureInsideABatchDisclosesWhatTheStoreCommitted(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
-	require.NotNil(t, body.Meta.PartialReset)
-	require.NotNil(t, body.Meta.PartialReset.ResetCount)
-	require.Zero(t, *body.Meta.PartialReset.ResetCount, "the failure names deletions the store refused")
+	}, "key-execute", listedCaller), http.StatusInternalServerError, CodeInterrupted)
+	require.NotNil(t, body.Meta.PartialReset, "a failure after acceptance discloses")
+	require.NotNil(t, body.Meta.PartialReset.ResetCount, "the disclosure of an execution carries resetCount")
+	assert.Equal(t, 0, *body.Meta.PartialReset.ResetCount, "the failure names deletions the store refused")
 
 	for _, client := range []string{"alice", "bob", "carol"} {
 		_, found := h.remaining(t, client)
-		require.True(t, found, "the counter of %s is gone", client)
+		assert.True(t, found, "the counter of %s is gone", client)
 	}
 }
 
@@ -428,15 +438,17 @@ func TestBulk_aFailureWithoutItsCommittedProgressAnswersThatTheStoreIsDown(t *te
 			h.api.StartBackground(ctx)
 			refused := false
 			h.api.Records = readBackFailingRecords{
-				batchRefusingRecords: batchRefusingRecords{contextBoundRecords: contextBoundRecords{Store: h.records}, cancel: cancel},
-				refused:              &refused,
-				lookupErr:            lookupErr,
+				batchRefusingRecords: batchRefusingRecords{
+					contextBoundRecords: contextBoundRecords{Store: h.records}, cancel: cancel,
+				},
+				refused:   &refused,
+				lookupErr: lookupErr,
 			}
 
 			requireError(t, h.bulk(t, map[string]any{
 				"selector": selector, "confirmationToken": preview.ConfirmationToken,
-			}, "key-execute", operatorRoles()), http.StatusServiceUnavailable, CodeStoreDown)
-			require.True(t, refused, "the sweep never reached the store")
+			}, "key-execute", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
+			assert.True(t, refused, "the sweep never reached the store")
 		})
 	}
 }
@@ -463,5 +475,5 @@ func TestBulk_recordsAFailedMintWhenShutdownEndsTheWalk(t *testing.T) {
 
 	requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusInternalServerError, CodeInterrupted)
+	}, "key-1", listedCaller), http.StatusInternalServerError, CodeInterrupted)
 }

@@ -1,6 +1,6 @@
 // Package settings reads the properties of the data plane: where the
-// counters live, the near-limit margin of the metrics, and the claims and
-// roles the management API authorizes against. The counter store comes from
+// counters live, the near-limit margin of the metrics, and the callers and
+// the token audience the management API authenticates against. The counter store comes from
 // the connection the DBaaS Secret carries; the rest read configloader and
 // return a value the wiring uses, where a bad value is logged and replaced by
 // the default, never fatal, because none of these is worth a pod that does
@@ -11,16 +11,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
+	"github.com/netcracker/qubership-core-lib-go/v3/security/token"
 	goredis "github.com/redis/go-redis/v9"
 
 	enginestore "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
-	"github.com/netcracker/qubership-ratelimit/service/internal/management"
 	"github.com/netcracker/qubership-ratelimit/service/internal/records"
 	"github.com/netcracker/qubership-ratelimit/service/internal/redisconn"
 	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
@@ -128,17 +130,20 @@ func CounterStore(source *redisconn.Source) CounterBackend {
 	}
 }
 
-// NearLimitRatio reads the near-limit margin for the metrics. The property
-// key spells every hump as its own segment because the configloader turns
-// each underscore of METRICS_NEAR_LIMIT_RATIO into a dot; a camelCase key
-// would never see the variable.
+// NearLimitRatio reads the near-limit margin for the metrics. Unset or empty,
+// it is [rls.DefaultNearLimitRatio]; any other value that does not parse or
+// lies outside (0, 1), NaN included, is reported through warn and replaced by
+// that default.
+// The property key spells every hump as its own segment because the
+// configloader turns each underscore of METRICS_NEAR_LIMIT_RATIO into a dot; a
+// camelCase key would never see the variable.
 func NearLimitRatio(warn Warn) float64 {
 	raw := configloader.GetOrDefaultString("metrics.near.limit.ratio", "")
 	if raw == "" {
 		return rls.DefaultNearLimitRatio
 	}
 	ratio, err := strconv.ParseFloat(raw, 64)
-	if err != nil || ratio <= 0 || ratio >= 1 {
+	if err != nil || math.IsNaN(ratio) || ratio <= 0 || ratio >= 1 {
 		warn("METRICS_NEAR_LIMIT_RATIO=%q is not a ratio in (0, 1), using %v",
 			raw, rls.DefaultNearLimitRatio)
 		return rls.DefaultNearLimitRatio
@@ -163,42 +168,47 @@ func IETFHeaders(warn Warn) bool {
 	return enabled
 }
 
-// ManagementClaims names the claims the subject and its roles are read from.
-// Both accept a dotted path, because an IdP often nests the roles: Keycloak
-// issues them under realm_access.roles.
-func ManagementClaims() management.ClaimNames {
-	return management.ClaimNames{
-		Subject: configloader.GetOrDefaultString("management.claims.subject",
-			management.DefaultClaimNames.Subject),
-		Roles: configloader.GetOrDefaultString("management.claims.roles",
-			management.DefaultClaimNames.Roles),
-	}
+// DefaultManagementAudience is the audience a caller's token is issued for
+// when MANAGEMENT_M2M_AUDIENCE is unset: the platform's machine-to-machine
+// convention.
+const DefaultManagementAudience = "netcracker"
+
+// ManagementAudience reads the audience the management API verifies a token
+// against, from MANAGEMENT_M2M_AUDIENCE.
+func ManagementAudience() string {
+	return configloader.GetOrDefaultString("management.m2m.audience", DefaultManagementAudience)
 }
 
-// ManagementRoles maps the role names the IdP issues onto the two this API
-// authorizes against. Both properties are comma-separated lists. An unset
-// property is the canonical name, which is what a deployment issuing "viewer"
-// and "operator" already has; a property set to an empty list maps no IdP role
-// onto that role, so an installation with operator empty is read-only.
-func ManagementRoles() management.RoleMapping {
-	return management.RoleMapping{
-		Viewer:   csv(stringUnlessUnset("management.roles.viewer", management.RoleViewer)),
-		Operator: csv(stringUnlessUnset("management.roles.operator", management.RoleOperator)),
-		Explicit: true,
+// ManagementCallers reads the ServiceAccounts that may call the management API
+// from MANAGEMENT_CALLERS, a comma-separated list: <name> for a ServiceAccount
+// in namespace, <namespace>/<name> for one in another namespace. It returns
+// each as the sub claim of the ServiceAccount's tokens,
+// system:serviceaccount:<namespace>:<name>. An entry of another shape is
+// reported through warn and left out; unset or empty is no caller.
+func ManagementCallers(namespace string, warn Warn) []string {
+	var out []string
+	for _, entry := range csv(configloader.GetOrDefaultString("management.callers", "")) {
+		ns, name, qualified := strings.Cut(entry, "/")
+		if !qualified {
+			ns, name = namespace, entry
+		}
+		if !namespaceName.MatchString(ns) || !serviceAccountName.MatchString(name) {
+			warn("MANAGEMENT_CALLERS entry %q is not <name> or <namespace>/<name> of a ServiceAccount, leaving it out",
+				entry)
+			continue
+		}
+		out = append(out, token.GetKubernetesSubject(ns, name))
 	}
+	return out
 }
 
-// stringUnlessUnset is the property's value, or def when the property is not
-// set at all. Unlike configloader.GetOrDefaultString it keeps an empty value
-// empty: the chart renders an empty list as an empty variable, and putting the
-// default back would grant the role the list leaves out.
-func stringUnlessUnset(key, def string) string {
-	k := configloader.GetKoanf()
-	if k == nil || !k.Exists(key) {
-		return def
-	}
-	return k.String(key)
-}
+// namespaceName and serviceAccountName are the Kubernetes rules for the two
+// halves of a callers entry: a namespace is a DNS label, a ServiceAccount
+// name a DNS subdomain.
+var (
+	namespaceName      = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	serviceAccountName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
+)
 
 // ManagementGatewayDomains lists the rate limit domains of the gateways that
 // route to the management API, a comma-separated property. The chart sets it

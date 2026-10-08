@@ -10,50 +10,143 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNamespace_isTheCloudNamespaceAndNothingElse(t *testing.T) {
-	// The namespace is the installation's scope, and the one thing that keeps
-	// the RBAC a Role. Unset is a startup error, never a fallback to the
-	// whole cluster.
-	// The env source alone: the YAML source waits on an application.yaml
-	// this package does not ship, and the property under test is an
-	// environment variable.
-	t.Setenv("CLOUD_NAMESPACE", "")
+// readEnvironment points configloader at the environment alone: the YAML
+// source waits on an application.yaml this package does not ship, and the
+// properties under test are environment variables.
+func readEnvironment() {
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
-	_, err := Namespace()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "CLOUD_NAMESPACE")
+}
 
+// The namespace is the installation's scope, and the one thing that keeps the
+// RBAC a Role. Unset is a startup error, never a fallback to the whole
+// cluster.
+func TestNamespace_refusesAnUnsetCloudNamespace(t *testing.T) {
+	t.Setenv("CLOUD_NAMESPACE", "")
+	readEnvironment()
+
+	_, err := Namespace()
+
+	assert.ErrorContains(t, err, "CLOUD_NAMESPACE", "the startup error names the variable to set")
+}
+
+func TestNamespace_isTheCloudNamespace(t *testing.T) {
 	t.Setenv("CLOUD_NAMESPACE", "biz")
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	readEnvironment()
+
 	namespace, err := Namespace()
+
 	require.NoError(t, err)
 	assert.Equal(t, "biz", namespace)
 }
 
-// The logr bridge. controller-runtime and client-go log through logr, and
-// the platform logs through its own logger; what is pinned is that names and
-// key-value pairs survive the crossing. The verbosity mapping is pinned in
-// TestLogrAdapter_boundsVerbosityByThePlatformLevel.
-func TestLogrAdapter_carriesNamesAndValues(t *testing.T) {
-	root := NewLogrLogger("test")
-	sink := root.GetSink().(*logrAdapter)
-	assert.Equal(t, "test", sink.name)
+// line is one line the platform logger wrote: the logger's name, the level,
+// and the message.
+type line struct {
+	Logger  string
+	Level   logging.Lvl
+	Message string
+}
 
-	named := root.WithName("store").WithValues("domain", "gateway.public")
-	child := named.GetSink().(*logrAdapter)
-	assert.Equal(t, "test/store", child.name, "sub-loggers are named under the root, e.g. ratelimit/rls")
-	assert.Equal(t, []any{"domain", "gateway.public"}, child.kvs)
+// capturedLines makes the platform logger of name keep its lines for the test
+// instead of writing them, and returns them. The registry hands the adapter the
+// same logger instance, so a logr logger under name writes here.
+func capturedLines(t *testing.T, name string) *[]line {
+	t.Helper()
+	var lines []line
+	logger := logging.GetLogger(name)
+	logger.SetLogFormat(func(r *logging.Record) []byte {
+		lines = append(lines, line{Logger: r.PackageName, Level: r.Lvl, Message: r.Message})
+		return nil
+	})
+	t.Cleanup(func() { logger.SetLogFormat(nil) })
+	return &lines
+}
 
-	// The parent is untouched by the child's values: WithValues copies.
-	assert.Empty(t, sink.kvs)
+// NewLogrLogger connects logr, which controller-runtime and client-go log
+// through, to the platform's own logger. The logger names and the key-value
+// pairs appear in the lines the platform logger writes. The logr tests in this
+// file write at the platform's default level, info.
+func TestLogrAdapter_writesUnderTheParentAndChildNamesJoined(t *testing.T) {
+	lines := capturedLines(t, "process-test-names/store")
 
-	// These exercise the write paths; the platform logger's output is not
-	// captured here, and what matters is that neither panics on a nil error
-	// or an odd number of values.
-	named.Info("rebuilt", "domains", 3)
-	named.V(1).Info("detail")
-	named.Error(errors.New("boom"), "failed", "domain", "gateway.public")
-	named.Error(nil, "no error value")
+	NewLogrLogger("process-test-names").WithName("store").Info("rebuilt")
+
+	assert.Equal(t, []line{{Logger: "process-test-names/store", Level: logging.LvlInfo, Message: "rebuilt"}}, *lines)
+}
+
+func TestLogrAdapter_putsTheLoggersValuesBeforeTheCallsValues(t *testing.T) {
+	lines := capturedLines(t, "process-test-values")
+
+	NewLogrLogger("process-test-values").WithValues("domain", "gateway.public").Info("rebuilt", "domains", 3)
+
+	assert.Equal(t, []line{{
+		Logger: "process-test-values", Level: logging.LvlInfo, Message: "rebuilt domain=gateway.public domains=3",
+	}}, *lines)
+}
+
+// WithValues copies: the logger it was called on keeps writing without the
+// child's values. The child writing them is
+// TestLogrAdapter_putsTheLoggersValuesBeforeTheCallsValues.
+func TestLogrAdapter_leavesTheParentWithoutTheChildsValues(t *testing.T) {
+	lines := capturedLines(t, "process-test-parent")
+	parent := NewLogrLogger("process-test-parent")
+	_ = parent.WithValues("domain", "gateway.public")
+
+	parent.Info("rebuilt")
+
+	assert.Equal(t, []line{{Logger: "process-test-parent", Level: logging.LvlInfo, Message: "rebuilt"}}, *lines)
+}
+
+// The platform logger takes a format string rather than structured fields, so
+// the pairs are flattened into the message as key=value. An odd trailing key
+// is a caller's mistake; it is dropped rather than paired with a missing value.
+func TestLogrAdapter_flattensThePairsIntoTheMessage(t *testing.T) {
+	cases := []struct {
+		name  string
+		msg   string
+		pairs []any
+		want  string
+	}{
+		{"no pairs leave the message as it is", "plain", nil, "plain"},
+		{"two pairs follow the message", "rebuilt", []any{"domains", 3, "took", "1s"}, "rebuilt domains=3 took=1s"},
+		{"an odd trailing key is dropped", "odd", []any{"a", 1, "dangling"}, "odd a=1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			lines := capturedLines(t, "process-test-pairs")
+
+			NewLogrLogger("process-test-pairs").Info(c.msg, c.pairs...)
+
+			assert.Equal(t, []line{{Logger: "process-test-pairs", Level: logging.LvlInfo, Message: c.want}}, *lines,
+				"Info(%q, %v)", c.msg, c.pairs)
+		})
+	}
+}
+
+// An error follows the message and its pairs after a colon, and a nil error
+// leaves the message as it is.
+func TestLogrAdapter_writesAnErrorAtTheErrorLevel(t *testing.T) {
+	cases := []struct {
+		name  string
+		err   error
+		msg   string
+		pairs []any
+		want  string
+	}{
+		{"an error follows the pairs", errors.New("boom"), "failed", []any{"domain", "gateway.public"},
+			"failed domain=gateway.public: boom"},
+		{"a nil error adds nothing", nil, "no error value", nil, "no error value"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			lines := capturedLines(t, "process-test-errors")
+
+			NewLogrLogger("process-test-errors").Error(c.err, c.msg, c.pairs...)
+
+			assert.Equal(t, []line{{Logger: "process-test-errors", Level: logging.LvlError, Message: c.want}}, *lines,
+				"Error(%v, %q, %v)", c.err, c.msg, c.pairs)
+		})
+	}
 }
 
 // The platform level bounds the verbosity the bridge enables: level 0 at
@@ -65,7 +158,7 @@ func TestLogrAdapter_boundsVerbosityByThePlatformLevel(t *testing.T) {
 	// One logger per platform level, each configured the way a deployment
 	// configures it, LOGGING_LEVEL_<name>. Setting the level on the logger
 	// alone would race: configloader delivers its Inited events on a
-	// goroutine, and the logging package answers each one by resetting every
+	// goroutine, and the logging package handles each one by resetting every
 	// registered logger to its configured level, so an Init from another test
 	// could land after SetLevel and undo it. Configured, any reset lands on
 	// the same level. The registry returns the same instance to the adapter,
@@ -74,7 +167,7 @@ func TestLogrAdapter_boundsVerbosityByThePlatformLevel(t *testing.T) {
 	t.Setenv("LOGGING_LEVEL_TEST_VERBOSITY_ERROR", "error")
 	t.Setenv("LOGGING_LEVEL_TEST_VERBOSITY_INFO", "info")
 	t.Setenv("LOGGING_LEVEL_TEST_VERBOSITY_DEBUG", "debug")
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	readEnvironment()
 	logging.GetLogger(atError).SetLevel(logging.LvlError)
 	logging.GetLogger(atInfo).SetLevel(logging.LvlInfo)
 	logging.GetLogger(atDebug).SetLevel(logging.LvlDebug)
@@ -101,17 +194,15 @@ func TestLogrAdapter_boundsVerbosityByThePlatformLevel(t *testing.T) {
 	}
 }
 
-func TestFormatMessage(t *testing.T) {
-	assert.Equal(t, "plain", formatMessage("plain", nil))
-	assert.Equal(t, "rebuilt domains=3 took=1s", formatMessage("rebuilt", []any{"domains", 3, "took", "1s"}))
-	// An odd trailing key is a caller's mistake; it is dropped rather than
-	// paired with a missing value.
-	assert.Equal(t, "odd a=1", formatMessage("odd", []any{"a", 1, "dangling"}))
+func TestPodName_isTheDownwardAPIValue(t *testing.T) {
+	t.Setenv("POD_NAME", "ratelimit-abc12")
+
+	assert.Equal(t, "ratelimit-abc12", PodName())
 }
 
-func TestPodName_isTheDownwardAPIValueOrEmpty(t *testing.T) {
-	t.Setenv("POD_NAME", "ratelimit-abc12")
-	assert.Equal(t, "ratelimit-abc12", PodName())
+// Outside a pod there is no pod name to borrow.
+func TestPodName_isEmptyWithoutTheDownwardAPIValue(t *testing.T) {
 	t.Setenv("POD_NAME", "")
-	assert.Empty(t, PodName(), "outside a pod there is no name to borrow")
+
+	assert.Empty(t, PodName())
 }

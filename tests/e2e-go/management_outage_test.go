@@ -60,7 +60,7 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 		if err := k8s.Get(ctx, client.ObjectKey{Namespace: store.namespace, Name: store.service}, &dep); err != nil {
 			Skip("the store at " + store.addr + " is not a Deployment this suite can scale")
 		}
-		viewer = map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")}
+		viewer = map[string]string{"Authorization": "Bearer " + managementToken()}
 
 		// Every change below registers its own undo before it is made, so a
 		// step that fails halfway is still undone, and one undo that fails
@@ -106,8 +106,8 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 		store.scale(0)
 
 		// The control: the gateway fails closed and the store is down, so a
-		// path the policy covers is refused. Without it the two specs on the
-		// API's own paths would pass against a gateway that fails open.
+		// path the policy covers is refused. Without it the specs on the API's
+		// own paths would pass against a gateway that fails open.
 		Eventually(func() int {
 			return gatewayGet(gateway, controlPath, nil)
 		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Equal(http.StatusServiceUnavailable),
@@ -116,20 +116,33 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 			`ratelimit_checks_total{verdict="unavailable"} of %s did not grow: the 503 is not a failed check`, domain)
 	})
 
-	It("serves the endpoints that read no counters", func() {
-		exempt := checks("exempt")
+	// Each endpoint is a spec of its own; the exempt counter is read before
+	// the first of them and after the last.
+	Context("the endpoints that read no counters", Ordered, func() {
+		var exempt float64
+
+		BeforeAll(func() { exempt = checks("exempt") })
 
 		// Eventually, not once: the gateway gives a check 50 ms, and one that
 		// is slow on a loaded runner is a 503 under fail-closed as well.
-		for _, path := range []string{"/status", "/domains", "/domains/" + domain + "/rules", "/openapi.yaml"} {
-			Eventually(func() int {
-				_, code := gatewayGetBody(gateway, basePath+path, viewer)
-				return code
-			}).WithTimeout(30*time.Second).WithPolling(2*time.Second).Should(Equal(http.StatusOK),
-				"GET %s through %s with the store down", basePath+path, gateway)
-		}
-		Expect(checks("exempt")-exempt).To(BeNumerically(">", 0),
-			`ratelimit_checks_total{verdict="exempt"} of %s did not grow: the requests passed some other way`, domain)
+		DescribeTable("answer 200 with the store down",
+			func(path string) {
+				Eventually(func() int {
+					_, code := gatewayGetBody(gateway, basePath+path, viewer)
+					return code
+				}).WithTimeout(30*time.Second).WithPolling(2*time.Second).Should(Equal(http.StatusOK),
+					"GET %s through %s with the store down", basePath+path, gateway)
+			},
+			Entry("GET /status", "/status"),
+			Entry("GET /domains", "/domains"),
+			Entry("GET /domains/{domain}/rules", "/domains/"+domain+"/rules"),
+			Entry("GET /openapi.yaml", "/openapi.yaml"),
+		)
+
+		It("count as exempt checks", func() {
+			Expect(checks("exempt")-exempt).To(BeNumerically(">", 0),
+				`ratelimit_checks_total{verdict="exempt"} of %s did not grow: the requests passed some other way`, domain)
+		})
 	})
 
 	It("returns the service's own RLS-0503 for the counter listing", func() {

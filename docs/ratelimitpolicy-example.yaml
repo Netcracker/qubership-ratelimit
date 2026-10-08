@@ -161,7 +161,7 @@ spec:
 #   replicas: { total: 3, applied: 3, summary: "3/3", lastCheckTime: "2026-09-02T12:00:05Z" }
 #   conditions:
 #   - { type: Accepted, status: "True",  reason: RulesCompiled }
-#   - { type: Ready,    status: "True",  reason: AllReplicas, message: "3/3 replicas enforce generation 3" }
+#   - { type: Ready,    status: "True",  reason: AllReplicas, message: "all 3 ready replicas enforce generation 3" }
 #   - { type: Stalled,  status: "False", reason: Progressing }
 ---
 # A minimal policy for the private gateway: binding through a different domain, built-in keys only.

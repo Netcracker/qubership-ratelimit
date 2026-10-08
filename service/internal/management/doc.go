@@ -26,12 +26,13 @@
 //
 // # Security
 //
-// Authentication happens at the perimeter: the gateway's auth extension
-// validates the bearer token, and the mesh is required to keep this service's
-// ingress to the gateway. Authorization happens here, by path and verb, over an
-// identity read from exactly one place, the bearer token, because a header the
-// service trusts is a header an attacker forges. Every mutation leaves an
-// audit record naming who made it, which key they used, and what came of it.
+// Every call carries a Kubernetes ServiceAccount token, and the service
+// verifies it against the cluster's OIDC discovery: signature, issuer,
+// audience, expiry. The caller is the token's sub claim, read from that one
+// place, because a header the service trusts is a header an attacker forges.
+// Authorization happens here, by path and verb, and the ServiceAccounts in
+// [API.Callers] hold operator. Every mutation leaves an audit record naming
+// who made it, which key they used, and what came of it.
 //
 // # Values
 //
