@@ -417,21 +417,25 @@ func TestDecode_isSilentOnAnObjectThisSchemaFullyDefines(t *testing.T) {
 // with counters: [] as an empty list and an absent counters as nil, so the
 // two can mean a value and an omission.
 func TestDecode_keepsAListWrittenEmptyApartFromOneLeftOut(t *testing.T) {
-	stored := unstructuredPolicy(t, policyObject(
-		v1.LimitBlock{Name: "api", Rules: []v1.Rule{simpleRule("written"), simpleRule("left-out")}}), nil)
-	blocks, found, err := unstructured.NestedSlice(stored.Object, "spec", "limits")
-	require.NoError(t, err)
-	require.True(t, found)
-	written := blocks[0].(map[string]any)["rules"].([]any)[0].(map[string]any)
-	written["counters"] = []any{}
-	require.NoError(t, unstructured.SetNestedSlice(stored.Object, blocks, "spec", "limits"))
+	stored := unstructuredPolicy(t, policyObject(), map[string]any{
+		"limits": []any{map[string]any{
+			"name": "api",
+			"rules": []any{
+				map[string]any{"name": "written", "counters": []any{}},
+				map[string]any{"name": "left-out"},
+			},
+		}},
+	})
 
 	decoded, skew, err := Decode(stored)
 
-	require.NoError(t, err)
-	assert.Empty(t, skew)
-	assert.Equal(t, []string{}, decoded.Spec.Limits[0].Rules[0].Counters, "written empty arrives as an empty list")
-	assert.Nil(t, decoded.Spec.Limits[0].Rules[1].Counters, "left out arrives as nil")
+	require.NoError(t, err, "Decode(counters: [] in rule written, no counters in rule left-out)")
+	assert.Empty(t, skew, "Decode skew")
+	require.Len(t, decoded.Spec.Limits, 1, "decoded Spec.Limits")
+	rules := decoded.Spec.Limits[0].Rules
+	require.Len(t, rules, 2, "decoded rules of block api")
+	assert.Equal(t, []string{}, rules[0].Counters, "decoded Counters of rule written, stored as []")
+	assert.Nil(t, rules[1].Counters, "decoded Counters of rule left-out, stored without the field")
 }
 
 // TestCompile_anUnknownFieldKeepsTheLastGoodGenerationServing is the whole

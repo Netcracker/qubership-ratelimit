@@ -32,7 +32,8 @@ func planCascade() v1.BlockPreset {
 		Mode: v1.BlockModeFirstMatch,
 		Rules: []v1.Rule{
 			{Name: "internal", Preset: "internal-bypass"},
-			{Name: "enterprise", Matches: []v1.Predicate{{Key: "plan", Operator: v1.OperatorEquals, Value: "enterprise"}},
+			{Name: "enterprise",
+				Matches:  []v1.Predicate{{Key: "plan", Operator: v1.OperatorEquals, Value: "enterprise"}},
 				Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(1000)}},
 			{Name: "per-user", Preset: "standard-client"},
 			{Name: "anonymous", Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorDoesNotExist}},
@@ -82,49 +83,59 @@ func TestResolve_aBlockPresetHasEveryFieldOfABlockExceptPreset(t *testing.T) {
 		presetFields[field.Name] = true
 	}
 
-	assert.Equal(t, blockFields, presetFields)
+	assert.Equal(t, blockFields, presetFields, "fields of v1.BlockPreset, against those of v1.LimitBlock")
 }
 
-func TestResolve_aBlockTakesTheModeAndTheRulesOfItsPresetAndKeepsItsNameAndItsTarget(t *testing.T) {
+// A block that writes a target and leaves the mode and the rules out takes
+// them from its preset, the rules with the rule presets they name, and keeps
+// its own name.
+func TestResolve_aBlockTakesItsPresetUnderItsOwnNameAndTarget(t *testing.T) {
 	spec := cascadeSpec(v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Target: prefixTarget("/orders")})
 	spec.Presets.Blocks[0].Target = prefixTarget("/default")
 
 	resolved, problems := Resolve(spec)
 
-	require.Empty(t, problems)
-	require.Len(t, resolved.Spec.Limits, 1)
+	require.Empty(t, problems, "Resolve problems")
+	require.Len(t, resolved.Spec.Limits, 1, "Resolved.Spec.Limits")
 	orders := resolved.Spec.Limits[0]
-	assert.Equal(t, "orders", orders.Name, "the name is always the point of use's")
-	assert.Empty(t, orders.Preset, "the resolved block carries no preset")
-	assert.Equal(t, prefixTarget("/orders"), orders.Target, "a target written in the block replaces the preset's")
-	assert.Equal(t, v1.BlockModeFirstMatch, orders.Mode, "the mode comes from the preset")
-	assert.Equal(t, []string{"internal", "enterprise", "per-user", "anonymous"}, ruleNames(orders))
-	assert.Equal(t, v1.RuleBehaviorBypass, orders.Rules[0].Behavior, "the rules of the preset took their rule presets")
-	assert.Equal(t, []string{"sub"}, orders.Rules[2].Counters)
-	assert.Equal(t, map[string]string{"orders": "plan-cascade"}, resolved.BlockPresets)
+	assert.Equal(t, "orders", orders.Name, "Name of the resolved block")
+	assert.Empty(t, orders.Preset, "Preset of the resolved block")
+	assert.Equal(t, prefixTarget("/orders"), orders.Target, "Target of the resolved block, written")
+	assert.Equal(t, v1.BlockModeFirstMatch, orders.Mode, "Mode of the resolved block, left out")
+	assert.Equal(t, []string{"internal", "enterprise", perUserName, "anonymous"}, ruleNames(orders),
+		"rules of the resolved block")
+	assert.Equal(t, v1.RuleBehaviorBypass, resolvedRule(t, resolved, "internal").Behavior,
+		"Behavior of rule internal, from its rule preset internal-bypass")
+	assert.Equal(t, []string{"sub"}, resolvedRule(t, resolved, perUserName).Counters,
+		"Counters of rule per-user, from its rule preset standard-client")
+	assert.Equal(t, map[string]string{"orders": "plan-cascade"}, resolved.BlockPresets, "Resolved.BlockPresets")
 	assert.Equal(t, map[RuleRef]string{
-		{Block: "orders", Rule: "internal"}: "internal-bypass",
-		{Block: "orders", Rule: "per-user"}: "standard-client",
-	}, resolved.Presets, "a rule the block took from its preset is listed under the block's own name")
+		{Block: "orders", Rule: "internal"}:  "internal-bypass",
+		{Block: "orders", Rule: perUserName}: "standard-client",
+	}, resolved.Presets, "Resolved.Presets, where a rule the block took from its preset is under the block's name")
 }
 
-func TestResolve_aTargetOrAModeLeftOutOfTheBlockComesFromItsPreset(t *testing.T) {
+func TestResolve_aBlockThatWritesAModeTakesTheTargetOfItsPreset(t *testing.T) {
 	spec := cascadeSpec(v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Mode: v1.BlockModeAll})
 	spec.Presets.Blocks[0].Target = prefixTarget("/default")
 
 	resolved, problems := Resolve(spec)
 
-	require.Empty(t, problems)
+	require.Empty(t, problems, "Resolve problems")
 	orders := resolved.Spec.Limits[0]
-	assert.Equal(t, prefixTarget("/default"), orders.Target, "a target left out comes from the preset")
-	assert.Equal(t, v1.BlockModeAll, orders.Mode, "a mode written in the block replaces the preset's")
+	assert.Equal(t, prefixTarget("/default"), orders.Target, "Target of the resolved block, left out")
+	assert.Equal(t, v1.BlockModeAll, orders.Mode, "Mode of the resolved block, written")
 }
 
 // The rules of the block merge with the preset's in three passes: overrides
 // in place, then insertions in the order written, then drops, with a dropped
-// rule serving as an anchor until the drops run.
+// rule serving as an anchor until the drops run. Every case asserts the
+// order of the merged rules, that no rule carries before, dropped, or preset
+// any more, and that the preset's per-user, which no case overrides, is
+// still listed with the rule preset it took.
 func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
-	partner := v1.Rule{Name: "partner", Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorInGroup, Value: "partners"}},
+	partner := v1.Rule{Name: "partner",
+		Matches:  []v1.Predicate{{Key: "sub", Operator: v1.OperatorInGroup, Value: "partners"}},
 		Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(500)}}
 	vip := v1.Rule{Name: "vip", Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(900)}}
 	withBefore := func(rule v1.Rule, before string) v1.Rule {
@@ -135,17 +146,7 @@ func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
 		name  string
 		rules []v1.Rule
 		order []string
-		check func(t *testing.T, block v1.LimitBlock)
 	}{
-		{
-			name:  "an override keeps the preset's position and replaces the fields it writes",
-			rules: []v1.Rule{{Name: "per-user", Rates: []v1.Rate{minuteRate(300)}}},
-			order: []string{"internal", "enterprise", "per-user", "anonymous"},
-			check: func(t *testing.T, block v1.LimitBlock) {
-				assert.Equal(t, []v1.Rate{{Requests: 300, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}}, block.Rules[2].Rates)
-				assert.Equal(t, []string{"sub"}, block.Rules[2].Counters, "the field left out comes from the rule preset")
-			},
-		},
 		{
 			name:  "a new rule without before goes after the preset's rules",
 			rules: []v1.Rule{partner},
@@ -155,6 +156,11 @@ func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
 			name:  "a new rule goes in front of the rule its before names",
 			rules: []v1.Rule{withBefore(partner, "per-user")},
 			order: []string{"internal", "enterprise", "partner", "per-user", "anonymous"},
+		},
+		{
+			name:  "a new rule before the preset's first rule goes first",
+			rules: []v1.Rule{withBefore(partner, "internal")},
+			order: []string{"partner", "internal", "enterprise", "per-user", "anonymous"},
 		},
 		{
 			name:  "before may name a new rule written earlier in the list",
@@ -176,27 +182,6 @@ func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
 			rules: []v1.Rule{withBefore(partner, "anonymous"), {Name: "anonymous", Dropped: true}},
 			order: []string{"internal", "enterprise", "per-user", "partner"},
 		},
-		{
-			name:  "a new rule may take a rule preset",
-			rules: []v1.Rule{{Name: "vip", Preset: "standard-client", Before: "per-user"}},
-			order: []string{"internal", "enterprise", "vip", "per-user", "anonymous"},
-			check: func(t *testing.T, block v1.LimitBlock) {
-				assert.Equal(t, []string{"sub"}, block.Rules[2].Counters, "the inserted rule took its rule preset")
-				assert.Len(t, block.Rules[2].Rates, 2)
-			},
-		},
-		{
-			name: "an override, an insertion, and a dropped rule in one block",
-			rules: []v1.Rule{
-				{Name: "enterprise", Rates: []v1.Rate{minuteRate(2000)}},
-				withBefore(partner, "per-user"),
-				{Name: "internal", Dropped: true},
-			},
-			order: []string{"enterprise", "partner", "per-user", "anonymous"},
-			check: func(t *testing.T, block v1.LimitBlock) {
-				assert.Equal(t, int32(2000), block.Rules[0].Rates[0].Requests)
-			},
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -204,21 +189,75 @@ func TestResolve_theRulesOfTheBlockMergeWithThePresetsByName(t *testing.T) {
 
 			resolved, problems := Resolve(spec)
 
-			require.Empty(t, problems)
+			require.Empty(t, problems, "Resolve problems")
 			block := resolved.Spec.Limits[0]
-			assert.Equal(t, tc.order, ruleNames(block))
+			assert.Equal(t, tc.order, ruleNames(block), "rules of the resolved block")
 			for _, rule := range block.Rules {
-				assert.Empty(t, rule.Before, "rule %s still carries before", rule.Name)
-				assert.False(t, rule.Dropped, "rule %s still carries dropped", rule.Name)
-				assert.Empty(t, rule.Preset, "rule %s still carries preset", rule.Name)
+				assert.Empty(t, rule.Before, "Before of resolved rule %s", rule.Name)
+				assert.False(t, rule.Dropped, "Dropped of resolved rule %s", rule.Name)
+				assert.Empty(t, rule.Preset, "Preset of resolved rule %s", rule.Name)
 			}
 			assert.Equal(t, "standard-client", resolved.Presets[RuleRef{Block: "orders", Rule: "per-user"}],
-				"a rule the block took from its preset is listed with the rule preset it took")
-			if tc.check != nil {
-				tc.check(t, block)
-			}
+				"Resolved.Presets of orders/per-user")
 		})
 	}
+}
+
+// An override by name keeps the preset rule's position and the rule preset
+// that rule takes, and replaces the fields it writes.
+func TestResolve_anOverrideKeepsThePresetsPositionAndReplacesTheFieldsItWrites(t *testing.T) {
+	spec := cascadeSpec(v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
+		{Name: perUserName, Rates: []v1.Rate{minuteRate(300)}},
+	}})
+
+	resolved, problems := Resolve(spec)
+
+	require.Empty(t, problems, "Resolve problems")
+	assert.Equal(t, []string{"internal", "enterprise", perUserName, "anonymous"}, ruleNames(resolved.Spec.Limits[0]),
+		"rules of the resolved block")
+	perUser := resolvedRule(t, resolved, perUserName)
+	assert.Equal(t, []v1.Rate{{Requests: 300, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}}, perUser.Rates,
+		"Rates of rule per-user, written")
+	assert.Equal(t, []string{"sub"}, perUser.Counters, "Counters of rule per-user, from its rule preset")
+	assert.Equal(t, "standard-client", resolved.Presets[RuleRef{Block: "orders", Rule: perUserName}],
+		"Resolved.Presets of orders/per-user")
+}
+
+func TestResolve_aNewRuleOfTheBlockMayTakeARulePreset(t *testing.T) {
+	spec := cascadeSpec(v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
+		{Name: "vip", Preset: "standard-client", Before: perUserName},
+	}})
+
+	resolved, problems := Resolve(spec)
+
+	require.Empty(t, problems, "Resolve problems")
+	assert.Equal(t, []string{"internal", "enterprise", "vip", perUserName, "anonymous"},
+		ruleNames(resolved.Spec.Limits[0]), "rules of the resolved block")
+	vip := resolvedRule(t, resolved, "vip")
+	burst := int32(20)
+	assert.Equal(t, []string{"sub"}, vip.Counters, "Counters of rule vip")
+	assert.Equal(t, []v1.Rate{
+		{Requests: 100, PeriodSeconds: 60, Burst: &burst, Algorithm: v1.AlgorithmGCRA},
+		{Requests: 20000, PeriodSeconds: 86400, Algorithm: v1.AlgorithmFixedWindow},
+	}, vip.Rates, "Rates of rule vip")
+	assert.Equal(t, "standard-client", resolved.Presets[RuleRef{Block: "orders", Rule: "vip"}],
+		"Resolved.Presets of orders/vip")
+}
+
+func TestResolve_anOverrideAnInsertionAndADropApplyInOneBlock(t *testing.T) {
+	spec := cascadeSpec(v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
+		{Name: "enterprise", Rates: []v1.Rate{minuteRate(2000)}},
+		{Name: "partner", Before: perUserName, Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(500)}},
+		{Name: "internal", Dropped: true},
+	}})
+
+	resolved, problems := Resolve(spec)
+
+	require.Empty(t, problems, "Resolve problems")
+	assert.Equal(t, []string{"enterprise", "partner", perUserName, "anonymous"}, ruleNames(resolved.Spec.Limits[0]),
+		"rules of the resolved block")
+	assert.Equal(t, []v1.Rate{{Requests: 2000, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}},
+		resolvedRule(t, resolved, "enterprise").Rates, "Rates of rule enterprise, written")
 }
 
 // A dropped rule carries nothing beside its name: every other field of
@@ -236,10 +275,9 @@ func TestResolve_aDroppedRuleCarriesNothingBesideItsName(t *testing.T) {
 			resolved, problems := Resolve(cascadeSpec(
 				v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{rule}}))
 
-			assert.Nil(t, resolved)
-			require.NotEmpty(t, problems, "dropped beside %s was accepted", field.Name)
-			assert.Equal(t, v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec,
-				Message: "a dropped rule carries nothing beside name"}, problems[0])
+			assert.Nil(t, resolved, "Resolved")
+			assert.Equal(t, []v1.RuleProblem{{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec}},
+				withoutMessage(problems), "Resolve problems with dropped beside %s", field.Name)
 		})
 	}
 }
@@ -268,35 +306,41 @@ func TestResolve_threeLayersApplyToOneRuleInOrder(t *testing.T) {
 
 	resolved, problems := Resolve(spec)
 
-	require.Empty(t, problems)
-	perUser := resolved.Spec.Limits[0].Rules[0]
-	assert.Equal(t, base.Matches, perUser.Matches, "the rule preset's layer, written nowhere else")
-	assert.Equal(t, []string{}, perUser.Counters, "the block preset rule's layer over the rule preset's")
-	assert.Equal(t, v1.RuleBehaviorEnforce, perUser.Behavior, "the point of use's layer over the block preset rule's")
+	require.Empty(t, problems, "Resolve problems")
+	perUser := resolvedRule(t, resolved, perUserName)
+	assert.Equal(t, base.Matches, perUser.Matches, "Matches of rule per-user, written in the rule preset alone")
+	assert.Equal(t, []string{}, perUser.Counters,
+		"Counters of rule per-user, written in the rule preset and in the rule of the block preset")
+	assert.Equal(t, v1.RuleBehaviorEnforce, perUser.Behavior,
+		"Behavior of rule per-user, written in the rule of the block preset and at the point of use")
 	assert.Equal(t, []v1.Rate{{Requests: 300, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}}, perUser.Rates,
-		"the point of use's layer over the rule preset's")
-	assert.Equal(t, "base", resolved.Presets[RuleRef{Block: "orders", Rule: "per-user"}])
+		"Rates of rule per-user, written in the rule preset and at the point of use")
+	assert.Equal(t, "base", resolved.Presets[RuleRef{Block: "orders", Rule: "per-user"}],
+		"Resolved.Presets of orders/per-user")
 }
 
-// Every reference that does not resolve and every shape a block may not
-// carry is reported at the block and the rule of the point of use.
-func TestResolve_reportsTheReferencesAndShapesOfABlockAtThePointOfUse(t *testing.T) {
+// A reference of a block that does not resolve is reported at the block and
+// the rule of the point of use, and the message names the reference.
+func TestResolve_reportsAnUnresolvedReferenceOfABlockAtThePointOfUse(t *testing.T) {
 	cases := []struct {
 		name  string
 		block v1.LimitBlock
 		want  v1.RuleProblem
+		names string
 	}{
 		{
 			name:  "a block preset nothing declares",
 			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascad"},
-			want: v1.RuleProblem{Block: "orders", Reason: v1.ProblemUnresolvedPresetReference,
-				Message: `preset "plan-cascad" is not declared under spec.presets.blocks`},
+			want:  v1.RuleProblem{Block: "orders", Reason: v1.ProblemUnresolvedPresetReference},
+			names: `"plan-cascad"`,
 		},
 		{
-			name:  "dropped on a rule the preset does not hold",
-			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{{Name: "ghost", Dropped: true}}},
-			want: v1.RuleProblem{Block: "orders", Rule: "ghost", Reason: v1.ProblemUnresolvedPresetReference,
-				Message: `dropped on rule "ghost", which block preset "plan-cascade" does not hold`},
+			name: "dropped on a rule the preset does not hold",
+			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
+				{Name: "ghost", Dropped: true},
+			}},
+			want:  v1.RuleProblem{Block: "orders", Rule: "ghost", Reason: v1.ProblemUnresolvedPresetReference},
+			names: `"ghost"`,
 		},
 		{
 			name: "before of a rule neither in the preset nor written earlier",
@@ -304,112 +348,156 @@ func TestResolve_reportsTheReferencesAndShapesOfABlockAtThePointOfUse(t *testing
 				{Name: "partner", Before: "vip", Rates: []v1.Rate{minuteRate(1)}},
 				{Name: "vip", Rates: []v1.Rate{minuteRate(1)}},
 			}},
-			want: v1.RuleProblem{Block: "orders", Rule: "partner", Reason: v1.ProblemUnresolvedPresetReference,
-				Message: `before names rule "vip", which is neither in block preset "plan-cascade" nor written earlier in the list`},
+			want:  v1.RuleProblem{Block: "orders", Rule: "partner", Reason: v1.ProblemUnresolvedPresetReference},
+			names: `"vip"`,
 		},
 		{
-			name:  "before in a block that takes no preset",
-			block: v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "x", Before: "y", Rates: []v1.Rate{minuteRate(1)}}}},
-			want: v1.RuleProblem{Block: "api", Rule: "x", Reason: v1.ProblemInvalidSpec,
-				Message: "before and dropped apply in a block that takes a block preset; this block takes none"},
-		},
-		{
-			name:  "dropped in a block that takes no preset",
-			block: v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "x", Dropped: true}}},
-			want: v1.RuleProblem{Block: "api", Rule: "x", Reason: v1.ProblemInvalidSpec,
-				Message: "before and dropped apply in a block that takes a block preset; this block takes none"},
-		},
-		{
-			name: "dropped beside a field",
+			name: "a new rule naming a rule preset nothing declares",
 			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
-				{Name: "anonymous", Dropped: true, Rates: []v1.Rate{minuteRate(1)}},
+				{Name: "vip", Preset: "standard-clinet", Before: perUserName},
 			}},
-			want: v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec,
-				Message: "a dropped rule carries nothing beside name"},
-		},
-		{
-			name: "before on a rule the preset holds",
-			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
-				{Name: "anonymous", Before: "internal"},
-			}},
-			want: v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec,
-				Message: `before on rule "anonymous", which block preset "plan-cascade" holds; an overridden rule keeps the preset's position`},
-		},
-		{
-			name: "preset on a rule that overrides by name",
-			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
-				{Name: "anonymous", Preset: "standard-client"},
-			}},
-			want: v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec,
-				Message: `preset on rule "anonymous", which overrides a rule of block preset "plan-cascade" by name`},
+			want:  v1.RuleProblem{Block: "orders", Rule: "vip", Reason: v1.ProblemUnresolvedPresetReference},
+			names: `"standard-clinet"`,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			resolved, problems := Resolve(cascadeSpec(tc.block))
 
-			assert.Nil(t, resolved)
-			require.Len(t, problems, 1)
-			assert.Equal(t, tc.want, problems[0])
+			assert.Nil(t, resolved, "Resolved")
+			require.Equal(t, []v1.RuleProblem{tc.want}, withoutMessage(problems), "Resolve problems")
+			assert.Contains(t, problems[0].Message, tc.names, "Message of the problem")
 		})
 	}
 }
 
-// A rule preset that a rule of the block preset names is a reference of the
-// body, checked through the blocks that take it and reported at each of
-// them, with the block's preset named.
-func TestResolve_aRulePresetABlockPresetNamesIsReportedAtTheBlockThatTakesIt(t *testing.T) {
-	spec := cascadeSpec(v1.LimitBlock{Name: "orders", Preset: "plan-cascade"},
-		v1.LimitBlock{Name: "catalog", Preset: "plan-cascade"})
-	spec.Presets.Blocks[0].Rules[0].Preset = "internal-bypas"
+// A rule shape that a block may not carry is InvalidSpec at the block and the
+// rule of the point of use.
+func TestResolve_rejectsARuleShapeABlockMayNotCarryAtThePointOfUse(t *testing.T) {
+	cases := []struct {
+		name  string
+		block v1.LimitBlock
+		want  v1.RuleProblem
+	}{
+		{
+			name: "before in a block that takes no preset",
+			block: v1.LimitBlock{Name: "api", Rules: []v1.Rule{
+				{Name: "x", Before: "y", Rates: []v1.Rate{minuteRate(1)}},
+			}},
+			want: v1.RuleProblem{Block: "api", Rule: "x", Reason: v1.ProblemInvalidSpec},
+		},
+		{
+			name:  "dropped in a block that takes no preset",
+			block: v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "x", Dropped: true}}},
+			want:  v1.RuleProblem{Block: "api", Rule: "x", Reason: v1.ProblemInvalidSpec},
+		},
+		{
+			name: "dropped beside a field",
+			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
+				{Name: "anonymous", Dropped: true, Rates: []v1.Rate{minuteRate(1)}},
+			}},
+			want: v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec},
+		},
+		{
+			name: "before on a rule the preset holds",
+			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
+				{Name: "anonymous", Before: "internal"},
+			}},
+			want: v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec},
+		},
+		{
+			name: "preset on a rule that overrides by name",
+			block: v1.LimitBlock{Name: "orders", Preset: "plan-cascade", Rules: []v1.Rule{
+				{Name: "anonymous", Preset: "standard-client"},
+			}},
+			want: v1.RuleProblem{Block: "orders", Rule: "anonymous", Reason: v1.ProblemInvalidSpec},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved, problems := Resolve(cascadeSpec(tc.block))
+
+			assert.Nil(t, resolved, "Resolved")
+			assert.Equal(t, []v1.RuleProblem{tc.want}, withoutMessage(problems), "Resolve problems")
+		})
+	}
+}
+
+// A block whose preset does not resolve still has the rule presets of its own
+// rules checked, so one generation reports every reference that does not
+// resolve; its rule that names a declared rule preset is reported nowhere.
+func TestResolve_aBlockWhosePresetDoesNotResolveStillHasItsRulesChecked(t *testing.T) {
+	spec := cascadeSpec(v1.LimitBlock{Name: "orders", Preset: "plan-cascad", Rules: []v1.Rule{
+		{Name: "vip", Preset: "standard-clinet"},
+		{Name: "regular", Preset: "standard-client"},
+	}})
 
 	resolved, problems := Resolve(spec)
 
-	assert.Nil(t, resolved)
+	assert.Nil(t, resolved, "Resolved")
 	assert.Equal(t, []v1.RuleProblem{
-		{Block: "orders", Rule: "internal", Reason: v1.ProblemUnresolvedPresetReference,
-			Message: `preset "internal-bypas" is not declared under spec.presets.rules; the block takes preset "plan-cascade"`},
-		{Block: "catalog", Rule: "internal", Reason: v1.ProblemUnresolvedPresetReference,
-			Message: `preset "internal-bypas" is not declared under spec.presets.rules; the block takes preset "plan-cascade"`},
-	}, problems)
+		{Block: "orders", Reason: v1.ProblemUnresolvedPresetReference},
+		{Block: "orders", Rule: "vip", Reason: v1.ProblemUnresolvedPresetReference},
+	}, withoutMessage(problems), "Resolve problems")
 }
 
-func TestResolve_aRulePresetOnlyAnUnusedBlockPresetNamesIsSilent(t *testing.T) {
-	spec := cascadeSpec(v1.LimitBlock{Name: "api", Rules: []v1.Rule{simpleRule("total")}})
+// A rule preset that a rule of a block preset names is a reference of the
+// body, checked through the blocks that take the rule: reported at each block
+// that takes the preset, with both presets named, and at no block that drops
+// the rule; a block preset that no block takes has its rule presets checked
+// nowhere.
+func TestResolve_aRulePresetABlockPresetNamesIsCheckedThroughTheBlocksThatTakeTheRule(t *testing.T) {
+	spec := cascadeSpec(
+		v1.LimitBlock{Name: "orders", Preset: "plan-cascade"},
+		v1.LimitBlock{Name: "catalog", Preset: "plan-cascade"},
+		v1.LimitBlock{Name: "exports", Preset: "plan-cascade", Rules: []v1.Rule{{Name: "internal", Dropped: true}}})
 	spec.Presets.Blocks[0].Rules[0].Preset = "internal-bypas"
+	spec.Presets.Blocks = append(spec.Presets.Blocks,
+		v1.BlockPreset{Name: "unused", Rules: []v1.Rule{{Name: "internal", Preset: "internal-bypas"}}})
 
-	_, problems := Resolve(spec)
+	resolved, problems := Resolve(spec)
 
-	assert.Empty(t, problems, "the content of a preset no block takes is not checked")
+	assert.Nil(t, resolved, "Resolved")
+	require.Equal(t, []v1.RuleProblem{
+		{Block: "orders", Rule: "internal", Reason: v1.ProblemUnresolvedPresetReference},
+		{Block: "catalog", Rule: "internal", Reason: v1.ProblemUnresolvedPresetReference},
+	}, withoutMessage(problems), "Resolve problems")
+	for _, problem := range problems {
+		assert.Contains(t, problem.Message, `"internal-bypas"`, "Message of the problem at %s/internal", problem.Block)
+		assert.Contains(t, problem.Message, `"plan-cascade"`, "Message of the problem at %s/internal", problem.Block)
+	}
 }
 
-// The shape of a block preset is checked whether a block takes it or not.
+// The shape of a block preset is checked whether a block takes it or not. A
+// preset has no block and no rule to address a problem to, so the message is
+// what locates the defect: it names the preset and the rule, or the kind of
+// preset where the preset has no name.
 func TestResolve_rejectsTheShapeOfABlockPresetNoBlockTakes(t *testing.T) {
 	withRules := func(rules ...v1.Rule) v1.BlockPreset { return v1.BlockPreset{Name: "cascade", Rules: rules} }
 	cases := []struct {
 		name    string
 		presets []v1.BlockPreset
-		message string
+		locates []string
 	}{
 		{
 			name:    "a rule of a block preset with before",
 			presets: []v1.BlockPreset{withRules(v1.Rule{Name: "a", Before: "b", Rates: []v1.Rate{minuteRate(1)}})},
-			message: `rule "a" of block preset "cascade" carries before or dropped, which a block that takes the preset carries`,
+			locates: []string{`"a"`, `"cascade"`},
 		},
 		{
 			name:    "a rule of a block preset with dropped",
 			presets: []v1.BlockPreset{withRules(v1.Rule{Name: "a", Dropped: true})},
-			message: `rule "a" of block preset "cascade" carries before or dropped, which a block that takes the preset carries`,
+			locates: []string{`"a"`, `"cascade"`},
 		},
 		{
 			name:    "a block preset declared twice",
 			presets: []v1.BlockPreset{planCascade(), planCascade()},
-			message: `block preset "plan-cascade" is declared twice`,
+			locates: []string{`"plan-cascade"`},
 		},
 		{
 			name:    "a block preset without a name",
 			presets: []v1.BlockPreset{{Rules: []v1.Rule{simpleRule("a")}}},
-			message: "a block preset without a name",
+			locates: []string{"block preset"},
 		},
 	}
 	for _, tc := range cases {
@@ -422,9 +510,12 @@ func TestResolve_rejectsTheShapeOfABlockPresetNoBlockTakes(t *testing.T) {
 
 			resolved, problems := Resolve(spec)
 
-			assert.Nil(t, resolved)
-			require.Len(t, problems, 1)
-			assert.Equal(t, v1.RuleProblem{Reason: v1.ProblemInvalidSpec, Message: tc.message}, problems[0])
+			assert.Nil(t, resolved, "Resolved")
+			require.Equal(t, []v1.RuleProblem{{Reason: v1.ProblemInvalidSpec}}, withoutMessage(problems),
+				"Resolve problems")
+			for _, part := range tc.locates {
+				assert.Contains(t, problems[0].Message, part, "Message of the problem")
+			}
 		})
 	}
 }
@@ -434,15 +525,15 @@ func TestResolve_rejectsTheShapeOfABlockPresetNoBlockTakes(t *testing.T) {
 func TestCompile_aBlockWithNoRulesAfterResolutionIsInvalid(t *testing.T) {
 	spec := &v1.RateLimitPolicySpec{
 		Domain:  testDomain,
-		Presets: &v1.Presets{Blocks: []v1.BlockPreset{{Name: "one", Rules: []v1.Rule{simpleRule("only")}}}},
-		Limits:  []v1.LimitBlock{{Name: "api", Preset: "one", Rules: []v1.Rule{{Name: "only", Dropped: true}}}},
+		Presets: &v1.Presets{Blocks: []v1.BlockPreset{{Name: "one-rule", Rules: []v1.Rule{simpleRule("only")}}}},
+		Limits:  []v1.LimitBlock{{Name: "api", Preset: "one-rule", Rules: []v1.Rule{{Name: "only", Dropped: true}}}},
 	}
 
 	outcome := compileOf(objectWithSpec(spec)).Policies[key()]
 
-	require.Len(t, outcome.Problems, 1)
-	assert.Equal(t, v1.RuleProblem{Block: "api", Reason: v1.ProblemInvalidSpec,
-		Message: `a block without rules; the block takes preset "one"`}, outcome.Problems[0])
+	require.Equal(t, []v1.RuleProblem{{Block: "api", Reason: v1.ProblemInvalidSpec}},
+		withoutMessage(outcome.Problems), "Outcome.Problems")
+	assert.Contains(t, outcome.Problems[0].Message, `"one-rule"`, "Message of the problem")
 }
 
 // TestCompile_aPolicyWithBlockPresetsCompilesLikeThePolicyWrittenOut is the
@@ -450,7 +541,8 @@ func TestCompile_aBlockWithNoRulesAfterResolutionIsInvalid(t *testing.T) {
 // rule overridden by name, and with a rule inserted and one dropped, against
 // the same three blocks written out in full.
 func TestCompile_aPolicyWithBlockPresetsCompilesLikeThePolicyWrittenOut(t *testing.T) {
-	partner := v1.Rule{Name: "partner", Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorInGroup, Value: "partners"}},
+	partner := v1.Rule{Name: "partner",
+		Matches:  []v1.Predicate{{Key: "sub", Operator: v1.OperatorInGroup, Value: "partners"}},
 		Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(500)}}
 	partnerBefore := partner
 	partnerBefore.Before = "per-user"
@@ -487,13 +579,13 @@ func TestCompile_aPolicyWithBlockPresetsCompilesLikeThePolicyWrittenOut(t *testi
 	fromPresets := compileOf(objectWithSpec(withPresets))
 	fromWrittenOut := compileOf(objectWithSpec(writtenOut))
 
-	require.NoError(t, fromWrittenOut.Policies[key()].Err)
-	require.NoError(t, fromPresets.Policies[key()].Err)
+	require.NoError(t, fromWrittenOut.Policies[key()].Err, "Outcome.Err of the policy written out")
+	require.NoError(t, fromPresets.Policies[key()].Err, "Outcome.Err of the policy with presets")
 	assert.Equal(t, fromWrittenOut.Snapshots[testDomain], fromPresets.Snapshots[testDomain],
-		"the snapshot, its counter key prefixes included, has to be the one the written-out policy builds")
-	assert.Equal(t, fromWrittenOut.Policies[key()].Rules, fromPresets.Policies[key()].Rules)
+		"Snapshots[%q], counter key prefixes included", testDomain)
+	assert.Equal(t, fromWrittenOut.Policies[key()].Rules, fromPresets.Policies[key()].Rules, "Outcome.Rules")
 	assert.Equal(t, fromWrittenOut.State[testDomain].GoodSpec, fromPresets.State[testDomain].GoodSpec,
-		"last-good holds the resolved spec, which is the written-out one")
+		"State[%q].GoodSpec, the last-good spec", testDomain)
 }
 
 // The decision budget counts resolved blocks, so a block preset is charged
@@ -518,9 +610,9 @@ func TestCompile_theDecisionBudgetChargesABlockPresetOncePerBlock(t *testing.T) 
 	six := compileOf(objectWithSpec(stamped(6))).Policies[key()]
 	seven := compileOf(objectWithSpec(stamped(7))).Policies[key()]
 
-	require.NoError(t, six.Err)
-	require.Error(t, seven.Err)
-	assert.Contains(t, seven.Err.Error(), v1.ProblemDomainBudgetExceeded)
+	assert.NoError(t, six.Err, "Outcome.Err with the preset taken by six blocks")
+	assert.ErrorContains(t, seven.Err, v1.ProblemDomainBudgetExceeded,
+		"Outcome.Err with the preset taken by seven blocks")
 }
 
 // TestResolve_estimatesABlockPresetOncePerBlockLessTheRulesDropped pins the
@@ -547,7 +639,8 @@ func TestResolve_estimatesABlockPresetOncePerBlockLessTheRulesDropped(t *testing
 	writtenWithDefaults := *spec.DeepCopy()
 	writtenWithDefaults.Limits = []v1.LimitBlock{
 		{Name: "x", Preset: "body", Mode: v1.BlockModeAll},
-		{Name: "y", Preset: "body", Mode: v1.BlockModeAll, Rules: []v1.Rule{{Name: "a", Dropped: true, Behavior: v1.RuleBehaviorEnforce}}},
+		{Name: "y", Preset: "body", Mode: v1.BlockModeAll,
+			Rules: []v1.Rule{{Name: "a", Dropped: true, Behavior: v1.RuleBehaviorEnforce}}},
 	}
 	bodyWithDefaults := v1.LimitBlock{Name: "body", Mode: v1.BlockModeAll, Rules: []v1.Rule{
 		{Name: "a", Counters: []string{"sub"}, Behavior: v1.RuleBehaviorEnforce,
@@ -555,7 +648,8 @@ func TestResolve_estimatesABlockPresetOncePerBlockLessTheRulesDropped(t *testing
 		{Name: "b", Preset: "standard-client", Behavior: v1.RuleBehaviorEnforce},
 	}}
 	burst := int32(20)
-	standardWithDefaults := v1.Rule{Name: "standard-client", Counters: []string{"sub"}, Behavior: v1.RuleBehaviorEnforce,
+	standardWithDefaults := v1.Rule{
+		Name: "standard-client", Counters: []string{"sub"}, Behavior: v1.RuleBehaviorEnforce,
 		Rates: []v1.Rate{
 			{Requests: 100, PeriodSeconds: 60, Burst: &burst, Algorithm: v1.AlgorithmGCRA},
 			{Requests: 20000, PeriodSeconds: 86400, Algorithm: v1.AlgorithmFixedWindow},
@@ -563,32 +657,37 @@ func TestResolve_estimatesABlockPresetOncePerBlockLessTheRulesDropped(t *testing
 
 	resolved, problems := Resolve(spec)
 
-	require.Empty(t, problems)
+	require.Empty(t, problems, "Resolve problems")
 	want := serialized(t, writtenWithDefaults) + 2*serialized(t, bodyWithDefaults) +
 		2*serialized(t, standardWithDefaults) - serialized(t, bodyRules[0])
-	assert.Equal(t, want, resolved.EstimatedSize)
+	assert.Equal(t, want, resolved.EstimatedSize, "Resolved.EstimatedSize")
 }
 
 func TestResolve_theEstimateIsAtLeastTheResolvedSizeWithBlockPresets(t *testing.T) {
-	partner := v1.Rule{Name: "partner", Before: "per-user", Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(500)}}
+	partner := v1.Rule{Name: "partner", Before: "per-user", Counters: []string{"sub"},
+		Rates: []v1.Rate{minuteRate(500)}}
 	specs := map[string]*v1.RateLimitPolicySpec{
 		"a block preset taken as is by three blocks": cascadeSpec(
 			v1.LimitBlock{Name: "a", Preset: "plan-cascade"}, v1.LimitBlock{Name: "b", Preset: "plan-cascade"},
 			v1.LimitBlock{Name: "c", Preset: "plan-cascade"}),
 		"a block preset with an override, an insertion, and a dropped rule": cascadeSpec(
 			v1.LimitBlock{Name: "a", Preset: "plan-cascade", Rules: []v1.Rule{
-				{Name: "enterprise", Rates: []v1.Rate{minuteRate(2000)}}, partner, {Name: "anonymous", Dropped: true}}}),
+				{Name: "enterprise", Rates: []v1.Rate{minuteRate(2000)}}, partner,
+				{Name: "anonymous", Dropped: true},
+			}}),
 		"a block preset every rule of which is dropped but one": cascadeSpec(
 			v1.LimitBlock{Name: "a", Preset: "plan-cascade", Rules: []v1.Rule{
-				{Name: "internal", Dropped: true}, {Name: "enterprise", Dropped: true}, {Name: "anonymous", Dropped: true}}}),
+				{Name: "internal", Dropped: true}, {Name: "enterprise", Dropped: true},
+				{Name: "anonymous", Dropped: true},
+			}}),
 	}
 	for name, spec := range specs {
 		t.Run(name, func(t *testing.T) {
 			resolved, problems := Resolve(spec)
 
-			require.Empty(t, problems)
+			require.Empty(t, problems, "Resolve problems")
 			assert.GreaterOrEqual(t, resolved.EstimatedSize, serialized(t, resolved.Spec),
-				"the estimate fell below the serialized size of the resolved spec")
+				"Resolved.EstimatedSize against the serialized size of Resolved.Spec")
 		})
 	}
 }
@@ -601,11 +700,13 @@ func TestCompile_theBlocksPresetIsNamedAtTheProblemsOfTheBlock(t *testing.T) {
 
 	outcome := compileOf(objectWithSpec(spec)).Policies[key()]
 
-	require.Len(t, outcome.Problems, 2, "%v", outcome.Problems)
-	assert.Equal(t, v1.RuleProblem{Block: "orders", Rule: "enterprise", Reason: v1.ProblemUnresolvedKeyReference,
-		Message: `key "plan" is not in the effective set of the domain; the block takes preset "plan-cascade"`},
-		outcome.Problems[0])
-	assert.Equal(t, v1.RuleProblem{Block: "orders", Rule: "per-user", Reason: v1.ProblemUnresolvedKeyReference,
-		Message: `counter axis "ghost" is not in the effective set of the domain; the rule takes preset "standard-client"; the block takes preset "plan-cascade"`},
-		outcome.Problems[1])
+	require.Equal(t, []v1.RuleProblem{
+		{Block: "orders", Rule: "enterprise", Reason: v1.ProblemUnresolvedKeyReference},
+		{Block: "orders", Rule: perUserName, Reason: v1.ProblemUnresolvedKeyReference},
+	}, withoutMessage(outcome.Problems), "Outcome.Problems")
+	enterprise, perUser := outcome.Problems[0].Message, outcome.Problems[1].Message
+	assert.Contains(t, enterprise, `"plan-cascade"`, "Message of the problem at orders/enterprise")
+	assert.NotContains(t, enterprise, `"standard-client"`, "Message of the problem at orders/enterprise")
+	assert.Contains(t, perUser, `"plan-cascade"`, "Message of the problem at orders/per-user")
+	assert.Contains(t, perUser, `"standard-client"`, "Message of the problem at orders/per-user")
 }

@@ -95,35 +95,50 @@ func policyWithPresets() *ratelimitv1.RateLimitPolicy {
 	return withPresets
 }
 
-// strayPreset is the preset name the specs on the shape of a preset body
-// write into a field the body cannot carry.
-const strayPreset = "other"
-
-// presetBody is the first body under spec.presets.<list> of an unstructured
-// spec: the map a field the typed body cannot carry is written into.
-func presetBody(spec map[string]any, list string) map[string]any {
-	return spec["presets"].(map[string]any)[list].([]any)[0].(map[string]any)
+// policyNamingPresets is a policy that writes name into every field naming a
+// preset or a rule a preset holds: the name of a rule preset and of a block
+// preset, the preset a block and a rule take, and the rule a before names.
+func policyNamingPresets(name string) *ratelimitv1.RateLimitPolicy {
+	named := policyWith("gateway.public", ratelimitv1.LimitBlock{Name: "orders", Preset: name,
+		Rules: []ratelimitv1.Rule{{Name: "partner", Preset: name, Before: name}}})
+	named.Spec.Presets = &ratelimitv1.Presets{
+		Rules:  []ratelimitv1.RulePreset{{Name: name, Counters: []string{"sub"}}},
+		Blocks: []ratelimitv1.BlockPreset{{Name: name, Rules: []ratelimitv1.Rule{ruleWith("total")}}},
+	}
+	return named
 }
 
-// unstructuredWith is a policy as unstructured, with its spec edited in
-// place: the way to write a field the typed object cannot carry.
-func unstructuredWith(typed *ratelimitv1.RateLimitPolicy, edit func(spec map[string]any)) *unstructured.Unstructured {
+// asUnstructured is a typed policy as an unstructured object: the form in which
+// a spec writes what the typed object cannot carry, such as a field the schema
+// does not define or no spec at all.
+func asUnstructured(typed *ratelimitv1.RateLimitPolicy) *unstructured.Unstructured {
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typed)
 	Expect(err).NotTo(HaveOccurred())
 	object := &unstructured.Unstructured{Object: raw}
 	object.SetAPIVersion(ratelimitv1.GroupVersion.String())
 	object.SetKind("RateLimitPolicy")
-	edit(object.Object["spec"].(map[string]any))
 	return object
 }
 
+// presetBody is the first body under spec.presets.<list> of an unstructured
+// policy: the map a field the typed body cannot carry is written into.
+func presetBody(object *unstructured.Unstructured, list string) map[string]any {
+	presets := object.Object["spec"].(map[string]any)["presets"].(map[string]any)
+	return presets[list].([]any)[0].(map[string]any)
+}
+
 // rejectedAt matches an error of the API server that refuses an object for a
-// cause of causeType at field.
-func rejectedAt(causeType metav1.CauseType, field string) gtypes.GomegaMatcher {
-	return WithTransform(statusCauses, ContainElement(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-		"Type":  Equal(causeType),
-		"Field": Equal(field),
-	})))
+// cause of causeType at each of fields. The API server reports every field
+// the schema refuses in one answer, so one create checks several fields.
+func rejectedAt(causeType metav1.CauseType, fields ...string) gtypes.GomegaMatcher {
+	causes := make([]any, 0, len(fields))
+	for _, field := range fields {
+		causes = append(causes, gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"Type":  Equal(causeType),
+			"Field": Equal(field),
+		}))
+	}
+	return WithTransform(statusCauses, ContainElements(causes...))
 }
 
 // statusCauses returns the causes an error of the API server carries, and
@@ -160,11 +175,24 @@ var _ = Describe("RateLimitPolicy", func() {
 		}
 	})
 
-	create := func(policy *ratelimitv1.RateLimitPolicy) error {
+	create := func(policy client.Object, opts ...client.CreateOption) error {
 		DeferCleanup(func() {
 			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, policy))).To(Succeed())
 		})
-		return k8sClient.Create(ctx, policy)
+		return k8sClient.Create(ctx, policy, opts...)
+	}
+
+	// readBack creates policy and returns the spec the API server stores for
+	// it. A structural schema prunes a field it does not define and the create
+	// still succeeds, so a field is stored only where the read shows it. The
+	// create writes the answer of the API server into the object it sends, so
+	// it is sent a copy, and policy stays what the author wrote.
+	readBack := func(policy *ratelimitv1.RateLimitPolicy) ratelimitv1.RateLimitPolicySpec {
+		GinkgoHelper()
+		Expect(create(policy.DeepCopy())).To(Succeed())
+		stored := &ratelimitv1.RateLimitPolicy{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
+		return stored.Spec
 	}
 
 	Context("the singleton rule", func() {
@@ -191,13 +219,10 @@ var _ = Describe("RateLimitPolicy", func() {
 		It("requires a spec", func() {
 			// A typed client sends a spec even when it is empty, so the object
 			// without one is built as unstructured.
-			policy := &unstructured.Unstructured{}
-			policy.SetAPIVersion(ratelimitv1.GroupVersion.String())
-			policy.SetKind("RateLimitPolicy")
-			policy.SetNamespace(envtestNamespace)
-			policy.SetName("gateway.public")
+			policy := asUnstructured(policyWith("gateway.public", blockWith("api", ruleWith("total"))))
+			unstructured.RemoveNestedField(policy.Object, "spec")
 
-			Expect(k8sClient.Create(ctx, policy)).To(MatchError(ContainSubstring("spec: Required value")))
+			Expect(create(policy)).To(rejectedAt(metav1.CauseTypeFieldValueRequired, "spec"))
 		})
 
 		It("requires a domain", func() {
@@ -356,76 +381,147 @@ var _ = Describe("RateLimitPolicy", func() {
 		// its behavior from a preset. The compiler reads the absent value as
 		// All, Enforce, and GCRA.
 		It("stores mode, behavior, and algorithm only where the author wrote them", func() {
-			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
-			Expect(create(policy)).To(Succeed())
+			written := blockWith("written", ruleWith("total",
+				ratelimitv1.Rate{Requests: 100, PeriodSeconds: 60, Algorithm: ratelimitv1.AlgorithmFixedWindow}))
+			written.Mode = ratelimitv1.BlockModeFirstMatch
+			written.Rules[0].Behavior = ratelimitv1.RuleBehaviorShadow
 
-			stored := &ratelimitv1.RateLimitPolicy{}
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
+			stored := readBack(policyWith("gateway.public", blockWith("api", ruleWith("total")), written))
 
-			type written struct {
+			type settings struct {
 				Mode      ratelimitv1.BlockMode
 				Behavior  ratelimitv1.RuleBehavior
 				Algorithm ratelimitv1.Algorithm
 			}
-			block := stored.Spec.Limits[0]
-			Expect(written{block.Mode, block.Rules[0].Behavior, block.Rules[0].Rates[0].Algorithm}).
-				To(Equal(written{}), "the fields the author left out")
+			settingsOf := func(block ratelimitv1.LimitBlock) settings {
+				return settings{block.Mode, block.Rules[0].Behavior, block.Rules[0].Rates[0].Algorithm}
+			}
+			blockName := func(element any) string { return element.(ratelimitv1.LimitBlock).Name }
+			Expect(stored.Limits).To(gstruct.MatchAllElements(blockName, gstruct.Elements{
+				"api": WithTransform(settingsOf, Equal(settings{})),
+				"written": WithTransform(settingsOf, Equal(settings{
+					ratelimitv1.BlockModeFirstMatch, ratelimitv1.RuleBehaviorShadow, ratelimitv1.AlgorithmFixedWindow,
+				})),
+			}), "the blocks read back")
 		})
 
 		It("stores rule presets and a rule that takes one", func() {
-			// Read back, because a structural schema prunes a field it does
-			// not define, and the create would succeed without a word.
-			policy := policyWith("gateway.public", blockWith("api",
+			written := policyWith("gateway.public", blockWith("api",
 				ratelimitv1.Rule{Name: "per-user", Preset: "standard-client"}))
-			policy.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.RulePreset{{
+			written.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.RulePreset{{
 				Name:     "standard-client",
 				Counters: []string{"sub"},
 				Rates:    []ratelimitv1.Rate{{Requests: 100, PeriodSeconds: 60}},
 			}}}
-			Expect(create(policy)).To(Succeed())
 
-			stored := &ratelimitv1.RateLimitPolicy{}
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
-
-			Expect(stored.Spec.Presets).To(Equal(policy.Spec.Presets))
-			Expect(stored.Spec.Limits[0].Rules[0].Preset).To(Equal("standard-client"))
+			Expect(readBack(written)).To(Equal(written.Spec), "the spec read back")
 		})
 
 		It("stores block presets and the blocks that take them", func() {
-			policy := policyWith("gateway.public",
+			// Block orders takes the preset whole and carries no rules; block
+			// exports inserts a rule and drops one.
+			written := policyWith("gateway.public",
 				ratelimitv1.LimitBlock{Name: "orders", Preset: "cascade"},
 				ratelimitv1.LimitBlock{Name: "exports", Preset: "cascade", Rules: []ratelimitv1.Rule{
 					{Name: "partner", Before: "total", Rates: []ratelimitv1.Rate{{Requests: 5, PeriodSeconds: 60}}},
 					{Name: "total", Dropped: true},
 				}})
-			policy.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.BlockPreset{{
+			written.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.BlockPreset{{
 				Name:  "cascade",
 				Mode:  ratelimitv1.BlockModeFirstMatch,
 				Rules: []ratelimitv1.Rule{ruleWith("total")},
 			}}}
-			Expect(create(policy)).To(Succeed())
 
-			stored := &ratelimitv1.RateLimitPolicy{}
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
-
-			Expect(stored.Spec.Presets).To(Equal(policy.Spec.Presets))
-			Expect(stored.Spec.Limits[0].Preset).To(Equal("cascade"))
-			Expect(stored.Spec.Limits[0].Rules).To(BeEmpty(), "a block that takes a preset may carry no rules")
-			Expect(stored.Spec.Limits[1].Rules).To(Equal(policy.Spec.Limits[1].Rules))
+			Expect(readBack(written)).To(Equal(written.Spec), "the spec read back")
 		})
 
-		It("rejects a preset reference outside the name pattern", func() {
+		// A list written empty is a value: counters: [] over the axes of a
+		// preset is one shared bucket, where a list left out is taken from the
+		// preset. The API server has to store the two apart.
+		It("stores a list written empty apart from one left out", func() {
+			written := policyWith("gateway.public", blockWith("api",
+				ratelimitv1.Rule{Name: "shared", Preset: "standard-client", Matches: []ratelimitv1.Predicate{},
+					Counters: []string{}, Rates: []ratelimitv1.Rate{}, ReplacedRules: []string{}},
+				ratelimitv1.Rule{Name: "per-user", Preset: "standard-client"}))
+			written.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.RulePreset{{
+				Name:     "standard-client",
+				Matches:  []ratelimitv1.Predicate{},
+				Counters: []string{"sub"},
+				Rates:    []ratelimitv1.Rate{{Requests: 100, PeriodSeconds: 60}},
+			}}}
+
+			Expect(readBack(written)).To(Equal(written.Spec), "the spec read back")
+		})
+
+		It("rejects a preset a rule takes outside the name pattern", func() {
 			policy := policyWith("gateway.public", blockWith("api",
 				ratelimitv1.Rule{Name: "per-user", Preset: "Standard Client"}))
 
-			Expect(create(policy)).To(MatchError(ContainSubstring("spec.limits[0].rules[0].preset")))
+			Expect(create(policy)).
+				To(rejectedAt(metav1.CauseTypeFieldValueInvalid, "spec.limits[0].rules[0].preset"))
+		})
+
+		It("rejects a preset a block takes outside the name pattern", func() {
+			policy := policyWith("gateway.public", ratelimitv1.LimitBlock{Name: "orders", Preset: "Plan Cascade"})
+
+			Expect(create(policy)).To(rejectedAt(metav1.CauseTypeFieldValueInvalid, "spec.limits[0].preset"))
 		})
 
 		It("rejects a before outside the name pattern", func() {
 			policy := policyWith("gateway.public", ratelimitv1.LimitBlock{Name: "orders", Preset: "cascade",
 				Rules: []ratelimitv1.Rule{{Name: "partner", Before: "Not A Name"}}})
 
-			Expect(create(policy)).To(MatchError(ContainSubstring("spec.limits[0].rules[0].before")))
+			Expect(create(policy)).
+				To(rejectedAt(metav1.CauseTypeFieldValueInvalid, "spec.limits[0].rules[0].before"))
+		})
+
+		It("rejects a rule preset name outside the name pattern", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.RulePreset{
+				{Name: "Standard Client", Counters: []string{"sub"}},
+			}}
+
+			Expect(create(policy)).To(rejectedAt(metav1.CauseTypeFieldValueInvalid, "spec.presets.rules[0].name"))
+		})
+
+		It("rejects a block preset name outside the name pattern", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.BlockPreset{
+				{Name: "Plan Cascade", Rules: []ratelimitv1.Rule{ruleWith("total")}},
+			}}
+
+			Expect(create(policy)).To(rejectedAt(metav1.CauseTypeFieldValueInvalid, "spec.presets.blocks[0].name"))
+		})
+
+		// One character is the shortest name the pattern admits and 63 the
+		// longest the schema allows, in every field that names a preset or a
+		// rule a preset holds.
+		DescribeTable("accepts preset names at the bounds of their length",
+			func(name string) {
+				Expect(create(policyNamingPresets(name))).To(Succeed())
+			},
+			Entry("one character", "a"),
+			Entry("63 characters", strings.Repeat("a", 63)),
+		)
+
+		// A typed client omits an empty preset or before, which leaves the
+		// block or the rule without one, so only the names of the presets reach
+		// the API server empty.
+		It("rejects empty preset names", func() {
+			Expect(create(policyNamingPresets(""))).To(rejectedAt(metav1.CauseTypeFieldValueInvalid,
+				"spec.presets.rules[0].name",
+				"spec.presets.blocks[0].name",
+			))
+		})
+
+		It("rejects preset names of 64 characters", func() {
+			Expect(create(policyNamingPresets(strings.Repeat("a", 64)))).To(rejectedAt(metav1.CauseTypeTooLong,
+				"spec.presets.rules[0].name",
+				"spec.presets.blocks[0].name",
+				"spec.limits[0].preset",
+				"spec.limits[0].rules[0].preset",
+				"spec.limits[0].rules[0].before",
+			))
 		})
 
 		It("rejects two rule presets of one name", func() {
@@ -435,47 +531,68 @@ var _ = Describe("RateLimitPolicy", func() {
 				{Name: "standard-client", Counters: []string{"path"}},
 			}}
 
-			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
+			Expect(create(policy)).To(rejectedAt(metav1.CauseTypeFieldValueDuplicate, "spec.presets.rules[1]"))
+		})
+
+		It("rejects two block presets of one name", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.BlockPreset{
+				{Name: "cascade", Rules: []ratelimitv1.Rule{ruleWith("total")}},
+				{Name: "cascade", Rules: []ratelimitv1.Rule{ruleWith("anonymous")}},
+			}}
+
+			Expect(create(policy)).To(rejectedAt(metav1.CauseTypeFieldValueDuplicate, "spec.presets.blocks[1]"))
+		})
+
+		It("rejects two rules of one name in a block preset", func() {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.BlockPreset{
+				{Name: "cascade", Rules: []ratelimitv1.Rule{ruleWith("total"), ruleWith("total")}},
+			}}
+
+			Expect(create(policy)).
+				To(rejectedAt(metav1.CauseTypeFieldValueDuplicate, "spec.presets.blocks[0].rules[1]"))
 		})
 
 		// A typed client cannot write any of these fields, so the object is
-		// built as unstructured. The server's default field validation prunes
+		// built as unstructured. Strict field validation refuses it with a
+		// BadRequest that carries no causes, and its message is the one place
+		// that names the field. The server's default field validation prunes
 		// the field with a warning instead; the spec "prunes the preset a rule
 		// preset names for a client that does not ask for strict field
 		// validation" pins that.
-		for _, field := range []struct {
-			path string
-			edit func(spec map[string]any)
-		}{
-			{"spec.presets.rules[0].preset", func(spec map[string]any) { presetBody(spec, "rules")["preset"] = strayPreset }},
-			{"spec.presets.rules[0].before", func(spec map[string]any) { presetBody(spec, "rules")["before"] = strayPreset }},
-			{"spec.presets.rules[0].dropped", func(spec map[string]any) { presetBody(spec, "rules")["dropped"] = true }},
-			{"spec.presets.blocks[0].preset", func(spec map[string]any) { presetBody(spec, "blocks")["preset"] = strayPreset }},
-		} {
-			It("refuses "+field.path+" under strict field validation", func() {
-				chained := unstructuredWith(policyWithPresets(), field.edit)
+		DescribeTable("refuses a field a preset body cannot carry under strict field validation",
+			func(list, field string, value any, unknown string) {
+				policy := asUnstructured(policyWithPresets())
+				presetBody(policy, list)[field] = value
 
-				err := k8sClient.Create(ctx, chained, client.FieldValidation(metav1.FieldValidationStrict))
-
-				Expect(err).To(MatchError(ContainSubstring(`unknown field "` + field.path + `"`)))
-			})
-		}
+				Expect(create(policy, client.FieldValidation(metav1.FieldValidationStrict))).To(SatisfyAll(
+					MatchError(apierrors.IsBadRequest, "apierrors.IsBadRequest"),
+					MatchError(ContainSubstring(unknown)),
+				))
+			},
+			Entry("a preset in a rule preset", "rules", "preset", "other",
+				`unknown field "spec.presets.rules[0].preset"`),
+			Entry("a before in a rule preset", "rules", "before", "other",
+				`unknown field "spec.presets.rules[0].before"`),
+			Entry("a dropped in a rule preset", "rules", "dropped", true,
+				`unknown field "spec.presets.rules[0].dropped"`),
+			Entry("a preset in a block preset", "blocks", "preset", "other",
+				`unknown field "spec.presets.blocks[0].preset"`),
+		)
 
 		It("prunes the preset a rule preset names for a client that does not ask for strict field validation", func() {
-			chained := unstructuredWith(policyWithPresets(), func(spec map[string]any) {
-				presetBody(spec, "rules")["preset"] = strayPreset
-			})
-			DeferCleanup(func() {
-				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, chained))).To(Succeed())
-			})
-			Expect(k8sClient.Create(ctx, chained)).To(Succeed())
+			policy := asUnstructured(policyWithPresets())
+			presetBody(policy, "rules")["preset"] = "other"
+			Expect(create(policy)).To(Succeed())
 
 			stored := &unstructured.Unstructured{}
-			stored.SetGroupVersionKind(chained.GroupVersionKind())
-			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(chained), stored)).To(Succeed())
+			stored.SetGroupVersionKind(policy.GroupVersionKind())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(policy), stored)).To(Succeed())
 			rules, _, err := unstructured.NestedSlice(stored.Object, "spec", "presets", "rules")
 			Expect(err).NotTo(HaveOccurred())
-			Expect(rules[0]).NotTo(HaveKey("preset"))
+			Expect(rules).To(Equal([]any{map[string]any{"name": "standard-client", "counters": []any{"sub"}}}),
+				"the rule presets read back")
 		})
 
 		It("accepts the mappings and groups of the one object", func() {
@@ -634,6 +751,58 @@ var _ = Describe("RateLimitPolicy", func() {
 					ratelimitv1.ConditionStalled:  Equal(verdict{metav1.ConditionTrue, ratelimitv1.ReasonNotCompiled}),
 				})),
 			}))
+		})
+
+		// The reconciler reads the stored object unstructured and decodes it
+		// strictly, and a field the decode does not define refuses the
+		// generation as skewed. Two blocks take a cascade of two rules, one of
+		// which takes a rule preset: four rules once resolved.
+		It("compiles the rules a policy takes from its presets", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.presets"}
+			policy := policyWith(name.Name,
+				ratelimitv1.LimitBlock{Name: "orders", Preset: "cascade"},
+				ratelimitv1.LimitBlock{Name: "exports", Preset: "cascade"})
+			policy.Spec.Presets = &ratelimitv1.Presets{
+				Rules: []ratelimitv1.RulePreset{{Name: "standard-client", Counters: []string{"sub"},
+					Rates: []ratelimitv1.Rate{{Requests: 100, PeriodSeconds: 60}}}},
+				Blocks: []ratelimitv1.BlockPreset{{Name: "cascade", Rules: []ratelimitv1.Rule{
+					{Name: "per-user", Preset: "standard-client"},
+					ruleWith("total"),
+				}}},
+			}
+			Expect(create(policy)).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			reconciled := &ratelimitv1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, name, reconciled)).To(Succeed())
+			Expect(reconciled.Status).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"Rules":        Equal(int32(4)),
+				"RuleProblems": BeEmpty(),
+				"Conditions": WithTransform(verdicts, HaveKeyWithValue(ratelimitv1.ConditionAccepted,
+					verdict{metav1.ConditionTrue, ratelimitv1.ReasonRulesCompiled})),
+			}))
+		})
+
+		// The schema admits a block without rules, because a block that takes
+		// a preset leaves them out. The compiler refuses a block that holds
+		// none, and the status carries the refusal.
+		It("reports a block without rules as InvalidSpec", func() {
+			name := types.NamespacedName{Namespace: envtestNamespace, Name: "gateway.empty"}
+			Expect(create(policyWith(name.Name, blockWith("api")))).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			reconciled := &ratelimitv1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, name, reconciled)).To(Succeed())
+			Expect(reconciled.Status.RuleProblems).To(HaveExactElements(gstruct.MatchFields(gstruct.IgnoreExtras,
+				gstruct.Fields{
+					"Block":  Equal("api"),
+					"Rule":   BeEmpty(),
+					"Reason": Equal(ratelimitv1.ProblemInvalidSpec),
+				})), "the rule problems of a policy whose one block holds no rules")
 		})
 
 		// A structural mistake in a long Template route quotes the whole

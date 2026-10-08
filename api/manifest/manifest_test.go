@@ -296,7 +296,7 @@ func TestFieldPaths_walksTheShapesTheSpecUses(t *testing.T) {
 		Size     *resource.Quantity `json:"size,omitempty"`
 		When     metav1.Time        `json:"when"`
 
-		// An authoring-only subtree: left out whole, its own fields with it.
+		// A subtree tagged manifest:"-" is left out whole, its own fields with it.
 		Presets *leaf `json:"presets,omitempty" manifest:"-"`
 	}
 
@@ -323,7 +323,7 @@ func TestFieldPaths_walksTheShapesTheSpecUses(t *testing.T) {
 		"timeout",
 		"timeouts[]",
 		"when",
-	}, FieldPaths(reflect.TypeFor[node]()))
+	}, FieldPaths(reflect.TypeFor[node]()), "FieldPaths(node)")
 }
 
 // TestGoldens_areOnlyTheSupportedVersions keeps testdata honest in the other

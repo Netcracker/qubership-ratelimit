@@ -3,13 +3,13 @@
 package e2e
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -89,14 +89,16 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 	})
 
 	It("limits every block that takes the preset, each in a bucket of its own", func() {
+		// The orders burst spends its bucket before the catalog burst starts,
+		// so the catalog burst is admitted only from a bucket of its own.
+		bursts := map[string][]int{}
 		for _, path := range []string{ordersPath, catalogPath} {
-			codes := gatewayBurst("public-gateway", path, limit+1, nil)
-			for i, code := range codes[:limit] {
-				Expect(code).NotTo(Equal(429), "request %d of %s within the preset's budget was refused", i+1, path)
-			}
-			Expect(codes[limit]).To(Equal(429),
-				"the request of %s over the preset's budget was admitted; the resolved rule is not enforced", path)
+			bursts[path] = gatewayBurst("public-gateway", path, limit+1, nil)
 		}
+		Expect(bursts).To(gstruct.MatchAllKeys(gstruct.Keys{
+			ordersPath:  HaveExactElements(beAdmitted(), beAdmitted(), Equal(http.StatusTooManyRequests)),
+			catalogPath: HaveExactElements(beAdmitted(), beAdmitted(), Equal(http.StatusTooManyRequests)),
+		}), "the codes of a burst of %d requests through public-gateway, by path", limit+1)
 	})
 
 	It("keeps the counters of the resolved rules across an edit of the preset's window", func() {
@@ -108,41 +110,49 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 		Expect(apply(policy(limit+2, ""))).To(Succeed())
 		waitApplied(domain)
 
+		bursts := map[string][]int{}
 		for _, path := range []string{ordersPath, catalogPath} {
-			codes := gatewayBurst("public-gateway", path, 3, nil)
-			Expect(codes[:2]).NotTo(ContainElement(429),
-				"the widened window of %s did not admit the two requests it gained: %v", path, codes)
-			Expect(codes[2]).To(Equal(429),
-				"the third request of %s was admitted; the edit of the preset reset the bucket", path)
+			bursts[path] = gatewayBurst("public-gateway", path, 3, nil)
 		}
+		Expect(bursts).To(gstruct.MatchAllKeys(gstruct.Keys{
+			ordersPath:  HaveExactElements(beAdmitted(), beAdmitted(), Equal(http.StatusTooManyRequests)),
+			catalogPath: HaveExactElements(beAdmitted(), beAdmitted(), Equal(http.StatusTooManyRequests)),
+		}), "the codes of a burst of 3 requests through public-gateway once the window is four, by path")
 	})
 
 	It("reports a preset nothing declares at the rule that names it and keeps the last-good generation", func() {
 		before, err := getPolicy(domain)
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred(), "getPolicy(%s) before the edit", domain)
 
 		broken := policy(limit+2, "")
 		broken.Spec.Limits[1].Rules[0].Preset = "standrad"
 		Expect(apply(broken)).To(Succeed())
 
+		// The problem names the preset in its message, and the block and the
+		// rule of the point of use in its fields.
 		Eventually(func(g Gomega) {
 			p, err := getPolicy(domain)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(p.Status.ObservedGeneration).To(Equal(p.Generation), "the operator has not observed the edit")
-			g.Expect(p.Status.RuleProblems).To(HaveLen(1))
-			g.Expect(p.Status.RuleProblems[0].Reason).To(Equal(v1.ProblemUnresolvedPresetReference))
-			g.Expect(p.Status.RuleProblems[0].Block).To(Equal(catalogBlock))
-			g.Expect(p.Status.RuleProblems[0].Rule).To(Equal("budget"))
-			g.Expect(p.Status.RuleProblems[0].Message).To(ContainSubstring("standrad"))
-			g.Expect(p.Status.ActiveGeneration).To(Equal(before.Generation),
-				"the generation enforced is not the last good one")
-		}).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed())
-		Expect(policyCondition(domain, v1.ConditionAccepted)()).To(Equal("False"))
+			g.Expect(p.Status).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"RuleProblems": HaveExactElements(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+					"Block":   Equal(catalogBlock),
+					"Rule":    Equal("budget"),
+					"Reason":  Equal(v1.ProblemUnresolvedPresetReference),
+					"Message": ContainSubstring("standrad"),
+				})),
+				"ActiveGeneration": Equal(before.Generation),
+			}))
+		}).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed(),
+			"the status of %s to report the unresolved preset and keep generation %d active",
+			domain, before.Generation)
+		Expect(policyCondition(domain, v1.ConditionAccepted)()).To(Equal("False"),
+			"the Accepted condition of %s", domain)
 
 		// The last-good generation holds the orders bucket at its four: a
 		// domain left unprotected would admit this request.
-		Expect(gatewayGet("public-gateway", ordersPath, nil)).To(Equal(429),
-			"the orders budget of the last-good generation is not enforced")
+		Expect(gatewayGet("public-gateway", ordersPath, nil)).To(Equal(http.StatusTooManyRequests),
+			"the code of a request on %s through public-gateway", ordersPath)
 	})
 
 	// An object stored before the schema stopped writing defaults carries
@@ -155,15 +165,19 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 		Expect(apply(shadowed)).To(Succeed())
 		waitApplied(domain)
 
-		Expect(gatewayGet("public-gateway", ordersPath, nil)).To(Equal(429),
-			"the written Enforce of the orders rule did not win over the Shadow preset")
-		Expect(gatewayGet("public-gateway", catalogPath, nil)).NotTo(Equal(429),
-			"the catalog rule took Shadow from the preset and still refused")
+		orders := gatewayGet("public-gateway", ordersPath, nil)
+		catalog := gatewayGet("public-gateway", catalogPath, nil)
+		Expect(map[string]int{ordersPath: orders, catalogPath: catalog}).To(gstruct.MatchAllKeys(gstruct.Keys{
+			// The orders rule writes Enforce over the preset's Shadow.
+			ordersPath: Equal(http.StatusTooManyRequests),
+			// The catalog rule takes Shadow from the preset.
+			catalogPath: beAdmitted(),
+		}), "the code of a request through public-gateway, by path")
 		Eventually(func() float64 {
 			return counterSum(scrapeAllReplicas(), "ratelimit_decisions_total",
 				map[string]string{"domain": domain, "outcome": "shadow_over_limit", "rule": catalogBlock + "/budget"})
 		}).WithTimeout(30*time.Second).Should(BeNumerically(">", 0),
-			"the Shadow rule of %s recorded no shadow_over_limit outcome", catalogBlock)
+			"the shadow_over_limit decisions of rule %s/budget across the replicas", catalogBlock)
 
 		By("removing the written behavior with the JSON patch of the runbook")
 		patch := client.RawPatch(types.JSONPatchType,
@@ -172,13 +186,13 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 		Expect(k8s.Patch(ctx, newPolicy(domain, nil), patch)).To(Succeed())
 		waitApplied(domain)
 
-		Expect(gatewayGet("public-gateway", ordersPath, nil)).NotTo(Equal(429),
-			"the orders rule still refuses after its written behavior was removed; the preset's Shadow did not apply")
+		Expect(gatewayGet("public-gateway", ordersPath, nil)).To(beAdmitted(),
+			"the code of a request on %s through public-gateway once its rule writes no behavior", ordersPath)
 		Eventually(func() float64 {
 			return counterSum(scrapeAllReplicas(), "ratelimit_decisions_total",
 				map[string]string{"domain": domain, "outcome": "shadow_over_limit", "rule": ordersBlock + "/budget"})
 		}).WithTimeout(30*time.Second).Should(BeNumerically(">", 0),
-			"the rule %s recorded no shadow_over_limit outcome after taking Shadow from the preset", ordersBlock)
+			"the shadow_over_limit decisions of rule %s/budget across the replicas", ordersBlock)
 	})
 })
 
@@ -206,9 +220,11 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 		port    int32
 
 		// What the written-out policy compiled to, read before the preset
-		// form replaces it.
+		// form replaces it, and what the preset form compiled to.
 		writtenRules   int32
 		writtenVersion string
+		presetRules    int32
+		presetVersion  string
 
 		// The block names carry the run's suffix, for the reason on runSuffix,
 		// in both forms of the policy, so the two compile to one rule set.
@@ -296,7 +312,7 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 			version = listedRuleSetVersion(body, domain)
 			return version
 		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).ShouldNot(BeEmpty(),
-			"the private gateway never served a listing with %s through %s", domain, basePath)
+			"the ruleSetVersion of %s in the listing private-gateway serves at %s/domains", domain, basePath)
 		return p.Status.Rules, version
 	}
 
@@ -330,70 +346,76 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 		}
 	})
 
-	It("compiles to the rule set of the same policy written out", func() {
+	It("enforces as many rules as the same policy written out", func() {
 		// The written-out form is the last-good generation, so a refused
 		// preset form would leave the same set enforced: the generation
 		// has to be the preset form's own before the two are compared.
 		p, err := getPolicy(domain)
-		Expect(err).NotTo(HaveOccurred())
+		Expect(err).NotTo(HaveOccurred(), "getPolicy(%s)", domain)
 		Expect(p.Status.ActiveGeneration).To(Equal(p.Generation),
-			"the preset form is not the enforced generation; the operator refused it: %v", p.Status.RuleProblems)
-		Expect(policyCondition(domain, v1.ConditionAccepted)()).To(Equal("True"))
+			"the active generation of %s; its rule problems: %v", domain, p.Status.RuleProblems)
+		Expect(policyCondition(domain, v1.ConditionAccepted)()).To(Equal("True"),
+			"the Accepted condition of %s", domain)
 
-		rules, version := enforcedSet()
-		Expect(rules).To(Equal(writtenRules), "the RULES count differs from the written-out policy's")
+		presetRules, presetVersion = enforcedSet()
+		Expect(presetRules).To(Equal(writtenRules), "the RULES count of %s", domain)
+	})
+
+	// The ruleSetVersion identifies the rule set the replicas enforce for a
+	// domain and changes with any block, rule, route, or window of it, so an
+	// equal version is the set of the policy written out.
+	It("enforces the rule set of the same policy written out", func() {
 		if port == 0 {
 			Skip("the release runs without management.enabled; the ruleSetVersion cannot be compared")
 		}
-		Expect(version).To(Equal(writtenVersion),
-			"the replicas enforce a rule set other than the written-out policy's; a preset reached the engine")
+		Expect(presetVersion).NotTo(BeEmpty(),
+			"the ruleSetVersion the spec \"enforces as many rules as the same policy written out\" reads")
+		Expect(presetVersion).To(Equal(writtenVersion), "the ruleSetVersion of %s in the management API", domain)
 	})
 
 	It("enforces the cascade as declared", func() {
-		for i, code := range gatewayBurst("public-gateway", ordersPath, 3, bearer(subjectJWT("prometheus"))) {
-			Expect(code).NotTo(Equal(429), "request %d of the internal caller was refused; the Bypass rule did not apply", i+1)
-		}
-		codes := gatewayBurst("public-gateway", ordersPath, perUser+1, bearer(subjectJWT("alice")))
-		Expect(codes[:perUser]).NotTo(ContainElement(429), "alice's budget on orders was refused early: %v", codes)
-		Expect(codes[perUser]).To(Equal(429), "alice's request over the per-user budget of orders was admitted")
-		codes = gatewayBurst("public-gateway", ordersPath, perUser+1, nil)
-		Expect(codes[:perUser]).NotTo(ContainElement(429), "the anonymous budget on orders was refused early: %v", codes)
-		Expect(codes[perUser]).To(Equal(429), "the anonymous request over the budget of orders was admitted")
+		bursts := map[string][]int{}
+		bursts["prometheus"] = gatewayBurst("public-gateway", ordersPath, 3, bearerFor("prometheus"))
+		bursts["alice"] = gatewayBurst("public-gateway", ordersPath, perUser+1, bearerFor("alice"))
+		bursts["anonymous"] = gatewayBurst("public-gateway", ordersPath, perUser+1, nil)
+		Expect(bursts).To(gstruct.MatchAllKeys(gstruct.Keys{
+			// The internal rule bypasses the rest of the cascade.
+			"prometheus": HaveEach(beAdmitted()),
+			// The per-user rule counts by sub.
+			"alice": HaveExactElements(beAdmitted(), beAdmitted(), Equal(http.StatusTooManyRequests)),
+			// The anonymous rule counts the requests without sub.
+			"anonymous": HaveExactElements(beAdmitted(), beAdmitted(), Equal(http.StatusTooManyRequests)),
+		}), "the codes of a burst on %s through public-gateway, by caller", ordersPath)
 	})
 
 	It("applies the window overridden by name", func() {
-		codes := gatewayBurst("public-gateway", catalogPath, perUser+3, bearer(subjectJWT("alice")))
-		Expect(codes[:perUser+2]).NotTo(ContainElement(429),
-			"alice's widened budget on catalog was refused early; the override did not apply: %v", codes)
-		Expect(codes[perUser+2]).To(Equal(429), "alice's request over the widened budget of catalog was admitted")
+		codes := gatewayBurst("public-gateway", catalogPath, perUser+3, bearerFor("alice"))
+		Expect(codes).To(HaveExactElements(
+			beAdmitted(), beAdmitted(), beAdmitted(), beAdmitted(), Equal(http.StatusTooManyRequests),
+		), "the codes of a burst of %d requests on %s for alice", perUser+3, catalogPath)
 	})
 
-	It("applies the rule inserted in front of per-user and leaves the dropped one out", func() {
-		codes := gatewayBurst("public-gateway", exportsPath, 2, bearer(subjectJWT("partner-a")))
-		Expect(codes[0]).NotTo(Equal(429), "the partner's first request on exports was refused")
-		Expect(codes[1]).To(Equal(429),
-			"the partner's second request on exports was admitted; the partner rule is not in front of per-user")
-		for i, code := range gatewayBurst("public-gateway", exportsPath, perUser+1, nil) {
-			Expect(code).NotTo(Equal(429),
-				"anonymous request %d on exports was refused; the dropped anonymous rule still applies", i+1)
-		}
+	It("applies the rule inserted in front of per-user", func() {
+		// The partner rule admits one request a day and per-user two, so the
+		// second request is refused where the partner rule decides first.
+		codes := gatewayBurst("public-gateway", exportsPath, 2, bearerFor("partner-a"))
+		Expect(codes).To(HaveExactElements(beAdmitted(), Equal(http.StatusTooManyRequests)),
+			"the codes of a burst of 2 requests on %s for partner-a", exportsPath)
+	})
+
+	It("leaves the dropped rule out", func() {
+		// Without the anonymous rule no rule of the cascade matches a request
+		// without sub: per-user has no sub to count by, and the other two
+		// match named subjects.
+		Expect(gatewayBurst("public-gateway", exportsPath, perUser+1, nil)).To(HaveEach(beAdmitted()),
+			"the codes of a burst of %d requests on %s without a token", perUser+1, exportsPath)
 	})
 })
 
-// subjectJWT builds an alg-none token with one sub claim, which the built-in
-// sub key reads lowercased. The engine decodes the payload and never
-// verifies, so an empty signature segment is a valid fixture.
-func subjectJWT(sub string) string {
-	seg := func(v map[string]string) string {
-		raw, err := json.Marshal(v)
-		Expect(err).NotTo(HaveOccurred())
-		return base64.RawURLEncoding.EncodeToString(raw)
-	}
-	return seg(map[string]string{"alg": "none", "typ": "JWT"}) + "." + seg(map[string]string{"sub": sub}) + "."
-}
-
-func bearer(token string) map[string]string {
-	return map[string]string{"Authorization": "Bearer " + token}
+// bearerFor is the Authorization header of a caller whose token carries sub,
+// which the built-in sub key reads lowercased.
+func bearerFor(sub string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + unsignedToken(map[string]string{"sub": sub})}
 }
 
 // listedRuleSetVersion reads the ruleSetVersion of one domain out of a
