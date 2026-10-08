@@ -4,8 +4,6 @@ package engine_test
 // stage in isolation, so a regression names its layer itself.
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -62,23 +60,15 @@ func benchSnapshot(b *testing.B) *compile.Snapshot {
 			},
 		},
 	}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		b.Fatalf("compile problems: %v", problems)
-	}
-	return snap
+	return compiled(b, p)
 }
 
 func benchToken(b *testing.B) string {
 	b.Helper()
-	raw, err := json.Marshal(map[string]any{
+	return claimsToken(b, map[string]any{
 		"sub": "alice", "iss": "https://idp.example", "exp": 1900000000,
 		"realm_access": map[string]any{"roles": []any{"basic", "reporting"}},
 	})
-	if err != nil {
-		b.Fatal(err)
-	}
-	return "h." + base64.RawURLEncoding.EncodeToString(raw) + ".s"
 }
 
 func BenchmarkDecideAuthed(b *testing.B) {
@@ -134,11 +124,7 @@ func BenchmarkDecideDenied(b *testing.B) {
 		Name:  "b",
 		Rules: []model.Rule{{Name: "one", Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		b.Fatalf("compile problems: %v", problems)
-	}
-	e := engine.New(snap, memory.New())
+	e := engine.New(compiled(b, p), memory.New())
 	req := engine.Request{Path: "/x", Method: "GET"}
 	b.ReportAllocs()
 	for b.Loop() {
@@ -156,7 +142,8 @@ func BenchmarkDecideParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			if _, err := e.Decide(b.Context(), req); err != nil {
-				b.Fatal(err)
+				b.Error(err)
+				return
 			}
 		}
 	})
@@ -220,11 +207,7 @@ func manyBlocksSnapshot(tb testing.TB, n int) *compile.Snapshot {
 				Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}},
 		})
 	}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		tb.Fatalf("compile problems: %v", problems)
-	}
-	return snap
+	return compiled(tb, p)
 }
 
 // lastBlockPath is a path only the last route of the last block matches, so
