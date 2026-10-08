@@ -147,6 +147,32 @@ func TestRuleSet_reportsAnUnboundDomainAsNotFound(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// Engine, Snapshot, and Version return nothing for an unbound domain: no
+// engine, which the server reports as an unknown domain, no snapshot, and an
+// empty version. TestRuleSet_returnsTheBoundDomainThroughEveryAccessor is the
+// control, on the domain the set binds.
+func TestRuleSet_returnsNothingThroughEveryAccessorForAnUnboundDomain(t *testing.T) {
+	bound := boundDomain(t, policySpec("gateway.private"))
+	bound.Version = "a1b2c3d4e5f6"
+	set := NewRuleSet(map[string]Domain{"gateway.private": bound})
+
+	assert.Nil(t, set.Engine("gateway.public"), "Engine")
+	assert.Nil(t, set.Snapshot("gateway.public"), "Snapshot")
+	assert.Empty(t, set.Version("gateway.public"), "Version")
+}
+
+// The set keeps its own copy of the domains: a caller that goes on writing to
+// the map it built the set from changes nothing a reader of the set sees.
+func TestNewRuleSet_keepsTheDomainsItWasBuiltWith(t *testing.T) {
+	domains := map[string]Domain{"gateway.private": boundDomain(t, policySpec("gateway.private"))}
+	set := NewRuleSet(domains)
+
+	domains["gateway.public"] = boundDomain(t, policySpec("gateway.public"))
+	delete(domains, "gateway.private")
+
+	assert.Equal(t, []string{"gateway.private"}, set.Domains())
+}
+
 // A refusal is not a swap: the rules and the swap time stay as they were, and
 // the set a reader already holds is not rewritten under it.
 func TestRefuse_publishesTheRefusalOnTheCurrentRules(t *testing.T) {
