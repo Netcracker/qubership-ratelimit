@@ -2,7 +2,9 @@ package compile
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,8 +21,10 @@ func rate(requests int64, period time.Duration) model.Rate {
 	return model.Rate{Requests: requests, Period: period}
 }
 
-// policyOf builds a minimal valid policy: one block, one per-client rule.
-func policyOf() model.Policy {
+// validPolicy builds the smallest policy that compiles: block "api" on the
+// prefix /api/, with one rule "per-user" that counts 100 requests a minute by
+// sub. A test writes its changes to the policy in its own body.
+func validPolicy() model.Policy {
 	return model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{{
@@ -35,95 +39,122 @@ func policyOf() model.Policy {
 	}
 }
 
-// withKeys adds the mappings and groups the rule-level tests resolve against.
-func withKeys(p model.Policy) model.Policy {
-	p.Mappings = []model.KeyMapping{
-		{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
-		{Key: "tenant", Claim: "org_id", Fallbacks: []string{"sub"}, Normalization: model.NormalizeLowercase},
-	}
-	p.Groups = append(p.Groups, model.Group{Name: "partners", Values: []string{"a", "b"}})
-	return p
-}
-
-// compileOne is the shape every test uses: one policy, which is one domain.
+// compileOne compiles p as the one policy of the test domain.
 func compileOne(p model.Policy) (*Snapshot, []Problem) {
 	return Compile(namespace, domain, &p)
 }
 
-func reasons(problems []Problem) map[Reason]int {
-	out := map[Reason]int{}
+// reasonsOf lists the reasons of problems in the order Compile reported them.
+func reasonsOf(problems []Problem) []Reason {
+	out := make([]Reason, 0, len(problems))
 	for _, p := range problems {
-		out[p.Reason]++
+		out = append(out, p.Reason)
 	}
 	return out
 }
 
-// TestCompileIsPure pins the property every replica depends on: the same spec
-// compiles to the same snapshot, with nothing of the caller's context in it.
-func TestCompileIsPure(t *testing.T) {
-	first, p1 := compileOne(withKeys(policyOf()))
-	second, p2 := compileOne(withKeys(policyOf()))
+func blockNames(blocks []Block) []string {
+	out := make([]string, 0, len(blocks))
+	for _, b := range blocks {
+		out = append(out, b.Name)
+	}
+	return out
+}
 
-	if len(p1)+len(p2) != 0 {
-		t.Fatalf("unexpected problems: %v %v", p1, p2)
+// assertRejectedWhole checks the outcome of a generation with one defect: one
+// problem, under the reason want, and no block in the snapshot. The diagnostics
+// carry only root causes, so a second problem for one defect fails here too.
+func assertRejectedWhole(t *testing.T, snap *Snapshot, problems []Problem, want Reason) {
+	t.Helper()
+	if got := reasonsOf(problems); !slices.Equal(got, []Reason{want}) {
+		t.Errorf("Compile reasons = %v, want [%s]; problems: %v", got, want, problems)
+	}
+	if got := blockNames(snap.Blocks); len(got) != 0 {
+		t.Errorf("Compile blocks = %v, want none: a blocking problem keeps the whole generation out", got)
+	}
+}
+
+// Every replica compiling the same spec has to produce the same snapshot. The
+// spec carries mappings, a fallback, and a group, so the key set and the
+// extraction plan take part in the comparison.
+func TestCompilingOneSpecTwiceGivesEqualSnapshots(t *testing.T) {
+	spec := func() model.Policy {
+		p := validPolicy()
+		p.Mappings = []model.KeyMapping{
+			{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
+			{Key: "tenant", Claim: "org_id", Fallbacks: []string{"sub"}, Normalization: model.NormalizeLowercase},
+		}
+		p.Groups = []model.Group{{Name: "partners", Values: []string{"a", "b"}}}
+		return p
+	}
+
+	first, firstProblems := compileOne(spec())
+	second, secondProblems := compileOne(spec())
+
+	if len(firstProblems)+len(secondProblems) != 0 {
+		t.Fatalf("Compile problems = %v and %v, want none", firstProblems, secondProblems)
 	}
 	if !reflect.DeepEqual(first, second) {
-		t.Error("two compilations of one spec differ")
+		t.Errorf("Compile twice on one spec:\n first = %+v\nsecond = %+v", *first, *second)
 	}
 }
 
-// TestBlocksKeepAuthoredOrder pins the one place ordering is semantics: a
-// FirstMatch cascade reads its rules in the order they were written, and the
-// blocks around it keep theirs too.
-func TestBlocksKeepAuthoredOrder(t *testing.T) {
-	p := policyOf()
-	p.Blocks = append(p.Blocks, model.Block{
-		Name:  "zzz-total",
-		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{rate(1000, time.Minute)}}},
-	})
-	p.Blocks[0], p.Blocks[1] = p.Blocks[1], p.Blocks[0]
+// The blocks are written in reverse alphabetical order, so a compiler that
+// sorted them by name would put "api" first.
+func TestCompileKeepsTheBlocksInAuthoredOrder(t *testing.T) {
+	p := validPolicy()
+	p.Blocks = []model.Block{
+		{Name: "zzz-total", Rules: []model.Rule{{Name: "all", Rates: []model.Rate{rate(1000, time.Minute)}}}},
+		p.Blocks[0],
+	}
 
 	snap, problems := compileOne(p)
+
 	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
+		t.Fatalf("Compile problems = %v, want none", problems)
 	}
-	if snap.Blocks[0].Name != "zzz-total" || snap.Blocks[1].Name != "api" {
-		t.Errorf("blocks = %s, %s: compilation reordered them",
-			snap.Blocks[0].Name, snap.Blocks[1].Name)
+	if got, want := blockNames(snap.Blocks), []string{"zzz-total", "api"}; !slices.Equal(got, want) {
+		t.Errorf("Compile blocks = %v, want %v", got, want)
 	}
 }
 
-func TestDefaultsResolve(t *testing.T) {
-	snap, problems := compileOne(policyOf())
-	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
-	}
+// The block and the rule of validPolicy set no mode, behavior, algorithm, or
+// burst, so each of them takes its documented default, and the rate prefix
+// names the GCRA default with the 60-second period.
+func TestCompileResolvesTheDefaultsOfAMinimalRule(t *testing.T) {
+	snap, problems := compileOne(validPolicy())
 
+	if len(problems) != 0 {
+		t.Fatalf("Compile problems = %v, want none", problems)
+	}
+	if len(snap.Blocks) != 1 || len(snap.Blocks[0].Rules) != 1 || len(snap.Blocks[0].Rules[0].Rates) != 1 {
+		t.Fatalf("Compile blocks = %+v, want one block with one rule of one rate", snap.Blocks)
+	}
 	block := snap.Blocks[0]
 	if block.Mode != model.ModeAll {
-		t.Errorf("mode = %q, want the All default", block.Mode)
+		t.Errorf("Compile: mode of api = %q, want %q", block.Mode, model.ModeAll)
 	}
 	rule := block.Rules[0]
 	if rule.Behavior != model.BehaviorEnforce {
-		t.Errorf("behavior = %q, want the Enforce default", rule.Behavior)
+		t.Errorf("Compile: behavior of api/per-user = %q, want %q", rule.Behavior, model.BehaviorEnforce)
 	}
 	window := rule.Rates[0]
-	if window.Algorithm.Name() != "GCRA" {
-		t.Errorf("algorithm = %q, want the GCRA default", window.Algorithm.Name())
+	if got := window.Algorithm.Name(); got != "GCRA" {
+		t.Errorf("Compile: algorithm of 100/min = %q, want GCRA", got)
 	}
 	if window.Window.Burst != 100 {
-		t.Errorf("burst = %d, want the full-bucket default of requests", window.Window.Burst)
+		t.Errorf("Compile: burst of 100/min = %d, want 100, a full bucket", window.Window.Burst)
 	}
-	if !strings.HasPrefix(window.Prefix, "rl:v1:{"+namespace+"/"+domain+"}:api/per-user:") {
-		t.Errorf("rate prefix = %q, want the namespace and the block/rule pair", window.Prefix)
+	if want := "rl:v1:{core-1-core/gateway.public}:api/per-user:gcra:60:"; window.Prefix != want {
+		t.Errorf("Compile: prefix of 100/min = %q, want %q", window.Prefix, want)
 	}
 }
 
-// TestOneBlockingProblemInvalidatesTheGeneration pins atomicity: a snapshot
-// never carries part of a generation, because a FirstMatch cascade missing one
-// rule hands its traffic to the neighbours.
-func TestOneBlockingProblemInvalidatesTheGeneration(t *testing.T) {
-	p := policyOf()
+// A generation compiles whole or not at all: a FirstMatch cascade missing one
+// rule would hand its traffic to the rules after it. So the healthy block "api"
+// stays out of the snapshot beside the block "second" that names an unknown key.
+func TestOneBlockingProblemKeepsEveryBlockOutOfTheSnapshot(t *testing.T) {
+	p := validPolicy()
 	p.Blocks = append(p.Blocks, model.Block{
 		Name:   "second",
 		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathExact, Value: "/x"}}}},
@@ -136,104 +167,92 @@ func TestOneBlockingProblemInvalidatesTheGeneration(t *testing.T) {
 
 	snap, problems := compileOne(p)
 
-	if reasons(problems)[ReasonUnresolvedKeyReference] != 1 {
-		t.Fatalf("problems = %v, want one UnresolvedKeyReference", problems)
-	}
-	if len(snap.Blocks) != 0 {
-		t.Errorf("blocks = %+v: the healthy block must not be enforced either", snap.Blocks)
-	}
+	assertRejectedWhole(t, snap, problems, ReasonUnresolvedKeyReference)
 }
 
-// TestSnapshotStillNamesTheDomain pins that an invalid generation leaves a
-// usable snapshot: the domain is claimed, so its requests are allowed rather
-// than reported as an unknown domain.
-func TestSnapshotStillNamesTheDomain(t *testing.T) {
-	p := policyOf()
+// The snapshot of an invalid generation still claims its domain, with the
+// built-in keys, so the domain's requests are allowed rather than reported as
+// an unknown domain.
+func TestAnInvalidGenerationStillYieldsAUsableSnapshot(t *testing.T) {
+	p := validPolicy()
 	p.Blocks[0].Rules[0].Counters = []string{"ghost"}
 
 	snap, problems := compileOne(p)
+
 	if len(problems) == 0 {
-		t.Fatal("an unresolved axis compiled without problems")
+		t.Fatal("Compile problems = none, want the unresolved counter axis ghost")
 	}
 	if snap.Domain != domain {
-		t.Errorf("snapshot domain = %q, want the domain named even when nothing compiles", snap.Domain)
+		t.Errorf("Compile: snapshot domain = %q, want %q", snap.Domain, domain)
 	}
-	if len(snap.EffectiveKeys) == 0 {
-		t.Error("the built-in key set is missing from an invalid generation's snapshot")
+	if want := []string{"method", "path", "sub"}; !slices.Equal(snap.EffectiveKeys, want) {
+		t.Errorf("Compile: effective keys = %v, want %v", snap.EffectiveKeys, want)
 	}
 }
 
-func TestBlockingReasons(t *testing.T) {
+// Each row gives validPolicy one defect: a reference, a type, or a window the
+// compiler cannot accept. A row with an unresolved name declares another entry
+// of the same kind, so the name is refused beside a declared one.
+func TestCompileRejectsADefectUnderItsReason(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(*model.Policy)
 		want   Reason
 	}{
-		{"unknown matches key", func(p *model.Policy) {
+		{"a matches key no mapping declares", func(p *model.Policy) {
+			p.Mappings = []model.KeyMapping{{Key: "tenant", Claim: "org_id"}}
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{{Key: "plan", Operator: model.OperatorExists}}
 		}, ReasonUnresolvedKeyReference},
-		{"unknown counter axis", func(p *model.Policy) {
+		{"a Contains predicate on a key no mapping declares", func(p *model.Policy) {
+			p.Blocks[0].Rules[0].Matches = []model.Predicate{
+				{Key: "roles", Operator: model.OperatorContains, Value: "admin"}}
+		}, ReasonUnresolvedKeyReference},
+		{"a counter axis no mapping declares", func(p *model.Policy) {
+			p.Mappings = []model.KeyMapping{{Key: "tenant", Claim: "org_id"}}
 			p.Blocks[0].Rules[0].Counters = []string{"plan"}
 		}, ReasonUnresolvedKeyReference},
-		{"unknown group", func(p *model.Policy) {
+		{"InGroup on a group the policy does not declare", func(p *model.Policy) {
+			p.Groups = []model.Group{{Name: "partners", Values: []string{"a", "b"}}}
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
 				{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "ghosts"}}
 		}, ReasonUnresolvedGroupReference},
-		{"replacedRules names a missing rule", func(p *model.Policy) {
+		{"replacedRules naming a rule the block lacks", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].ReplacedRules = []string{"ghost"}
 		}, ReasonUnresolvedReplacedRules},
-		{"replacedRules names itself", func(p *model.Policy) {
+		{"replacedRules naming its own rule", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].ReplacedRules = []string{"per-user"}
 		}, ReasonUnresolvedReplacedRules},
-		{"equals on an array key", func(p *model.Policy) {
+		{"Equals on an array-valued key", func(p *model.Policy) {
+			p.Mappings = []model.KeyMapping{{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray}}
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
 				{Key: "roles", Operator: model.OperatorEquals, Value: "admin"}}
 		}, ReasonIncompatibleOperator},
-		{"array key as an axis", func(p *model.Policy) {
+		{"an array-valued key as a counter axis", func(p *model.Policy) {
+			p.Mappings = []model.KeyMapping{{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray}}
 			p.Blocks[0].Rules[0].Counters = []string{"roles"}
 		}, ReasonInvalidCounterAxis},
-		{"window beyond gcra resolution", func(p *model.Policy) {
+		// A second does not divide into 500001 whole microseconds.
+		{"a GCRA rate of 500001 a second", func(p *model.Policy) {
 			p.Blocks[0].Rules[0].Rates = []model.Rate{rate(500_001, time.Second)}
 		}, ReasonInvalidWindow},
-		{"path in matches", func(p *model.Policy) {
-			p.Blocks[0].Rules[0].Matches = []model.Predicate{
-				{Key: model.KeyPath, Operator: model.OperatorEquals, Value: "/x"}}
-		}, ReasonInvalidSpec},
-		{"token in matches", func(p *model.Policy) {
-			p.Blocks[0].Rules[0].Matches = []model.Predicate{
-				{Key: model.KeyToken, Operator: model.OperatorExists}}
-		}, ReasonInvalidSpec},
-		{"bypass with rates", func(p *model.Policy) {
-			p.Blocks[0].Rules[0].Behavior = model.BehaviorBypass
-		}, ReasonInvalidSpec},
-		{"replacedRules under FirstMatch", func(p *model.Policy) {
-			p.Blocks[0].Mode = model.ModeFirstMatch
-			p.Blocks[0].Rules[0].ReplacedRules = []string{"per-user"}
-		}, ReasonInvalidSpec},
-		{"duplicate periods", func(p *model.Policy) {
-			p.Blocks[0].Rules[0].Rates = []model.Rate{rate(10, time.Minute), rate(20, time.Minute)}
-		}, ReasonInvalidSpec},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := withKeys(policyOf())
+			p := validPolicy()
 			tc.mutate(&p)
+
 			snap, problems := compileOne(p)
-			if got := reasons(problems); got[tc.want] == 0 {
-				t.Fatalf("problems = %v, want %s", problems, tc.want)
-			}
-			if len(snap.Blocks) != 0 {
-				t.Errorf("the generation compiled despite a blocking problem: %+v", snap.Blocks)
-			}
+
+			assertRejectedWhole(t, snap, problems, tc.want)
 		})
 	}
 }
 
-// TestInvalidSpecFamily walks the structural guards the schema does not
-// carry: with CEL limited to the name rule, the compiler is the only judge of
-// how the fields relate, and it answers with problems rather than with garbage.
-func TestInvalidSpecFamily(t *testing.T) {
+// With CEL limited to the name rule, the compiler is the only judge of how the
+// fields of a policy relate. Each row gives validPolicy one structural defect,
+// and the compiler answers with InvalidSpec rather than with a snapshot.
+func TestCompileRejectsAStructuralDefectAsInvalidSpec(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(*model.Policy)
@@ -251,6 +270,14 @@ func TestInvalidSpecFamily(t *testing.T) {
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
 				{Key: model.KeySub, Operator: "Matches", Value: "x"}}
 		}},
+		{"path in matches", func(p *model.Policy) {
+			p.Blocks[0].Rules[0].Matches = []model.Predicate{
+				{Key: model.KeyPath, Operator: model.OperatorEquals, Value: "/x"}}
+		}},
+		{"token in matches", func(p *model.Policy) {
+			p.Blocks[0].Rules[0].Matches = []model.Predicate{
+				{Key: model.KeyToken, Operator: model.OperatorExists}}
+		}},
 		{"unknown path type", func(p *model.Policy) { p.Blocks[0].Target.Routes[0].Path.Type = "Regex" }},
 		{"relative path", func(p *model.Policy) { p.Blocks[0].Target.Routes[0].Path.Value = "api/" }},
 		{"unknown method", func(p *model.Policy) { p.Blocks[0].Target.Routes[0].Methods = []string{"FETCH"} }},
@@ -258,7 +285,20 @@ func TestInvalidSpecFamily(t *testing.T) {
 			p.Blocks[0].Target.Routes[0].Methods = []string{"GET", "GET"}
 		}},
 		{"no rates on a counting rule", func(p *model.Policy) { p.Blocks[0].Rules[0].Rates = nil }},
+		// FirstMatch, where a bypass names no replacedRules, so the rates are
+		// the only defect of the rule.
+		{"rates on a Bypass rule", func(p *model.Policy) {
+			p.Blocks[0].Mode = model.ModeFirstMatch
+			p.Blocks[0].Rules[0].Behavior = model.BehaviorBypass
+		}},
+		{"two rates with one period", func(p *model.Policy) {
+			p.Blocks[0].Rules[0].Rates = []model.Rate{rate(10, time.Minute), rate(20, time.Minute)}
+		}},
 		{"unknown algorithm", func(p *model.Policy) { p.Blocks[0].Rules[0].Rates[0].Algorithm = "SlidingLog" }},
+		{"replacedRules under FirstMatch", func(p *model.Policy) {
+			p.Blocks[0].Mode = model.ModeFirstMatch
+			p.Blocks[0].Rules[0].ReplacedRules = []string{"per-user"}
+		}},
 		{"duplicate group", func(p *model.Policy) {
 			p.Groups = []model.Group{{Name: "g", Values: []string{"a"}}, {Name: "g", Values: []string{"b"}}}
 		}},
@@ -285,8 +325,9 @@ func TestInvalidSpecFamily(t *testing.T) {
 		{"bad mapping key name", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: "Bad-Name", Claim: "x"}}
 		}},
+		// 64 characters, one over the limit of 63.
 		{"overlong mapping key", func(p *model.Policy) {
-			p.Mappings = []model.KeyMapping{{Key: "k" + strings.Repeat("x", maxKeyLength), Claim: "a"}}
+			p.Mappings = []model.KeyMapping{{Key: strings.Repeat("k", 64), Claim: "a"}}
 		}},
 		// A capture is a descriptor key and can serve as a counter axis, so it
 		// carries the same cap as a mapping key: the name becomes a segment of
@@ -294,7 +335,7 @@ func TestInvalidSpecFamily(t *testing.T) {
 		{"overlong placeholder", func(p *model.Policy) {
 			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{
 				Type:  model.PathTemplate,
-				Value: "/api/{" + "k" + strings.Repeat("x", maxKeyLength) + "}",
+				Value: "/api/{" + strings.Repeat("k", 64) + "}",
 			}
 		}},
 		// A capture named after a built-in key is refused: the caller controls
@@ -364,26 +405,38 @@ func TestInvalidSpecFamily(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := policyOf()
+			p := validPolicy()
 			tc.mutate(&p)
+
 			snap, problems := compileOne(p)
-			if reasons(problems)[ReasonInvalidSpec] == 0 {
-				t.Fatalf("problems = %v, want InvalidSpec", problems)
-			}
-			if len(snap.Blocks) != 0 {
-				t.Error("the generation compiled despite a structural problem")
-			}
+
+			assertRejectedWhole(t, snap, problems, ReasonInvalidSpec)
 		})
 	}
 }
 
-// TestNoListIsBounded pins that no list of the policy is capped: 100 blocks
-// and a group of 4096 values compile, because what binds a generation is the
-// bucket budget and the object size, not a count of blocks or group values.
-func TestNoListIsBounded(t *testing.T) {
+// Compile reports every problem it finds. A Bypass rule under All that carries
+// rates and names no replacedRules has two defects, and each one is reported.
+func TestCompileReportsEachDefectOfABypassRuleUnderAll(t *testing.T) {
+	p := validPolicy()
+	p.Blocks[0].Rules[0].Behavior = model.BehaviorBypass
+
+	snap, problems := compileOne(p)
+
+	if got, want := reasonsOf(problems), []Reason{ReasonInvalidSpec, ReasonInvalidSpec}; !slices.Equal(got, want) {
+		t.Errorf("Compile reasons = %v, want %v; problems: %v", got, want, problems)
+	}
+	if got := blockNames(snap.Blocks); len(got) != 0 {
+		t.Errorf("Compile blocks = %v, want none", got)
+	}
+}
+
+// No list of a policy is capped: what binds a generation is the bucket budget
+// and the object size, not a count of blocks or of group values. The 100
+// blocks have no target and one bucket each, so a decision collects all 100,
+// inside the budget of 128.
+func TestCompileAcceptsLongListsWithinTheBucketBudget(t *testing.T) {
 	p := model.Policy{Domain: domain}
-	// 100 blocks without a target and with one bucket each: every decision
-	// collects all 100, inside the budget of 128.
 	for i := range 100 {
 		p.Blocks = append(p.Blocks, model.Block{
 			Name:  fmt.Sprintf("b%d", i),
@@ -396,140 +449,199 @@ func TestNoListIsBounded(t *testing.T) {
 	}
 
 	snap, problems := compileOne(p)
+
 	if len(problems) != 0 {
-		t.Fatalf("a wide but budgeted generation must compile; problems: %v", problems)
+		t.Fatalf("Compile problems = %v, want none", problems)
 	}
 	if len(snap.Blocks) != 100 {
-		t.Errorf("blocks = %d, want all 100", len(snap.Blocks))
+		t.Errorf("Compile: %d blocks, want 100", len(snap.Blocks))
 	}
 }
 
-// TestTargetlessBlockCompiles pins the documented whole-domain form: no
-// target means the block applies to the domain's entire traffic.
-func TestTargetlessBlockCompiles(t *testing.T) {
-	p := policyOf()
+// A block without a target is the documented whole-domain form: it applies to
+// the domain's entire traffic.
+func TestABlockWithoutATargetCompilesWithNoRoutes(t *testing.T) {
+	p := validPolicy()
 	p.Blocks[0].Target = model.Target{}
+
 	snap, problems := compileOne(p)
-	if len(problems) != 0 || len(snap.Blocks) != 1 || len(snap.Blocks[0].Routes) != 0 {
-		t.Errorf("problems = %v, blocks = %+v: a target-less block is legal and route-less", problems, snap.Blocks)
+
+	if len(problems) != 0 {
+		t.Fatalf("Compile problems = %v, want none", problems)
+	}
+	if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"api"}) {
+		t.Fatalf("Compile blocks = %v, want [api]", got)
+	}
+	if got := snap.Blocks[0].Routes; len(got) != 0 {
+		t.Errorf("Compile: routes of api = %+v, want none", got)
 	}
 }
 
-// TestInvalidDomainCompilesNothing pins the guard in front of the key
-// builder's empty-hash-tag panic: an invalid domain is a compile problem,
-// never a request-time crash.
-func TestInvalidDomainCompilesNothing(t *testing.T) {
-	for _, d := range []string{"", "Bad_Domain", "-x", "a/b", strings.Repeat("a", 64)} {
-		p := policyOf()
-		p.Domain = d
-		snap, problems := Compile(namespace, d, &p)
-		if len(snap.Blocks) != 0 || reasons(problems)[ReasonInvalidSpec] == 0 {
-			t.Errorf("domain %q: blocks = %d, problems = %v; want a blocking InvalidSpec and no blocks",
-				d, len(snap.Blocks), problems)
-		}
+// The domain check stands in front of the key builder, which panics on an empty
+// hash tag: an invalid domain is a compile problem, never a crash at request
+// time.
+func TestCompileRejectsAMalformedDomain(t *testing.T) {
+	cases := []struct {
+		name, domain string
+	}{
+		{"empty", ""},
+		{"uppercase letters and an underscore", "Bad_Domain"},
+		{"a leading hyphen", "-x"},
+		{"a slash", "a/b"},
+		{"64 characters", strings.Repeat("a", 64)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPolicy()
+			p.Domain = tc.domain
+
+			snap, problems := Compile(namespace, tc.domain, &p)
+
+			assertRejectedWhole(t, snap, problems, ReasonInvalidSpec)
+		})
 	}
 }
 
-// TestEmptyNamespaceCompilesNothing pins the other half of the hash tag: the
-// component's own namespace is a key segment, and an empty one would scatter a
-// decision across cluster slots.
-func TestEmptyNamespaceCompilesNothing(t *testing.T) {
-	p := policyOf()
+// The component's own namespace is the other half of the hash tag, and an
+// empty one would scatter a decision across cluster slots.
+func TestCompileRejectsAnEmptyNamespace(t *testing.T) {
+	p := validPolicy()
+
 	snap, problems := Compile("", domain, &p)
-	if len(snap.Blocks) != 0 || reasons(problems)[ReasonInvalidSpec] == 0 {
-		t.Errorf("blocks = %d, problems = %v; want a blocking InvalidSpec", len(snap.Blocks), problems)
-	}
+
+	assertRejectedWhole(t, snap, problems, ReasonInvalidSpec)
 }
 
-// TestNilPolicyIsTheEmptyDomain pins what a domain with nothing enforced looks
-// like: built-in keys, no blocks, no problems.
-func TestNilPolicyIsTheEmptyDomain(t *testing.T) {
+// A nil policy is a domain with nothing enforced: the built-in keys, no
+// blocks, and no problems.
+func TestCompileOfANilPolicyYieldsTheBuiltInKeysAlone(t *testing.T) {
 	snap, problems := Compile(namespace, domain, nil)
+
 	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
+		t.Fatalf("Compile problems = %v, want none", problems)
 	}
-	if len(snap.Blocks) != 0 {
-		t.Errorf("blocks = %d, want none", len(snap.Blocks))
+	if got := blockNames(snap.Blocks); len(got) != 0 {
+		t.Errorf("Compile blocks = %v, want none", got)
 	}
-	want := []string{model.KeyMethod, model.KeyPath, model.KeySub}
-	if !reflect.DeepEqual(snap.EffectiveKeys, want) {
-		t.Errorf("effective keys = %v, want %v", snap.EffectiveKeys, want)
+	if want := []string{"method", "path", "sub"}; !slices.Equal(snap.EffectiveKeys, want) {
+		t.Errorf("Compile: effective keys = %v, want %v", snap.EffectiveKeys, want)
 	}
-	if len(snap.Extraction) != 1 || snap.Extraction[0].Key != model.KeySub {
-		t.Errorf("extraction = %+v, want the built-in sub alone", snap.Extraction)
+	want := []KeyExtraction{
+		{Key: "sub", Path: []string{"sub"}, Type: model.ValueString, Normalization: model.NormalizeLowercase},
+	}
+	if !reflect.DeepEqual(snap.Extraction, want) {
+		t.Errorf("Compile: extraction = %+v, want %+v", snap.Extraction, want)
 	}
 }
 
-// TestSnapshotDoesNotAliasTheModel pins immutability: mutating the model
-// after Compile must not reach the snapshot.
-func TestSnapshotDoesNotAliasTheModel(t *testing.T) {
-	p := policyOf()
+// The snapshot is immutable: the model's counters and claimPath slices are
+// copied, not shared, so a write to the model after Compile reaches neither.
+func TestMutatingThePolicyAfterCompileLeavesTheSnapshotUnchanged(t *testing.T) {
+	p := validPolicy()
 	p.Mappings = []model.KeyMapping{{Key: "plan", ClaimPath: []string{"a", "b"}}}
-
 	snap, problems := compileOne(p)
 	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
+		t.Fatalf("Compile problems = %v, want none", problems)
+	}
+	if len(snap.Blocks) != 1 || len(snap.Blocks[0].Rules) != 1 || len(snap.Extraction) != 2 {
+		t.Fatalf("Compile = %+v, want one block of one rule and the extraction of sub and plan", *snap)
 	}
 
 	p.Blocks[0].Rules[0].Counters[0] = "mutated"
-	if snap.Blocks[0].Rules[0].Counters[0] != model.KeySub {
-		t.Error("the snapshot aliased the model's counters slice")
-	}
 	p.Mappings[0].ClaimPath[0] = "mutated"
-	if snap.Extraction[1].Path[0] != "a" {
-		t.Error("the extraction plan aliased the model's claimPath slice")
+
+	if got := snap.Blocks[0].Rules[0].Counters; !slices.Equal(got, []string{"sub"}) {
+		t.Errorf("snapshot counters of api/per-user = %v, want [sub]", got)
+	}
+	if got := snap.Extraction[1].Path; !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("snapshot extraction path of plan = %v, want [a b]", got)
 	}
 }
 
-func TestCaptureShadowingIsInformational(t *testing.T) {
-	p := withKeys(policyOf())
+// Inside its block a capture wins over the mapped key of the same name, and
+// the author is told so without the generation being refused. The other
+// mapping and the group stay silent, so the one problem is the shadowing.
+func TestACaptureShadowingAMappedKeyIsReportedWithoutBlocking(t *testing.T) {
+	p := validPolicy()
+	p.Mappings = []model.KeyMapping{
+		{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
+		{Key: "tenant", Claim: "org_id", Fallbacks: []string{"sub"}, Normalization: model.NormalizeLowercase},
+	}
+	p.Groups = []model.Group{{Name: "partners", Values: []string{"a", "b"}}}
 	p.Blocks[0].Target.Routes = append(p.Blocks[0].Target.Routes, model.Route{
 		Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/v1/tenants/{tenant}/orders"},
 	})
 
 	snap, problems := compileOne(p)
 
-	if len(problems) != 1 || problems[0].Reason != ReasonCaptureShadowsMappedKey || problems[0].Blocking {
-		t.Fatalf("problems = %v, want one non-blocking CaptureShadowsMappedKey", problems)
+	if len(problems) != 1 {
+		t.Fatalf("Compile problems = %v, want one CaptureShadowsMappedKey", problems)
 	}
-	if len(snap.Blocks) != 1 {
-		t.Fatal("an informational problem must not invalidate the generation")
+	if got := problems[0].Reason; got != ReasonCaptureShadowsMappedKey {
+		t.Errorf("Compile: problem reason = %s, want %s", got, ReasonCaptureShadowsMappedKey)
 	}
-	if got := snap.Blocks[0].Captures; len(got) != 1 || got[0] != "tenant" {
-		t.Errorf("captures = %v, want [tenant]", got)
+	if problems[0].Blocking {
+		t.Errorf("Compile: problem %+v is blocking, want informational", problems[0])
+	}
+	if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"api"}) {
+		t.Fatalf("Compile blocks = %v, want [api]", got)
+	}
+	if got := snap.Blocks[0].Captures; !slices.Equal(got, []string{"tenant"}) {
+		t.Errorf("Compile: captures of api = %v, want [tenant]", got)
 	}
 }
 
-func TestCapturesAreBlockScopedKeys(t *testing.T) {
-	p := policyOf()
+// policyCountingByOrderID returns validPolicy with block "api" on the template
+// /api/v1/orders/{orderId}/items and its rule counting by the capture orderId.
+func policyCountingByOrderID() model.Policy {
+	p := validPolicy()
 	p.Blocks[0].Target.Routes = []model.Route{{
 		Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/v1/orders/{orderId}/items"},
 	}}
 	p.Blocks[0].Rules[0].Counters = []string{"orderId"}
+	return p
+}
 
-	snap, problems := compileOne(p)
-	if len(problems) != 0 || len(snap.Blocks) != 1 {
-		t.Fatalf("problems = %v: a capture must resolve as a counter axis in its own block", problems)
-	}
-	if got := snap.EffectiveKeys; len(got) != 3 {
-		t.Errorf("effective keys = %v: a capture is block-scoped and must not be listed", got)
-	}
+// A capture is a key of the block whose route declares it, and the
+// domain-wide key set does not list it.
+func TestACaptureResolvesAsACounterAxisOfItsOwnBlock(t *testing.T) {
+	snap, problems := compileOne(policyCountingByOrderID())
 
-	// A second block does not see the first block's capture.
+	if len(problems) != 0 {
+		t.Fatalf("Compile problems = %v, want none", problems)
+	}
+	if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"api"}) {
+		t.Errorf("Compile blocks = %v, want [api]", got)
+	}
+	if want := []string{"method", "path", "sub"}; !slices.Equal(snap.EffectiveKeys, want) {
+		t.Errorf("Compile: effective keys = %v, want %v", snap.EffectiveKeys, want)
+	}
+}
+
+// One compilation holds block api, whose template declares orderId, and block
+// stranger, which only counts by it. The single problem names stranger, and
+// api stands as its control.
+func TestACaptureDoesNotResolveInAnotherBlock(t *testing.T) {
+	p := policyCountingByOrderID()
 	p.Blocks = append(p.Blocks, model.Block{
 		Name:  "stranger",
 		Rules: []model.Rule{{Name: "r", Counters: []string{"orderId"}, Rates: []model.Rate{rate(1, time.Minute)}}},
 	})
-	_, problems = compileOne(p)
-	if reasons(problems)[ReasonUnresolvedKeyReference] == 0 {
-		t.Error("a capture leaked outside its block: another block resolved it")
+
+	_, problems := compileOne(p)
+
+	if len(problems) != 1 {
+		t.Fatalf("Compile problems = %v, want one UnresolvedKeyReference in block stranger", problems)
+	}
+	if got := problems[0]; got.Block != "stranger" || got.Reason != ReasonUnresolvedKeyReference {
+		t.Errorf("Compile problem = %+v, want an UnresolvedKeyReference in block stranger", got)
 	}
 }
 
-// TestCamelCaseKeysAreAdmitted pins the widened key pattern: {orderId} is the
-// shape the specification's own examples use.
-func TestCamelCaseKeysAreAdmitted(t *testing.T) {
-	p := policyOf()
+// The key pattern admits camelCase: {orderId} is the shape the
+// specification's own examples use.
+func TestCompileAdmitsCamelCaseKeyNames(t *testing.T) {
+	p := validPolicy()
 	p.Mappings = []model.KeyMapping{{Key: "tenantId", Claim: "org_id"}}
 	p.Blocks[0].Rules[0].Counters = []string{"tenantId"}
 	p.Blocks[0].Target.Routes = []model.Route{{
@@ -537,83 +649,94 @@ func TestCamelCaseKeysAreAdmitted(t *testing.T) {
 	}}
 
 	snap, problems := compileOne(p)
-	if len(problems) != 0 || len(snap.Blocks) != 1 {
-		t.Fatalf("camelCase keys must compile; problems: %v", problems)
+
+	if len(problems) != 0 {
+		t.Fatalf("Compile problems = %v, want none", problems)
 	}
-	if got := snap.Blocks[0].Captures; len(got) != 1 || got[0] != "orderId" {
-		t.Errorf("captures = %v, want [orderId]", got)
+	if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"api"}) {
+		t.Fatalf("Compile blocks = %v, want [api]", got)
+	}
+	if got := snap.Blocks[0].Captures; !slices.Equal(got, []string{"orderId"}) {
+		t.Errorf("Compile: captures of api = %v, want [orderId]", got)
 	}
 }
 
-func TestGroupsResolveAtCompileTime(t *testing.T) {
-	p := withKeys(policyOf())
+// Group indirection ends at compile time: the predicate itself carries the
+// values, so a request never looks a group up.
+func TestAnInGroupPredicateCarriesTheValuesOfItsGroup(t *testing.T) {
+	p := validPolicy()
+	p.Groups = []model.Group{{Name: "partners", Values: []string{"a", "b"}}}
 	p.Blocks[0].Rules[0].Matches = []model.Predicate{
 		{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "partners"},
 	}
 
 	snap, problems := compileOne(p)
+
 	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
+		t.Fatalf("Compile problems = %v, want none", problems)
 	}
-	got := snap.Blocks[0].Rules[0].Matches[0].Values
-	if len(got) != 2 {
-		t.Errorf("resolved group = %v, want the group's values baked in", got)
+	if len(snap.Blocks) != 1 || len(snap.Blocks[0].Rules) != 1 || len(snap.Blocks[0].Rules[0].Matches) != 1 {
+		t.Fatalf("Compile blocks = %+v, want one block of one rule with one predicate", snap.Blocks)
+	}
+	want := map[string]struct{}{"a": {}, "b": {}}
+	if got := snap.Blocks[0].Rules[0].Matches[0].Values; !maps.Equal(got, want) {
+		t.Errorf("Compile: values of InGroup partners = %v, want %v", got, want)
 	}
 }
 
-func TestExtractionPlan(t *testing.T) {
-	snap, problems := compileOne(withKeys(policyOf()))
+// The extraction plan reads the built-in sub first and the mapped keys after
+// it in authored order, with the claim and fallback paths split on dots and
+// the unset type and normalization at their defaults. The domain key set holds
+// the built-ins and the mapped keys, sorted.
+func TestCompileDerivesTheDomainKeysFromTheMappings(t *testing.T) {
+	p := validPolicy()
+	p.Mappings = []model.KeyMapping{
+		{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray},
+		{Key: "tenant", Claim: "org_id", Fallbacks: []string{"sub"}, Normalization: model.NormalizeLowercase},
+	}
+
+	snap, problems := compileOne(p)
+
 	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
+		t.Fatalf("Compile problems = %v, want none", problems)
 	}
-
-	if snap.Extraction[0].Key != model.KeySub || snap.Extraction[0].Path[0] != "sub" {
-		t.Errorf("extraction[0] = %+v, want the built-in sub from the sub claim", snap.Extraction[0])
+	wantExtraction := []KeyExtraction{
+		{Key: "sub", Path: []string{"sub"}, Type: model.ValueString, Normalization: model.NormalizeLowercase},
+		{Key: "roles", Path: []string{"realm_access", "roles"}, Type: model.ValueStringArray,
+			Normalization: model.NormalizeNone},
+		{Key: "tenant", Path: []string{"org_id"}, Type: model.ValueString, Normalization: model.NormalizeLowercase,
+			Fallbacks: [][]string{{"sub"}}},
 	}
-	roles := snap.Extraction[1]
-	if !reflect.DeepEqual(roles.Path, []string{"realm_access", "roles"}) {
-		t.Errorf("roles path = %v, want the dot path split", roles.Path)
+	if !reflect.DeepEqual(snap.Extraction, wantExtraction) {
+		t.Errorf("Compile: extraction =\n%+v\nwant\n%+v", snap.Extraction, wantExtraction)
 	}
-	tenant := snap.Extraction[2]
-	if len(tenant.Fallbacks) != 1 || tenant.Fallbacks[0][0] != "sub" {
-		t.Errorf("tenant fallbacks = %v, want [[sub]]", tenant.Fallbacks)
-	}
-
-	want := []string{model.KeyMethod, model.KeyPath, "roles", model.KeySub, "tenant"}
-	if !reflect.DeepEqual(snap.EffectiveKeys, want) {
-		t.Errorf("effective keys = %v, want %v", snap.EffectiveKeys, want)
+	if want := []string{"method", "path", "roles", "sub", "tenant"}; !slices.Equal(snap.EffectiveKeys, want) {
+		t.Errorf("Compile: effective keys = %v, want %v", snap.EffectiveKeys, want)
 	}
 }
 
-func TestSubOverrideReplacesBuiltin(t *testing.T) {
-	p := policyOf()
+// A mapping of sub replaces the built-in extraction rather than adding a
+// second one, and its own normalization applies, None by default.
+func TestAMappingOfSubReplacesTheBuiltInExtraction(t *testing.T) {
+	p := validPolicy()
 	p.Mappings = []model.KeyMapping{{Key: model.KeySub, Claim: "azp"}}
 
 	snap, problems := compileOne(p)
+
 	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
+		t.Fatalf("Compile problems = %v, want none", problems)
 	}
-	if len(snap.Extraction) != 1 || snap.Extraction[0].Path[0] != "azp" {
-		t.Errorf("extraction = %+v, want the override only, no built-in duplicate", snap.Extraction)
+	want := []KeyExtraction{
+		{Key: "sub", Path: []string{"azp"}, Type: model.ValueString, Normalization: model.NormalizeNone},
 	}
-}
-
-func TestUndeclaredKeyBlocksTheGeneration(t *testing.T) {
-	p := policyOf()
-	p.Blocks[0].Rules[0].Matches = []model.Predicate{
-		{Key: "roles", Operator: model.OperatorContains, Value: "admin"}}
-
-	snap, problems := compileOne(p)
-	if reasons(problems)[ReasonUnresolvedKeyReference] == 0 || len(snap.Blocks) != 0 {
-		t.Errorf("problems = %v, blocks = %d: without the mapping the generation must be invalid whole",
-			problems, len(snap.Blocks))
+	if !reflect.DeepEqual(snap.Extraction, want) {
+		t.Errorf("Compile: extraction = %+v, want %+v", snap.Extraction, want)
 	}
 }
 
-// TestSpecCascadeCompiles is the specification's two-block example in
-// miniature: a FirstMatch cascade with Bypass and Shadow steps over an additive
-// block.
-func TestSpecCascadeCompiles(t *testing.T) {
+// The specification's two-block example in miniature: a FirstMatch cascade
+// with Bypass and Shadow steps over an additive block.
+func TestTheSpecificationCascadeExampleCompiles(t *testing.T) {
 	p := model.Policy{
 		Domain: domain,
 		Groups: []model.Group{{Name: "trial", Values: []string{"t1", "t2"}}},
@@ -647,22 +770,29 @@ func TestSpecCascadeCompiles(t *testing.T) {
 	}
 
 	snap, problems := compileOne(p)
+
 	if len(problems) != 0 {
-		t.Fatalf("unexpected problems: %v", problems)
+		t.Fatalf("Compile problems = %v, want none", problems)
 	}
-	if len(snap.Blocks) != 2 {
-		t.Fatalf("blocks = %d, want 2", len(snap.Blocks))
+	if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"cascade", "total"}) {
+		t.Fatalf("Compile blocks = %v, want [cascade total]", got)
 	}
 	cascade := snap.Blocks[0]
-	if cascade.Mode != model.ModeFirstMatch || len(cascade.Rules) != 3 {
-		t.Fatalf("cascade = %+v", cascade)
+	if cascade.Mode != model.ModeFirstMatch {
+		t.Errorf("Compile: mode of cascade = %q, want %q", cascade.Mode, model.ModeFirstMatch)
 	}
-	if cascade.Rules[0].Behavior != model.BehaviorBypass || cascade.Rules[0].Rates != nil {
-		t.Error("bypass rule must compile without rates")
+	if len(cascade.Rules) != 3 || len(cascade.Rules[2].Rates) != 2 {
+		t.Fatalf("Compile: rules of cascade = %+v, want three, the last with two rates", cascade.Rules)
+	}
+	if bypass := cascade.Rules[0]; bypass.Behavior != model.BehaviorBypass || bypass.Rates != nil {
+		t.Errorf("Compile: rule internal = %+v, want a Bypass rule without rates", bypass)
 	}
 	daily := cascade.Rules[2].Rates[1]
-	if daily.Algorithm.Name() != "FixedWindow" || daily.Window.Burst != 0 {
-		t.Errorf("daily quota = %+v, want FixedWindow without burst", daily)
+	if got := daily.Algorithm.Name(); got != "FixedWindow" {
+		t.Errorf("Compile: algorithm of the daily quota = %q, want FixedWindow", got)
+	}
+	if daily.Window.Burst != 0 {
+		t.Errorf("Compile: burst of the daily quota = %d, want 0, since a fixed window has no burst", daily.Window.Burst)
 	}
 }
 
@@ -691,52 +821,66 @@ func budgetPolicy(mode model.Mode, rules []model.Rule) model.Policy {
 		Blocks: []model.Block{{Name: "b", Mode: mode, Rules: rules}}}
 }
 
-// TestDecisionBucketBudget pins the worst-case formula and the fact that going
-// over it is blocking: the alternative is a generation whose widest paths the
+// The worst case of a decision is bounded by 128 buckets, and a generation
+// over it is refused: the alternative is a generation whose widest paths the
 // runtime backstop refuses outright.
-func TestDecisionBucketBudget(t *testing.T) {
-	t.Run("All sums every rule", func(t *testing.T) {
+func TestCompileEnforcesTheDecisionBucketBudget(t *testing.T) {
+	t.Run("All over the budget is refused", func(t *testing.T) {
+		// 33 rules x 4 rates = 132 buckets.
 		snap, problems := compileOne(budgetPolicy(model.ModeAll, counting(33, "")))
-		if reasons(problems)[ReasonDomainBudgetExceeded] == 0 {
-			t.Fatalf("33 rules x 4 rates = 132 must exceed the budget of %d; problems: %v",
-				model.MaxDomainDecisionBuckets, problems)
-		}
-		if len(snap.Blocks) != 0 {
-			t.Fatal("a generation over the budget must be enforced nowhere")
-		}
+
+		assertRejectedWhole(t, snap, problems, ReasonDomainBudgetExceeded)
 	})
-	t.Run("the boundary itself passes", func(t *testing.T) {
+	t.Run("All one bucket over the budget is refused", func(t *testing.T) {
+		// 32 rules x 4 rates + 1 = 129 buckets.
+		rules := append(counting(32, ""), model.Rule{Name: "extra", Rates: []model.Rate{rate(100, time.Minute)}})
+
+		snap, problems := compileOne(budgetPolicy(model.ModeAll, rules))
+
+		assertRejectedWhole(t, snap, problems, ReasonDomainBudgetExceeded)
+	})
+	t.Run("All at exactly the budget compiles", func(t *testing.T) {
+		// 32 rules x 4 rates = 128 buckets.
 		snap, problems := compileOne(budgetPolicy(model.ModeAll, counting(32, "")))
-		if len(problems) != 0 || len(snap.Blocks) != 1 {
-			t.Fatalf("32 rules x 4 rates = 128 is exactly the budget; problems: %v", problems)
+
+		if len(problems) != 0 {
+			t.Fatalf("Compile problems = %v, want none", problems)
+		}
+		if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"b"}) {
+			t.Errorf("Compile blocks = %v, want [b]", got)
 		}
 		if snap.DecisionBuckets != 128 {
-			t.Errorf("DecisionBuckets = %d, want 128", snap.DecisionBuckets)
+			t.Errorf("Compile: DecisionBuckets = %d, want 128", snap.DecisionBuckets)
 		}
 	})
-	t.Run("FirstMatch settles on its widest rule", func(t *testing.T) {
-		_, problems := compileOne(budgetPolicy(model.ModeFirstMatch, counting(33, "")))
+	t.Run("FirstMatch counts its widest rule alone", func(t *testing.T) {
+		// 33 rules of 4 rates, of which one decision applies one.
+		snap, problems := compileOne(budgetPolicy(model.ModeFirstMatch, counting(33, "")))
+
 		if len(problems) != 0 {
-			t.Fatalf("FirstMatch worst case is one rule of 4 buckets; problems: %v", problems)
+			t.Fatalf("Compile problems = %v, want none", problems)
+		}
+		if snap.DecisionBuckets != 4 {
+			t.Errorf("Compile: DecisionBuckets = %d, want 4", snap.DecisionBuckets)
 		}
 	})
-	t.Run("FirstMatch counts every shadow rule", func(t *testing.T) {
-		rules := counting(32, model.BehaviorShadow)
-		rules = append(rules, model.Rule{Name: "last", Rates: fourRates()})
-		_, problems := compileOne(budgetPolicy(model.ModeFirstMatch, rules))
-		if reasons(problems)[ReasonDomainBudgetExceeded] == 0 {
-			t.Fatalf("32 shadow rules count before the terminating rule; problems: %v", problems)
-		}
+	t.Run("FirstMatch counts every shadow rule ahead of the widest", func(t *testing.T) {
+		// 32 shadow rules x 4 rates + 4 for the terminating rule = 132 buckets.
+		rules := append(counting(32, model.BehaviorShadow), model.Rule{Name: "last", Rates: fourRates()})
+
+		snap, problems := compileOne(budgetPolicy(model.ModeFirstMatch, rules))
+
+		assertRejectedWhole(t, snap, problems, ReasonDomainBudgetExceeded)
 	})
-	t.Run("blocks add up", func(t *testing.T) {
+	t.Run("blocks add up past the budget", func(t *testing.T) {
+		// Two blocks of 17 rules x 4 rates = 136 buckets.
 		p := budgetPolicy(model.ModeAll, counting(17, ""))
 		second := budgetPolicy(model.ModeAll, counting(17, "")).Blocks[0]
 		second.Name = "b2"
 		p.Blocks = append(p.Blocks, second)
 
-		_, problems := compileOne(p)
-		if reasons(problems)[ReasonDomainBudgetExceeded] == 0 {
-			t.Fatalf("two blocks of 68 buckets must exceed the budget; problems: %v", problems)
-		}
+		snap, problems := compileOne(p)
+
+		assertRejectedWhole(t, snap, problems, ReasonDomainBudgetExceeded)
 	})
 }

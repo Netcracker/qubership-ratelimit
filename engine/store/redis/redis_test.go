@@ -151,19 +151,18 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// TestContract is the acceptance bar: the same conformance suite the
-// in-memory store passes, now against a live Redis.
-func TestContract(t *testing.T) {
+// The conformance suite the in-memory store passes is the acceptance bar,
+// here against a live Redis.
+func TestConformsToTheStoreContract(t *testing.T) {
 	c := client(t)
 	storetest.Run(t, func(t *testing.T) store.Store {
 		return redisstore.New(c)
 	})
 }
 
-// TestDifferentialAgainstMemory drives both stores through one scenario and
-// compares verdicts field for field: the Lua script and the in-memory
-// reference must be the same math.
-func TestDifferentialAgainstMemory(t *testing.T) {
+// Both stores run through one scenario, and their verdicts are compared field
+// for field: the Lua script and the in-memory reference must be the same math.
+func TestRedisAndMemoryReturnTheSameVerdicts(t *testing.T) {
 	r := redisstore.New(client(t))
 	m := memory.New()
 	waitOutBoundary(time.Hour, 10*time.Second)
@@ -193,37 +192,41 @@ func TestDifferentialAgainstMemory(t *testing.T) {
 	}, r, m)
 }
 
+// compareBoth runs op on both stores and compares the verdicts bucket by
+// bucket: Allowed, CostExceedsCapacity, and Remaining exactly, RetryAfter and
+// ResetAfter within tolerance. Every call of the scenario is valid, so an
+// error from either store fails the comparison.
 func compareBoth(t *testing.T, label string, buckets []store.Bucket,
 	op func(store.Store) ([]store.Verdict, error), r, m store.Store) {
 	t.Helper()
 	rv, rerr := op(r)
 	mv, merr := op(m)
-	if (rerr != nil) != (merr != nil) {
-		t.Fatalf("%s: redis err = %v, memory err = %v", label, rerr, merr)
+	if rerr != nil || merr != nil {
+		t.Fatalf("%s: redis err = %v, memory err = %v, want neither", label, rerr, merr)
 	}
-	if rerr != nil {
-		return
+	if len(rv) != len(buckets) || len(mv) != len(buckets) {
+		t.Fatalf("%s: redis %d verdicts, memory %d, want %d", label, len(rv), len(mv), len(buckets))
 	}
-	for i := range buckets {
+	for i, b := range buckets {
 		if rv[i].Allowed != mv[i].Allowed || rv[i].CostExceedsCapacity != mv[i].CostExceedsCapacity ||
 			rv[i].Remaining != mv[i].Remaining {
-			t.Errorf("%s, bucket %d: redis %+v, memory %+v", label, i, rv[i], mv[i])
+			t.Errorf("%s, bucket %s: redis %+v, memory %+v", label, b.Key, rv[i], mv[i])
 		}
 		if diff := rv[i].RetryAfter - mv[i].RetryAfter; diff > tolerance || diff < -tolerance {
-			t.Errorf("%s, bucket %d: RetryAfter diverged: redis %s, memory %s", label, i,
+			t.Errorf("%s, bucket %s: RetryAfter diverged: redis %s, memory %s", label, b.Key,
 				rv[i].RetryAfter, mv[i].RetryAfter)
 		}
 		if diff := rv[i].ResetAfter - mv[i].ResetAfter; diff > tolerance || diff < -tolerance {
-			t.Errorf("%s, bucket %d: ResetAfter diverged: redis %s, memory %s", label, i,
+			t.Errorf("%s, bucket %s: ResetAfter diverged: redis %s, memory %s", label, b.Key,
 				rv[i].ResetAfter, mv[i].ResetAfter)
 		}
 	}
 }
 
-// TestOracleRedisRate pins the Lua GCRA to the ported original on single
-// buckets: the admission pattern must match request for request, and
-// remaining within one unit (the oracle rounds, we floor).
-func TestOracleRedisRate(t *testing.T) {
+// The Lua GCRA is a port of redis_rate, which serves as the oracle on single
+// buckets: the admission pattern matches request for request, and remaining
+// within one unit, because the oracle rounds where the script floors.
+func TestTheGCRAScriptAdmitsAsRedisRateDoes(t *testing.T) {
 	c := client(t)
 	r := redisstore.New(c)
 	oracle := redis_rate.NewLimiter(c)
@@ -254,12 +257,11 @@ func TestOracleRedisRate(t *testing.T) {
 	}
 }
 
-// TestHighFrequencyStateExact pins the serialization of a 100 000 req/s GCRA
-// bucket: Lua's tostring formats numbers as %.14g, which would round a
-// 16-digit microsecond timestamp by ~100µs and silently forgive debt at this
-// rate. The stored state must be an exact integer, and the in-script verdict
-// must be exact to the request.
-func TestHighFrequencyStateExact(t *testing.T) {
+// A GCRA bucket of 100000 requests a second stores its state as exact
+// integers. Lua's tostring formats numbers as %.14g, which rounds a 16-digit
+// microsecond timestamp by about 100 microseconds and at this rate forgives
+// debt silently. The in-script verdict is exact to the request.
+func TestAHighFrequencyBucketStoresItsStateAsExactIntegers(t *testing.T) {
 	c := client(t)
 	r := redisstore.New(c)
 
@@ -279,7 +281,7 @@ func TestHighFrequencyStateExact(t *testing.T) {
 		t.Fatalf("Decide: %v", err)
 	}
 	if !v[0].Allowed || v[0].Remaining != 1000 {
-		t.Fatalf("gcra verdict = %+v, want allowed with exactly 1000 remaining", v[0])
+		t.Fatalf("Decide(cost 9000) verdict of %s = %+v, want allowed with exactly 1000 remaining", gcra.Key, v[0])
 	}
 
 	nowUS := time.Now().UnixMicro()
@@ -291,31 +293,40 @@ func TestHighFrequencyStateExact(t *testing.T) {
 		assertExactTimestampState(t, b.Key, raw, nowUS)
 	}
 
-	// The stored debt must be honored on the next decision, not forgiven.
+	// The next decision reads the stored integer state back. Time passes
+	// between the two calls and refills the bucket, so the verdict cannot
+	// show whether a rounding forgave part of the debt; the format check
+	// above covers that.
 	if v, err = r.Decide(t.Context(), []store.Bucket{gcra}, 1); err != nil || !v[0].Allowed {
-		t.Fatalf("follow-up decide = %+v, %v; want allowed", v, err)
+		t.Fatalf("Decide(cost 1) after the stored state = %+v, %v; want allowed", v, err)
 	}
 }
 
 // assertExactTimestampState fails on tostring precision loss: every state
-// segment must be a plain integer, and the leading one must parse to a
-// microsecond timestamp near now.
+// segment is a plain integer, and the leading one parses to a microsecond
+// timestamp within two seconds of now.
 func assertExactTimestampState(t *testing.T, key, raw string, nowUS int64) {
 	t.Helper()
 	for part := range strings.SplitSeq(raw, ":") {
 		if part == "" || strings.ContainsAny(part, "eE.+") {
-			t.Fatalf("state of %s = %q is not an exact integer; tostring precision loss", key, raw)
+			t.Errorf("state of %s = %q, want integer segments; tostring precision loss", key, raw)
+			return
 		}
 	}
 	ts, err := strconv.ParseInt(strings.Split(raw, ":")[0], 10, 64)
-	if err != nil || ts < nowUS-2_000_000 || ts > nowUS+2_000_000 {
-		t.Fatalf("state of %s = %q does not parse to a timestamp near now (%d)", key, raw, nowUS)
+	if err != nil {
+		t.Errorf("state of %s = %q, want a leading timestamp: %v", key, raw, err)
+		return
+	}
+	if ts < nowUS-2_000_000 || ts > nowUS+2_000_000 {
+		t.Errorf("state of %s = %q: timestamp %d, want within 2 s of now, %d", key, raw, ts, nowUS)
 	}
 }
 
-// TestStateExpires covers TTL: state must vanish on its own once the window
-// drains — the store has no cleanup process to fall back on.
-func TestStateExpires(t *testing.T) {
+// State vanishes on its own once its window drains: the store has no cleanup
+// process to fall back on. Both windows last one second, so the poll allows
+// 200 ms more than a window for the keys to go.
+func TestStateIsGoneOnceItsWindowDrains(t *testing.T) {
 	c := client(t)
 	r := redisstore.New(c)
 
@@ -336,13 +347,25 @@ func TestStateExpires(t *testing.T) {
 		}
 	}
 
-	time.Sleep(1200 * time.Millisecond)
-
-	for _, b := range buckets {
-		exists, err := c.Exists(t.Context(), b.Key).Result()
-		if err != nil || exists != 0 {
-			t.Errorf("Exists(%s) = %d, %v after the window drained; want gone", b.Key, exists, err)
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for {
+		var live []string
+		for _, b := range buckets {
+			exists, err := c.Exists(t.Context(), b.Key).Result()
+			if err != nil {
+				t.Fatalf("Exists(%s): %v", b.Key, err)
+			}
+			if exists != 0 {
+				live = append(live, b.Key)
+			}
 		}
+		if len(live) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("keys %v exist 1.2 s after the decision, want none once both windows drained", live)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
