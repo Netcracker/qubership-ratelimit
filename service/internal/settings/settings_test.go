@@ -17,6 +17,18 @@ import (
 	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
 )
 
+// readEnvironment points configloader at the environment alone, where the
+// tests set the properties.
+func readEnvironment() {
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+}
+
+// warnings collects the warnings a function here logs about a value it
+// replaced.
+type warnings []string
+
+func (w *warnings) warn(format string, args ...any) { *w = append(*w, fmt.Sprintf(format, args...)) }
+
 // Without a DBaaS connection the process counts in its own memory, the
 // developer loop's store: management.enabled does not require Redis. The
 // records have to follow the counters there. Leaving them nil starts the
@@ -25,12 +37,11 @@ import (
 func TestCounterStore_theInProcessBackendCarriesARecordsStore(t *testing.T) {
 	backend := CounterStore(nil)
 
-	require.NotNil(t, backend.Store, "the in-process branch must still count somewhere")
-	require.NotNil(t, backend.Records,
-		"a nil records store panics on the first DELETE /counters")
-	require.False(t, backend.Shared, "in-process counting is per replica, and says so")
-	require.Nil(t, backend.Closer, "nothing was dialed, so there is nothing to close")
-	require.Nil(t, backend.CheckEviction, "the in-process store never evicts")
+	assert.NotNil(t, backend.Store, "the in-process branch must still count somewhere")
+	assert.NotNil(t, backend.Records, "a nil records store panics on the first DELETE /counters")
+	assert.False(t, backend.Shared, "an in-process store counts per replica")
+	assert.Nil(t, backend.Closer, "nothing was dialed, so there is nothing to close")
+	assert.Nil(t, backend.CheckEviction, "the in-process store never evicts")
 }
 
 // With a DBaaS connection the store is Redis at the address the Secret
@@ -42,6 +53,8 @@ func TestCounterStore_countsInTheDatabaseTheSecretNames(t *testing.T) {
 	require.NoError(t, err)
 
 	backend := CounterStore(source)
+
+	require.NotNil(t, backend.Closer, "the client the caller closes")
 	t.Cleanup(func() { _ = backend.Closer.Close() })
 	assert.True(t, backend.Shared)
 	assert.NotNil(t, backend.Records)
@@ -49,48 +62,39 @@ func TestCounterStore_countsInTheDatabaseTheSecretNames(t *testing.T) {
 	assert.NotNil(t, backend.CheckEviction)
 }
 
-// The store's eviction policy is read at startup: noeviction passes, any
-// other policy and a policy that cannot be read are errors that name it.
-func TestCheckEviction_namesAPolicyThatEvicts(t *testing.T) {
-	require.NoError(t, CheckEviction(context.Background(), policyReader{"maxmemory-policy": "noeviction"}))
-
-	err := CheckEviction(context.Background(), policyReader{"maxmemory-policy": "allkeys-lru"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `"allkeys-lru"`)
-	assert.Contains(t, err.Error(), "maxmemory-policy: noeviction")
-
-	err = CheckEviction(context.Background(), policyReader(nil))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "ERR unknown command")
-}
-
-// policyReader answers CONFIG GET with its map, or with an error when nil.
+// policyReader returns its map for CONFIG GET, or errUnknownCommand when it is
+// nil.
 type policyReader map[string]string
 
-func (p policyReader) ConfigGet(ctx context.Context, _ string) *goredis.MapStringStringCmd {
+var errUnknownCommand = errors.New("ERR unknown command 'CONFIG'")
+
+func (p policyReader) ConfigGet(context.Context, string) *goredis.MapStringStringCmd {
 	if p == nil {
-		return goredis.NewMapStringStringResult(nil, errors.New("ERR unknown command 'CONFIG'"))
+		return goredis.NewMapStringStringResult(nil, errUnknownCommand)
 	}
 	return goredis.NewMapStringStringResult(p, nil)
 }
 
-// The values a property can carry wrong, and what each one is replaced by.
-func TestSettings_replaceABadValueWithTheDefaultAndSaySo(t *testing.T) {
-	var warned []string
-	warn := func(format string, args ...any) { warned = append(warned, format) }
-
-	t.Setenv("METRICS_NEAR_LIMIT_RATIO", "1.5")
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
-
-	assert.Equal(t, rls.DefaultNearLimitRatio, NearLimitRatio(warn))
-	assert.Len(t, warned, 1)
-
-	t.Setenv("METRICS_NEAR_LIMIT_RATIO", "0.5")
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
-	assert.Equal(t, 0.5, NearLimitRatio(warn))
+// The store's eviction policy is read at startup: noeviction passes, and any
+// other policy, or a policy that cannot be read, is an error that names it.
+func TestCheckEviction_acceptsNoeviction(t *testing.T) {
+	assert.NoError(t, CheckEviction(context.Background(), policyReader{"maxmemory-policy": "noeviction"}))
 }
 
-// fixedResolver answers every lookup with one set of connection properties.
+func TestCheckEviction_refusesAnEvictingPolicyByName(t *testing.T) {
+	err := CheckEviction(context.Background(), policyReader{"maxmemory-policy": "allkeys-lru"})
+
+	assert.ErrorContains(t, err, `"allkeys-lru"`)
+	assert.ErrorContains(t, err, "maxmemory-policy: noeviction", "the remedy names the policy to install")
+}
+
+func TestCheckEviction_reportsAPolicyItCannotRead(t *testing.T) {
+	err := CheckEviction(context.Background(), policyReader(nil))
+
+	assert.ErrorIs(t, err, errUnknownCommand)
+}
+
+// fixedResolver returns one set of connection properties for every lookup.
 type fixedResolver map[string]any
 
 func (f fixedResolver) GetConnection(context.Context, string, map[string]any,
@@ -98,17 +102,42 @@ func (f fixedResolver) GetConnection(context.Context, string, map[string]any,
 	return f, nil
 }
 
+// A ratio outside (0, 1) is reported and replaced by the default.
+func TestNearLimitRatio_replacesARatioAboveOneWithTheDefault(t *testing.T) {
+	var warned warnings
+	t.Setenv("METRICS_NEAR_LIMIT_RATIO", "1.5")
+	readEnvironment()
+
+	ratio := NearLimitRatio(warned.warn)
+
+	assert.Equal(t, rls.DefaultNearLimitRatio, ratio)
+	assert.Len(t, warned, 1)
+}
+
+// A ratio inside (0, 1) is read as it is, without a warning. This is the
+// control of TestNearLimitRatio_replacesARatioAboveOneWithTheDefault.
+func TestNearLimitRatio_readsARatioInsideTheInterval(t *testing.T) {
+	var warned warnings
+	t.Setenv("METRICS_NEAR_LIMIT_RATIO", "0.5")
+	readEnvironment()
+
+	ratio := NearLimitRatio(warned.warn)
+
+	assert.Equal(t, 0.5, ratio)
+	assert.Empty(t, warned)
+}
+
 // MANAGEMENT_GATEWAY_DOMAINS is a comma-separated list, read with the blanks
 // around an entry and the empty entries dropped.
 func TestManagementGatewayDomains_readsACommaSeparatedList(t *testing.T) {
 	t.Setenv("MANAGEMENT_GATEWAY_DOMAINS", "gateway.private, gateway.internal,")
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	readEnvironment()
 
 	assert.Equal(t, []string{"gateway.private", "gateway.internal"}, ManagementGatewayDomains())
 }
 
 func TestManagementGatewayDomains_unsetIsNoDomain(t *testing.T) {
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	readEnvironment()
 
 	assert.Empty(t, ManagementGatewayDomains())
 }
@@ -121,48 +150,58 @@ func TestManagementCallers_readsBothFormsAsTokenSubjects(t *testing.T) {
 	var warned []string
 	warn := func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
 	t.Setenv("MANAGEMENT_CALLERS", "ui-backend, platform/ops-backend,, Bad/Name, a/b/c")
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	readEnvironment()
 
 	assert.Equal(t, []string{
 		"system:serviceaccount:biz:ui-backend",
 		"system:serviceaccount:platform:ops-backend",
 	}, ManagementCallers("biz", warn))
-	assert.Len(t, warned, 2)
+	assert.Len(t, warned, 2, "the entries of another shape are not both reported")
 }
 
 func TestManagementCallers_unsetIsNoCaller(t *testing.T) {
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	readEnvironment()
 
 	assert.Empty(t, ManagementCallers("biz", func(string, ...any) {}))
 }
 
-// The audience defaults to the platform's machine-to-machine convention and
-// is replaced whole by MANAGEMENT_M2M_AUDIENCE.
-func TestManagementAudience_defaultsToThePlatformConvention(t *testing.T) {
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
-	assert.Equal(t, "netcracker", ManagementAudience())
+// The audience defaults to the platform's machine-to-machine convention.
+func TestManagementAudience_unsetIsThePlatformConvention(t *testing.T) {
+	readEnvironment()
 
+	assert.Equal(t, "netcracker", ManagementAudience())
+}
+
+func TestManagementAudience_readsTheConfiguredAudience(t *testing.T) {
 	t.Setenv("MANAGEMENT_M2M_AUDIENCE", "ratelimit-e2e")
-	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	readEnvironment()
+
 	assert.Equal(t, "ratelimit-e2e", ManagementAudience())
 }
 
 // RESPONSE_HEADERS_IETF turns the ratelimit-policy and ratelimit fields off
-// only when it reads as false: unset or empty is on, and a value that is not a boolean
+// only when it reads as false: empty is on, and a value that is not a boolean
 // is reported and read as on, so a typo does not change what clients receive.
 func TestIETFHeaders_isOnUnlessSetToFalse(t *testing.T) {
-	var warned []string
-	warn := func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
-	read := func(value string) bool {
-		t.Setenv("RESPONSE_HEADERS_IETF", value)
-		configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
-		return IETFHeaders(warn)
+	cases := []struct {
+		name     string
+		value    string
+		want     bool
+		warnings int
+	}{
+		{"an empty value is on", "", true, 0},
+		{"false is off", "false", false, 0},
+		{"true is on", "true", true, 0},
+		{"a value that is not a boolean reads as on with a warning", "off", true, 1},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var warned warnings
+			t.Setenv("RESPONSE_HEADERS_IETF", c.value)
+			readEnvironment()
 
-	assert.True(t, read(""), "an empty value")
-	assert.False(t, read("false"))
-	assert.True(t, read("true"))
-	assert.Empty(t, warned)
-	assert.True(t, read("off"), "a value that is not a boolean")
-	assert.Len(t, warned, 1)
+			assert.Equal(t, c.want, IETFHeaders(warned.warn), "RESPONSE_HEADERS_IETF=%q", c.value)
+			assert.Len(t, warned, c.warnings, "warnings about RESPONSE_HEADERS_IETF=%q", c.value)
+		})
+	}
 }

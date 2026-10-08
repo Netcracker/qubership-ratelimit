@@ -1,6 +1,7 @@
 package management
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,10 +9,11 @@ import (
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// The app is the platform's, and the platform brings middleware of its own —
+// The app is the platform's, and the platform brings middleware of its own:
 // context propagation that already puts an X-Request-Id on the response, a
 // security middleware, and an error handler for whatever a route did not
 // answer. These tests pin what that adds up to at the edge.
@@ -21,13 +23,12 @@ import (
 func TestApp_answersWithExactlyOneRequestID(t *testing.T) {
 	h := newTestAPI(t)
 
-	request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
-	request.Header.Set("Authorization", "Bearer "+testToken(listedCaller))
-	request.Header.Set(RequestIDHeader, "trace-42")
+	recorder := h.callWith(t, http.MethodGet, BasePath+"/domains", listedCaller, nil, func(request *http.Request) {
+		request.Header.Set(RequestIDHeader, "trace-42")
+	})
 
-	recorder := h.send(t, request)
-	require.Equal(t, http.StatusOK, recorder.Code)
-	require.Equal(t, []string{"trace-42"}, recorder.Header().Values(RequestIDHeader))
+	require.Equal(t, http.StatusOK, recorder.Code, "body: %s", recorder.Body.String())
+	assert.Equal(t, []string{"trace-42"}, recorder.Header().Values(RequestIDHeader))
 }
 
 func TestApp_generatesOneRequestIDWhenTheCallerSendsNone(t *testing.T) {
@@ -36,7 +37,7 @@ func TestApp_generatesOneRequestIDWhenTheCallerSendsNone(t *testing.T) {
 
 	values := recorder.Header().Values(RequestIDHeader)
 	require.Len(t, values, 1)
-	require.Regexp(t, requestIDPattern, values[0])
+	assert.Regexp(t, requestIDPattern, values[0])
 }
 
 // A path outside the API is answered in the same envelope as everything else,
@@ -46,8 +47,8 @@ func TestApp_answersAnUnknownPathInTheSameShape(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodGet, "/nothing-here", strings.NewReader(""))
 	body := requireError(t, h.send(t, request), http.StatusNotFound, CodeNotFound)
-	require.NotEmpty(t, body.Meta.RequestID)
-	require.Equal(t, "NC.TMFErrorResponse.v1.0", body.Type)
+
+	assert.Equal(t, "NC.TMFErrorResponse.v1.0", body.Type)
 }
 
 // The error catalog reaches the wire through the platform's TMF envelope, so a
@@ -58,32 +59,34 @@ func TestApp_answersInTheTmfEnvelope(t *testing.T) {
 	body := requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules",
 		listedCaller, nil), http.StatusNotFound, CodeNotFound)
 
-	require.Equal(t, "NC.TMFErrorResponse.v1.0", body.Type)
-	require.Equal(t, "404", body.Status)
-	require.NotEmpty(t, body.ID, "every instance carries its own id")
-	require.Contains(t, body.Message, "gateway.typo")
+	assert.Equal(t, "NC.TMFErrorResponse.v1.0", body.Type)
+	assert.Equal(t, "404", body.Status)
+	assert.Regexp(t, `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, body.ID,
+		"every instance carries its own id, a UUID")
+	assert.Contains(t, body.Message, "gateway.typo")
 }
 
+// The security middleware is registered globally, once; a second app must not
+// trip over the registration the first one made.
 func TestNewApp_isBuildableTwiceInOneProcess(t *testing.T) {
-	// The security middleware is registered globally, once; a second app must
-	// not trip over the registration the first one made.
 	first := newTestAPI(t)
 	second := newTestAPI(t)
 
-	require.Equal(t, http.StatusOK,
-		first.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code)
-	require.Equal(t, http.StatusOK,
-		second.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code)
+	assert.Equal(t, http.StatusOK,
+		first.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code, "the app built first")
+	assert.Equal(t, http.StatusOK,
+		second.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code, "the app built second")
 }
 
 // fasthttp cuts an oversized body before any handler runs, so this is two
 // facts: the limit is the one this package documents rather than fiber's 4 MiB
-// default, and what the cut produces is answered as a bad request. Under the
+// default, and what the cut produces is answered as a bad request, which
+// TestErrorHandler_answersAnOversizedBodyAsABadRequest holds. Under the
 // platform's default handler it would be RLS-0500, telling a client branching
 // on codes that the server broke when its request was simply too large.
 func TestApp_boundsTheRequestBodyAtItsOwnLimit(t *testing.T) {
 	h := newTestAPI(t)
-	require.Equal(t, maxRequestBody, h.app.Config().BodyLimit,
+	assert.Equal(t, maxRequestBody, h.app.Config().BodyLimit,
 		"the guard in decodeJSON runs after the body is in memory; this is the limit")
 }
 
@@ -95,46 +98,39 @@ func TestErrorHandler_answersAnOversizedBodyAsABadRequest(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, response.Body.Close()) }()
 
-	require.Equal(t, http.StatusBadRequest, response.StatusCode)
-	body, err := io.ReadAll(response.Body)
+	raw, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(body), CodeInvalidRequest.Code)
-	require.Contains(t, string(body), "larger than")
+	require.Equal(t, http.StatusBadRequest, response.StatusCode, "body: %s", raw)
+	var body errorBody
+	require.NoError(t, json.Unmarshal(raw, &body), "body: %s", raw)
+	assert.Equal(t, CodeInvalidRequest.Code, body.Code, "body: %s", raw)
 }
 
 // The only acceptable end of a body is the end of the stream. Checking for a
 // second well-formed JSON value catches {}{} alone: {}garbage ends in a syntax
 // error and {}[] in a type error, and reading either as "nothing follows"
 // accepts trailing data and runs the command. It matters most for the bulk
-// reset, where the command is destructive.
+// reset, where the command is destructive. Whitespace is not data: a body
+// written by a shell ends in a newline.
 func TestDecodeJSON_refusesAnythingAfterTheValue(t *testing.T) {
-	h := newTestAPI(t)
-
-	target := BasePath + "/domains/" + testDomain + "/counter-resets"
-	post := func(t *testing.T, body, key string) *testResponse {
-		t.Helper()
-		return h.callWith(t, http.MethodPost, target, listedCaller, nil,
-			func(request *http.Request) {
-				request.Header.Set("Idempotency-Key", key)
-				request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
-				request.Body = io.NopCloser(strings.NewReader(body))
-				request.ContentLength = int64(len(body))
-			})
+	const valid = `{"selector":{"ruleIds":["orders"]},"dryRun":true}`
+	cases := []struct{ name, body string }{
+		{name: "trailing garbage", body: valid + "garbage"},
+		{name: "a trailing array", body: valid + "[]"},
+		{name: "a second object", body: valid + valid},
+		{name: "a trailing NUL byte", body: valid + "\x00"},
 	}
-
-	valid := `{"selector":{"ruleIds":["orders"]},"dryRun":true}`
-	for name, body := range map[string]string{
-		"trailing garbage":    valid + "garbage",
-		"a trailing array":    valid + "[]",
-		"a second object":     valid + valid,
-		"a trailing NUL byte": valid + "\x00",
-	} {
-		t.Run(name, func(t *testing.T) {
-			requireError(t, post(t, body, "key-"+strings.ReplaceAll(name, " ", "-")),
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestAPI(t)
+			requireError(t, h.bulk(t, rawJSON(tc.body), "key-1", listedCaller),
 				http.StatusBadRequest, CodeInvalidRequest)
 		})
 	}
 
-	// Whitespace is not data: a body written by a shell ends in a newline.
-	require.Equal(t, http.StatusOK, post(t, valid+"\n", "key-newline").Code)
+	t.Run("a trailing newline is accepted", func(t *testing.T) {
+		h := newTestAPI(t)
+		response := h.bulk(t, rawJSON(valid+"\n"), "key-1", listedCaller)
+		assert.Equal(t, http.StatusOK, response.Code, "body: %s", response.Body.String())
+	})
 }

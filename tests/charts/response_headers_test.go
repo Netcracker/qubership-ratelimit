@@ -24,7 +24,7 @@ func TestServiceChart_handsTheIETFHeaderSwitchToTheService(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			value, ok := envOf(t, render(t, serviceChart, "biz", tc.args...), "RESPONSE_HEADERS_IETF")
 			require.True(t, ok, "RESPONSE_HEADERS_IETF is not rendered")
-			assert.Equal(t, tc.want, value)
+			assert.Equal(t, tc.want, value, "RESPONSE_HEADERS_IETF")
 		})
 	}
 }

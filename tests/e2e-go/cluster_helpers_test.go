@@ -14,6 +14,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/format"
+	"github.com/onsi/gomega/types"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -70,12 +72,31 @@ func chartPods(chart string) []corev1.Pod {
 func servicePods() []corev1.Pod  { return chartPods(serviceChart) }
 func operatorPods() []corev1.Pod { return chartPods(operatorChart) }
 
-// execPod runs one command in a container and returns its stdout - the
-// kubectl exec of the suite.
-func execPod(pod, container string, command ...string) (string, error) {
-	return execPodIn(namespace, pod, container, command...)
+// podNames names the pods, for an assertion that prints them rather than
+// whole pod objects.
+func podNames(pods []corev1.Pod) []string {
+	names := make([]string, 0, len(pods))
+	for _, p := range pods {
+		names = append(names, p.Name)
+	}
+	return names
 }
 
+// namedPort returns the container port a pod publishes under the given name,
+// 0 when no container publishes one.
+func namedPort(pod corev1.Pod, name string) int {
+	for _, c := range pod.Spec.Containers {
+		for _, p := range c.Ports {
+			if p.Name == name {
+				return int(p.ContainerPort)
+			}
+		}
+	}
+	return 0
+}
+
+// execPodIn runs one command in a container and returns its stdout - the
+// kubectl exec of the suite.
 func execPodIn(ns, pod, container string, command ...string) (string, error) {
 	cfg, err := ctrlconfig.GetConfig()
 	if err != nil {
@@ -284,18 +305,50 @@ func gatewayBurstWithHeadersIn(ns, gateway, path string, count int,
 	return codes, answered
 }
 
-// waitGatewayServes warms a gateway up until the routed probe answers a
-// terminal code - the bash wait_for_gateway.
+// waitGatewayServes warms a gateway up until the routed probe is admitted -
+// the bash wait_for_gateway.
 func waitGatewayServes(gateway, path string) {
 	waitGatewayServesIn(namespace, gateway, path)
 }
 
 func waitGatewayServesIn(ns, gateway, path string) {
-	Eventually(func() bool {
-		code := gatewayGetIn(ns, gateway, path, nil)
-		return (code >= 200 && code < 300) || code == 404
-	}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(BeTrue(),
+	Eventually(func() int {
+		return gatewayGetIn(ns, gateway, path, nil)
+	}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(beAdmitted(),
 		"the gateway %s in %s never served %s", gateway, ns, path)
+}
+
+// beAdmitted matches a status code the gateway answers for a request it let
+// through: 2xx, or 404 from the routed probe backend. 429 is a refusal, 0 a
+// transport error, and any other code a gateway answering on its own, so none
+// of them matches. An admission alone cannot tell a healthy check from one
+// the gateway failed open around; the specs that need that read the service's
+// log or its counters as well.
+func beAdmitted() types.GomegaMatcher { return admission{} }
+
+// admission is the matcher beAdmitted returns. Its GomegaString keeps the
+// report of a HaveEach over a burst to the codes and one line, rather than a
+// dump of the matcher.
+type admission struct{}
+
+func (admission) Match(actual any) (bool, error) {
+	code, ok := actual.(int)
+	if !ok {
+		return false, fmt.Errorf("beAdmitted expects a status code, got %s", format.Object(actual, 1))
+	}
+	return (code >= 200 && code < 300) || code == 404, nil
+}
+
+func (admission) FailureMessage(actual any) string {
+	return format.Message(actual, "to be an admission: 2xx, or 404 from the routed probe backend")
+}
+
+func (admission) NegatedFailureMessage(actual any) string {
+	return format.Message(actual, "not to be an admission: 2xx, or 404 from the routed probe backend")
+}
+
+func (admission) GomegaString() string {
+	return "an admission: 2xx, or 404 from the routed probe backend"
 }
 
 // podLogs returns one pod's log, whole when since is nil. serviceLogsSince
@@ -349,10 +402,10 @@ func waitRolloutSettled(name string) {
 		if d.Spec.Replicas != nil {
 			want = *d.Spec.Replicas
 		}
-		g.Expect(d.Status.ObservedGeneration).To(BeNumerically(">=", d.Generation))
-		g.Expect(d.Status.UpdatedReplicas).To(Equal(want))
-		g.Expect(d.Status.Replicas).To(Equal(want))
-		g.Expect(d.Status.AvailableReplicas).To(Equal(want))
+		g.Expect(d.Status.ObservedGeneration).To(BeNumerically(">=", d.Generation), "observedGeneration of %s", name)
+		g.Expect(d.Status.UpdatedReplicas).To(Equal(want), "updatedReplicas of %s", name)
+		g.Expect(d.Status.Replicas).To(Equal(want), "replicas of %s", name)
+		g.Expect(d.Status.AvailableReplicas).To(Equal(want), "availableReplicas of %s", name)
 	}).WithTimeout(3*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
 		"the %s Deployment did not come back after the restart", name)
 }
@@ -438,8 +491,8 @@ func scaleDeployment(name string, replicas int32) {
 	Eventually(func(g Gomega) {
 		var d appsv1.Deployment
 		g.Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &d)).To(Succeed())
-		g.Expect(d.Status.Replicas).To(Equal(replicas))
-		g.Expect(d.Status.ReadyReplicas).To(Equal(replicas))
+		g.Expect(d.Status.Replicas).To(Equal(replicas), "replicas of %s", name)
+		g.Expect(d.Status.ReadyReplicas).To(Equal(replicas), "readyReplicas of %s", name)
 		// The Deployment's count leaves a terminating pod out, and a
 		// terminating operator keeps writing until its grace period ends:
 		// a spec that scaled it to zero has to see every pod gone.

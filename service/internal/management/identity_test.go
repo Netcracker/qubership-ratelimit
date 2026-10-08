@@ -13,6 +13,7 @@ import (
 
 	"github.com/MicahParks/jwkset"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -187,42 +188,45 @@ func TestIdentity_refusesEveryCallUntilTheVerifierIsBuilt(t *testing.T) {
 	}
 }
 
-func TestRequestID_roundTripsALogSafeValueAndRefusesTheRest(t *testing.T) {
+// The id lands in the log and the audit journal verbatim, so a value that
+// could forge a record is refused, never sanitized, and the refusal is
+// reported under a generated id rather than the offending one.
+// TestApp_answersWithExactlyOneRequestID holds the log-safe value that
+// round-trips.
+func TestRequestID_refusesAValueThatCouldForgeALogRecord(t *testing.T) {
 	h := newTestAPI(t)
 
-	request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
-	request.Header.Set("Authorization", "Bearer "+testToken(listedCaller))
-	request.Header.Set(RequestIDHeader, "trace-42")
-	recorder := h.send(t, request)
-	require.Equal(t, "trace-42", recorder.Header().Get(RequestIDHeader))
+	recorder := h.callWith(t, http.MethodGet, BasePath+"/domains", listedCaller, nil, func(request *http.Request) {
+		request.Header.Set(RequestIDHeader, "id\nlevel=error msg=\"forged\"")
+	})
 
-	// The id lands in the log and the audit journal verbatim, so a value that
-	// could forge a record is refused, never sanitized — and the refusal is
-	// reported under a generated id rather than the offending one.
-	forged := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
-	forged.Header.Set("Authorization", "Bearer "+testToken(listedCaller))
-	forged.Header.Set(RequestIDHeader, "id\nlevel=error msg=\"forged\"")
-	forgedRecorder := h.send(t, forged)
-
-	requireError(t, forgedRecorder, http.StatusBadRequest, CodeInvalidRequest)
-	require.NotContains(t, forgedRecorder.Header().Get(RequestIDHeader), "\n")
-	require.NotContains(t, forgedRecorder.Body.String(), "forged")
-}
-
-func TestRequestID_isGeneratedWhenTheCallerSendsNone(t *testing.T) {
-	h := newTestAPI(t)
-	recorder := h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil)
-	require.NotEmpty(t, recorder.Header().Get(RequestIDHeader))
-	require.Regexp(t, requestIDPattern, recorder.Header().Get(RequestIDHeader))
+	requireError(t, recorder, http.StatusBadRequest, CodeInvalidRequest)
+	assert.Regexp(t, requestIDPattern, recorder.Header().Get(RequestIDHeader), "the id the refusal is reported under")
+	assert.NotContains(t, recorder.Body.String(), "forged")
 }
 
 func TestLogSafe_dropsWhatCouldForgeARecord(t *testing.T) {
-	require.Equal(t, "alicelevel=info", logSafe("alice\nlevel=info"))
-	require.Equal(t, "alice", logSafe("alice\r\t\x00"))
-	require.Len(t, logSafe(strings.Repeat("x", 1000)), maxLoggedValueLength)
-
-	// The longest caller subject, a 63-byte namespace and a 253-byte name,
-	// reaches the audit line whole.
-	longest := "system:serviceaccount:" + strings.Repeat("n", 63) + ":" + strings.Repeat("s", 253)
-	require.Equal(t, longest, logSafe(longest))
+	cases := []struct {
+		name, raw, want string
+	}{
+		{name: "a newline", raw: "alice\nlevel=info", want: "alicelevel=info"},
+		{name: "a carriage return, a tab, and a NUL", raw: "alice\r\t\x00", want: "alice"},
+		{
+			name: "a value over the length bound",
+			raw:  strings.Repeat("x", 1000),
+			want: strings.Repeat("x", maxLoggedValueLength),
+		},
+		{
+			// A 63-byte namespace and a 253-byte name: the longest caller
+			// subject reaches the audit line whole.
+			name: "the longest caller subject",
+			raw:  "system:serviceaccount:" + strings.Repeat("n", 63) + ":" + strings.Repeat("s", 253),
+			want: "system:serviceaccount:" + strings.Repeat("n", 63) + ":" + strings.Repeat("s", 253),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, logSafe(tc.raw), "logSafe(%q)", tc.raw)
+		})
+	}
 }

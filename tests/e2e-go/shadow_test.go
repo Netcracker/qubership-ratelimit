@@ -44,17 +44,13 @@ var _ = Describe("shadow rules", Ordered, Label("shadow"), func() {
 	})
 
 	It("records refusals without refusing", func() {
-		codes := gatewayBurst("public-gateway", probePath, 4, nil)
-		for i, code := range codes {
-			Expect((code >= 200 && code < 300) || code == 404).To(BeTrue(),
-				"request %d was not admitted (got %d); a shadow rule must never refuse", i+1, code)
-		}
+		Expect(gatewayBurst("public-gateway", probePath, 4, nil)).To(HaveEach(beAdmitted()),
+			"a burst over the shadow limit of 1; a shadow rule must never refuse")
 
-		Eventually(func() bool {
-			families := scrapeAllReplicas()
-			return counterSum(families, "ratelimit_decisions_total",
-				map[string]string{"domain": domain, "outcome": "shadow_over_limit", "rule": rule}) > 0
-		}).WithTimeout(30*time.Second).Should(BeTrue(),
+		Eventually(func() float64 {
+			return counterSum(scrapeAllReplicas(), "ratelimit_decisions_total",
+				map[string]string{"domain": domain, "outcome": "shadow_over_limit", "rule": rule})
+		}).WithTimeout(30*time.Second).Should(BeNumerically(">", 0),
 			"the dry run left no shadow_over_limit outcome for %s", rule)
 	})
 })

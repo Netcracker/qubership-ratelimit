@@ -16,47 +16,35 @@ import (
 // and judges the policies. An operator that is scraped with no Lease holder
 // judges nothing, and a green 0 there would read as a healthy fleet; the
 // panel shows no data instead. The expression is evaluated with promtool over
-// series a scrape of each case would hold.
+// series a scrape of each case would hold, one promtool run per case: a
+// failed promql_expr_test prints the expression, the time, and the samples,
+// and not the name of its test group.
 func TestServiceChart_dashboardCountsNotReadyPoliciesOnlyUnderALeader(t *testing.T) {
-	promtool := findPromtool()
-	if promtool == "" {
-		if os.Getenv("CHARTS_TEST_REQUIRE_PROMTOOL") != "" {
-			t.Fatal("promtool is not available and CHARTS_TEST_REQUIRE_PROMTOOL is set")
-		}
-		t.Skip("promtool is not available")
-	}
-
+	promtool := promtoolOrSkip(t)
 	expr := panelExpr(t, "Policies not ready")
 	expr = strings.NewReplacer(`"$cluster"`, `".*"`, `"$namespace"`, `".*"`).Replace(expr)
 
-	cases := map[string]any{
-		"rule_files":          []string{},
-		"evaluation_interval": "1m",
-		"tests": []any{
-			promqlCase(expr, []string{`ratelimit_leader{pod="a"} 0x5`}, nil),
-			promqlCase(expr, []string{`ratelimit_leader{pod="a"} 1x5`}, []any{map[string]any{"labels": "{}", "value": 0}}),
-			promqlCase(expr, []string{
-				`ratelimit_leader{pod="a"} 1x5`,
-				`ratelimit_policy_ready{domain="gateway.public",reason="ProbeFailed"} 0x5`,
-			}, []any{map[string]any{"labels": "{}", "value": 1}}),
-		},
-	}
-	raw, err := json.Marshal(cases)
-	require.NoError(t, err)
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "dashboard.test.yaml"), raw, 0o600))
-
-	cmd := exec.Command(promtool, "test", "rules", "dashboard.test.yaml")
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "promtool test rules: %s", out)
-	assert.Contains(t, string(out), "SUCCESS", "the panel's expression did not pass: %s", out)
+	t.Run("with no Lease holder the panel shows no data", func(t *testing.T) {
+		assertPanelReturns(t, promtool, expr, []string{`ratelimit_leader{pod="a"} 0x5`}, nil)
+	})
+	t.Run("under a leader with no not-ready policy it reads 0", func(t *testing.T) {
+		assertPanelReturns(t, promtool, expr, []string{`ratelimit_leader{pod="a"} 1x5`},
+			[]any{map[string]any{"labels": "{}", "value": 0}})
+	})
+	t.Run("under a leader with one policy not ready it reads 1", func(t *testing.T) {
+		assertPanelReturns(t, promtool, expr, []string{
+			`ratelimit_leader{pod="a"} 1x5`,
+			`ratelimit_policy_ready{domain="gateway.public",reason="ProbeFailed"} 0x5`,
+		}, []any{map[string]any{"labels": "{}", "value": 1}})
+	})
 }
 
-// promqlCase is one promtool test group: the series a scrape held for five
-// minutes, and the samples the expression returns at minute two. No samples
-// is no data on the panel.
-func promqlCase(expr string, series []string, samples []any) map[string]any {
+// assertPanelReturns runs promtool test rules with one test group: the
+// series, each a name with its labels and a promtool values notation, held
+// for five minutes at one sample a minute, and the samples expr has to
+// return at minute two. No samples is no data on the panel.
+func assertPanelReturns(t *testing.T, promtool, expr string, series []string, samples []any) {
+	t.Helper()
 	input := make([]any, 0, len(series))
 	for _, s := range series {
 		name, values, _ := strings.Cut(s, " ")
@@ -65,20 +53,32 @@ func promqlCase(expr string, series []string, samples []any) map[string]any {
 	if samples == nil {
 		samples = []any{}
 	}
-	return map[string]any{
-		"interval":     "1m",
-		"input_series": input,
-		"promql_expr_test": []any{map[string]any{
-			"expr": expr, "eval_time": "2m", "exp_samples": samples,
+	raw, err := json.Marshal(map[string]any{
+		"rule_files":          []string{},
+		"evaluation_interval": "1m",
+		"tests": []any{map[string]any{
+			"interval":     "1m",
+			"input_series": input,
+			"promql_expr_test": []any{map[string]any{
+				"expr": expr, "eval_time": "2m", "exp_samples": samples,
+			}},
 		}},
-	}
+	})
+	require.NoError(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dashboard.test.yaml"), raw, 0o600))
+
+	cmd := exec.Command(promtool, "test", "rules", "dashboard.test.yaml")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "promtool test rules: %s", out)
+	assert.Contains(t, string(out), "SUCCESS", "output of promtool test rules")
 }
 
 // panelExpr is the first query of the dashboard panel with the given title.
 func panelExpr(t *testing.T, title string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "helm-templates", serviceChart, "dashboards",
-		"ratelimit-dashboard.json"))
+	raw, err := os.ReadFile(chartFile(serviceChart, "dashboards", "ratelimit-dashboard.json"))
 	require.NoError(t, err)
 	type panel struct {
 		Title   string  `json:"title"`

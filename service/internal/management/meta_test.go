@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 )
@@ -19,15 +20,15 @@ func TestStatus_reportsWhatThisReplicaServes(t *testing.T) {
 	var status StatusView
 	decode(t, h.call(t, http.MethodGet, BasePath+"/status", listedCaller, nil), http.StatusOK, &status)
 
-	require.Equal(t, "ratelimit-6c9d-x2v", status.Replica)
-	require.Equal(t, "in-process, counted per replica", status.CounterStore.Backend)
-	require.Equal(t, map[string]string{testDomain: h.version}, status.RuleSetVersions)
-	require.NotNil(t, status.SnapshotSwappedAt, "the rule set was swapped when the fixture built it")
+	assert.Equal(t, "ratelimit-6c9d-x2v", status.Replica)
+	assert.Equal(t, "in-process, counted per replica", status.CounterStore.Backend)
+	assert.Equal(t, map[string]string{testDomain: h.version}, status.RuleSetVersions)
+	assert.NotNil(t, status.SnapshotSwappedAt, "the rule set was swapped when the fixture built it")
 }
 
 // The version a replica reports for a domain is the one its own rule listing
 // reports: comparing the two across pods is how a rollout skew is spotted.
-func TestStatus_agreesWithTheRuleListing(t *testing.T) {
+func TestStatus_reportsTheVersionTheRuleListingReports(t *testing.T) {
 	h := newTestAPI(t)
 
 	var status StatusView
@@ -38,24 +39,26 @@ func TestStatus_agreesWithTheRuleListing(t *testing.T) {
 	}
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
 		http.StatusOK, &rules)
+	require.NotEmpty(t, rules.RuleSetVersion, "GET /domains/%s/rules reports no version to compare", testDomain)
 
-	require.Equal(t, rules.RuleSetVersion, status.RuleSetVersions[testDomain])
+	assert.Equal(t, rules.RuleSetVersion, status.RuleSetVersions[testDomain])
 }
 
 func TestSpecification_isServedAsTheDocumentTheBinaryCarries(t *testing.T) {
 	h := newTestAPI(t)
 
 	recorder := h.call(t, http.MethodGet, BasePath+"/openapi.yaml", listedCaller, nil)
+
 	require.Equal(t, http.StatusOK, recorder.Code)
-	require.Equal(t, "application/yaml", recorder.Header().Get("Content-Type"))
-	require.Equal(t, string(specification), recorder.Body.String())
+	assert.Equal(t, "application/yaml", recorder.Header().Get("Content-Type"))
+	assert.Equal(t, string(specification), recorder.Body.String())
 }
 
 // The embedded document is what this binary was built against, so the routes
-// and the paths in it have to be the same set — in both directions. A route
+// and the paths in it have to be the same set, in both directions. A route
 // nobody documented is invisible; a documented path nobody serves is a promise
-// the binary does not keep, which is exactly what the audit endpoints would be
-// here if the document still carried them.
+// the binary does not keep, which is what the audit endpoints would be here if
+// the document still carried them.
 func TestSpecification_describesExactlyTheRoutesTheAppServes(t *testing.T) {
 	h := newTestAPI(t)
 
@@ -87,7 +90,7 @@ func TestSpecification_describesExactlyTheRoutesTheAppServes(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, sortedSet(documented), sortedSet(served))
+	assert.Equal(t, sortedSet(documented), sortedSet(served))
 }
 
 // openAPIPath renders a router path the way the document spells it: the router
@@ -105,7 +108,8 @@ func sortedSet(set map[string]bool) []string {
 	return out
 }
 
-// The audit endpoints are not built, so nothing may advertise them.
+// The audit endpoints are not built, so neither a path nor a tag of the
+// document may advertise them.
 func TestSpecification_carriesNoUnimplementedEndpoints(t *testing.T) {
 	var document struct {
 		Paths map[string]any `json:"paths"`
@@ -114,11 +118,13 @@ func TestSpecification_carriesNoUnimplementedEndpoints(t *testing.T) {
 		} `json:"tags"`
 	}
 	require.NoError(t, yaml.Unmarshal(specification, &document))
+	require.NotEmpty(t, document.Paths, "the embedded openapi.yaml lists no paths to check")
+	require.NotEmpty(t, document.Tags, "the embedded openapi.yaml lists no tags to check")
 
 	for path := range document.Paths {
-		require.NotContains(t, path, "/audit")
+		assert.NotContains(t, path, "/audit", "a path of the embedded openapi.yaml")
 	}
 	for _, tag := range document.Tags {
-		require.NotEqual(t, "audit", tag.Name)
+		assert.NotEqual(t, "audit", tag.Name, "a tag of the embedded openapi.yaml")
 	}
 }

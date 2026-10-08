@@ -31,7 +31,8 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 		BeforeAll(func() {
 			Expect(apply(newPolicy(domain, totalLimits(1000, 60)))).To(Succeed())
 			waitApplied(domain)
-			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas))
+			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas),
+				"the policy of %s to be Ready on every replica before the spec starts", domain)
 		})
 		AfterAll(func() {
 			if fleet != nil {
@@ -40,18 +41,25 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			deletePolicies(domain)
 		})
 
-		It("reports NoReplicas, and Ready again once the service is back", func() {
+		It("reports NoReplicas for a fleet scaled to zero until the fleet returns", func() {
 			// The service release at zero replicas: the Service has no ready
 			// endpoint, and nothing enforces the policy. The operator says
 			// so rather than reporting a fleet of none as whole.
-			fleet = scaleFleet(0)
+			//
+			// A retry of a failure between scaleFleet(0) and fleet.restore()
+			// starts with the release at zero, so fleet keeps the count the
+			// first attempt read.
+			scaled := scaleFleet(0)
+			if fleet == nil {
+				fleet = scaled
+			}
 			Eventually(readyReason(domain)).WithTimeout(2*time.Minute).WithPolling(2*time.Second).
 				Should(Equal(v1.ReasonNoReplicas), "the operator did not report the missing service")
 			Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("False"),
 				"a fleet of none is not stuck; it is absent")
 			p, err := getPolicy(domain)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(p.Status.Replicas.Summary).To(Equal("0/0"))
+			Expect(p.Status.Replicas.Summary).To(Equal("0/0"), "the replica summary of a fleet of none")
 
 			// Back, the replicas read the ConfigMap the operator kept writing
 			// and take the generation up without a policy event.
@@ -68,7 +76,8 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 		BeforeAll(func() {
 			Expect(apply(newPolicy(domain, prefixLimits(probePath, "total", nil, 1, 1)))).To(Succeed())
 			waitApplied(domain)
-			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas))
+			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas),
+				"the policy of %s to be Ready on every replica before the spec starts", domain)
 		})
 		AfterAll(func() {
 			if operatorOff {
@@ -77,7 +86,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			deletePolicies(domain)
 		})
 
-		It("leaves the snapshot in place and reports the refusal", func() {
+		It("keeps every replica enforcing its snapshot while it refuses the manifest", func() {
 			// The operator rewrites any change to the object within a second,
 			// so a manifest of a format this service does not read has to be
 			// written while no operator runs. What a real skew would be is a
@@ -100,12 +109,15 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 				for _, pod := range servicePods() {
 					report := appliedReport(pod)
 					g.Expect(report.Refusal).NotTo(BeNil(), "replica %s reports no refusal", pod.Name)
-					g.Expect(report.Refusal.FormatVersion).To(Equal(manifest.FormatVersion + 100))
-					g.Expect(report.Refusal.Reason).To(ContainSubstring("unsupported format version"))
+					g.Expect(report.Refusal.FormatVersion).To(Equal(manifest.FormatVersion+100),
+						"the refused format version on replica %s", pod.Name)
+					g.Expect(report.Refusal.Reason).To(ContainSubstring("unsupported format version"),
+						"the refusal reason on replica %s", pod.Name)
 					g.Expect(report.Domains).To(HaveKey(domain), "replica %s dropped its snapshot", pod.Name)
 					g.Expect(podReady(pod)).To(BeTrue(), "replica %s left Ready over a refusal", pod.Name)
 				}
-			}).WithTimeout(2 * time.Minute).WithPolling(2 * time.Second).Should(Succeed())
+			}).WithTimeout(2*time.Minute).WithPolling(2*time.Second).Should(Succeed(),
+				"every replica to refuse the manifest and keep its snapshot")
 
 			// And enforces it: one per second on the probe path, as before.
 			nextWindow()
@@ -170,9 +182,12 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			Expect(apply(newPolicy(bigA, totalLimits(100, 60)))).To(Succeed())
 			Expect(apply(withGroup(newPolicy(bigB, totalLimits(100, 60)), bigGroupSize))).To(Succeed())
 			waitApplied(bigA, bigB)
-			Eventually(readyReason(bigA)).Should(Equal(v1.ReasonAllReplicas))
-			Eventually(readyReason(bigB)).Should(Equal(v1.ReasonAllReplicas))
-			Expect(manifestGeneration(bigA)()).To(Equal(int64(1)))
+			Eventually(readyReason(bigA)).Should(Equal(v1.ReasonAllReplicas),
+				"the first generation of %s to be Ready on every replica", bigA)
+			Eventually(readyReason(bigB)).Should(Equal(v1.ReasonAllReplicas),
+				"the first generation of %s to be Ready on every replica", bigB)
+			Expect(manifestGeneration(bigA)()).To(Equal(int64(1)),
+				"the generation of %s in %s", bigA, contract.ConfigMapName)
 
 			// The second generation of A does not fit beside B. A's first
 			// generation stays in the object and enforced; B is untouched.
@@ -206,12 +221,13 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 		BeforeAll(func() {
 			Expect(apply(newPolicy(domain, prefixLimits(probePath, "total", nil, 1, 1)))).To(Succeed())
 			waitApplied(domain)
-			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas))
+			Eventually(readyReason(domain)).Should(Equal(v1.ReasonAllReplicas),
+				"the policy of %s to be Ready on every replica before the spec starts", domain)
 			waitGatewayServes("public-gateway", probePath)
 		})
 		AfterAll(func() { deletePolicies(domain) })
 
-		It("is recreated by the operator while the service keeps serving", func() {
+		It("is recreated by the operator with the active generation", func() {
 			cm, err := configMap()
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8s.Delete(ctx, cm)).To(Succeed())
@@ -227,7 +243,9 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 				"the operator did not recreate %s", contract.ConfigMapName)
 			Expect(manifestGeneration(domain)()).To(Equal(generations(domain)()[1]),
 				"the recreated object carries a generation other than the active one")
+		})
 
+		It("leaves the replicas Ready and enforcing their snapshot through the deletion", func() {
 			// Through it all the replicas stayed Ready on their snapshot and
 			// kept enforcing: one per second on the probe path.
 			for _, pod := range servicePods() {

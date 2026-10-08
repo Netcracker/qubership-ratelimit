@@ -2,10 +2,13 @@ package config
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +22,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
+	"github.com/netcracker/qubership-ratelimit/operator/internal/policy"
 )
 
 const testNamespace = "ratelimit-config-envtest"
@@ -27,7 +31,7 @@ const testNamespace = "ratelimit-config-envtest"
 // the object as the service will mount it: the keys, the manifest under
 // data, the payloads under binaryData, and the ownerReference the garbage
 // collector reads.
-var _ = Describe("the configuration writer", Ordered, func() {
+var _ = Describe("the configuration writer", func() {
 	var (
 		store      *Store
 		reconciler *Reconciler
@@ -72,14 +76,24 @@ var _ = Describe("the configuration writer", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "the manifest the writer wrote does not decode")
 		return &object, m
 	}
-	create := func(policy *v1.RateLimitPolicy) {
+	// manifestOf and payloadOf decode the two halves of the object for a
+	// matcher that reads them through WithTransform.
+	manifestOf := func(raw string) (manifest.Manifest, error) { return manifest.Decode([]byte(raw)) }
+	payloadOf := func(raw []byte) (v1.RateLimitPolicySpec, error) {
+		var spec v1.RateLimitPolicySpec
+		_, err := manifest.DecodePayload(raw, &spec)
+		return spec, err
+	}
+	create := func(object *v1.RateLimitPolicy) {
 		DeferCleanup(func() {
-			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, policy))).To(Succeed())
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, object))).To(Succeed())
 		})
-		Expect(k8sClient.Create(ctx, policy)).To(Succeed())
+		Expect(k8sClient.Create(ctx, object)).To(Succeed())
 	}
 
-	BeforeAll(func() {
+	// Every spec gets a store and a writer of its own and starts from no
+	// object, so what it reads is what it wrote.
+	BeforeEach(func() {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace}}
 		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, ns))).To(Succeed())
 
@@ -88,76 +102,81 @@ var _ = Describe("the configuration writer", Ordered, func() {
 		reconciler = &Reconciler{Client: k8sClient, Namespace: testNamespace, Store: store}
 	})
 	AfterEach(func() {
-		// Every spec starts from no object, so what it reads is what it wrote.
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: contract.ConfigMapName}}))).To(Succeed())
-		reconciler.Limit = 0
 	})
 
 	It("writes an empty manifest when the namespace holds no policy", func() {
 		reconcile()
 
 		object, m := read()
-		Expect(m.Domains).To(BeEmpty())
-		Expect(m.FormatVersion).To(Equal(manifest.FormatVersion))
-		Expect(m.OperatorVersion).To(Equal("0.0.0-test"))
-		Expect(object.BinaryData).To(BeEmpty(), "no domain, no payload")
+		Expect(m).To(gstruct.MatchAllFields(gstruct.Fields{
+			"FormatVersion":   Equal(manifest.FormatVersion),
+			"OperatorVersion": Equal("0.0.0-test"),
+			"Domains":         BeEmpty(),
+		}), "the manifest")
+		Expect(object.BinaryData).To(BeEmpty(), "binaryData")
 	})
 
 	It("writes one payload and one manifest entry for one domain", func() {
-		policy := policyWith("gateway.one", oneRule("a"))
-		create(policy)
+		object := policyWith("gateway.one", oneRule("a"))
+		create(object)
+
 		reconcile()
 
-		object, m := read()
-		Expect(m.Domains).To(HaveLen(1))
-		entry := m.Domains["gateway.one"]
-		Expect(entry.Generation).To(Equal(policy.Generation))
-		Expect(entry.UID).To(Equal(string(policy.UID)))
-
-		raw, ok := object.BinaryData[manifest.PayloadKey("gateway.one")]
-		Expect(ok).To(BeTrue(), "the payload key is <domain>.json.gz")
+		configMap, m := read()
+		Expect(m.Domains).To(gstruct.MatchAllKeys(gstruct.Keys{
+			"gateway.one": gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"Generation": Equal(object.Generation),
+				"UID":        Equal(string(object.UID)),
+			}),
+		}), "the manifest's domains")
+		Expect(configMap.BinaryData).To(HaveKey("gateway.one.json.gz"), "binaryData")
 		var spec v1.RateLimitPolicySpec
-		hash, err := manifest.DecodePayload(raw, &spec)
+		hash, err := manifest.DecodePayload(configMap.BinaryData["gateway.one.json.gz"], &spec)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(hash).To(Equal(entry.Hash), "the manifest's hash is the payload's")
-		Expect(spec.Domain).To(Equal("gateway.one"))
-		Expect(spec.Limits).To(HaveLen(1))
+		Expect(hash).To(Equal(m.Domains["gateway.one"].Hash), "the hash of the payload against the manifest's")
+		Expect(spec).To(Equal(object.Spec), "the payload of gateway.one")
 	})
 
 	It("writes every domain of the namespace", func() {
 		create(policyWith("gateway.a", oneRule("a")))
 		create(policyWith("gateway.b", oneRule("b")))
+
 		reconcile()
 
 		object, m := read()
-		Expect(m.Domains).To(HaveKey("gateway.a"))
-		Expect(m.Domains).To(HaveKey("gateway.b"))
-		Expect(object.BinaryData).To(HaveLen(2))
+		Expect(slices.Collect(maps.Keys(m.Domains))).To(ConsistOf("gateway.a", "gateway.b"),
+			"the manifest's domains")
+		Expect(slices.Collect(maps.Keys(object.BinaryData))).To(ConsistOf("gateway.a.json.gz", "gateway.b.json.gz"),
+			"the binaryData keys")
 	})
 
 	It("drops a domain whose policy is gone", func() {
-		policy := policyWith("gateway.gone", oneRule("a"))
-		create(policy)
+		object := policyWith("gateway.gone", oneRule("a"))
+		create(object)
 		reconcile()
 		_, m := read()
-		Expect(m.Domains).To(HaveKey("gateway.gone"))
+		Expect(m.Domains).To(HaveKey("gateway.gone"), "the manifest's domains while the policy exists")
 
-		Expect(k8sClient.Delete(ctx, policy)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, object)).To(Succeed())
 		reconcile()
 
-		object, m := read()
-		Expect(m.Domains).NotTo(HaveKey("gateway.gone"))
-		Expect(object.BinaryData).NotTo(HaveKey(manifest.PayloadKey("gateway.gone")),
-			"the object is replaced whole; a retired domain's payload does not linger")
+		configMap, _ := read()
+		Expect(configMap).To(gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"Data": HaveKeyWithValue(contract.ManifestKey,
+				WithTransform(manifestOf, HaveField("Domains", Not(HaveKey("gateway.gone"))))),
+			"BinaryData": Not(HaveKey("gateway.gone.json.gz")),
+		})), "ratelimit-config after the policy of gateway.gone is gone")
 	})
 
-	It("keeps a generation that does not fit out, and last-good in", func() {
+	It("keeps the last-good generation in when the latest one does not fit", func() {
 		small := policyWith("gateway.size", oneRule("a"))
 		create(small)
 		reconcile()
 		_, m := read()
-		Expect(m.Domains["gateway.size"].Generation).To(Equal(int64(1)))
+		Expect(m.Domains["gateway.size"].Generation).To(Equal(int64(1)),
+			"the manifest's generation of gateway.size before the edit")
 
 		// A limit the small generation fits and the wide one does not.
 		reconciler.Limit = 1024
@@ -168,13 +187,12 @@ var _ = Describe("the configuration writer", Ordered, func() {
 		Expect(latest.Generation).To(Equal(int64(2)))
 		reconcile()
 
-		object, m := read()
-		Expect(m.Domains["gateway.size"].Generation).To(Equal(int64(1)),
-			"the generation that does not fit is not written; last-good stays")
-		var spec v1.RateLimitPolicySpec
-		_, err := manifest.DecodePayload(object.BinaryData[manifest.PayloadKey("gateway.size")], &spec)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(spec.Limits).To(HaveLen(1), "the payload is the last-good spec")
+		configMap, _ := read()
+		Expect(configMap).To(gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"Data": HaveKeyWithValue(contract.ManifestKey, WithTransform(manifestOf,
+				HaveField("Domains", HaveKeyWithValue("gateway.size", HaveField("Generation", int64(1)))))),
+			"BinaryData": HaveKeyWithValue("gateway.size.json.gz", WithTransform(payloadOf, Equal(small.Spec))),
+		})), "ratelimit-config after generation 2 of gateway.size did not fit")
 	})
 
 	It("recreates the object when it is deleted", func() {
@@ -182,15 +200,15 @@ var _ = Describe("the configuration writer", Ordered, func() {
 		reconcile()
 		object, _ := read()
 		Expect(k8sClient.Delete(ctx, object)).To(Succeed())
-		Eventually(func() bool {
-			err := k8sClient.Get(ctx, client.ObjectKeyFromObject(object), &corev1.ConfigMap{})
-			return apierrors.IsNotFound(err)
-		}).WithTimeout(10 * time.Second).Should(BeTrue())
+		Eventually(func() error {
+			return k8sClient.Get(ctx, client.ObjectKeyFromObject(object), &corev1.ConfigMap{})
+		}).WithTimeout(10*time.Second).Should(Satisfy(apierrors.IsNotFound),
+			"the deleted ConfigMap to be gone")
 
 		reconcile()
 
 		_, m := read()
-		Expect(m.Domains).To(HaveKey("gateway.back"), "the recreated object carries the namespace's state again")
+		Expect(m.Domains).To(HaveKey("gateway.back"), "the recreated manifest's domains")
 	})
 
 	It("owns the object through the operator's Deployment", func() {
@@ -208,29 +226,26 @@ var _ = Describe("the configuration writer", Ordered, func() {
 		Expect(k8sClient.Create(ctx, deployment)).To(Succeed())
 		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, deployment))).To(Succeed()) })
 		store.SetOwner(deployment, "apps/v1", "Deployment")
-		DeferCleanup(func() { store.owner = nil })
 
 		reconcile()
 
 		object, _ := read()
-		Expect(object.OwnerReferences).To(HaveLen(1))
-		Expect(object.OwnerReferences[0].Kind).To(Equal("Deployment"))
-		Expect(object.OwnerReferences[0].Name).To(Equal("ratelimit-operator"))
-		Expect(object.OwnerReferences[0].UID).To(Equal(deployment.UID),
-			"the ConfigMap goes with the operator, never with a policy")
+		Expect(object.OwnerReferences).To(Equal([]metav1.OwnerReference{{
+			APIVersion: "apps/v1", Kind: "Deployment", Name: "ratelimit-operator", UID: deployment.UID,
+		}}), "ownerReferences of ratelimit-config")
 	})
 
 	It("reads back what it wrote as last-good", func() {
-		policy := policyWith("gateway.read", oneRule("a"))
-		create(policy)
+		object := policyWith("gateway.read", oneRule("a"))
+		create(object)
 		reconcile()
 
 		bundles, err := store.Load(ctx, []string{"gateway.read", "gateway.absent"})
+
 		Expect(err).NotTo(HaveOccurred())
-		Expect(bundles).To(HaveLen(1))
-		Expect(bundles["gateway.read"].UID).To(Equal(string(policy.UID)))
-		Expect(bundles["gateway.read"].GoodGeneration).To(Equal(policy.Generation))
-		Expect(bundles["gateway.read"].GoodSpec.Domain).To(Equal("gateway.read"))
+		Expect(bundles).To(Equal(map[string]policy.Bundle{
+			"gateway.read": {UID: string(object.UID), GoodGeneration: object.Generation, GoodSpec: object.Spec},
+		}))
 	})
 })
 

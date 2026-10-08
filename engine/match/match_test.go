@@ -28,6 +28,18 @@ func minuteRate() []model.Rate {
 	return []model.Rate{{Requests: 100, Period: time.Minute}}
 }
 
+// request and evaluate run both phases in one call: every scenario in this
+// file exercises the target phase and the rule phase together.
+type request struct {
+	Path   string
+	Method string
+	Keys   map[string][]string
+}
+
+func evaluate(snap *compile.Snapshot, r request) Result {
+	return Match(snap, r.Path, r.Method).Evaluate(r.Keys)
+}
+
 func ruleNames(r Result) []string {
 	out := make([]string, len(r.Rules))
 	for i, m := range r.Rules {
@@ -36,7 +48,34 @@ func ruleNames(r Result) []string {
 	return out
 }
 
-func TestRouteMatching(t *testing.T) {
+// matchedBlocks lists the block of every applied rule, in result order.
+func matchedBlocks(r Result) []string {
+	out := make([]string, len(r.Rules))
+	for i, m := range r.Rules {
+		out[i] = m.Block
+	}
+	return out
+}
+
+func blockNames(blocks []*compile.Block) []string {
+	out := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		out = append(out, block.Name)
+	}
+	return out
+}
+
+func targetNames(targets []Target) []string {
+	out := make([]string, 0, len(targets))
+	for _, target := range targets {
+		out = append(out, target.Block.Name)
+	}
+	return out
+}
+
+// Each block carries one rule, so the blocks of the applied rules are the
+// blocks the target phase selected.
+func TestMatchTargetsABlockByItsRoute(t *testing.T) {
 	p := model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{
@@ -70,21 +109,25 @@ func TestRouteMatching(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := evaluate(snap, tc.req)
-			names := make([]string, len(got.Rules))
-			for i, m := range got.Rules {
-				names[i] = m.Block
-			}
-			if len(names) != len(tc.blocks) {
-				t.Fatalf("matched blocks = %v, want %v", names, tc.blocks)
-			}
-			for i := range names {
-				if names[i] != tc.blocks[i] {
-					t.Fatalf("matched blocks = %v, want %v", names, tc.blocks)
-				}
+			got := matchedBlocks(evaluate(snap, tc.req))
+
+			if !slices.Equal(got, tc.blocks) {
+				t.Errorf("%s %s matched blocks %v, want %v", tc.req.Method, tc.req.Path, got, tc.blocks)
 			}
 		})
 	}
+}
+
+// prefixTargets reports whether a block whose only route is a Prefix route of
+// value targets a GET request for path.
+func prefixTargets(t *testing.T, value, path string) bool {
+	t.Helper()
+	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name:   "b",
+		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: value}}}},
+		Rules:  []model.Rule{{Name: "r", Rates: minuteRate()}},
+	}}})
+	return !Match(snap, path, "GET").Empty()
 }
 
 // Prefix is a prefix on a segment boundary, the contract the CRD and the spec
@@ -108,13 +151,15 @@ func TestPrefixMatchesOnASegmentBoundary(t *testing.T) {
 		{"/", "/", true},
 	}
 	for _, tc := range cases {
-		if got := matchPrefix(tc.value, tc.path); got != tc.want {
-			t.Errorf("Prefix %q on %q = %v, want %v", tc.value, tc.path, got, tc.want)
+		if got := prefixTargets(t, tc.value, tc.path); got != tc.want {
+			t.Errorf("Prefix %q targets %q = %t, want %t", tc.value, tc.path, got, tc.want)
 		}
 	}
+}
 
-	// And through the matcher, so the block of the neighboring resource is
-	// the only one the request reaches.
+// The blocks of two neighboring resources share their first characters, and a
+// request under the second one reaches its block alone.
+func TestARequestUnderANeighboringPrefixReachesOnlyItsOwnBlock(t *testing.T) {
 	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{
 		{Name: "orders", Target: model.Target{Routes: []model.Route{
 			{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/v1/orders"}}}},
@@ -123,13 +168,15 @@ func TestPrefixMatchesOnASegmentBoundary(t *testing.T) {
 			{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/v1/orders-archive"}}}},
 			Rules: []model.Rule{{Name: "r", Rates: minuteRate()}}},
 	}})
-	got := evaluate(snap, request{Path: "/api/v1/orders-archive/7", Method: "GET"})
-	if len(got.Rules) != 1 || got.Rules[0].Block != "archive" {
-		t.Fatalf("/api/v1/orders-archive/7 reached %v, want the archive block alone", got.Rules)
+
+	got := matchedBlocks(evaluate(snap, request{Path: "/api/v1/orders-archive/7", Method: "GET"}))
+
+	if want := []string{"archive"}; !slices.Equal(got, want) {
+		t.Errorf("GET /api/v1/orders-archive/7 matched blocks %v, want %v", got, want)
 	}
 }
 
-func TestOperators(t *testing.T) {
+func TestAPredicateHoldsPerItsOperator(t *testing.T) {
 	mappings := []model.KeyMapping{
 		{Key: "roles", Claim: "roles", Type: model.ValueStringArray},
 		{Key: "tenant", Claim: "org"},
@@ -146,47 +193,54 @@ func TestOperators(t *testing.T) {
 	}
 
 	cases := []struct {
-		name    string
-		cond    model.Predicate
-		keys    map[string][]string
-		matches bool
+		name string
+		cond model.Predicate
+		keys map[string][]string
+		want []string
 	}{
 		{"equals hit", model.Predicate{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"},
-			map[string][]string{model.KeySub: {"alice"}}, true},
+			map[string][]string{model.KeySub: {"alice"}}, []string{"r"}},
 		{"equals miss", model.Predicate{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"},
-			map[string][]string{model.KeySub: {"bob"}}, false},
+			map[string][]string{model.KeySub: {"bob"}}, nil},
 		{"in hit", model.Predicate{Key: model.KeySub, Operator: model.OperatorIn, Values: []string{"a", "b"}},
-			map[string][]string{model.KeySub: {"b"}}, true},
+			map[string][]string{model.KeySub: {"b"}}, []string{"r"}},
 		{"ingroup hit", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
-			map[string][]string{model.KeySub: {"bob"}}, true},
+			map[string][]string{model.KeySub: {"bob"}}, []string{"r"}},
 		{"ingroup miss", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
-			map[string][]string{model.KeySub: {"eve"}}, false},
+			map[string][]string{model.KeySub: {"eve"}}, nil},
 		{"ingroup on absent key", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
-			map[string][]string{}, false},
+			map[string][]string{}, nil},
 		{"contains on array", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
-			map[string][]string{"roles": {"user", "admin"}}, true},
+			map[string][]string{"roles": {"user", "admin"}}, []string{"r"}},
 		{"contains never substring", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
-			map[string][]string{"roles": {"administrator"}}, false},
+			map[string][]string{"roles": {"administrator"}}, nil},
 		{"exists", model.Predicate{Key: "tenant", Operator: model.OperatorExists},
-			map[string][]string{"tenant": {"acme"}}, true},
+			map[string][]string{"tenant": {"acme"}}, []string{"r"}},
 		{"notexists on absent", model.Predicate{Key: "tenant", Operator: model.OperatorDoesNotExist},
-			map[string][]string{}, true},
+			map[string][]string{}, []string{"r"}},
 		{"notexists on present", model.Predicate{Key: "tenant", Operator: model.OperatorDoesNotExist},
-			map[string][]string{"tenant": {"acme"}}, false},
+			map[string][]string{"tenant": {"acme"}}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			snap := mustCompile(t, withPredicate(tc.cond))
-			got := evaluate(snap, request{Path: "/x", Method: "GET", Keys: tc.keys})
-			if (len(got.Rules) == 1) != tc.matches {
-				t.Errorf("matched = %v, want %v", ruleNames(got), tc.matches)
+
+			got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET", Keys: tc.keys}))
+
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Evaluate(%v) matched %v, want %v", tc.keys, got, tc.want)
 			}
 		})
 	}
 }
 
-func TestMissingAxisSkipsRule(t *testing.T) {
-	p := model.Policy{
+// A counter axis keys the bucket, so a rule matches only when each of its axes
+// carries exactly one value: an absent axis is the mechanism by which a
+// per-client rule skips anonymous traffic, and an axis with several values is
+// an ambiguity the matcher refuses to resolve by guessing. The axis-less rule
+// "total" matches every request and is the control of each row.
+func TestARuleMatchesOnlyWhenEachCounterAxisHasOneValue(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
@@ -194,41 +248,32 @@ func TestMissingAxisSkipsRule(t *testing.T) {
 				{Name: "per-user", Counters: []string{model.KeySub}, Rates: minuteRate()},
 				{Name: "total", Rates: minuteRate()},
 			}}},
-	}
-	snap := mustCompile(t, p)
+	})
 
-	anonymous := evaluate(snap, request{Path: "/x", Method: "GET"})
-	if got := ruleNames(anonymous); len(got) != 1 || got[0] != "total" {
-		t.Errorf("anonymous matched %v, want [total]: per-user has nothing to key its bucket with", got)
+	cases := []struct {
+		name string
+		keys map[string][]string
+		want []string
+	}{
+		{"no sub", nil, []string{"total"}},
+		{"one sub", map[string][]string{model.KeySub: {"alice"}}, []string{"per-user", "total"}},
+		{"two sub values", map[string][]string{model.KeySub: {"a", "b"}}, []string{"total"}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET", Keys: tc.keys}))
 
-	authed := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"alice"}}})
-	if got := ruleNames(authed); len(got) != 2 {
-		t.Errorf("authenticated matched %v, want both rules", got)
-	}
-}
-
-// TestAxisRefusesAmbiguity pins that a scalar axis sent with several values —
-// a direct consumer breaking the typing — makes the rule not match rather
-// than guessing which value keys the bucket.
-func TestAxisRefusesAmbiguity(t *testing.T) {
-	p := model.Policy{
-		Domain: domain,
-		Blocks: []model.Block{{Name: "b",
-			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
-			Rules:  []model.Rule{{Name: "per-user", Counters: []string{model.KeySub}, Rates: minuteRate()}}}},
-	}
-	snap := mustCompile(t, p)
-
-	got := evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeySub: {"a", "b"}}})
-	if len(got.Rules) != 0 {
-		t.Errorf("matched %v: an ambiguous axis must not match", ruleNames(got))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Evaluate(%v) matched %v, want %v", tc.keys, got, tc.want)
+			}
+		})
 	}
 }
 
-func TestReplacesSuppressesUnderAll(t *testing.T) {
-	p := model.Policy{
+// The override "enterprise" replaces "base" only for the requests it matches
+// itself.
+func TestUnderAllAMatchedRuleSuppressesTheRulesItReplaces(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
 		Domain: domain,
 		Groups: []model.Group{{Name: "enterprise", Values: []string{"corp"}}},
 		Blocks: []model.Block{{Name: "b",
@@ -241,24 +286,32 @@ func TestReplacesSuppressesUnderAll(t *testing.T) {
 					Rates:         []model.Rate{{Requests: 1000, Period: time.Minute}},
 					ReplacedRules: []string{"base"}},
 			}}},
-	}
-	snap := mustCompile(t, p)
+	})
 
-	corp := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"corp"}}})
-	if got := ruleNames(corp); len(got) != 1 || got[0] != "enterprise" {
-		t.Errorf("enterprise client matched %v, want the override only", got)
+	cases := []struct {
+		name, sub string
+		want      []string
+	}{
+		{"a client in the group of the override", "corp", []string{"enterprise"}},
+		{"a client outside it", "alice", []string{"base"}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := map[string][]string{model.KeySub: {tc.sub}}
 
-	plain := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"alice"}}})
-	if got := ruleNames(plain); len(got) != 1 || got[0] != "base" {
-		t.Errorf("plain client matched %v, want [base]: replaces of an unmatched rule must not fire", got)
+			got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET", Keys: keys}))
+
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Evaluate(sub=%s) matched %v, want %v", tc.sub, got, tc.want)
+			}
+		})
 	}
 }
 
 // A group is bound to no key: the predicate that names it decides which
 // key's value is looked up in it.
 func TestInGroupMatchesTheKeyOfItsPredicate(t *testing.T) {
-	p := model.Policy{
+	snap := mustCompile(t, model.Policy{
 		Domain:   domain,
 		Mappings: []model.KeyMapping{{Key: "tenant", Claim: "org_id", Normalization: model.NormalizeLowercase}},
 		Groups:   []model.Group{{Name: "partners", Values: []string{"acme"}}},
@@ -270,19 +323,26 @@ func TestInGroupMatchesTheKeyOfItsPredicate(t *testing.T) {
 					Counters: []string{model.KeySub},
 					Rates:    minuteRate()},
 			}}},
-	}
-	snap := mustCompile(t, p)
+	})
 
-	partner := evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeySub: {"alice"}, "tenant": {"acme"}}})
-	if got := ruleNames(partner); len(got) != 1 || got[0] != "partners" {
-		t.Errorf("tenant acme matched %v, want [partners]", got)
+	cases := []struct {
+		name string
+		keys map[string][]string
+		want []string
+	}{
+		{"a tenant in the group", map[string][]string{model.KeySub: {"alice"}, "tenant": {"acme"}},
+			[]string{"partners"}},
+		{"a sub in the group with a tenant outside it", map[string][]string{model.KeySub: {"acme"}, "tenant": {"globex"}},
+			nil},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET", Keys: tc.keys}))
 
-	outsider := evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeySub: {"acme"}, "tenant": {"globex"}}})
-	if got := ruleNames(outsider); len(got) != 0 {
-		t.Errorf("tenant globex matched %v, want nothing: the group is looked up by tenant, not by sub", got)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Evaluate(%v) matched %v, want %v", tc.keys, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -290,8 +350,8 @@ func TestInGroupMatchesTheKeyOfItsPredicate(t *testing.T) {
 // nothing: the enforcing rule it names stays matched beside it. The shadow
 // used to remove the rule it named, and a trial of a narrower limit switched
 // the live one off.
-func TestReplacesOfAShadowRuleSuppressNothing(t *testing.T) {
-	p := model.Policy{
+func TestAShadowRuleSuppressesNoneOfTheRulesItReplaces(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Rules: []model.Rule{
@@ -299,40 +359,39 @@ func TestReplacesOfAShadowRuleSuppressNothing(t *testing.T) {
 				{Name: "trial", Behavior: model.BehaviorShadow, Counters: []string{model.KeySub},
 					Rates: []model.Rate{{Requests: 10, Period: time.Minute}}, ReplacedRules: []string{"base"}},
 			}}},
-	}
-	snap := mustCompile(t, p)
+	})
 
 	got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET",
 		Keys: map[string][]string{model.KeySub: {"alice"}}}))
-	if len(got) != 2 || !slices.Contains(got, "base") || !slices.Contains(got, "trial") {
-		t.Errorf("matched %v, want base and trial: a shadow rule must not suppress the rule it names", got)
+
+	if want := []string{"base", "trial"}; !slices.Equal(got, want) {
+		t.Errorf("Evaluate(sub=alice) matched %v, want %v", got, want)
 	}
 }
 
-// TestTargetlessBlockMatchesEverything pins the whole-domain form at match
-// time: any path, any method.
-func TestTargetlessBlockMatchesEverything(t *testing.T) {
-	p := model.Policy{
+// A block without a target is the whole-domain form: it matches any path under
+// any method.
+func TestABlockWithoutATargetMatchesEveryRequest(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Rules: []model.Rule{{Name: "total", Rates: minuteRate()}}}},
-	}
-	snap := mustCompile(t, p)
+	})
+
 	for _, req := range []request{
 		{Path: "/anything", Method: "GET"},
 		{Path: "/", Method: "DELETE"},
 	} {
-		if got := evaluate(snap, req); len(got.Rules) != 1 {
-			t.Errorf("request %+v matched %v, want the total rule", req, ruleNames(got))
+		if got := ruleNames(evaluate(snap, req)); !slices.Equal(got, []string{"total"}) {
+			t.Errorf("%s %s matched %v, want [total]", req.Method, req.Path, got)
 		}
 	}
 }
 
-// TestBypassUnderAllExemptsNamedRulesOnly pins the targeted-exemption
-// semantics: a matched bypass frees the request from the rules it names and
-// from nothing else.
+// A matched bypass under All is a targeted exemption: it frees the request
+// from the rules it names and from nothing else.
 func TestBypassUnderAllExemptsNamedRulesOnly(t *testing.T) {
-	p := model.Policy{
+	snap := mustCompile(t, model.Policy{
 		Domain: domain,
 		Groups: []model.Group{{Name: "vip", Values: []string{"corp"}}},
 		Blocks: []model.Block{{Name: "b",
@@ -343,24 +402,48 @@ func TestBypassUnderAllExemptsNamedRulesOnly(t *testing.T) {
 				{Name: "vip-exempt", Behavior: model.BehaviorBypass, ReplacedRules: []string{"base"},
 					Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"}}},
 			}}},
-	}
-	snap := mustCompile(t, p)
+	})
 
-	corp := evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeySub: {"corp"}}})
-	if got := ruleNames(corp); len(got) != 1 || got[0] != "guard" {
-		t.Errorf("vip matched %v, want [guard]: exempt from base only, guard still counts", got)
+	cases := []struct {
+		name, sub string
+		want      []string
+	}{
+		{"a client the bypass matches", "corp", []string{"guard"}},
+		{"a client it does not match", "alice", []string{"base", "guard"}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := map[string][]string{model.KeySub: {tc.sub}}
 
-	plain := evaluate(snap, request{Path: "/x", Method: "GET",
-		Keys: map[string][]string{model.KeySub: {"alice"}}})
-	if got := ruleNames(plain); len(got) != 2 {
-		t.Errorf("plain client matched %v, want base and guard", got)
+			got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET", Keys: keys}))
+
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Evaluate(sub=%s) matched %v, want %v", tc.sub, got, tc.want)
+			}
+		})
 	}
 }
 
-func TestFirstMatchCascade(t *testing.T) {
-	p := model.Policy{
+// appliedRule is the part of a matched rule a cascade decides: which rule
+// applies, and whether it only shadows.
+type appliedRule struct {
+	Rule   string
+	Shadow bool
+}
+
+func appliedRules(r Result) []appliedRule {
+	out := make([]appliedRule, len(r.Rules))
+	for i, m := range r.Rules {
+		out[i] = appliedRule{Rule: m.Rule, Shadow: m.Shadow}
+	}
+	return out
+}
+
+// A FirstMatch cascade walks its rules in authored order: a matched bypass ends
+// it with nothing counted, a matched shadow rule counts without ending it, and
+// a matched enforcing rule counts and ends it.
+func TestAFirstMatchCascadeEndsAtTheFirstMatchedRuleThatIsNotShadow(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
 		Domain: domain,
 		Groups: []model.Group{{Name: "trial", Values: []string{"t1"}}},
 		Blocks: []model.Block{{Name: "cascade", Mode: model.ModeFirstMatch,
@@ -373,31 +456,35 @@ func TestFirstMatchCascade(t *testing.T) {
 					Rates:   []model.Rate{{Requests: 10, Period: time.Minute}}},
 				{Name: "everyone", Counters: []string{model.KeySub}, Rates: minuteRate()},
 			}}},
-	}
-	snap := mustCompile(t, p)
-	client := func(id string) request {
-		return request{Path: "/q", Method: "GET", Keys: map[string][]string{model.KeySub: {id}}}
-	}
+	})
 
-	if got := evaluate(snap, client("prometheus")); len(got.Rules) != 0 {
-		t.Errorf("bypass client matched %v, want nothing counted", ruleNames(got))
+	cases := []struct {
+		name, sub string
+		want      []appliedRule
+	}{
+		{"a client the bypass matches", "prometheus", nil},
+		{"a client the shadow rule matches", "t1", []appliedRule{{"trial", true}, {"everyone", false}}},
+		{"any other client", "alice", []appliedRule{{"everyone", false}}},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := map[string][]string{model.KeySub: {tc.sub}}
 
-	trial := evaluate(snap, client("t1"))
-	if got := ruleNames(trial); len(got) != 2 || got[0] != "trial" || got[1] != "everyone" {
-		t.Fatalf("trial client matched %v, want shadow then the enforcing rule", got)
-	}
-	if !trial.Rules[0].Shadow || trial.Rules[1].Shadow {
-		t.Error("shadow flags did not follow behavior through the cascade")
-	}
+			got := appliedRules(evaluate(snap, request{Path: "/q", Method: "GET", Keys: keys}))
 
-	if got := ruleNames(evaluate(snap, client("alice"))); len(got) != 1 || got[0] != "everyone" {
-		t.Errorf("plain client matched %v, want [everyone]", got)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Evaluate(sub=%s) applied %+v, want %+v", tc.sub, got, tc.want)
+			}
+		})
 	}
 }
 
-func TestPathAxisAndCaptures(t *testing.T) {
-	p := model.Policy{
+// The path axis takes the template string in a block whose template route
+// matched, which bounds the axis cardinality, and the raw path elsewhere. A
+// capture is an axis value of its block. The key ends with the axes, each
+// escaped and terminated.
+func TestThePathAxisIsTheTemplateOnlyWhereATemplateRouteMatched(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{
 			{Name: "tpl", Target: model.Target{Routes: []model.Route{
@@ -407,26 +494,25 @@ func TestPathAxisAndCaptures(t *testing.T) {
 				{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/"}}}},
 				Rules: []model.Rule{{Name: "per-path", Counters: []string{model.KeyPath}, Rates: minuteRate()}}},
 		},
-	}
-	snap := mustCompile(t, p)
+	})
 
 	got := evaluate(snap, request{Path: "/api/orders/42/items", Method: "GET"})
-	if len(got.Rules) != 2 {
-		t.Fatalf("matched %v, want both blocks", ruleNames(got))
-	}
 
-	tplKey := got.Rules[0].Buckets[0].Key
-	if !strings.Contains(tplKey, ":42:") || !strings.Contains(tplKey, "%2Fapi%2Forders%2F%7Border_id%7D%2Fitems") {
-		t.Errorf("template bucket key = %q: want the captured 42 and the template string as the path axis", tplKey)
+	if names := ruleNames(got); !slices.Equal(names, []string{"per-order", "per-path"}) {
+		t.Fatalf("GET /api/orders/42/items matched %v, want [per-order per-path]", names)
 	}
-	rawKey := got.Rules[1].Buckets[0].Key
-	if !strings.Contains(rawKey, "%2Fapi%2Forders%2F42%2Fitems") {
-		t.Errorf("raw bucket key = %q: want the raw path as the axis outside template blocks", rawKey)
+	templateAxes := ":42:%2Fapi%2Forders%2F%7Border_id%7D%2Fitems:"
+	if key := got.Rules[0].Buckets[0].Key; !strings.HasSuffix(key, templateAxes) {
+		t.Errorf("bucket key of tpl/per-order = %q, want it to end in the axes %q", key, templateAxes)
+	}
+	rawAxis := ":%2Fapi%2Forders%2F42%2Fitems:"
+	if key := got.Rules[1].Buckets[0].Key; !strings.HasSuffix(key, rawAxis) {
+		t.Errorf("bucket key of raw/per-path = %q, want it to end in the axis %q", key, rawAxis)
 	}
 }
 
-func TestBucketsPerWindow(t *testing.T) {
-	p := model.Policy{
+func TestAMatchedRuleContributesOneBucketPerWindow(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{{Name: "b",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
@@ -434,32 +520,23 @@ func TestBucketsPerWindow(t *testing.T) {
 				{Requests: 100, Period: time.Minute},
 				{Requests: 10000, Period: 24 * time.Hour, Algorithm: "FixedWindow"},
 			}}}}},
-	}
-	snap := mustCompile(t, p)
+	})
 
-	got := evaluate(snap, request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"alice"}}})
-	buckets := got.Buckets()
+	buckets := evaluate(snap, request{Path: "/x", Method: "GET",
+		Keys: map[string][]string{model.KeySub: {"alice"}}}).Buckets()
+
 	if len(buckets) != 2 {
-		t.Fatalf("buckets = %d, want one per window", len(buckets))
+		t.Fatalf("Buckets() = %+v, want one per window, 2", buckets)
 	}
-	if !strings.Contains(buckets[0].Key, ":gcra:60:") || !strings.Contains(buckets[1].Key, ":fixedwindow:86400:") {
-		t.Errorf("bucket keys = %q, %q: want the algorithm and window segments", buckets[0].Key, buckets[1].Key)
+	if key := buckets[0].Key; !strings.Contains(key, ":gcra:60:") {
+		t.Errorf("bucket key of 100/min = %q, want the segments gcra:60", key)
+	}
+	if key := buckets[1].Key; !strings.Contains(key, ":fixedwindow:86400:") {
+		t.Errorf("bucket key of 10000/day = %q, want the segments fixedwindow:86400", key)
 	}
 	if buckets[0].Window.Burst != 100 {
-		t.Errorf("burst = %d, want the resolved full-bucket default", buckets[0].Window.Burst)
+		t.Errorf("burst of 100/min = %d, want 100, the resolved full-bucket default", buckets[0].Window.Burst)
 	}
-}
-
-// request and evaluate run both phases in one call: every scenario in this
-// file exercises the target phase and the rule phase together.
-type request struct {
-	Path   string
-	Method string
-	Keys   map[string][]string
-}
-
-func evaluate(snap *compile.Snapshot, r request) Result {
-	return Match(snap, r.Path, r.Method).Evaluate(r.Keys)
 }
 
 // BlocksByPath answers the introspection question Match cannot: which blocks
@@ -475,14 +552,14 @@ func TestBlocksByPath_ignoresTheMethodsARouteRestrictsItselfTo(t *testing.T) {
 		}}},
 		Rules: []model.Rule{{Name: "per-client", Rates: minuteRate()}},
 	}}})
-
-	if blocks := Match(snap, "/api/orders", "").Blocks(); len(blocks) != 0 {
-		t.Fatalf("Match with no method returned %d blocks; the empty method is not one a route admits", len(blocks))
+	if got := blockNames(Match(snap, "/api/orders", "").Blocks()); len(got) != 0 {
+		t.Fatalf("precondition: Match(/api/orders, no method) = %v, want no block", got)
 	}
 
-	blocks := BlocksByPath(snap, "/api/orders")
-	if len(blocks) != 1 || blocks[0].Name != "orders" {
-		t.Fatalf("BlocksByPath = %v, want the orders block", blockNames(blocks))
+	got := blockNames(BlocksByPath(snap, "/api/orders"))
+
+	if want := []string{"orders"}; !slices.Equal(got, want) {
+		t.Errorf("BlocksByPath(/api/orders) = %v, want %v", got, want)
 	}
 }
 
@@ -518,19 +595,10 @@ func TestBlocksByPath_appliesTheSamePathRules(t *testing.T) {
 		"/api/login?next=/home": {"exact", "everything"},
 	}
 	for path, want := range cases {
-		got := blockNames(BlocksByPath(snap, path))
-		if strings.Join(got, ",") != strings.Join(want, ",") {
+		if got := blockNames(BlocksByPath(snap, path)); !slices.Equal(got, want) {
 			t.Errorf("BlocksByPath(%q) = %v, want %v", path, got, want)
 		}
 	}
-}
-
-func blockNames(blocks []*compile.Block) []string {
-	out := make([]string, 0, len(blocks))
-	for _, block := range blocks {
-		out = append(out, block.Name)
-	}
-	return out
 }
 
 // A block's captures are decided by the route the request matches, so a
@@ -589,8 +657,9 @@ func TestTargetsByPath_decidesCapturesByTheRoutesThatCanDecide(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			targets := TargetsByPath(snap, tc.path)
-			if len(targets) != 1 || targets[0].Block.Name != tc.block {
-				t.Fatalf("TargetsByPath(%q) = %v, want the %s block alone", tc.path, targetNames(targets), tc.block)
+
+			if got := targetNames(targets); !slices.Equal(got, []string{tc.block}) {
+				t.Fatalf("TargetsByPath(%q) = %v, want [%s]", tc.path, got, tc.block)
 			}
 			if got := targets[0].Captures; !maps.Equal(got, tc.captures) {
 				t.Errorf("TargetsByPath(%q) captures = %v, want %v", tc.path, got, tc.captures)
@@ -627,20 +696,13 @@ func TestTargets_carryTheCapturesOfTheMatchedRoute(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			targets := Match(snap, tc.path, tc.method).Targets()
-			if len(targets) != 1 {
-				t.Fatalf("Match(%q, %s).Targets() = %v, want one target", tc.path, tc.method, targetNames(targets))
+
+			if got := targetNames(targets); !slices.Equal(got, []string{"orders"}) {
+				t.Fatalf("Match(%q, %s).Targets() = %v, want [orders]", tc.path, tc.method, got)
 			}
 			if got := targets[0].Captures; !maps.Equal(got, tc.captures) {
 				t.Errorf("Match(%q, %s).Targets()[0].Captures = %v, want %v", tc.path, tc.method, got, tc.captures)
 			}
 		})
 	}
-}
-
-func targetNames(targets []Target) []string {
-	out := make([]string, 0, len(targets))
-	for _, target := range targets {
-		out = append(out, target.Block.Name)
-	}
-	return out
 }

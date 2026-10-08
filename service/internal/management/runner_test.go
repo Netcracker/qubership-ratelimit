@@ -5,10 +5,11 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,6 +18,9 @@ import (
 // over the loopback rather than mocking it away, because "it listens and then it
 // stops" is the whole of its contract.
 
+// The runner's lifecycle is one sequence: it answers on the socket it bound,
+// Start returns without an error once its context ends, and the socket is
+// closed after that.
 func TestRunner_servesUntilTheContextEnds(t *testing.T) {
 	h := newTestAPI(t)
 
@@ -32,27 +36,27 @@ func TestRunner_servesUntilTheContextEnds(t *testing.T) {
 	go func() { stopped <- runner.Start(ctx) }()
 
 	addr := waitForListener(t, runner)
-	response, err := http.Get("http://" + addr + BasePath + "/domains") //nolint:noctx // the deadline is the test's
-	require.NoError(t, err)
+	target := "http://" + addr + BasePath + "/domains"
+	response, err := http.Get(target) //nolint:noctx // the deadline is the test's
+	require.NoError(t, err, "GET %s while the runner serves", target)
 	defer func() { require.NoError(t, response.Body.Close()) }()
 
 	// Unauthenticated, because the point here is that the socket answers at all.
-	require.Equal(t, http.StatusUnauthorized, response.StatusCode)
+	assert.Equal(t, http.StatusUnauthorized, response.StatusCode, "GET %s while the runner serves", target)
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(body), CodeUnauthorized.Code)
+	assert.Contains(t, string(body), CodeUnauthorized.Code, "GET %s while the runner serves", target)
 
 	cancel()
 	select {
 	case err := <-stopped:
-		require.NoError(t, err)
+		require.NoError(t, err, "Start after its context ended")
 	case <-time.After(10 * time.Second):
-		t.Fatal("the runner did not stop when its context ended")
+		t.Fatal("timed out after 10s waiting for Start to return once its context ended")
 	}
 
-	// And the socket is closed behind it.
-	_, err = http.Get("http://" + addr + BasePath + "/domains") //nolint:noctx // the deadline is the test's
-	require.Error(t, err)
+	_, err = http.Get(target) //nolint:noctx // the deadline is the test's
+	assert.Error(t, err, "GET %s after the runner stopped", target)
 }
 
 func TestRunner_reportsAnAddressItCannotHave(t *testing.T) {
@@ -66,8 +70,8 @@ func TestRunner_reportsAnAddressItCannotHave(t *testing.T) {
 	runner := &Runner{Addr: held.Addr().String(), App: h.app, Log: discardLogger{}}
 	err = runner.Start(t.Context())
 
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "listen on")
+	assert.ErrorIs(t, err, syscall.EADDRINUSE, "Start on %s", held.Addr())
+	assert.ErrorContains(t, err, held.Addr().String(), "Start on %s", held.Addr())
 }
 
 // waitForListener returns the address the runner bound, once it has one. The
@@ -75,16 +79,10 @@ func TestRunner_reportsAnAddressItCannotHave(t *testing.T) {
 func waitForListener(t *testing.T, runner *Runner) string {
 	t.Helper()
 
-	var addr string
-	require.Eventually(t, func() bool {
-		bound := runner.boundAddr()
-		if bound == "" {
-			return false
-		}
-		addr = bound
-		return true
-	}, 5*time.Second, 10*time.Millisecond, "the runner never bound a port")
+	require.Eventually(t, func() bool { return runner.boundAddr() != "" }, 5*time.Second, 10*time.Millisecond,
+		"timed out waiting for the runner on %s to bind a port", runner.Addr)
 
-	require.True(t, strings.HasPrefix(addr, "127.0.0.1:"))
+	addr := runner.boundAddr()
+	require.Regexp(t, `^127\.0\.0\.1:\d+$`, addr, "the address the runner bound for %s", runner.Addr)
 	return addr
 }

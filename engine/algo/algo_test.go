@@ -1,88 +1,123 @@
 package algo
 
 import (
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestRegistryResolvesBothAlgorithms(t *testing.T) {
-	for name, id := range map[string]ID{"GCRA": GCRAID, "FixedWindow": FixedWindowID} {
-		a, ok := ByName(name)
-		if !ok {
-			t.Fatalf("ByName(%q): not registered", name)
-		}
-		if a.ID() != id {
-			t.Errorf("ByName(%q).ID() = %d, want %d", name, a.ID(), id)
-		}
-		if b, ok := ByID(id); !ok || b.Name() != name {
-			t.Errorf("ByID(%d) did not resolve back to %q", id, name)
-		}
+// algorithm resolves a registered algorithm by the name a rule carries.
+func algorithm(t *testing.T, name string) Algorithm {
+	t.Helper()
+	a, ok := ByName(name)
+	if !ok {
+		t.Fatalf("ByName(%q) found nothing; registered: %q", name, Names())
 	}
+	return a
 }
 
-func TestCheck(t *testing.T) {
-	minute := time.Minute
-
-	cases := []struct {
-		name    string
-		algo    string
-		window  Window
-		wantErr bool
+func TestRegistryBindsEachNameToItsDispatchCode(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		id   ID
 	}{
-		{"gcra plain", "GCRA", Window{Requests: 100, Period: minute, Burst: 100}, false},
-		{"gcra with burst", "GCRA", Window{Requests: 100, Period: minute, Burst: 20}, false},
-		{"burst not resolved", "GCRA", Window{Requests: 100, Period: minute}, true},
-		{"fixed window plain", "FixedWindow", Window{Requests: 10000, Period: 24 * time.Hour}, false},
-		{"foreign field rejected", "FixedWindow", Window{Requests: 100, Period: minute, Burst: 20}, true},
-		{"requests below one", "GCRA", Window{Requests: 0, Period: minute}, true},
-		{"period beyond a day", "GCRA", Window{Requests: 100, Period: 48 * time.Hour}, true},
-		{"period not set", "GCRA", Window{Requests: 100}, true},
-		{"sub-second period", "GCRA", Window{Requests: 100, Period: 500 * time.Millisecond}, true},
-		{"fractional seconds", "GCRA", Window{Requests: 100, Period: 90*time.Second + 500*time.Millisecond}, true},
-		{"beyond gcra resolution", "GCRA",
-			Window{Requests: 61_000_000, Period: minute, Burst: 61_000_000}, true},
-		{"bucket depth overflow", "GCRA",
-			Window{Requests: 1, Period: 24 * time.Hour, Burst: 20_000}, true},
-		{"inexact near-resolution rate", "GCRA",
-			Window{Requests: 500_001, Period: time.Second, Burst: 500_001}, true},
-		{"exact near-resolution rate", "GCRA",
-			Window{Requests: 500_000, Period: time.Second, Burst: 500_000}, false},
-		{"negative burst", "GCRA", Window{Requests: 100, Period: minute, Burst: -1}, true},
-	}
-
-	for _, c := range cases {
+		{"GCRA", GCRAID},
+		{"FixedWindow", FixedWindowID},
+	} {
 		t.Run(c.name, func(t *testing.T) {
-			a, ok := ByName(c.algo)
-			if !ok {
-				t.Fatalf("%s is not registered", c.algo)
+			if got := algorithm(t, c.name).ID(); got != c.id {
+				t.Errorf("ByName(%q).ID() = %d, want %d", c.name, got, c.id)
 			}
-			err := Check(a, c.window)
-			if (err != nil) != c.wantErr {
-				t.Errorf("Check(%s, %+v) error = %v, want error: %v", c.algo, c.window, err, c.wantErr)
+			byID, ok := ByID(c.id)
+			if !ok {
+				t.Fatalf("ByID(%d) found nothing, want %s", c.id, c.name)
+			}
+			if got := byID.Name(); got != c.name {
+				t.Errorf("ByID(%d).Name() = %q, want %q", c.id, got, c.name)
 			}
 		})
 	}
 }
 
-// TestRegisterRejectsBrokenDeclarations pins the fail-fast contract: a passport
-// declaring a field Window does not carry, or a mandatory one, must not make it
-// into the registry.
-func TestRegisterRejectsBrokenDeclarations(t *testing.T) {
-	cases := []struct {
+func TestCheckAcceptsAnExpressibleWindow(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		algo   string
+		window Window
+	}{
+		{"a GCRA window with a full bucket", "GCRA", Window{Requests: 100, Period: time.Minute, Burst: 100}},
+		{"a GCRA window with a smaller burst", "GCRA", Window{Requests: 100, Period: time.Minute, Burst: 20}},
+		{"a fixed window of exactly a day", "FixedWindow", Window{Requests: 10000, Period: 24 * time.Hour}},
+		{"a GCRA rate that divides the period at microsecond resolution", "GCRA",
+			Window{Requests: 500_000, Period: time.Second, Burst: 500_000}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := Check(algorithm(t, c.algo), c.window); err != nil {
+				t.Errorf("Check(%s, %+v) = %q, want nil", c.algo, c.window, err)
+			}
+		})
+	}
+}
+
+// Each window breaks the bound its row names and is otherwise valid, burst
+// included, except that a GCRA rate past one request per microsecond cannot
+// avoid breaking the division rule as well. Each row therefore also requires
+// the refusal to name the window field the author has to change, the field the
+// InvalidWindow message points the author at; that check keeps a refusal by
+// another bound from passing for the bound under test.
+func TestCheckRejectsAnInexpressibleWindow(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		algo   string
+		window Window
+		field  string
+	}{
+		{"a GCRA window whose burst is not resolved", "GCRA",
+			Window{Requests: 100, Period: time.Minute}, "burst"},
+		{"a negative burst", "GCRA", Window{Requests: 100, Period: time.Minute, Burst: -1}, "burst"},
+		{"a burst on a fixed window", "FixedWindow", Window{Requests: 100, Period: time.Minute, Burst: 20}, "burst"},
+		{"requests below one", "GCRA", Window{Requests: 0, Period: time.Minute, Burst: 100}, "requests"},
+		{"a period of two days", "GCRA", Window{Requests: 100, Period: 48 * time.Hour, Burst: 100}, "period"},
+		{"a fixed window one second longer than a day", "FixedWindow",
+			Window{Requests: 10000, Period: 24*time.Hour + time.Second}, "period"},
+		{"no period", "FixedWindow", Window{Requests: 100}, "period"},
+		{"a sub-second period", "GCRA", Window{Requests: 100, Period: 500 * time.Millisecond, Burst: 100}, "period"},
+		{"a period of fractional seconds", "GCRA",
+			Window{Requests: 100, Period: 90*time.Second + 500*time.Millisecond, Burst: 100}, "period"},
+		{"a GCRA rate past one request per microsecond", "GCRA",
+			Window{Requests: 61_000_000, Period: time.Minute, Burst: 61_000_000}, "requests"},
+		{"a GCRA rate near the resolution that does not divide the period", "GCRA",
+			Window{Requests: 500_001, Period: time.Second, Burst: 500_001}, "period"},
+		{"a GCRA bucket deeper than the supported maximum", "GCRA",
+			Window{Requests: 1, Period: 24 * time.Hour, Burst: 20_000}, "burst"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			err := Check(algorithm(t, c.algo), c.window)
+			if err == nil {
+				t.Fatalf("Check(%s, %+v) = nil, want an error naming %s", c.algo, c.window, c.field)
+			}
+			if !strings.Contains(err.Error(), c.field) {
+				t.Errorf("Check(%s, %+v) = %q, want an error naming %s", c.algo, c.window, err, c.field)
+			}
+		})
+	}
+}
+
+func TestRegisterPanicsOnABrokenDeclaration(t *testing.T) {
+	for _, c := range []struct {
 		name string
 		algo Algorithm
 	}{
-		{"unknown field", declaring{id: 200, name: "BadField", fields: []string{"Precision"}}},
-		{"mandatory field", declaring{id: 201, name: "BadMandatory", fields: []string{"Period"}}},
-		{"name taken", declaring{id: 202, name: "GCRA"}},
-		{"id taken", declaring{id: GCRAID, name: "UniqueEnough"}},
-	}
-
-	for _, c := range cases {
+		{"a field Window does not carry", declaring{id: 200, name: "BadField", fields: []string{"Precision"}}},
+		{"a mandatory field", declaring{id: 201, name: "BadMandatory", fields: []string{"Period"}}},
+		{"a name already registered", declaring{id: 202, name: "GCRA"}},
+		{"a dispatch code already registered", declaring{id: GCRAID, name: "UniqueEnough"}},
+	} {
 		t.Run(c.name, func(t *testing.T) {
 			defer func() {
 				if recover() == nil {
-					t.Fatal("Register accepted a broken declaration")
+					t.Errorf("Register(%+v) returned, want a panic", c.algo)
 				}
 			}()
 			Register(c.algo)
@@ -104,15 +139,7 @@ func (d declaring) consumes() []string    { return d.fields }
 func (d declaring) validate(Window) error { return nil }
 
 func TestNamesAreOrderedByDispatchCode(t *testing.T) {
-	got := Names()
-	want := []string{"GCRA", "FixedWindow"}
-
-	if len(got) != len(want) {
-		t.Fatalf("Names() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("Names() = %v, want %v", got, want)
-		}
+	if got, want := Names(), []string{"GCRA", "FixedWindow"}; !slices.Equal(got, want) {
+		t.Errorf("Names() = %q, want %q", got, want)
 	}
 }

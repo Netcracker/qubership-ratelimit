@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/algo"
@@ -38,46 +39,44 @@ func runConformance(t *testing.T, build factory) {
 		k := freshKeys(t)
 
 		accepted := acceptWith(t, commands, k, "command-a", "fence-1", time.Minute)
-		require.True(t, accepted.OK)
 
+		require.True(t, accepted.OK, "Accept(command-a) = %+v", accepted)
 		record, err := commands.Lookup(t.Context(), k)
 		require.NoError(t, err)
-		require.True(t, record.Found)
-		require.Equal(t, "command-a", record.Command)
-		require.False(t, record.Terminal)
-		require.True(t, record.Alive())
+		assert.True(t, record.Found, "Lookup = %+v", record)
+		assert.Equal(t, "command-a", record.Command, "Record.Command")
+		assert.False(t, record.Terminal, "Record.Terminal")
+		assert.True(t, record.Alive(), "Alive() of %+v", record)
 	})
 
 	t.Run("a second sweep in the domain is refused before anything binds", func(t *testing.T) {
 		commands, _ := build(t)
 		first, second := freshKeys(t), freshKeys(t)
 		second.Lease = first.Lease
+		mustAccept(t, commands, first, "fence-1", time.Minute)
 
-		require.True(t, acceptWith(t, commands, first, "command-a", "fence-1", time.Minute).OK)
 		busy := acceptWith(t, commands, second, "command-b", "fence-2", time.Minute)
 
-		require.True(t, busy.SweepBusy)
-		require.Positive(t, busy.LeaseTTL)
-
+		assert.True(t, busy.SweepBusy, "Accept(command-b) = %+v", busy)
+		assert.Positive(t, busy.LeaseTTL, "Accepted.LeaseTTL")
 		record, err := commands.Lookup(t.Context(), second)
 		require.NoError(t, err)
-		require.False(t, record.Found)
+		assert.False(t, record.Found, "Lookup of the record of command-b = %+v", record)
 	})
 
 	t.Run("a busy domain does not spend the confirmation token", func(t *testing.T) {
 		commands, _ := build(t)
 		first, second := freshKeys(t), freshKeys(t)
 		second.Lease, second.Token = first.Lease, first.Record+":token"
-
 		require.NoError(t, commands.Put(t.Context(), second.Token, []byte(`{"selection":"x"}`), time.Minute))
-		require.True(t, acceptWith(t, commands, first, "command-a", "fence-1", time.Minute).OK)
+		mustAccept(t, commands, first, "fence-1", time.Minute)
 
 		busy := acceptWith(t, commands, second, "command-b", "fence-2", time.Minute)
-		require.True(t, busy.SweepBusy)
 
+		require.True(t, busy.SweepBusy, "Accept(command-b) = %+v", busy)
 		_, found, err := commands.Get(t.Context(), second.Token)
 		require.NoError(t, err)
-		require.True(t, found)
+		assert.True(t, found, "Get(%q) after the refused acceptance", second.Token)
 	})
 
 	t.Run("the confirmation token is consumed exactly once", func(t *testing.T) {
@@ -86,79 +85,89 @@ func runConformance(t *testing.T, build factory) {
 		second.Lease = first.Lease
 		first.Token = first.Record + ":token"
 		second.Token = first.Token
-
 		require.NoError(t, commands.Put(t.Context(), first.Token, []byte(`{"selection":"x"}`), time.Minute))
 
 		accepted := acceptWith(t, commands, first, "command-a", "fence-1", time.Minute)
-		require.True(t, accepted.OK)
-		require.JSONEq(t, `{"selection":"x"}`, string(accepted.Token))
-
+		require.True(t, accepted.OK, "Accept(command-a) = %+v", accepted)
+		assert.JSONEq(t, `{"selection":"x"}`, string(accepted.Token), "Accepted.Token")
 		require.NoError(t, commands.Commit(t.Context(), records.Commit{
 			Keys: first, Fencing: "fence-1", Outcome: records.Outcome{},
 		}))
-
 		again := acceptWith(t, commands, second, "command-b", "fence-2", time.Minute)
-		require.True(t, again.TokenMissing)
+
+		assert.True(t, again.TokenMissing, "Accept(command-b) with the token command-a consumed = %+v", again)
 	})
 
 	t.Run("a bound key reports the command it carries", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)
+		first := acceptWith(t, commands, k, "command-a", "fence-1", time.Minute)
+		require.True(t, first.OK, "Accept(command-a) = %+v", first)
 
-		require.True(t, acceptWith(t, commands, k, "command-a", "fence-1", time.Minute).OK)
 		again := acceptWith(t, commands, k, "command-a", "fence-2", time.Minute)
 
-		require.False(t, again.OK)
-		require.Equal(t, "command-a", again.Existing.Command)
+		assert.False(t, again.OK, "Accept(command-a) on the bound key = %+v", again)
+		assert.Equal(t, "command-a", again.Existing.Command, "Accepted.Existing.Command")
 	})
 
 	t.Run("a batch deletes and advances the progress together", func(t *testing.T) {
 		commands, counters := build(t)
 		k := freshKeys(t)
-		require.True(t, acceptWith(t, commands, k, "command-a", "fence-1", time.Minute).OK)
-
+		mustAccept(t, commands, k, "fence-1", time.Minute)
 		live := spend(t, counters, counterKey(t))
+		progress := records.Progress{Scanned: 10, Matched: 4, Reset: 4,
+			Rules: map[string]int{"a/b/c": 4}, Keys: []string{live}}
+
 		require.NoError(t, commands.Batch(t.Context(), records.Batch{
-			Keys: k, Fencing: "fence-1", Delete: []string{live},
-			Progress: records.Progress{Scanned: 10, Matched: 4, Reset: 4,
-				Rules: map[string]int{"a/b/c": 4}, Keys: []string{live}},
+			Keys: k, Fencing: "fence-1", Delete: []string{live}, Progress: progress,
 		}))
 
 		record, err := commands.Lookup(t.Context(), k)
 		require.NoError(t, err)
-		require.Equal(t, 10, record.Progress.Scanned)
-		require.Equal(t, 4, record.Progress.Reset)
-		require.Equal(t, map[string]int{"a/b/c": 4}, record.Progress.Rules)
-
-		found := keysUnder(t, counters, live)
-		require.Empty(t, found, "the batch deleted what it counted")
+		assert.Equal(t, progress, record.Progress, "Record.Progress")
+		assert.Empty(t, keysUnder(t, counters, live), "counters under %q", live)
 	})
 
 	t.Run("a walker that lost the domain writes nothing", func(t *testing.T) {
 		commands, counters := build(t)
 		k := freshKeys(t)
-		require.True(t, acceptWith(t, commands, k, "command-a", "fence-1", time.Minute).OK)
-
+		mustAccept(t, commands, k, "fence-1", time.Minute)
 		live := spend(t, counters, counterKey(t))
+
 		err := commands.Batch(t.Context(), records.Batch{
 			Keys: k, Fencing: "someone-else", Delete: []string{live},
 			Progress: records.Progress{Scanned: 99},
 		})
-		require.ErrorIs(t, err, records.ErrLeaseLost)
+
+		assert.ErrorIs(t, err, records.ErrLeaseLost)
+		record, err := commands.Lookup(t.Context(), k)
+		require.NoError(t, err)
+		assert.Equal(t, records.Progress{}, record.Progress, "Record.Progress")
+		assert.Equal(t, []string{live}, keysUnder(t, counters, live), "counters under %q", live)
+	})
+
+	t.Run("a commit records its outcome as terminal", func(t *testing.T) {
+		commands, _ := build(t)
+		k := freshKeys(t)
+		mustAccept(t, commands, k, "fence-1", time.Minute)
+		outcome := records.Outcome{
+			Progress: records.Progress{Scanned: 12, Reset: 5},
+			Token:    "ct-0123456789ab",
+		}
+
+		require.NoError(t, commands.Commit(t.Context(), records.Commit{Keys: k, Fencing: "fence-1", Outcome: outcome}))
 
 		record, err := commands.Lookup(t.Context(), k)
 		require.NoError(t, err)
-		require.Zero(t, record.Progress.Scanned)
-
-		found := keysUnder(t, counters, live)
-		require.Len(t, found, 1, "and it deleted nothing either")
+		assert.True(t, record.Terminal, "Record.Terminal")
+		assert.Equal(t, outcome, record.Outcome, "Record.Outcome")
+		assert.False(t, record.Alive(), "Alive() of %+v", record)
 	})
 
-	t.Run("the outcome releases the domain", func(t *testing.T) {
+	t.Run("a commit releases the domain to the next sweep", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)
-		require.True(t, acceptWith(t, commands, k, "command-a", "fence-1", time.Minute).OK)
-
+		mustAccept(t, commands, k, "fence-1", time.Minute)
 		require.NoError(t, commands.Commit(t.Context(), records.Commit{
 			Keys: k, Fencing: "fence-1",
 			Outcome: records.Outcome{
@@ -166,37 +175,32 @@ func runConformance(t *testing.T, build factory) {
 				Token:    "ct-0123456789ab",
 			},
 		}))
-
-		record, err := commands.Lookup(t.Context(), k)
-		require.NoError(t, err)
-		require.True(t, record.Terminal)
-		require.Equal(t, 5, record.Outcome.Progress.Reset)
-		require.Equal(t, "ct-0123456789ab", record.Outcome.Token)
-		require.False(t, record.Alive())
-
 		next := freshKeys(t)
 		next.Lease = k.Lease
-		require.True(t, acceptWith(t, commands, next, "command-b", "fence-2", time.Minute).OK)
+
+		accepted := acceptWith(t, commands, next, "command-b", "fence-2", time.Minute)
+
+		assert.True(t, accepted.OK, "Accept(command-b) in the released domain = %+v", accepted)
 	})
 
 	t.Run("only the owner may record the outcome", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)
-		require.True(t, acceptWith(t, commands, k, "command-a", "fence-1", time.Minute).OK)
+		mustAccept(t, commands, k, "fence-1", time.Minute)
 
 		err := commands.Commit(t.Context(), records.Commit{
 			Keys: k, Fencing: "someone-else", Outcome: records.Outcome{},
 		})
-		require.ErrorIs(t, err, records.ErrLeaseLost)
+
+		assert.ErrorIs(t, err, records.ErrLeaseLost)
 	})
 
 	t.Run("a dead sweep is finalized from its committed progress", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)
-
 		// A lease shorter than the test is how a dead walker is staged: it
 		// expires while the record stays accepted.
-		require.True(t, acceptWith(t, commands, k, "command-a", "fence-1", 100*time.Millisecond).OK)
+		mustAccept(t, commands, k, "fence-1", 100*time.Millisecond)
 		require.NoError(t, commands.Batch(t.Context(), records.Batch{
 			Keys: k, Fencing: "fence-1", Progress: records.Progress{Scanned: 40, Reset: 31},
 		}))
@@ -206,30 +210,33 @@ func runConformance(t *testing.T, build factory) {
 			Keys:    k,
 			Outcome: records.Outcome{Failed: true, Code: "RLS-0501", ErrorID: "id-1"},
 		})
+
 		require.NoError(t, err)
-		require.True(t, record.Terminal)
-		require.True(t, record.Outcome.Failed)
-		require.Equal(t, "RLS-0501", record.Outcome.Code)
-		require.Equal(t, 31, record.Outcome.Progress.Reset)
+		assert.True(t, record.Terminal, "Record.Terminal")
+		assert.Equal(t, records.Outcome{
+			Failed: true, Code: "RLS-0501", ErrorID: "id-1",
+			Progress: records.Progress{Scanned: 40, Reset: 31},
+		}, record.Outcome, "Record.Outcome")
 	})
 
 	t.Run("a live sweep is left alone", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)
-		require.True(t, acceptWith(t, commands, k, "command-a", "fence-1", time.Minute).OK)
+		mustAccept(t, commands, k, "fence-1", time.Minute)
 
 		record, err := commands.Finalize(t.Context(), records.Finalize{
 			Keys: k, Outcome: records.Outcome{Failed: true, Code: "RLS-0501"},
 		})
+
 		require.NoError(t, err)
-		require.False(t, record.Terminal)
-		require.True(t, record.Alive())
+		assert.False(t, record.Terminal, "Record.Terminal")
+		assert.True(t, record.Alive(), "Alive() of %+v", record)
 	})
 
 	t.Run("an outcome already recorded is not re-judged", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)
-		require.True(t, acceptWith(t, commands, k, "command-a", "fence-1", time.Minute).OK)
+		mustAccept(t, commands, k, "fence-1", time.Minute)
 		require.NoError(t, commands.Commit(t.Context(), records.Commit{
 			Keys: k, Fencing: "fence-1",
 			Outcome: records.Outcome{Progress: records.Progress{Reset: 7}},
@@ -238,9 +245,9 @@ func runConformance(t *testing.T, build factory) {
 		record, err := commands.Finalize(t.Context(), records.Finalize{
 			Keys: k, Outcome: records.Outcome{Failed: true, Code: "RLS-0501"},
 		})
+
 		require.NoError(t, err)
-		require.False(t, record.Outcome.Failed)
-		require.Equal(t, 7, record.Outcome.Progress.Reset)
+		assert.Equal(t, records.Outcome{Progress: records.Progress{Reset: 7}}, record.Outcome, "Record.Outcome")
 	})
 
 	t.Run("the addressed reset binds, deletes, and records in one step", func(t *testing.T) {
@@ -251,35 +258,32 @@ func runConformance(t *testing.T, build factory) {
 		outcome, err := commands.Reset(t.Context(), records.Addressed{
 			Record: k.Record, Command: "command-a", Delete: []string{live},
 		})
-		require.NoError(t, err)
-		require.False(t, outcome.Replayed)
-		require.Equal(t, 1, outcome.Count)
 
-		found := keysUnder(t, counters, live)
-		require.Empty(t, found)
+		require.NoError(t, err)
+		assert.False(t, outcome.Replayed, "AddressedOutcome.Replayed")
+		assert.Equal(t, 1, outcome.Count, "AddressedOutcome.Count")
+		assert.Empty(t, keysUnder(t, counters, live), "counters under %q", live)
 	})
 
 	t.Run("the addressed reset replays instead of deleting twice", func(t *testing.T) {
 		commands, counters := build(t)
 		k := freshKeys(t)
 		live := spend(t, counters, counterKey(t))
-
 		first, err := commands.Reset(t.Context(), records.Addressed{
 			Record: k.Record, Command: "command-a", Delete: []string{live},
 		})
 		require.NoError(t, err)
-		require.Equal(t, 1, first.Count)
-
+		require.Equal(t, 1, first.Count, "Count of the first Reset")
 		spend(t, counters, live)
+
 		second, err := commands.Reset(t.Context(), records.Addressed{
 			Record: k.Record, Command: "command-a", Delete: []string{live},
 		})
-		require.NoError(t, err)
-		require.True(t, second.Replayed)
-		require.Equal(t, 1, second.Count)
 
-		found := keysUnder(t, counters, live)
-		require.Len(t, found, 1, "the retry deleted nothing")
+		require.NoError(t, err)
+		assert.True(t, second.Replayed, "AddressedOutcome.Replayed of the retry")
+		assert.Equal(t, 1, second.Count, "AddressedOutcome.Count of the retry")
+		assert.Equal(t, []string{live}, keysUnder(t, counters, live), "counters under %q", live)
 	})
 
 	t.Run("the addressed preview counts without deleting", func(t *testing.T) {
@@ -290,19 +294,18 @@ func runConformance(t *testing.T, build factory) {
 		outcome, err := commands.Reset(t.Context(), records.Addressed{
 			Record: k.Record, Command: "command-a", Delete: []string{live}, DryRun: true,
 		})
-		require.NoError(t, err)
-		require.Equal(t, 1, outcome.Count)
 
-		found := keysUnder(t, counters, live)
-		require.Len(t, found, 1)
+		require.NoError(t, err)
+		assert.Equal(t, 1, outcome.Count, "AddressedOutcome.Count")
+		assert.Equal(t, []string{live}, keysUnder(t, counters, live), "counters under %q", live)
 	})
 
 	// The answer is what a replay is built from: the API renders the body once
 	// and hands it here, so a retry gets the bytes the first call gave rather
 	// than a body rebuilt from a rule set that has moved on. It crosses the
 	// wire as a hash field in Redis and as a value in the memory store, and a
-	// renamed field on either side would break every replay while the cases
-	// above stayed green.
+	// renamed field on either side would break every replay while every other
+	// subtest of this suite stayed green.
 	t.Run("the addressed reset carries its answer back to the replay", func(t *testing.T) {
 		commands, counters := build(t)
 		k := freshKeys(t)
@@ -313,45 +316,50 @@ func runConformance(t *testing.T, build factory) {
 			Record: k.Record, Command: "command-a", Delete: []string{live}, Answer: answer,
 		})
 		require.NoError(t, err)
-		require.False(t, first.Replayed)
-
+		require.False(t, first.Replayed, "AddressedOutcome.Replayed of the first Reset")
 		record, err := commands.Lookup(t.Context(), k)
 		require.NoError(t, err)
-		require.True(t, record.Found)
-		require.True(t, record.Terminal)
-		require.Equal(t, answer, record.Answer)
-
+		assert.True(t, record.Found, "Lookup = %+v", record)
+		assert.True(t, record.Terminal, "Record.Terminal")
+		assert.Equal(t, answer, record.Answer, "Record.Answer")
 		second, err := commands.Reset(t.Context(), records.Addressed{
 			Record: k.Record, Command: "command-a", Delete: []string{live}, Answer: answer,
 		})
+
 		require.NoError(t, err)
-		require.True(t, second.Replayed)
-		require.Equal(t, answer, second.Answer)
+		assert.True(t, second.Replayed, "AddressedOutcome.Replayed of the retry")
+		assert.Equal(t, answer, second.Answer, "AddressedOutcome.Answer of the retry")
 	})
 
 	t.Run("the addressed reset reports the command a key is bound to", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)
-
 		_, err := commands.Reset(t.Context(), records.Addressed{Record: k.Record, Command: "command-a"})
 		require.NoError(t, err)
 
 		outcome, err := commands.Reset(t.Context(), records.Addressed{Record: k.Record, Command: "command-b"})
+
 		require.NoError(t, err)
-		require.True(t, outcome.Replayed)
-		require.Equal(t, "command-a", outcome.Command)
+		assert.True(t, outcome.Replayed, "AddressedOutcome.Replayed of command-b")
+		assert.Equal(t, "command-a", outcome.Command, "AddressedOutcome.Command of command-b")
 	})
 
 	t.Run("an absent record is absent, not an error", func(t *testing.T) {
 		commands, _ := build(t)
 
 		record, err := commands.Lookup(t.Context(), freshKeys(t))
+
 		require.NoError(t, err)
-		require.False(t, record.Found)
+		assert.False(t, record.Found, "Lookup of a record never written = %+v", record)
+	})
+
+	t.Run("an absent token is absent, not an error", func(t *testing.T) {
+		commands, _ := build(t)
 
 		_, found, err := commands.Get(t.Context(), "rlm:v1:{d}:ct:nothing")
+
 		require.NoError(t, err)
-		require.False(t, found)
+		assert.False(t, found, "Get of a token never put")
 	})
 }
 
@@ -372,15 +380,27 @@ func acceptWith(
 	return accepted
 }
 
+// mustAccept accepts command-a under the fencing token, as the step a test
+// needs to succeed before its act.
+//
+//nolint:unparam // every call site shows the fencing token its batches and commits repeat
+func mustAccept(t *testing.T, commands records.Store, k records.Keys, fencing string, lease time.Duration) {
+	t.Helper()
+
+	accepted := acceptWith(t, commands, k, "command-a", fencing, lease)
+	require.True(t, accepted.OK, "Accept(command-a, %s) = %+v", fencing, accepted)
+}
+
 // waitForLease blocks until the domain lease has expired, which is what makes a
 // walker dead as far as any other caller can tell.
 func waitForLease(t *testing.T, commands records.Store, k records.Keys) {
 	t.Helper()
 
-	require.Eventually(t, func() bool {
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		record, err := commands.Lookup(t.Context(), k)
-		return err == nil && !record.Alive()
-	}, 2*time.Second, 20*time.Millisecond, "the lease never expired")
+		assert.NoError(c, err, "Lookup")
+		assert.False(c, record.Alive(), "Alive() of %+v", record)
+	}, 2*time.Second, 20*time.Millisecond, "the lease of the record to expire")
 }
 
 // keysUnder walks the keys of one prefix to the end, which is how a test

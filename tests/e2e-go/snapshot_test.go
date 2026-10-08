@@ -5,10 +5,10 @@ package e2e
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
 	"sigs.k8s.io/yaml"
 
@@ -103,13 +103,16 @@ var _ = Describe("the snapshot endpoint", Ordered, Label("snapshot"), func() {
 				}
 			}
 			Expect(row).NotTo(BeNil(), "pod %s lists no row for %s: %s", pod.Name, domain, body)
-			Expect(row.Generation).To(Equal(p.Status.ActiveGeneration),
-				"pod %s reports a generation other than the one it applied", pod.Name)
-			Expect(row.UID).To(Equal(string(p.UID)))
-			Expect(row.Blocks).To(Equal(1))
-			Expect(row.Rules).To(Equal(2))
-			Expect(row.EffectiveKeys).To(ContainElement("tenant"), "the mapped key is missing from the key set")
-			Expect(row.RuleSetVersion).To(HaveLen(12))
+			// The generation is the one the replica applied, and the mapped key
+			// tenant is in the key set.
+			Expect(*row).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+				"Generation":     Equal(p.Status.ActiveGeneration),
+				"UID":            Equal(string(p.UID)),
+				"Blocks":         Equal(1),
+				"Rules":          Equal(2),
+				"EffectiveKeys":  ContainElement("tenant"),
+				"RuleSetVersion": HaveLen(12),
+			}), "the row of %s on pod %s", domain, pod.Name)
 		}
 	})
 
@@ -148,7 +151,7 @@ var _ = Describe("the snapshot endpoint", Ordered, Label("snapshot"), func() {
 		var asJSON, asYAML domainSnapshot
 		Expect(json.Unmarshal(debugGet(pod, contract.SnapshotPath+"/"+domain), &asJSON)).To(Succeed())
 		body := debugGet(pod, contract.SnapshotPath+"/"+domain+"?format=yaml")
-		Expect(strings.HasPrefix(string(body), "{")).To(BeFalse(), "the YAML rendering came back as JSON: %s", body)
+		Expect(string(body)).NotTo(HavePrefix("{"), "the YAML rendering came back as JSON")
 		Expect(yaml.Unmarshal(body, &asYAML)).To(Succeed(), "pod %s: %s", pod.Name, body)
 		Expect(asYAML).To(Equal(asJSON), "the two renderings carry different documents")
 	})

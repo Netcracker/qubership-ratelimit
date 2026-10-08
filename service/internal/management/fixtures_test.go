@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ import (
 )
 
 // discardLogger drops what the handlers write. What the log says is not what
-// these tests assert; the one line that is a contract — the audit record — has
+// these tests assert; the one line that is a contract, the audit record, has
 // its own test.
 type discardLogger struct{}
 
@@ -45,7 +46,7 @@ const (
 )
 
 // cascadeBlocks is a FirstMatch cascade: an exempt client, a premium tier, and
-// everyone else. It is the shape the applicability analysis exists for — a rule
+// everyone else. It is the shape the applicability analysis exists for: a rule
 // is reachable only if no earlier one decided first.
 func cascadeBlocks() []model.Block {
 	return []model.Block{{
@@ -212,8 +213,8 @@ func wholeDomainBlocks() []model.Block {
 
 // testPolicy is the singleton of the domain: the blocks under test plus the
 // identity keys the fixtures read, a scalar plan, lowercased, and an
-// array-valued roles.
-// Extraction and rules live in one object now, so they compile as one unit.
+// array-valued roles. The mappings and the blocks are one object and compile
+// as one unit.
 func testPolicy(blocks []model.Block) model.Policy {
 	return model.Policy{
 		Domain: testDomain,
@@ -230,9 +231,13 @@ func compileSnapshot(t *testing.T, blocks []model.Block) *compile.Snapshot {
 	t.Helper()
 	policy := testPolicy(blocks)
 	snapshot, problems := compile.Compile(testNamespace, testDomain, &policy)
+	var blocking []compile.Problem
 	for _, problem := range problems {
-		require.False(t, problem.Blocking, "blocking compile problem: %+v", problem)
+		if problem.Blocking {
+			blocking = append(blocking, problem)
+		}
 	}
+	require.Empty(t, blocking, "compile.Compile(%s) refused the fixture policy", testDomain)
 	return snapshot
 }
 
@@ -311,29 +316,19 @@ const (
 	unlistedCaller = "system:serviceaccount:" + testNamespace + ":intruder"
 )
 
-// call runs one request through the whole app, as an authenticated caller.
+// call runs one request through the whole app, as caller.
 func (h *testAPI) call(t *testing.T, method, target string, caller string, body any) *testResponse {
 	t.Helper()
-
-	var reader *strings.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		require.NoError(t, err)
-		reader = strings.NewReader(string(encoded))
-	} else {
-		reader = strings.NewReader("")
-	}
-
-	request := httptest.NewRequest(method, target, reader)
-	if body != nil {
-		request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
-	}
-	request.Header.Set(fiber.HeaderAuthorization, "Bearer "+testToken(caller))
-	return h.send(t, request)
+	return h.callWith(t, method, target, caller, body, nil)
 }
 
-// callWith runs one request, letting the caller shape the headers — an
-// Idempotency-Key, another subject's token — before it goes out.
+// rawJSON is a request body sent as written, for the bodies json.Marshal does
+// not produce, such as a value followed by trailing data.
+type rawJSON string
+
+// callWith runs one request, letting the caller shape the headers, such as an
+// Idempotency-Key or another subject's token, before it goes out. A body other
+// than a rawJSON is sent as its JSON encoding.
 func (h *testAPI) callWith(
 	t *testing.T,
 	method, target string,
@@ -343,14 +338,18 @@ func (h *testAPI) callWith(
 ) *testResponse {
 	t.Helper()
 
-	reader := strings.NewReader("")
-	if body != nil {
-		encoded, err := json.Marshal(body)
+	payload := ""
+	switch value := body.(type) {
+	case nil:
+	case rawJSON:
+		payload = string(value)
+	default:
+		encoded, err := json.Marshal(value)
 		require.NoError(t, err)
-		reader = strings.NewReader(string(encoded))
+		payload = string(encoded)
 	}
 
-	request := httptest.NewRequest(method, target, reader)
+	request := httptest.NewRequest(method, target, strings.NewReader(payload))
 	if body != nil {
 		request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
 	}
@@ -391,10 +390,10 @@ func (h *testAPI) clock(t *testing.T) *time.Time {
 
 // send runs one prepared request through the app.
 //
-// The app is exercised whole — routing, middleware, error handler — rather than
-// one handler in isolation, because most of what this API promises lives in
-// that chain: the request id, the identity, the role gate, and the shape every
-// refusal comes back in.
+// The app is exercised whole, with its routing, middleware, and error handler,
+// rather than one handler in isolation, because most of what this API promises
+// lives in that chain: the request id, the identity, the role gate, and the
+// shape every refusal comes back in.
 func (h *testAPI) send(t *testing.T, request *http.Request) *testResponse {
 	t.Helper()
 
@@ -412,7 +411,8 @@ func (h *testAPI) send(t *testing.T, request *http.Request) *testResponse {
 	return &testResponse{Code: response.StatusCode, Body: bytes.NewBuffer(body), header: response.Header}
 }
 
-// testResponse is one answer, in the shape the assertions below read it.
+// testResponse is one answer, in the shape the assertions of these tests read
+// it.
 type testResponse struct {
 	Code int
 	Body *bytes.Buffer
@@ -452,8 +452,8 @@ func tokenWithClaims(claims map[string]any) string {
 
 // readingVerifier accepts every well-formed token and returns its claims, so
 // the tests exercise what the API does with a verified token. Verification
-// itself is the platform library's, and identity_test.go pins how the API
-// answers each of its refusals.
+// itself is the m2m package's, and identity_test.go pins how the API answers
+// each of its refusals.
 type readingVerifier struct{}
 
 func (readingVerifier) Verify(_ context.Context, raw string) (*jwt.Token, error) {
@@ -500,4 +500,37 @@ func requireError(t *testing.T, recorder *testResponse, status int, code errs.Er
 	require.NotEmpty(t, body.Meta.RequestID)
 	require.Equal(t, recorder.Header().Get(RequestIDHeader), body.Meta.RequestID)
 	return body
+}
+
+// maxListedPages bounds how many pages listPages follows before it fails the
+// test as a listing that never ends.
+const maxListedPages = 20
+
+// listPages follows a counter listing from target, which already carries a
+// query, through every nextCursor, and returns its pages in order. It stops
+// the test once the listing runs past maxListedPages pages.
+func (h *testAPI) listPages(t *testing.T, target string) []CounterList {
+	t.Helper()
+
+	var pages []CounterList
+	next := target
+	for {
+		var page CounterList
+		decode(t, h.call(t, http.MethodGet, next, listedCaller, nil), http.StatusOK, &page)
+		pages = append(pages, page)
+		if page.NextCursor == "" {
+			return pages
+		}
+		require.Less(t, len(pages), maxListedPages, "GET %s: the listing did not end", target)
+		next = target + "&cursor=" + url.QueryEscape(page.NextCursor)
+	}
+}
+
+// subsOf returns the sub axis value of each listed counter, in listing order.
+func subsOf(items []CounterView) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.Axes[model.KeySub])
+	}
+	return out
 }

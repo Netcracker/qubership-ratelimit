@@ -47,7 +47,7 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 		// The whole fraction is the precondition: the spec below asserts that
 		// Ready never leaves True, which says nothing unless it was True to
 		// begin with.
-		Eventually(policyCondition(domain, "Ready")).
+		Eventually(policyCondition(domain, v1.ConditionReady)).
 			WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Equal("True"),
 			"the domain was not ready before the rollout, so a flicker would be unreadable")
 	})
@@ -125,7 +125,7 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 				"so a frozen True would have passed")
 	})
 
-	It("reads a policy change as a rollout on its way to the replicas", func() {
+	It("reports a policy change as in flight until every replica applies it", func() {
 		// A new generation reaches the replicas through the ConfigMap and the
 		// kubelet's projection of it, one pod at a time. Ready leaves True
 		// while that happens and comes back once every replica applied it.
@@ -136,7 +136,7 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 		// the way are Reconciling, no replica has it yet, and Propagating,
 		// some have; which of the two a sample catches depends on the
 		// kubelet's timing across the nodes.
-		Expect(policyCondition(domain, "Ready")()).To(Equal("True"), "the domain was not ready before the change")
+		Expect(policyCondition(domain, v1.ConditionReady)()).To(Equal("True"), "the domain was not ready before the change")
 		p, err := getPolicy(domain)
 		Expect(err).NotTo(HaveOccurred())
 		p.Spec.Limits[0].Rules[0].Rates[0].Requests++
@@ -153,7 +153,7 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 			"the change reached every replica without Ready ever reading as in flight")
 		Eventually(readyReason(domain)).WithTimeout(2*time.Minute).WithPolling(time.Second).
 			Should(Equal(v1.ReasonAllReplicas), "Ready did not come back once the change propagated")
-		Expect(policyCondition(domain, "Stalled")()).To(Equal("False"),
+		Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("False"),
 			"a rollout that completed was reported as stalled")
 	})
 
@@ -168,7 +168,8 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 
 			// The REPLICAS printer column reads this field, so a status that
 			// carries the numbers and not the fraction shows an empty column.
-			g.Expect(policy.Status.Replicas.Summary).NotTo(BeEmpty())
-		}).WithTimeout(2 * time.Minute).WithPolling(3 * time.Second).Should(Succeed())
+			g.Expect(policy.Status.Replicas.Summary).NotTo(BeEmpty(), "the replica summary")
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
+			"the status to count every replica once the rollout settled")
 	})
 })

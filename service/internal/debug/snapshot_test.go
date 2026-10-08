@@ -52,6 +52,8 @@ func policy() model.Policy {
 
 var appliedAt = time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
 
+// ruleSet binds the policy at generation, with the UID uid-7, applied at
+// appliedAt.
 func ruleSet(t *testing.T, generation int64) (*store.RuleSet, *compile.Snapshot) {
 	t.Helper()
 	p := policy()
@@ -65,12 +67,14 @@ func ruleSet(t *testing.T, generation int64) (*store.RuleSet, *compile.Snapshot)
 	}), snapshot
 }
 
-func fixture(t *testing.T) (http.Handler, *compile.Snapshot) {
+// fixture serves the handler of replica ratelimit-0 over a store that holds
+// the policy at generation 7.
+func fixture(t *testing.T) (http.Handler, *store.Store, *compile.Snapshot) {
 	t.Helper()
 	set, snapshot := ruleSet(t, 7)
 	rules := store.New()
 	rules.Replace(set)
-	return debug.Handler(rules, "ratelimit-0"), snapshot
+	return debug.Handler(rules, "ratelimit-0"), rules, snapshot
 }
 
 func get(t *testing.T, h http.Handler, path string, accept string) *httptest.ResponseRecorder {
@@ -84,123 +88,176 @@ func get(t *testing.T, h http.Handler, path string, accept string) *httptest.Res
 	return rec
 }
 
+// getDomain reads the JSON document of the fixture's domain.
+func getDomain(t *testing.T) debug.DomainSnapshot {
+	t.Helper()
+	h, _, _ := fixture(t)
+	rec := get(t, h, contract.SnapshotPath+"/"+domain, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var doc debug.DomainSnapshot
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &doc))
+	return doc
+}
+
+// The version is the one the management API reports, so the two listings
+// compare by it. Replicas swap at different times, so the swap time sets one
+// replica's report apart from another's.
 func TestSummary_listsEveryDomainWithItsGeneration(t *testing.T) {
-	h, snapshot := fixture(t)
+	h, rules, snapshot := fixture(t)
+
 	rec := get(t, h, contract.SnapshotPath, "")
+
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-
 	var summary debug.Summary
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &summary))
 	assert.Equal(t, "ratelimit-0", summary.Replica)
-	assert.False(t, summary.SwappedAt.IsZero(), "the swap time is what tells replicas apart")
-	require.Len(t, summary.Domains, 1)
-	row := summary.Domains[0]
-	assert.Equal(t, domain, row.Domain)
-	assert.Equal(t, int64(7), row.Generation)
-	assert.Equal(t, "uid-7", row.UID)
-	assert.Equal(t, appliedAt, row.AppliedAt)
-	assert.Equal(t, ruleview.Version(snapshot), row.RuleSetVersion,
-		"the version is the one the management API reports, so the two listings compare")
-	assert.Equal(t, 1, row.Blocks)
-	assert.Equal(t, 2, row.Rules)
-	assert.Equal(t, snapshot.DecisionBuckets, row.DecisionBuckets)
-	assert.Contains(t, row.EffectiveKeys, "tenant")
+	assert.WithinDuration(t, rules.SwappedAt(), summary.SwappedAt, 0, "the swap time of the store")
+	assert.Equal(t, []debug.DomainSummary{{
+		Domain:          domain,
+		Generation:      7,
+		UID:             "uid-7",
+		AppliedAt:       appliedAt,
+		RuleSetVersion:  ruleview.Version(snapshot),
+		Blocks:          1,
+		Rules:           2,
+		DecisionBuckets: snapshot.DecisionBuckets,
+		EffectiveKeys:   []string{"method", "path", "sub", "tenant"},
+	}}, summary.Domains)
 }
 
-func TestDomain_rendersTheResolvedRulesAndTheClaimPaths(t *testing.T) {
-	h, _ := fixture(t)
-	rec := get(t, h, contract.SnapshotPath+"/"+domain, "")
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+// The group is resolved: the rule shows the values the engine tests, sorted,
+// not the group's name.
+func TestDomain_rendersAGroupAsTheSortedValuesItResolvesTo(t *testing.T) {
+	doc := getDomain(t)
 
-	var doc debug.DomainSnapshot
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &doc))
 	assert.Equal(t, int64(7), doc.Generation)
 	require.Len(t, doc.Blocks, 1)
 	require.Len(t, doc.Blocks[0].Rules, 2)
+	assert.Equal(t, []ruleview.PredicateView{{Key: model.KeySub, Operator: "In", Values: []string{"alice", "bob", "zed"}}},
+		doc.Blocks[0].Rules[0].Matches, "the matches of the rule partners")
+}
 
-	// The group is resolved: the rule shows the values the engine
-	// tests, sorted, not the group's name.
-	partners := doc.Blocks[0].Rules[0]
-	require.Len(t, partners.Matches, 1)
-	assert.Equal(t, "In", partners.Matches[0].Operator)
-	assert.Equal(t, []string{"alice", "bob", "zed"}, partners.Matches[0].Values)
+// The keys carry the claim behind each one, which is the half of a "nobody is
+// limited" question the rules alone cannot answer. The built-in sub is
+// extracted first, then the mapped keys as authored.
+func TestDomain_rendersTheClaimBehindEveryKey(t *testing.T) {
+	doc := getDomain(t)
 
-	// The keys carry the claim behind each one, which is the half of a
-	// "nobody is limited" question the rules alone cannot answer.
-	var tenant *debug.KeyView
-	for i := range doc.Keys {
-		if doc.Keys[i].Key == "tenant" {
-			tenant = &doc.Keys[i]
-		}
-	}
-	require.NotNil(t, tenant, "the mapped key is missing from the extraction plan: %+v", doc.Keys)
+	require.Len(t, doc.Keys, 2)
+	assert.Equal(t, model.KeySub, doc.Keys[0].Key, "the key extracted first")
+	tenant := doc.Keys[1]
+	assert.Equal(t, "tenant", tenant.Key)
 	assert.Equal(t, "org.id", tenant.Claim)
 	assert.Equal(t, string(model.NormalizeLowercase), tenant.Normalization)
-	assert.Equal(t, model.KeySub, doc.Keys[0].Key, "the built-in sub is extracted first")
 }
 
-func TestDomain_answersYAMLOnRequest(t *testing.T) {
-	h, _ := fixture(t)
-	for name, rec := range map[string]*httptest.ResponseRecorder{
-		"query":  get(t, h, contract.SnapshotPath+"/"+domain+"?format=yaml", ""),
-		"accept": get(t, h, contract.SnapshotPath+"/"+domain, "application/yaml"),
-	} {
-		require.Equal(t, http.StatusOK, rec.Code, name)
-		assert.Equal(t, "application/yaml", rec.Header().Get("Content-Type"), name)
-		var doc debug.DomainSnapshot
-		require.NoError(t, yaml.Unmarshal(rec.Body.Bytes(), &doc), name)
-		assert.Equal(t, domain, doc.Domain, name)
-		assert.Len(t, doc.Blocks, 1, name)
+func TestDomain_servesYAMLOnRequest(t *testing.T) {
+	cases := []struct {
+		name   string
+		path   string
+		accept string
+	}{
+		{"format=yaml in the query", contract.SnapshotPath + "/" + domain + "?format=yaml", ""},
+		{"application/yaml in Accept", contract.SnapshotPath + "/" + domain, "application/yaml"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, _ := fixture(t)
+
+			rec := get(t, h, c.path, c.accept)
+
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Equal(t, "application/yaml", rec.Header().Get("Content-Type"))
+			var doc debug.DomainSnapshot
+			require.NoError(t, yaml.Unmarshal(rec.Body.Bytes(), &doc))
+			assert.Equal(t, domain, doc.Domain)
+			assert.Len(t, doc.Blocks, 1)
+		})
 	}
 }
 
-// The pairing that the endpoint exists for: the rules, the generation they
-// were applied from, and the refusal come off one rule set, so a document
-// built from a set carries that set's facts and nothing of a set swapped in
-// during the request.
-func TestSummarize_pairsTheRulesWithTheGenerationOfTheSameSet(t *testing.T) {
-	rules := store.New()
-	older, _ := ruleSet(t, 7)
-	rules.Replace(older)
-	rules.Refuse(&applied.Refusal{FormatVersion: 9, Reason: "unsupported"})
-	refused := rules.Load()
-	newer, snapshot := ruleSet(t, 8)
-	rules.Replace(newer)
+// history is what a store held over a refusal: the set applied at generation
+// 7, the same rules with a refusal of format version 9, and the set applied at
+// generation 8 after it, compiled from currentSnapshot.
+type history struct {
+	older, refused, current *store.RuleSet
+	currentSnapshot         *compile.Snapshot
+}
 
-	summary := debug.Summarize(refused, "ratelimit-0")
+func refusedThenApplied(t *testing.T) history {
+	t.Helper()
+	var h history
+	rules := store.New()
+	h.older, _ = ruleSet(t, 7)
+	rules.Replace(h.older)
+	rules.Refuse(&applied.Refusal{FormatVersion: 9, Reason: "unsupported"})
+	h.refused = rules.Load()
+	var newer *store.RuleSet
+	newer, h.currentSnapshot = ruleSet(t, 8)
+	rules.Replace(newer)
+	h.current = rules.Load()
+	return h
+}
+
+// The pairing the endpoint exists for: the rules, the generation they were
+// applied from, and the refusal come off one rule set, so a document built
+// from a set carries that set's facts and nothing of a set swapped in during
+// the request. The refused reading rides on the set it left in place.
+func TestSummarize_reportsARefusalWithTheGenerationOfTheSetItRidesOn(t *testing.T) {
+	h := refusedThenApplied(t)
+
+	summary := debug.Summarize(h.refused, "ratelimit-0")
+
 	require.Len(t, summary.Domains, 1)
 	assert.Equal(t, int64(7), summary.Domains[0].Generation)
-	require.NotNil(t, summary.Refusal, "the refused reading rides on the set it left in place")
-	assert.Equal(t, 9, summary.Refusal.FormatVersion)
-	assert.Equal(t, older.SwappedAt(), summary.SwappedAt, "a refusal is not a swap")
+	assert.Equal(t, &applied.Refusal{FormatVersion: 9, Reason: "unsupported"}, summary.Refusal)
+	assert.Equal(t, h.older.SwappedAt(), summary.SwappedAt, "a refusal is not a swap")
+}
 
-	summary = debug.Summarize(rules.Load(), "ratelimit-0")
+// The applied set carries no refusal, whatever the reading before it.
+func TestSummarize_reportsTheSetAppliedAfterARefusalWithoutIt(t *testing.T) {
+	h := refusedThenApplied(t)
+
+	summary := debug.Summarize(h.current, "ratelimit-0")
+
 	require.Len(t, summary.Domains, 1)
 	assert.Equal(t, int64(8), summary.Domains[0].Generation)
-	assert.Equal(t, ruleview.Version(snapshot), summary.Domains[0].RuleSetVersion)
-	assert.Nil(t, summary.Refusal, "the applied set carries no refusal, whatever the reading before it")
+	assert.Equal(t, ruleview.Version(h.currentSnapshot), summary.Domains[0].RuleSetVersion)
+	assert.Nil(t, summary.Refusal)
+}
 
-	d, ok := newer.Domain(domain)
+func TestRender_takesTheGenerationFromTheDomainItRenders(t *testing.T) {
+	set, _ := ruleSet(t, 8)
+	d, ok := set.Domain(domain)
 	require.True(t, ok)
+
 	doc := debug.Render(d)
+
 	assert.Equal(t, int64(8), doc.Generation)
 	assert.Equal(t, domain, doc.Domain)
 	assert.Len(t, doc.Blocks, 1)
 }
 
 func TestDomain_isNotFoundForAnUnboundDomain(t *testing.T) {
-	h, _ := fixture(t)
+	h, _, _ := fixture(t)
+
 	rec := get(t, h, contract.SnapshotPath+"/gateway.nowhere", "")
+
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// The endpoint reads the store and nothing else.
 func TestHandler_refusesEveryMethodButGET(t *testing.T) {
-	h, _ := fixture(t)
 	for _, method := range []string{http.MethodPost, http.MethodDelete, http.MethodPut} {
-		req := httptest.NewRequest(method, contract.SnapshotPath+"/"+domain, nil)
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, method)
+		t.Run(method, func(t *testing.T) {
+			h, _, _ := fixture(t)
+			req := httptest.NewRequest(method, contract.SnapshotPath+"/"+domain, nil)
+			rec := httptest.NewRecorder()
+
+			h.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+		})
 	}
 }

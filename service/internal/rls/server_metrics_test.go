@@ -2,8 +2,6 @@ package rls
 
 import (
 	"context"
-	"encoding/base64"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -25,370 +23,269 @@ import (
 	"github.com/netcracker/qubership-ratelimit/service/internal/store"
 )
 
-// delta reads a counter twice around an action; the tests below assert on
-// differences because the package-level series accumulate across tests.
-func delta(read func() float64, act func()) float64 {
-	before := read()
-	act()
-	return read() - before
-}
-
-func TestShouldRateLimit_countsChecksAndDecisions(t *testing.T) {
-	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
-	log, output := recordingLogger()
-	server := NewServer(ruleStore, log)
-
-	check := func() {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api"}))
-		require.NoError(t, err)
-	}
-
-	const rule = "b/all"
-	reads := map[string]func() float64{
-		"checks ok": func() float64 {
-			return testutil.ToFloat64(metrics.Checks.WithLabelValues(domain, metrics.VerdictOK))
-		},
-		"checks over_limit": func() float64 {
-			return testutil.ToFloat64(metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit))
-		},
-		"decisions ok": func() float64 {
-			return testutil.ToFloat64(metrics.Decisions.WithLabelValues(domain, rule, metrics.OutcomeOK))
-		},
-		"decisions over_limit": func() float64 {
-			return testutil.ToFloat64(metrics.Decisions.WithLabelValues(domain, rule, metrics.OutcomeOverLimit))
-		},
-		// The first request drains the one-per-hour limit entirely, so its
-		// admission is already inside the near-limit margin.
-		"near limit": func() float64 {
-			return testutil.ToFloat64(metrics.NearLimit.WithLabelValues(domain, rule))
-		},
-	}
-	before := map[string]float64{}
+// deltas reads every series of reads around act and returns how much each one
+// grew, under the same names. The series are package-level and accumulate
+// across tests, so a test asserts on growth.
+func deltas(reads map[string]func() float64, act func()) map[string]float64 {
+	before := make(map[string]float64, len(reads))
 	for name, read := range reads {
 		before[name] = read()
 	}
-
-	check()
-	check()
-
+	act()
+	grown := make(map[string]float64, len(reads))
 	for name, read := range reads {
-		assert.Equal(t, before[name]+1, read(), "%s must grow by one across the pair", name)
+		grown[name] = read() - before[name]
 	}
-	assert.Contains(t, output(), "rate limit refused domain=gateway.public path=/api")
+	return grown
 }
 
-func TestShouldRateLimit_countsAShadowRefusalAsItsOwnOutcome(t *testing.T) {
+// valueOf reads the current value of one counter series.
+func valueOf(series prometheus.Collector) func() float64 {
+	return func() float64 { return testutil.ToFloat64(series) }
+}
+
+// An admission and a refusal of one per hour count one check of each verdict
+// and one decision of each outcome for the rule b/all. The admission spends
+// the one request, so it is inside the near-limit margin too.
+func TestShouldRateLimit_countsAnAdmissionAndARefusalUnderTheirVerdicts(t *testing.T) {
 	const domain = "gateway.public"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
-		Name: "b",
-		Rules: []model.Rule{{Name: "trial", Behavior: model.BehaviorShadow,
-			Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
-	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
 
-	shadow := func() float64 {
-		return testutil.ToFloat64(metrics.Decisions.WithLabelValues(
-			domain, "b/trial", metrics.OutcomeShadowOverLimit))
-	}
-	near := func() float64 {
-		return testutil.ToFloat64(metrics.NearLimit.WithLabelValues(domain, "b/trial"))
-	}
-	nearBefore := near()
-	got := delta(shadow, func() {
-		for range 2 {
-			resp, err := server.ShouldRateLimit(context.Background(),
-				request(domain, map[string]string{"path": "/api"}))
-			require.NoError(t, err)
-			require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
-				"a shadow rule reports, never vetoes")
-		}
+	got := deltas(map[string]func() float64{
+		"checks ok":            valueOf(metrics.Checks.WithLabelValues(domain, metrics.VerdictOK)),
+		"checks over_limit":    valueOf(metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit)),
+		"decisions ok":         valueOf(metrics.Decisions.WithLabelValues(domain, "b/all", metrics.OutcomeOK)),
+		"decisions over_limit": valueOf(metrics.Decisions.WithLabelValues(domain, "b/all", metrics.OutcomeOverLimit)),
+		"near limit":           valueOf(metrics.NearLimit.WithLabelValues(domain, "b/all")),
+	}, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
 	})
-	assert.Equal(t, 1.0, got, "the second request is over the shadow limit")
-	assert.Equal(t, nearBefore, near(),
-		"a dry run near its experimental limit is not a precursor of client-visible refusals")
+
+	assert.Equal(t, map[string]float64{
+		"checks ok": 1, "checks over_limit": 1, "decisions ok": 1, "decisions over_limit": 1, "near limit": 1,
+	}, got)
 }
 
+// A shadow rule's refusal counts under its own outcome, shadow_over_limit, and
+// a shadow admission stays out of the near-limit series: that series is the
+// precursor of refusals a client sees, and a dry run near its experimental
+// limit is not one.
+func TestShouldRateLimit_countsAShadowRuleApartFromTheEnforcedOutcomes(t *testing.T) {
+	const domain = "gateway.public"
+	server, _ := newServerOver(ruleSetWith(t, shadowPolicy(1, time.Hour)))
+
+	got := deltas(map[string]func() float64{
+		"decisions shadow_over_limit": valueOf(
+			metrics.Decisions.WithLabelValues(domain, "b/trial", metrics.OutcomeShadowOverLimit)),
+		"near limit": valueOf(metrics.NearLimit.WithLabelValues(domain, "b/trial")),
+	}, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
+	})
+
+	assert.Equal(t, map[string]float64{"decisions shadow_over_limit": 1, "near limit": 0}, got)
+}
+
+// A check outside every route charges nothing, and the unmatched series counts
+// it.
 func TestShouldRateLimit_countsAnUnmatchedCheck(t *testing.T) {
 	const domain = "gateway.unmatched"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Blocks: []model.Block{{
 		Name: "b",
 		Target: model.Target{Routes: []model.Route{
 			{Path: model.PathMatch{Type: model.PathExact, Value: "/api/only"}}}},
 		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetIn(t, domain, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+	server, _ := newServerOver(ruleSetOver(t, domain, &p, memory.New()))
 
-	unmatched := func() float64 {
-		return testutil.ToFloat64(metrics.UnmatchedChecks.WithLabelValues(domain))
-	}
-	got := delta(unmatched, func() {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/elsewhere"}))
-		require.NoError(t, err)
+	got := deltas(map[string]func() float64{
+		"unmatched checks": valueOf(metrics.UnmatchedChecks.WithLabelValues(domain)),
+	}, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/elsewhere"}))
 	})
-	assert.Equal(t, 1.0, got, "a check outside every route charges nothing and must say so")
+
+	assert.Equal(t, map[string]float64{"unmatched checks": 1}, got)
 }
 
-func TestShouldRateLimit_countsTheDescriptorOverflow(t *testing.T) {
+func TestShouldRateLimit_countsACheckOfTooManyDescriptorsAsItsOwnRefusalCause(t *testing.T) {
 	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
-	log, output := recordingLogger()
-	server := NewServer(ruleStore, log)
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
 
-	req := request(domain, map[string]string{"path": "/api"})
-	for range maxDescriptorsPerCheck {
-		req.Descriptors = append(req.Descriptors, req.Descriptors[0])
-	}
-
-	overflow := func() float64 {
-		return testutil.ToFloat64(metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyDescriptors))
-	}
-	got := delta(overflow, func() {
-		resp, err := server.ShouldRateLimit(context.Background(), req)
-		require.NoError(t, err)
-		require.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	got := deltas(map[string]func() float64{
+		"refusals too_many_descriptors": valueOf(
+			metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyDescriptors)),
+	}, func() {
+		shouldRateLimit(t, server, checkOfClients(17))
 	})
-	assert.Equal(t, 1.0, got)
-	// The violation repeats at traffic speed by nature, so its log line rides
-	// a sampler; the first line of a window always comes through.
-	assert.Contains(t, output(), "descriptors, over the limit")
-	assert.Contains(t, output(), "suppressed=0")
+
+	assert.Equal(t, map[string]float64{"refusals too_many_descriptors": 1}, got)
 }
 
-// A cost the engine cannot charge is counted as its own refusal cause, and
-// the check as over_limit, not as unavailable.
-func TestShouldRateLimit_countsAnInvalidCost(t *testing.T) {
+// A cost the engine cannot charge is counted as its own refusal cause, and the
+// check as over_limit, not as unavailable.
+func TestShouldRateLimit_countsAnInvalidCostAsItsOwnRefusalCause(t *testing.T) {
 	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
-
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
 	req := request(domain, map[string]string{"path": "/api"})
 	req.Descriptors[0].HitsAddend = wrapperspb.UInt64(5)
 	req.Descriptors[0].IsNegativeHits = true
 
-	refusals := func() float64 {
-		return testutil.ToFloat64(metrics.Refusals.WithLabelValues(domain, metrics.CauseInvalidCost))
-	}
-	overLimit := func() float64 {
-		return testutil.ToFloat64(metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit))
-	}
-	unavailable := func() float64 {
-		return testutil.ToFloat64(metrics.Checks.WithLabelValues(domain, metrics.VerdictUnavailable))
-	}
-	beforeOver, beforeUnavailable := overLimit(), unavailable()
-	got := delta(refusals, func() {
-		_, err := server.ShouldRateLimit(context.Background(), req)
-		require.NoError(t, err)
+	got := deltas(map[string]func() float64{
+		"refusals invalid_cost": valueOf(metrics.Refusals.WithLabelValues(domain, metrics.CauseInvalidCost)),
+		"checks over_limit":     valueOf(metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit)),
+		"checks unavailable":    valueOf(metrics.Checks.WithLabelValues(domain, metrics.VerdictUnavailable)),
+	}, func() {
+		shouldRateLimit(t, server, req)
 	})
-	assert.Equal(t, 1.0, got)
-	assert.Equal(t, 1.0, overLimit()-beforeOver, "the refused check is not counted over_limit")
-	assert.Zero(t, unavailable()-beforeUnavailable, "the refused check is counted as the store's failure")
+
+	assert.Equal(t, map[string]float64{"refusals invalid_cost": 1, "checks over_limit": 1, "checks unavailable": 0}, got)
 }
 
-func TestShouldRateLimit_samplesTheViolationLog(t *testing.T) {
+// With a violation log budget of one line per second, five violations leave
+// one line, or two when the checks straddle a second, while the refusal series
+// counts all five. The test lowers the budget of the server's own sampler,
+// which NewServer sets to 10 lines per second.
+func TestShouldRateLimit_samplesTheViolationLogWhileCountingEveryViolation(t *testing.T) {
 	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
-	log, output := recordingLogger()
-	server := NewServer(ruleStore, log)
+	server, log := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
 	server.violationLog.limit = 1
 
-	req := request(domain, map[string]string{"path": "/api"})
-	for range maxDescriptorsPerCheck {
-		req.Descriptors = append(req.Descriptors, req.Descriptors[0])
-	}
-
-	refused := func() float64 {
-		return testutil.ToFloat64(metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyDescriptors))
-	}
-	got := delta(refused, func() {
+	got := deltas(map[string]func() float64{
+		"refusals too_many_descriptors": valueOf(
+			metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyDescriptors)),
+	}, func() {
 		for range 5 {
-			_, err := server.ShouldRateLimit(context.Background(), req)
-			require.NoError(t, err)
+			shouldRateLimit(t, server, checkOfClients(17))
 		}
 	})
-	assert.Equal(t, 5.0, got, "the counter stays complete whatever the log budget")
-	lines := strings.Count(output(), "descriptors, over the limit")
-	assert.LessOrEqual(t, lines, 2, "a burst must not become a log line per request")
+
+	assert.Equal(t, map[string]float64{"refusals too_many_descriptors": 5}, got)
+	lines := strings.Count(log.output(), "descriptors, over the limit")
+	assert.Contains(t, []int{1, 2}, lines, "violation log lines of five checks at a budget of one per second")
 }
 
-func TestShouldRateLimit_countsAnUnknownDomain(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetOf(t))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+// An unknown domain is counted in its own series, and its check under the
+// placeholder domain, never the caller's name.
+func TestShouldRateLimit_countsAnUnknownDomainUnderThePlaceholder(t *testing.T) {
+	server, _ := newServerOver(nil)
 
-	unknown := func() float64 { return testutil.ToFloat64(metrics.UnknownDomainChecks) }
-	placeholder := func() float64 {
-		return testutil.ToFloat64(metrics.Checks.WithLabelValues(metrics.UnknownDomain, metrics.VerdictOK))
-	}
-	before := placeholder()
-	got := delta(unknown, func() {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request("nobody.claims.this", map[string]string{"path": "/api"}))
-		require.NoError(t, err)
+	got := deltas(map[string]func() float64{
+		"unknown domain checks": valueOf(metrics.UnknownDomainChecks),
+		"checks [unknown] ok":   valueOf(metrics.Checks.WithLabelValues(metrics.UnknownDomain, metrics.VerdictOK)),
+	}, func() {
+		shouldRateLimit(t, server, request("nobody.claims.this", map[string]string{"path": "/api"}))
 	})
-	assert.Equal(t, 1.0, got)
-	assert.Equal(t, before+1, placeholder(),
-		"the check series must use the placeholder, never the caller's domain name")
+
+	assert.Equal(t, map[string]float64{"unknown domain checks": 1, "checks [unknown] ok": 1}, got)
 }
 
-func TestShouldRateLimit_countsExtractionsAndSkips(t *testing.T) {
+func TestShouldRateLimit_countsAnExtractionForATokenCarryingTheClaim(t *testing.T) {
 	const domain = "gateway.public"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
-		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
-			Rates: []model.Rate{{Requests: 10, Period: time.Hour}}}},
-	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(10)))
 
-	extractions := func() float64 {
-		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(domain, model.KeySub))
-	}
-	skips := func() float64 {
-		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(domain, model.KeySub, "decode_failed"))
-	}
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice"}`))
+	got := deltas(map[string]func() float64{
+		"extractions sub": valueOf(metrics.Extractions.WithLabelValues(domain, model.KeySub)),
+	}, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api", "token": tokenWithSub("alice")}))
+	})
 
-	assert.Equal(t, 1.0, delta(extractions, func() {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api", "token": "h." + payload + ".s"}))
-		require.NoError(t, err)
-	}), "a decodable token carrying the claim counts as one extraction")
-
-	assert.Equal(t, 1.0, delta(skips, func() {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api", "token": "garbage"}))
-		require.NoError(t, err)
-	}), "an undecodable token counts as a skip for the planned key")
+	assert.Equal(t, map[string]float64{"extractions sub": 1}, got)
 }
 
-// A direct caller's value past the identity layer's bounds is absent and
-// counted as the token's would be: a client of MaxValueBytes+1 bytes is a
-// too_long skip, and the check is decided without a client.
-func TestShouldRateLimit_countsTheDirectFormsSkips(t *testing.T) {
+// An undecodable token counts as a skip for the key the rule plans to read.
+func TestShouldRateLimit_countsADecodeFailedSkipForAnUndecodableToken(t *testing.T) {
 	const domain = "gateway.public"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
-		Name: "b",
-		Rules: []model.Rule{{Name: "each", Counters: []string{model.KeySub},
-			Rates: []model.Rate{{Requests: 10, Period: time.Hour}}}},
-	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(10)))
 
-	skips := func() float64 {
-		return testutil.ToFloat64(metrics.ExtractionSkips.WithLabelValues(domain, model.KeySub, "too_long"))
-	}
-	extractions := func() float64 {
-		return testutil.ToFloat64(metrics.Extractions.WithLabelValues(domain, model.KeySub))
-	}
-	check := func(client string) {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api", "sub": client}))
-		require.NoError(t, err)
-	}
-
-	assert.Equal(t, 1.0, delta(skips, func() { check(strings.Repeat("x", identity.MaxValueBytes+1)) }),
-		"a direct value past the length bound was not counted as a skip")
-	assert.Equal(t, 0.0, delta(extractions, func() { check(strings.Repeat("x", identity.MaxValueBytes+1)) }),
-		"a direct value past the length bound reached the decision")
-	assert.Equal(t, 1.0, delta(extractions, func() { check(strings.Repeat("x", identity.MaxValueBytes)) }),
-		"a direct value at the length bound was dropped")
-}
-
-// failingRuleSet compiles the one-per-hour policy over a store that refuses
-// every operation, standing in for an outage.
-func failingRuleSet(t *testing.T, domain string) *store.RuleSet {
-	t.Helper()
-	p := onePerHourPolicy()
-	snap, problems := compile.Compile(testNamespace, domain, &p)
-	require.Empty(t, problems)
-	return store.NewRuleSet(map[string]store.Domain{
-		domain: {Engine: engine.New(snap, failingCounters{}), Snapshot: snap},
+	got := deltas(map[string]func() float64{
+		"skips sub decode_failed": valueOf(metrics.ExtractionSkips.WithLabelValues(domain, model.KeySub, "decode_failed")),
+	}, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api", "token": "garbage"}))
 	})
+
+	assert.Equal(t, map[string]float64{"skips sub decode_failed": 1}, got)
 }
 
-// ruleSetIn compiles the policies into the given domain over private
-// in-memory counters — for tests whose counter assertions need a domain of
-// their own.
-func ruleSetIn(t *testing.T, domain string, p model.Policy) *store.RuleSet {
-	t.Helper()
-	snap, problems := compile.Compile(testNamespace, domain, &p)
-	require.Empty(t, problems, "broken fixture")
-	return store.NewRuleSet(map[string]store.Domain{
-		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
-	})
+// A direct caller's value is held to the identity layer's bounds, as the
+// token's would be: a value of MaxValueBytes reaches the decision, and one byte
+// more is absent and counted as a too_long skip.
+func TestShouldRateLimit_countsADirectValuePastTheLengthBoundAsASkip(t *testing.T) {
+	const domain = "gateway.public"
+	for _, tc := range []struct {
+		name   string
+		length int
+		want   map[string]float64
+	}{
+		{"a value at the bound", identity.MaxValueBytes,
+			map[string]float64{"skips sub too_long": 0, "extractions sub": 1}},
+		{"a value one byte past the bound", identity.MaxValueBytes + 1,
+			map[string]float64{"skips sub too_long": 1, "extractions sub": 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(10)))
+
+			got := deltas(map[string]func() float64{
+				"skips sub too_long": valueOf(metrics.ExtractionSkips.WithLabelValues(domain, model.KeySub, "too_long")),
+				"extractions sub":    valueOf(metrics.Extractions.WithLabelValues(domain, model.KeySub)),
+			}, func() {
+				shouldRateLimit(t, server, request(domain,
+					map[string]string{"path": "/api", "sub": strings.Repeat("x", tc.length)}))
+			})
+
+			assert.Equal(t, tc.want, got, "series after a sub of %d bytes", tc.length)
+		})
+	}
 }
 
-func TestShouldRateLimit_timesTheUnknownDomainCheck(t *testing.T) {
-	// Checks of an unknown domain must be visible in latency too, not only in
-	// count - under the placeholder label, never the caller's name.
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetOf(t))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
-
+// A check of an unknown domain is timed too, under the placeholder label and
+// never the caller's name.
+func TestShouldRateLimit_timesAnUnknownDomainCheckUnderThePlaceholder(t *testing.T) {
+	server, _ := newServerOver(nil)
 	before := histogramSamples(t, metrics.CheckDuration, metrics.UnknownDomain)
-	_, err := server.ShouldRateLimit(context.Background(),
-		request("nobody.claims.this.either", map[string]string{"path": "/api"}))
-	require.NoError(t, err)
+
+	shouldRateLimit(t, server, request("nobody.claims.this.either", map[string]string{"path": "/api"}))
 
 	assert.Equal(t, before+1, histogramSamples(t, metrics.CheckDuration, metrics.UnknownDomain),
-		"the check must land one observation under the placeholder label")
+		"observations of ratelimit_check_duration_seconds{domain=%q}", metrics.UnknownDomain)
 }
 
 // histogramSamples reads the sample count of one series of a histogram
 // vector. Reading through the vector creates the series if absent, which is
-// exactly what a before/after delta needs.
-func histogramSamples(t *testing.T, vec *prometheus.HistogramVec, labels ...string) uint64 {
+// what a before and after comparison needs.
+func histogramSamples(t *testing.T, vec *prometheus.HistogramVec, labels ...string) int {
 	t.Helper()
 	observer, err := vec.GetMetricWithLabelValues(labels...)
 	require.NoError(t, err)
 	var out dto.Metric
 	require.NoError(t, observer.(prometheus.Metric).Write(&out))
-	return out.GetHistogram().GetSampleCount()
+	return int(out.GetHistogram().GetSampleCount())
 }
 
-func TestNearLimit_theExactBoundaryCounts(t *testing.T) {
-	// 100*(1-0.9) computes to just under 10 in binary floating point; the
-	// epsilon keeps the canonical "90% consumed" request inside the margin.
-	rule := engine.RuleOutcome{Limit: 100, Capacity: 100, Remaining: 10}
-	assert.True(t, nearLimit(rule, 0.9), "remaining exactly at the margin is near")
-
-	rule.Remaining = 11
-	assert.False(t, nearLimit(rule, 0.9), "one request earlier is not")
-}
-
-// The margin is a share of the capacity remaining counts down from: for a
-// window of 1000 with a burst of 100, remaining never exceeds 100, and the
-// margin is 10 whatever the limit says.
-func TestNearLimit_theMarginIsAShareOfTheCapacity(t *testing.T) {
-	cases := map[string]struct {
+// An admission is near the limit when the remaining count is at or under a
+// tenth of the capacity, with a ratio of 0.9. The margin is a share of the
+// capacity remaining counts down from: for a window of 1000 with a burst of
+// 100, remaining never exceeds 100, and the margin is 10 whatever the limit
+// is. 100*(1-0.9) computes to just under 10 in binary floating point, and at
+// a billion the float grid step is coarser than any absolute epsilon; the
+// relative epsilon keeps the canonical 90%-consumed request inside the margin
+// at every scale.
+func TestNearLimit_countsARemainingAtOrUnderATenthOfTheCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
 		rule engine.RuleOutcome
 		near bool
 	}{
-		"a full burst bucket of a wide window": {engine.RuleOutcome{Limit: 1000, Capacity: 100, Remaining: 99}, false},
-		"a tenth of the burst left":            {engine.RuleOutcome{Limit: 1000, Capacity: 100, Remaining: 10}, true},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
+		{"exactly a tenth left", engine.RuleOutcome{Limit: 100, Capacity: 100, Remaining: 10}, true},
+		{"one request more than a tenth left", engine.RuleOutcome{Limit: 100, Capacity: 100, Remaining: 11}, false},
+		{"a full burst bucket of a wide window", engine.RuleOutcome{Limit: 1000, Capacity: 100, Remaining: 99}, false},
+		{"a tenth of the burst left", engine.RuleOutcome{Limit: 1000, Capacity: 100, Remaining: 10}, true},
+		{"exactly a tenth of a billion left",
+			engine.RuleOutcome{Limit: 1_000_000_000, Capacity: 1_000_000_000, Remaining: 100_000_000}, true},
+		{"one request more than a tenth of a billion left",
+			engine.RuleOutcome{Limit: 1_000_000_000, Capacity: 1_000_000_000, Remaining: 100_000_001}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.near, nearLimit(tc.rule, 0.9), "nearLimit(%+v, 0.9)", tc.rule)
 		})
 	}
@@ -400,152 +297,103 @@ func TestNearLimit_theMarginIsAShareOfTheCapacity(t *testing.T) {
 // of such a window satisfies.
 func TestShouldRateLimit_aFullBurstBucketIsNotNearItsLimit(t *testing.T) {
 	const domain = "gateway.public"
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+	p := model.Policy{Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{{Name: "wide",
 			Rates: []model.Rate{{Requests: 1000, Period: time.Minute, Burst: 100}}}},
 	}}}
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, p))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+	server, _ := newServerOver(ruleSetWith(t, p))
 
-	near := func() float64 {
-		return testutil.ToFloat64(metrics.NearLimit.WithLabelValues(domain, "b/wide"))
-	}
-	got := delta(near, func() {
-		resp, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api"}))
-		require.NoError(t, err)
-		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
+	got := deltas(map[string]func() float64{
+		"near limit": valueOf(metrics.NearLimit.WithLabelValues(domain, "b/wide")),
+	}, func() {
+		resp := shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
+		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "the first check of the bucket")
 	})
-	assert.Equal(t, 0.0, got, "the first request of a fresh bucket with 99 of 100 left is not near the limit")
+
+	assert.Equal(t, map[string]float64{"near limit": 0}, got)
 }
 
+// With a store error log budget of one line per second, five failing checks
+// leave one line, or two when the checks straddle a second, and the first line
+// of a second reports no suppressed lines. The test lowers the budget of the
+// server's own sampler, which NewServer sets to 10 lines per second.
 func TestShouldRateLimit_samplesTheStoreErrorLog(t *testing.T) {
 	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(failingRuleSet(t, domain))
-	log, output := recordingLogger()
-	server := NewServer(ruleStore, log)
+	p := domainWidePolicy(1, time.Hour)
+	server, log := newServerOver(ruleSetOver(t, domain, &p, failingCounters{}))
 	server.storeLog.limit = 1
 
-	for range 5 {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api"}))
-		require.Error(t, err, "a store failure surfaces as a gRPC error")
+	for i := range 5 {
+		_, err := server.ShouldRateLimit(context.Background(), request(domain, map[string]string{"path": "/api"}))
+		require.Error(t, err, "check %d of a failing store", i+1)
 	}
 
-	lines := strings.Count(output(), "rate limit store error")
-	require.GreaterOrEqual(t, lines, 1, "the first line of a window always comes through")
-	assert.LessOrEqual(t, lines, 2, "an outage must not become a log line per check")
-	assert.Contains(t, output(), "suppressed=0")
+	lines := strings.Count(log.output(), "rate limit store error")
+	assert.Contains(t, []int{1, 2}, lines, "store error log lines of five checks at a budget of one per second")
+	assert.Contains(t, log.output(), "suppressed=0")
 }
 
-func TestNearLimit_theBoundaryHoldsAtLargeLimits(t *testing.T) {
-	// At a billion the float grid step near the threshold is coarser than any
-	// absolute epsilon; the relative one keeps the canonical 90%-consumed
-	// request inside the margin at every scale.
-	rule := engine.RuleOutcome{Limit: 1_000_000_000, Capacity: 1_000_000_000, Remaining: 100_000_000}
-	assert.True(t, nearLimit(rule, 0.9))
-
-	rule.Remaining++
-	assert.False(t, nearLimit(rule, 0.9), "one request earlier is not near, even at scale")
-}
-
-func TestShouldRateLimit_countsTokensSeen(t *testing.T) {
+// A check that carries a token counts as a token seen, whatever extraction
+// makes of it; a check without one is no evidence about any claim path.
+func TestShouldRateLimit_countsATokenSeenOnlyForACheckThatCarriesOne(t *testing.T) {
 	const domain = "gateway.public"
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetWith(t, onePerHourPolicy()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
+	server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
+	tokensSeen := map[string]func() float64{"tokens seen": valueOf(metrics.TokensSeen.WithLabelValues(domain))}
 
-	tokens := func() float64 { return testutil.ToFloat64(metrics.TokensSeen.WithLabelValues(domain)) }
-	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"alice"}`))
+	withToken := deltas(tokensSeen, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api", "token": tokenWithSub("alice")}))
+	})
+	withoutToken := deltas(tokensSeen, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
+	})
 
-	assert.Equal(t, 1.0, delta(tokens, func() {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api", "token": "h." + payload + ".s"}))
-		require.NoError(t, err)
-	}), "a decision that arrived with a token counts, whatever extraction makes of it")
-
-	assert.Zero(t, delta(tokens, func() {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(domain, map[string]string{"path": "/api"}))
-		require.NoError(t, err)
-	}), "a tokenless decision is not evidence about any claim path")
+	assert.Equal(t, map[string]float64{"tokens seen": 1}, withToken, "a check with a token")
+	assert.Equal(t, map[string]float64{"tokens seen": 0}, withoutToken, "a check without a token")
 }
 
-// The budget binds one decision, and a call is one decision per descriptor:
-// two descriptors that each fill the budget are two atomic store scripts of
-// 128 buckets, not one of 256, and the call is answered OK. The descriptor
-// cap bounds the call.
-func TestShouldRateLimit_theBudgetBindsOneDecisionNotTheCall(t *testing.T) {
+// The bucket budget binds one decision, and a check is one decision per
+// descriptor: two descriptors that each fill the budget are two atomic store
+// scripts of 128 buckets, not one of 256, and the check is admitted. The rules
+// count by sub, so the two descriptors address disjoint buckets. The
+// descriptor cap bounds the check as a whole.
+func TestShouldRateLimit_appliesTheBucketBudgetToEachDecisionOnItsOwn(t *testing.T) {
 	const domain = "gateway.public"
-	periods := []time.Duration{time.Minute, time.Hour, 30 * time.Second, 10 * time.Second}
-	rules := make([]model.Rule, 0, 32)
-	for ri := range 32 {
-		rates := make([]model.Rate, 0, len(periods))
-		for _, pd := range periods {
-			rates = append(rates, model.Rate{Requests: 100, Period: pd})
-		}
-		// Counted by sub, so the two descriptors below address disjoint
-		// buckets: a per-call check that merged equal keys would not see them
-		// as one set.
-		rules = append(rules, model.Rule{
-			Name: fmt.Sprintf("r%d", ri), Counters: []string{model.KeySub}, Rates: rates,
-		})
-	}
-	atTheBudget := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
+	atTheBudget := model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "b", Rules: rulesFillingTheBucketBudget(model.KeySub),
+	}}}
 	snap, problems := compile.Compile(testNamespace, domain, &atTheBudget)
 	require.Empty(t, problems)
-	require.Equal(t, engine.MaxDecisionBuckets, snap.DecisionBuckets,
-		"the fixture fills the budget of one decision exactly")
-
-	ruleStore := store.New()
-	ruleStore.Replace(store.NewRuleSet(map[string]store.Domain{
+	require.Equal(t, engine.MaxDecisionBuckets, snap.DecisionBuckets, "buckets of one decision of the fixture")
+	server, _ := newServerOver(store.NewRuleSet(map[string]store.Domain{
 		domain: {Engine: engine.New(snap, memory.New()), Snapshot: snap},
 	}))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log)
 
-	overBudget := func() float64 {
-		return testutil.ToFloat64(metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyBuckets))
-	}
 	var resp *envoyratelimit.RateLimitResponse
-	refused := delta(overBudget, func() {
-		var err error
-		resp, err = server.ShouldRateLimit(context.Background(), requestWith(
+	got := deltas(map[string]func() float64{
+		"refusals too_many_buckets": valueOf(metrics.Refusals.WithLabelValues(domain, metrics.CauseTooManyBuckets)),
+	}, func() {
+		resp = shouldRateLimit(t, server, request(domain,
 			map[string]string{"path": "/any", model.KeySub: "alice"},
 			map[string]string{"path": "/any", model.KeySub: "bob"}))
-		require.NoError(t, err)
 	})
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
-		"two decisions of 128 buckets each are within the budget")
-	assert.Equal(t, 0.0, refused, "the budget is not the sum over the call")
+
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
+	assert.Equal(t, map[string]float64{"refusals too_many_buckets": 0}, got)
 }
 
 // An exempt check is counted under its own verdict, in its domain, and not as
 // ok: ok stays the count of checks the engine decided.
-func TestShouldRateLimit_countsAnExemptCheck(t *testing.T) {
-	ruleStore := store.New()
-	ruleStore.Replace(onePerHourRuleSet(t, exemptDomain, memory.New()))
-	log, _ := recordingLogger()
-	server := NewServer(ruleStore, log, WithExemptPath(exemptPrefix, []string{exemptDomain}))
+func TestShouldRateLimit_countsAnExemptCheckUnderItsOwnVerdict(t *testing.T) {
+	server, _ := newServerOver(exemptDomainRules(t, memory.New()),
+		WithExemptPath(exemptPrefix, []string{exemptDomain}))
 
-	exempt := func() float64 {
-		return testutil.ToFloat64(metrics.Checks.WithLabelValues(exemptDomain, metrics.VerdictExempt))
-	}
-	ok := func() float64 {
-		return testutil.ToFloat64(metrics.Checks.WithLabelValues(exemptDomain, metrics.VerdictOK))
-	}
-	okBefore := ok()
-	got := delta(exempt, func() {
-		_, err := server.ShouldRateLimit(context.Background(),
-			request(exemptDomain, map[string]string{"path": "/ratelimit/v1/status"}))
-		require.NoError(t, err)
+	got := deltas(map[string]func() float64{
+		"checks exempt": valueOf(metrics.Checks.WithLabelValues(exemptDomain, metrics.VerdictExempt)),
+		"checks ok":     valueOf(metrics.Checks.WithLabelValues(exemptDomain, metrics.VerdictOK)),
+	}, func() {
+		shouldRateLimit(t, server, request(exemptDomain, map[string]string{"path": "/ratelimit/v1/status"}))
 	})
 
-	assert.Equal(t, 1.0, got, `ratelimit_checks_total{verdict="exempt"} after one exempt check`)
-	assert.Equal(t, okBefore, ok(), `ratelimit_checks_total{verdict="ok"} after one exempt check`)
+	assert.Equal(t, map[string]float64{"checks exempt": 1, "checks ok": 0}, got)
 }

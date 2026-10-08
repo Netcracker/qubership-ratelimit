@@ -12,6 +12,8 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
 )
 
 // The operator writes the status and the configuration, and nothing else:
@@ -61,18 +63,13 @@ var _ = Describe("the operator", Ordered, Label("operator", "leader"), func() {
 		// serving from an empty store. Traffic cannot prove this: the
 		// gateway multiplexes checks over one gRPC connection, so one
 		// replica may legitimately serve them all.
-		Eventually(func() bool {
+		Eventually(func(g Gomega) {
 			pods := servicePods()
-			if len(pods) < 2 {
-				return false
-			}
+			g.Expect(len(pods)).To(BeNumerically(">=", 2), "the running service replicas")
 			for _, pod := range pods {
-				if !strings.Contains(podLogs(pod.Name, nil), appliedLine) {
-					return false
-				}
+				g.Expect(podLogs(pod.Name, nil)).To(ContainSubstring(appliedLine), "the log of replica %s", pod.Name)
 			}
-			return true
-		}).WithTimeout(time.Minute).WithPolling(2*time.Second).Should(BeTrue(),
+		}).WithTimeout(time.Minute).WithPolling(2*time.Second).Should(Succeed(),
 			"a replica never applied the configuration")
 	})
 
@@ -85,25 +82,21 @@ var _ = Describe("the operator", Ordered, Label("operator", "leader"), func() {
 		// its duration runs out, so right after another suite restarted the
 		// operator the first non-empty holder can be the pod that restart
 		// killed.
-		Eventually(func() string {
+		Eventually(func(g Gomega) {
 			holder := leaseHolderPod()
-			if holder == "" {
-				return ""
-			}
+			g.Expect(holder).NotTo(BeEmpty(), "the lease names no holder")
 			var pod corev1.Pod
-			if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: holder}, &pod); err != nil {
-				return ""
-			}
+			g.Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: holder}, &pod)).To(Succeed(),
+				"the lease names pod %s", holder)
 			operator = holder
-			return holder
-		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).ShouldNot(BeEmpty(),
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
 			"no live operator pod holds the lease")
 		Expect(operator).NotTo(ContainSubstring("_"),
 			"the identity carries controller-runtime's random suffix, so POD_NAME is not reaching it")
 
-		pods := operatorPods()
-		Expect(pods).To(HaveLen(1), "the dev profile runs one operator replica outside a rollout")
-		Expect(pods[0].Name).To(Equal(operator), "the lease holder is not the operator pod")
+		// The dev profile runs one operator replica outside a rollout, and the
+		// lease holder has to be that pod.
+		Expect(podNames(operatorPods())).To(ConsistOf(operator), "the running operator pods")
 	})
 
 	It("answers checks on every replica", func() {
@@ -113,8 +106,8 @@ var _ = Describe("the operator", Ordered, Label("operator", "leader"), func() {
 		since := time.Now()
 		time.Sleep(time.Second)
 		for attempt := 1; attempt <= 4; attempt++ {
-			Expect(burstClean(probePath)).To(BeTrue(),
-				"burst %d was refused or failed under a limit far above it", attempt)
+			Expect(gatewayBurst("public-gateway", probePath, 4, nil)).To(HaveEach(beAdmitted()),
+				"burst %d of 4 under a limit far above it", attempt)
 			time.Sleep(1200 * time.Millisecond)
 		}
 		Expect(checksLoggedSince(since)).To(BeNumerically(">=", 4),
@@ -142,15 +135,13 @@ var _ = Describe("the operator", Ordered, Label("operator", "leader"), func() {
 		// The service reads no API server object and holds no lease: the
 		// operator's absence changes nothing on the data path, so every
 		// burst has to stay clean.
-		clean := 0
-		for i := 0; i < 8; i++ {
-			if burstClean(probePath) {
-				clean++
-			}
+		bursts := make([][]int, 0, 8)
+		for range 8 {
+			bursts = append(bursts, gatewayBurst("public-gateway", probePath, 4, nil))
 			time.Sleep(1200 * time.Millisecond)
 		}
-		Expect(clean).To(Equal(8),
-			"checks degraded while the operator was replaced (%d/8 clean bursts)", clean)
+		Expect(bursts).To(HaveEach(HaveEach(beAdmitted())),
+			"checks degraded while the operator was replaced; the codes of the 8 bursts")
 		Expect(checksLoggedSince(since)).To(BeNumerically(">=", 8),
 			"too few checks reached the service during the handover")
 		Expect(serviceLogsSince(since)()).NotTo(ContainSubstring("unknown rate limit domain"),
@@ -160,17 +151,14 @@ var _ = Describe("the operator", Ordered, Label("operator", "leader"), func() {
 	It("moves the lease to the replacement pod", func() {
 		// Up to a full lease duration passes before the replacement may
 		// take over, so this wait is generous rather than tight.
-		Eventually(func() string {
+		Eventually(func(g Gomega) {
 			holder := leaseHolderPod()
-			if holder == "" || holder == operator {
-				return ""
-			}
+			g.Expect(holder).NotTo(BeEmpty(), "the lease names no holder")
+			g.Expect(holder).NotTo(Equal(operator), "the lease still names the killed pod")
 			var pod corev1.Pod
-			if err := k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: holder}, &pod); err != nil {
-				return ""
-			}
-			return holder
-		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).ShouldNot(BeEmpty(),
+			g.Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: holder}, &pod)).To(Succeed(),
+				"the lease names pod %s", holder)
+		}).WithTimeout(2*time.Minute).WithPolling(3*time.Second).Should(Succeed(),
 			"the lease did not move off the killed operator pod to a live one")
 	})
 
@@ -186,13 +174,14 @@ var _ = Describe("the operator", Ordered, Label("operator", "leader"), func() {
 		p.Spec.Limits[0].Rules[0].Rates[0].Requests = 1001
 		Expect(k8s.Update(ctx, p)).To(Succeed())
 
-		Eventually(policyCondition(domain, "Accepted")).
+		Eventually(policyCondition(domain, v1.ConditionAccepted)).
 			WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(Equal("True"),
 			"the replacement operator did not accept a policy after the handover")
-		Eventually(func() bool {
+		Eventually(func(g Gomega) {
 			p, err := getPolicy(domain)
-			return err == nil && p.Status.ObservedGeneration == p.Generation
-		}).WithTimeout(time.Minute).Should(BeTrue(),
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(p.Status.ObservedGeneration).To(Equal(p.Generation), "observedGeneration of %s", domain)
+		}).WithTimeout(time.Minute).Should(Succeed(),
 			"observedGeneration does not match generation after the handover")
 	})
 })
@@ -214,21 +203,6 @@ func leaseHolderPod() string {
 		return ""
 	}
 	return *lease.Spec.HolderIdentity
-}
-
-// burstClean sends four requests and reports whether the gateway admitted
-// every one: 2xx or 404 from the routed probe backend. 429 is a refusal, 0 a
-// transport error, and 5xx a gateway answering on its own; none of them
-// count. Passing traffic alone still cannot distinguish a healthy endpoint
-// from one the gateway failed open around; the log detectors supply that
-// half of the proof.
-func burstClean(path string) bool {
-	for _, code := range gatewayBurst("public-gateway", path, 4, nil) {
-		if (code < 200 || code > 299) && code != 404 {
-			return false
-		}
-	}
-	return true
 }
 
 // checksLoggedSince counts the per-check Debug lines across every replica:

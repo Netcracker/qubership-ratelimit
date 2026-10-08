@@ -88,17 +88,16 @@ func draining(pod string) discoveryv1.Endpoint {
 
 // answers replies with one generation for every caller.
 func answers(t *testing.T, domains map[string]applied.Domain) http.HandlerFunc {
-	t.Helper()
 	return reports(t, applied.Report{Domains: domains})
 }
 
 // reports replies with a whole report: the domains, and whatever else the
-// replica says about itself.
+// replica says about itself. It runs on the server's goroutine, so it reports
+// a mismatch with assert and never stops the test.
 func reports(t *testing.T, report applied.Report) http.HandlerFunc {
-	t.Helper()
 	return func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, contract.AppliedPath, r.URL.Path, "the probe reads the documented path")
-		require.NoError(t, json.NewEncoder(w).Encode(report))
+		assert.Equal(t, contract.AppliedPath, r.URL.Path, "the path the probe requested")
+		assert.NoError(t, json.NewEncoder(w).Encode(report), "encoding the report")
 	}
 }
 
@@ -116,10 +115,10 @@ func TestObserve_countsTheReplicasOnTheGenerationAsked(t *testing.T) {
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), view.Total)
-	assert.Equal(t, int32(2), view.Applied)
-	assert.Empty(t, view.Behind)
-	assert.Empty(t, view.Silent)
+	assert.Equal(t, int32(2), view.Total, "view.Total")
+	assert.Equal(t, int32(2), view.Applied, "view.Applied")
+	assert.Empty(t, view.Behind, "view.Behind")
+	assert.Empty(t, view.Silent, "view.Silent")
 }
 
 // The UID travels with the generation because the number alone is ambiguous
@@ -132,8 +131,8 @@ func TestObserve_aMatchingGenerationOfAnotherObjectIsNotApplied(t *testing.T) {
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Zero(t, view.Applied)
-	assert.Equal(t, []string{"ratelimit-a"}, view.Behind)
+	assert.Zero(t, view.Applied, "view.Applied")
+	assert.Equal(t, []string{"ratelimit-a"}, view.Behind, "view.Behind")
 }
 
 func TestObserve_aReplicaOnAnotherGenerationIsBehind(t *testing.T) {
@@ -142,9 +141,9 @@ func TestObserve_aReplicaOnAnotherGenerationIsBehind(t *testing.T) {
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Equal(t, int32(1), view.Total)
-	assert.Zero(t, view.Applied)
-	assert.Equal(t, []string{"ratelimit-a"}, view.Behind)
+	assert.Equal(t, int32(1), view.Total, "view.Total")
+	assert.Zero(t, view.Applied, "view.Applied")
+	assert.Equal(t, []string{"ratelimit-a"}, view.Behind, "view.Behind")
 }
 
 // A replica that has never compiled this domain answers without it, which is
@@ -155,14 +154,17 @@ func TestObserve_aReplicaThatDoesNotKnowTheDomainIsBehind(t *testing.T) {
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Zero(t, view.Applied)
-	assert.Equal(t, []string{"ratelimit-a"}, view.Behind)
+	assert.Zero(t, view.Applied, "view.Applied")
+	assert.Equal(t, []string{"ratelimit-a"}, view.Behind, "view.Behind")
 }
 
-// One silent replica among answering ones is a fact about that pod, and it stays
-// out of Applied without turning the whole observation into a failure.
-func TestObserve_oneSilentReplicaIsNamedButDoesNotBlindTheLeader(t *testing.T) {
+// One silent replica among answering ones is a fact about that pod: it is
+// counted silent, not behind, and the observation still succeeds. The handler
+// refuses whichever request arrives first, so the test does not name the
+// silent replica.
+func TestObserve_oneSilentReplicaAmongAnsweringOnesIsCountedSilent(t *testing.T) {
 	var once sync.Once
+	answer := answers(t, appliedBy(7))
 	probe := fleet(t, func(w http.ResponseWriter, r *http.Request) {
 		refused := false
 		once.Do(func() { refused = true })
@@ -170,22 +172,23 @@ func TestObserve_oneSilentReplicaIsNamedButDoesNotBlindTheLeader(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		require.NoError(t, json.NewEncoder(w).Encode(applied.Report{Domains: appliedBy(7)}))
+		answer(w, r)
 	}, ready("ratelimit-a"), ready("ratelimit-b"))
 
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), view.Total)
-	assert.Equal(t, int32(1), view.Applied)
-	assert.Empty(t, view.Behind, "a silent replica is not one that reported another generation")
-	assert.Len(t, view.Silent, 1)
+	assert.Equal(t, int32(2), view.Total, "view.Total")
+	assert.Equal(t, int32(1), view.Applied, "view.Applied")
+	assert.Empty(t, view.Behind, "view.Behind")
+	assert.Len(t, view.Silent, 1, "view.Silent")
 }
 
 // When nobody answers, the statement is about the leader's reach rather than
 // about the fleet. A network policy that admits only Prometheus to the metrics
 // port silences every probe, and reporting that as a stale replica would mark a
-// working domain Degraded.
+// working domain Degraded. The error names the path that went unanswered, the
+// only part of it an operator can act on; there is no sentinel to match.
 func TestObserve_aFleetThatAnswersNothingIsAnError(t *testing.T) {
 	probe := fleet(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -193,19 +196,24 @@ func TestObserve_aFleetThatAnswersNothingIsAnError(t *testing.T) {
 
 	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
-	require.Error(t, err, "no answer at all is ProbeFailed, not a fleet of stale replicas")
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), contract.AppliedPath)
 }
 
-func TestObserve_aBodyThatDoesNotDecodeIsSilence(t *testing.T) {
+// A reply that does not decode counts as no answer, so a fleet whose every
+// reply is garbage fails the observation with the error of a fleet that
+// answers nothing, the one that names the unanswered path, and the decoding
+// error is in its chain.
+func TestObserve_repliesThatDoNotDecodeCountAsNoAnswer(t *testing.T) {
 	probe := fleet(t, func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("not json"))
 	}, ready("ratelimit-a"), ready("ratelimit-b"))
 
 	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decode")
+	assert.ErrorContains(t, err, contract.AppliedPath, "the error of a fleet that answers nothing")
+	var syntax *json.SyntaxError
+	assert.ErrorAs(t, err, &syntax)
 }
 
 // An empty fleet is not an error: it is the NoReplicas case, and the leader
@@ -216,70 +224,63 @@ func TestObserve_anEmptyFleetIsObservedAsEmpty(t *testing.T) {
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Zero(t, view.Total)
-	assert.Zero(t, view.Applied)
+	assert.Zero(t, view.Total, "view.Total")
+	assert.Zero(t, view.Applied, "view.Applied")
 }
 
 // The denominator is the ready endpoints: a pod that is not ready receives no
-// traffic, so it enforces nothing and belongs in no fraction.
-func TestEndpoints_countsOnlyTheOnesReceivingTraffic(t *testing.T) {
+// traffic, so it enforces nothing and belongs in no fraction. A nil Ready
+// means ready, per the EndpointSlice API. Every replica answers another
+// generation, so the ones counted are named as behind.
+func TestObserve_countsOnlyTheEndpointsReceivingTraffic(t *testing.T) {
 	notReady := ready("ratelimit-draining")
 	notReady.Conditions.Ready = new(false)
-
-	// A nil Ready means ready, per the EndpointSlice API.
 	unstated := ready("ratelimit-unstated")
 	unstated.Conditions.Ready = nil
-
 	addressless := ready("ratelimit-addressless")
 	addressless.Addresses = nil
+	probe := fleet(t, answers(t, appliedBy(6)), notReady, unstated, addressless, ready("ratelimit-a"))
 
-	probe := fleet(t, answers(t, appliedBy(7)), notReady, unstated, addressless, ready("ratelimit-a"))
-
-	endpoints, err := probe.endpoints(context.Background())
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	names := make([]string, 0, len(endpoints))
-	for _, e := range endpoints {
-		names = append(names, e.name)
-	}
-	assert.Equal(t, []string{"ratelimit-a", "ratelimit-unstated"}, names)
+	assert.Equal(t, int32(2), view.Total, "view.Total")
+	assert.Equal(t, []string{"ratelimit-a", "ratelimit-unstated"}, view.Behind, "view.Behind")
 }
 
 // Without a target reference the address is all the message can name, which is
 // still enough to find the pod.
-func TestEndpoints_fallsBackToTheAddressWhenNoPodIsNamed(t *testing.T) {
+func TestObserve_namesAnEndpointWithoutAPodByItsAddress(t *testing.T) {
 	anonymous := ready("")
 	anonymous.TargetRef = nil
+	probe := fleet(t, answers(t, appliedBy(6)), anonymous)
 
-	probe := fleet(t, answers(t, appliedBy(7)), anonymous)
-
-	endpoints, err := probe.endpoints(context.Background())
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	require.Len(t, endpoints, 1)
-	assert.Equal(t, "127.0.0.1", endpoints[0].name)
+	assert.Equal(t, []string{"127.0.0.1"}, view.Behind, "view.Behind")
 }
 
 // The slices of other Services carry other pods, and counting them would put
 // somebody else's rollout in this policy's status.
-func TestEndpoints_ignoresTheSlicesOfOtherServices(t *testing.T) {
+func TestObserve_ignoresTheSlicesOfOtherServices(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
 	probe.Service = "some-other-service"
 
-	endpoints, err := probe.endpoints(context.Background())
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Empty(t, endpoints)
+	assert.Zero(t, view.Total, "view.Total")
 }
 
-func TestEndpoints_reportsAListThatFailed(t *testing.T) {
+// A fleet whose EndpointSlices cannot be listed is unobservable, not empty.
+func TestObserve_aFleetThatCannotBeListedIsAnError(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
 	probe.Reader = failingReader{}
 
 	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
-	require.Error(t, err, "a fleet that cannot be listed is unobservable, not empty")
-	assert.Contains(t, err.Error(), "EndpointSlice")
+	assert.ErrorIs(t, err, assert.AnError)
 }
 
 // failingReader stands in for an API server that will not answer.
@@ -289,10 +290,9 @@ func (failingReader) List(context.Context, client.ObjectList, ...client.ListOpti
 	return assert.AnError
 }
 
-// TestObserve_aTerminatingReplicaLeavesTheFraction pins the guard. A draining
-// pod that is still reported ready answers the probe with whatever it
-// enforces, so counting it would drag applied below total for the length of a
-// rollout and flicker Ready on a change nobody made to the rules.
+// A draining pod that is still reported ready answers the probe with whatever
+// it enforces, so counting it would drag applied below total for the length of
+// a rollout and flicker Ready on a change nobody made to the rules.
 func TestObserve_aTerminatingReplicaLeavesTheFraction(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(7)),
 		ready("ratelimit-new"), draining("ratelimit-old"))
@@ -300,21 +300,22 @@ func TestObserve_aTerminatingReplicaLeavesTheFraction(t *testing.T) {
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Equal(t, int32(1), view.Total, "a terminating pod is not part of the fleet")
-	assert.Equal(t, int32(1), view.Applied)
-	assert.Empty(t, view.Behind)
+	assert.Equal(t, int32(1), view.Total, "view.Total")
+	assert.Equal(t, int32(1), view.Applied, "view.Applied")
+	assert.Empty(t, view.Behind, "view.Behind")
 }
 
-// The same pod on an older generation: without the terminating check this is
-// the flicker, because it reports a generation that will never advance.
+// A draining pod reports a generation that will never advance, and it is not
+// a propagation problem: the ready replica on the same old generation is
+// behind, the draining one is not.
 func TestObserve_aTerminatingReplicaOnAnOldGenerationIsNotBehind(t *testing.T) {
-	probe := fleet(t, answers(t, appliedBy(6)), draining("ratelimit-old"))
+	probe := fleet(t, answers(t, appliedBy(6)), ready("ratelimit-a"), draining("ratelimit-old"))
 
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Zero(t, view.Total)
-	assert.Empty(t, view.Behind, "a pod on its way out is not a propagation problem")
+	assert.Equal(t, int32(1), view.Total, "view.Total")
+	assert.Equal(t, []string{"ratelimit-a"}, view.Behind, "view.Behind")
 }
 
 // counting wraps a handler and counts the requests it served, which is the
@@ -348,7 +349,7 @@ func TestObserve_theDomainsOfACycleShareOneRound(t *testing.T) {
 
 	assert.Equal(t, int32(2), a.Applied, "gateway.a applied of %d", a.Total)
 	assert.Equal(t, int32(2), b.Applied, "gateway.b applied of %d", b.Total)
-	assert.Zero(t, c.Applied, "gateway.c: the generation matches but the object does not")
+	assert.Zero(t, c.Applied, "gateway.c applied, on the generation asked of another object")
 	assert.Equal(t, []string{"ratelimit-a", "ratelimit-b"}, c.Behind, "gateway.c behind")
 	assert.Equal(t, int32(2), calls.Load(), "requests for three domains over two replicas")
 }
@@ -365,11 +366,11 @@ func TestObserve_aFreshObservationRetakesTheRound(t *testing.T) {
 	require.NoError(t, err)
 	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), calls.Load(), "an observation within the freshness reused the round")
+	assert.Equal(t, int32(2), calls.Load(), "requests for two observations within the freshness over two replicas")
 
 	_, err = probe.Observe(context.Background(), testDomain, want(7), true)
 	require.NoError(t, err)
-	assert.Equal(t, int32(4), calls.Load(), "the fresh observation took a round of its own")
+	assert.Equal(t, int32(4), calls.Load(), "requests after a fresh observation over two replicas")
 }
 
 // A round is reused while it is younger than the freshness and retaken from
@@ -379,7 +380,7 @@ func TestObserve_aRoundIsRetakenAtItsFreshness(t *testing.T) {
 	var calls atomic.Int32
 	probe := fleet(t, counting(&calls, answers(t, appliedBy(7))), ready("ratelimit-a"))
 	probe.Freshness = time.Minute
-	now := time.Now()
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	probe.Now = func() time.Time { return now }
 
 	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
@@ -388,12 +389,12 @@ func TestObserve_aRoundIsRetakenAtItsFreshness(t *testing.T) {
 	now = now.Add(time.Minute - time.Millisecond)
 	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
 	require.NoError(t, err)
-	assert.Equal(t, int32(1), calls.Load(), "just under the freshness the round is reused")
+	assert.Equal(t, int32(1), calls.Load(), "requests over one replica, the second observation just under the freshness")
 
 	now = now.Add(time.Millisecond)
 	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
 	require.NoError(t, err)
-	assert.Equal(t, int32(2), calls.Load(), "at the freshness a round is taken")
+	assert.Equal(t, int32(2), calls.Load(), "requests over one replica, the third observation at the freshness")
 }
 
 // A round is reused only for the fleet it was taken from. The reconciles an
@@ -407,7 +408,7 @@ func TestObserve_aRoundIsRetakenWhenTheFleetChanges(t *testing.T) {
 
 	first, err := probe.Observe(context.Background(), testDomain, want(7), false)
 	require.NoError(t, err)
-	require.Equal(t, int32(2), first.Total)
+	require.Equal(t, int32(2), first.Total, "the replicas of the first round")
 
 	var slice discoveryv1.EndpointSlice
 	writer := probe.Reader.(client.Client)
@@ -418,12 +419,12 @@ func TestObserve_aRoundIsRetakenWhenTheFleetChanges(t *testing.T) {
 
 	second, err := probe.Observe(context.Background(), testDomain, want(7), false)
 	require.NoError(t, err)
-	assert.Equal(t, int32(3), second.Total, "the joined pod is in the denominator at once")
+	assert.Equal(t, int32(3), second.Total, "the replicas once a pod joined")
 	assert.Equal(t, int32(5), calls.Load(), "two requests for the first fleet, three for the changed one")
 
 	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
 	require.NoError(t, err)
-	assert.Equal(t, int32(5), calls.Load(), "an unchanged fleet keeps the round")
+	assert.Equal(t, int32(5), calls.Load(), "requests after a third observation of the unchanged fleet")
 }
 
 // A fleet that answers nothing is an error for every domain of the cycle, and
@@ -436,23 +437,24 @@ func TestObserve_aSilentFleetIsOneRoundOfErrors(t *testing.T) {
 	}), ready("ratelimit-a"), ready("ratelimit-b"))
 	probe.Freshness = time.Minute
 
-	_, err := probe.Observe(context.Background(), "gateway.a", want(7), false)
-	require.Error(t, err)
-	_, err = probe.Observe(context.Background(), "gateway.b", want(7), false)
-	require.Error(t, err)
+	_, errA := probe.Observe(context.Background(), "gateway.a", want(7), false)
+	_, errB := probe.Observe(context.Background(), "gateway.b", want(7), false)
+
+	assert.Error(t, errA, "Observe of gateway.a")
+	assert.Error(t, errB, "Observe of gateway.b")
 	assert.Equal(t, int32(2), calls.Load(), "requests for two domains over two replicas")
 }
 
-// Without a freshness every observation is a round of its own; the older
-// tests of this file leave the freshness at zero and count on it.
+// Without a freshness every observation is a round of its own.
 func TestObserve_withoutAFreshnessEveryObservationIsARound(t *testing.T) {
 	var calls atomic.Int32
 	probe := fleet(t, counting(&calls, answers(t, appliedBy(7))), ready("ratelimit-a"))
 
-	for range 2 {
-		_, err := probe.Observe(context.Background(), testDomain, want(7), false)
-		require.NoError(t, err)
-	}
+	_, err := probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+	_, err = probe.Observe(context.Background(), testDomain, want(7), false)
+	require.NoError(t, err)
+
 	assert.Equal(t, int32(2), calls.Load(), "requests for two observations over one replica")
 }
 
@@ -472,8 +474,8 @@ func TestObserve_aViewCarriesTheTimeOfItsRound(t *testing.T) {
 	second, err := probe.Observe(context.Background(), testDomain, want(7), false)
 	require.NoError(t, err)
 
-	assert.Equal(t, taken, first.At)
-	assert.Equal(t, taken, second.At, "a reused round keeps the time it was taken")
+	assert.Equal(t, taken, first.At, "the time of the first view")
+	assert.Equal(t, taken, second.At, "the time of a view from the reused round, observed at %v", now)
 }
 
 // fakeClock is a clock the test and the fleet's handlers advance from their
@@ -487,6 +489,17 @@ func (c *fakeClock) now() time.Time { return c.base.Add(time.Duration(c.offset.L
 
 func (c *fakeClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
 
+// slowAnswers answers for every replica with generation 7 of the test domain
+// after advancing clock by six seconds, the way a slow replica spends the
+// time of a round.
+func slowAnswers(t *testing.T, clock *fakeClock) http.HandlerFunc {
+	answer := answers(t, appliedBy(7))
+	return func(w http.ResponseWriter, r *http.Request) {
+		clock.advance(6 * time.Second)
+		answer(w, r)
+	}
+}
+
 // The freshness counts from the end of a round, not from its start: a round
 // whose replicas took twelve seconds of the clock to answer is still reused
 // by the next domain under a freshness of ten, where a round aged from its
@@ -495,20 +508,16 @@ func (c *fakeClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
 func TestObserve_aSlowRoundIsStillReusedAfterItCompletes(t *testing.T) {
 	var calls atomic.Int32
 	clock := &fakeClock{base: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
-	slow := func(w http.ResponseWriter, r *http.Request) {
-		clock.advance(6 * time.Second)
-		answers(t, appliedBy(7))(w, r)
-	}
-	probe := fleet(t, counting(&calls, slow), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe := fleet(t, counting(&calls, slowAnswers(t, clock)), ready("ratelimit-a"), ready("ratelimit-b"))
 	probe.Freshness = 10 * time.Second
 	probe.Now = clock.now
 
 	a, err := probe.Observe(context.Background(), "gateway.a", want(7), false)
 	require.NoError(t, err)
-	require.Equal(t, clock.base, a.At, "the view carries the start of the round")
-
 	_, err = probe.Observe(context.Background(), "gateway.b", want(7), false)
 	require.NoError(t, err)
+
+	assert.Equal(t, clock.base, a.At, "the time of the view of gateway.a")
 	assert.Equal(t, int32(2), calls.Load(), "requests for two domains over two replicas, the second from the round")
 }
 
@@ -519,64 +528,71 @@ func TestObserve_aSlowRoundIsStillReusedAfterItCompletes(t *testing.T) {
 func TestObserve_asksTheReplicasTogether(t *testing.T) {
 	const replicas = 3
 	var arrived atomic.Int32
+	allInFlight := make(chan struct{})
+	answer := answers(t, appliedBy(7))
 	together := func(w http.ResponseWriter, r *http.Request) {
-		arrived.Add(1)
-		deadline := time.Now().Add(3 * time.Second)
-		for arrived.Load() < replicas && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
+		if arrived.Add(1) == replicas {
+			close(allInFlight)
 		}
-		answers(t, appliedBy(7))(w, r)
+		select {
+		case <-allInFlight:
+		case <-time.After(3 * time.Second):
+			t.Errorf("waited 3s for %d requests in flight together; %d arrived", replicas, arrived.Load())
+		}
+		answer(w, r)
 	}
 	probe := fleet(t, together, ready("ratelimit-a"), ready("ratelimit-b"), ready("ratelimit-c"))
 
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
 
 	require.NoError(t, err)
-	assert.Equal(t, int32(replicas), view.Applied, "every replica answered within one timeout")
-	assert.Empty(t, view.Silent)
+	assert.Equal(t, int32(replicas), view.Applied, "view.Applied")
+	assert.Empty(t, view.Silent, "view.Silent")
 }
 
 // A view says when the probe stops answering from its round: the round's
 // completion plus the freshness, so a reconciler that requeues for that
-// moment takes a new round rather than the same one again. A probe that
-// reuses nothing says one interval after the fleet was asked.
-func TestObserve_aViewSaysWhenItsRoundExpires(t *testing.T) {
+// moment takes a new round rather than the same one again.
+func TestObserve_aReusableRoundExpiresAFreshnessAfterItCompletes(t *testing.T) {
 	clock := &fakeClock{base: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
-	slow := func(w http.ResponseWriter, r *http.Request) {
-		clock.advance(6 * time.Second)
-		answers(t, appliedBy(7))(w, r)
-	}
+	probe := fleet(t, slowAnswers(t, clock), ready("ratelimit-a"), ready("ratelimit-b"))
+	probe.Freshness = 10 * time.Second
+	probe.Now = clock.now
 
-	reusing := fleet(t, slow, ready("ratelimit-a"), ready("ratelimit-b"))
-	reusing.Freshness = 10 * time.Second
-	reusing.Now = clock.now
-	view, err := reusing.Observe(context.Background(), testDomain, want(7), false)
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+
 	require.NoError(t, err)
 	assert.Equal(t, clock.base.Add(22*time.Second), view.RefreshAt,
-		"a round taken at the base and completed twelve seconds later, reused for ten more")
-
-	clock.offset.Store(0)
-	single := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
-	single.Now = clock.now
-	view, err = single.Observe(context.Background(), testDomain, want(7), false)
-	require.NoError(t, err)
-	assert.Equal(t, clock.base.Add(ProbeInterval), view.RefreshAt,
-		"a probe that reuses nothing wants the next look one interval after the ask")
+		"the expiry of a round taken at %v, completed twelve seconds later, and reused for ten", clock.base)
 }
 
+// A probe that reuses nothing names the next look one interval after the
+// fleet was asked.
+func TestObserve_aRoundWithoutAFreshnessExpiresAnIntervalAfterTheAsk(t *testing.T) {
+	clock := &fakeClock{base: time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)}
+	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
+	probe.Now = clock.now
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+
+	require.NoError(t, err)
+	assert.Equal(t, clock.base.Add(ProbeInterval), view.RefreshAt, "the expiry of a round taken at %v", clock.base)
+}
+
+// The port is there, under another name: a misnamed Service. Its endpoints
+// cannot be asked, and they are not counted silent: a stale replica is a
+// replica the probe could reach and found behind, and this one it could not
+// address at all.
 func TestObserve_aSliceWithoutTheNamedPortHasNoReplicas(t *testing.T) {
 	probe := fleet(t, answers(t, appliedBy(7)), ready("ratelimit-a"))
 	number := slicePort(t, probe)
-	// The port is there, under another name: a misnamed Service. Its
-	// endpoints cannot be asked, and they are not counted silent: a stale
-	// replica is a replica the probe could reach and found behind, and this
-	// one it could not address at all.
 	requireSlicePorts(t, probe, discoveryv1.EndpointPort{Name: new("http-metrics"), Port: &number})
 
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+
 	require.NoError(t, err)
-	assert.Zero(t, view.Total, "an endpoint without an addressable port is not in the fraction")
-	assert.Empty(t, view.Silent)
+	assert.Zero(t, view.Total, "view.Total")
+	assert.Empty(t, view.Silent, "view.Silent")
 }
 
 // slicePort reads the number the probe's one slice publishes.
@@ -600,7 +616,8 @@ func requireSlicePorts(t *testing.T, probe *ReplicaProbe, ports ...discoveryv1.E
 }
 
 // A replica that refused the manifest is named apart from one that lags: it
-// will never take the generation up, whatever the threshold.
+// will never take the generation up, whatever the threshold. It kept the
+// snapshot from before the manifest, so it is behind as well.
 func TestObserve_namesAReplicaThatRefusedTheManifest(t *testing.T) {
 	probe := fleet(t, reports(t, applied.Report{
 		Domains:        map[string]applied.Domain{testDomain: want(6)},
@@ -609,8 +626,9 @@ func TestObserve_namesAReplicaThatRefusedTheManifest(t *testing.T) {
 	}), ready("ratelimit-a"))
 
 	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+
 	require.NoError(t, err)
-	assert.Equal(t, []string{"ratelimit-a"}, view.Refusing)
-	assert.Equal(t, []string{"ratelimit-a"}, view.Behind, "a refusing replica is behind as well; it kept its snapshot")
-	assert.Zero(t, view.Applied)
+	assert.Equal(t, []string{"ratelimit-a"}, view.Refusing, "view.Refusing")
+	assert.Equal(t, []string{"ratelimit-a"}, view.Behind, "view.Behind")
+	assert.Zero(t, view.Applied, "view.Applied")
 }

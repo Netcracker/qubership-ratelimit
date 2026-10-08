@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,12 +21,30 @@ import (
 
 const domain = "gateway.public"
 
+// compiled compiles one policy of the domain and fails the test on any
+// compile problem.
+func compiled(tb testing.TB, p model.Policy) *compile.Snapshot {
+	tb.Helper()
+	snap, problems := compile.Compile("core-1-core", domain, &p)
+	if len(problems) != 0 {
+		tb.Fatalf("compile problems: %v", problems)
+	}
+	return snap
+}
+
+// engineFor compiles one synthetic policy, which is one domain, over a fresh
+// store.
+func engineFor(t *testing.T, p model.Policy, opts ...engine.Option) *engine.Engine {
+	t.Helper()
+	return engine.New(compiled(t, p), memory.New(), opts...)
+}
+
 // newEngine compiles the specification's cascade example — a FirstMatch
 // cascade with Bypass and Shadow steps plus an additive total block — over a
 // fresh in-memory store.
 func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 	t.Helper()
-	p := model.Policy{
+	return engineFor(t, model.Policy{
 		Domain: domain,
 		Groups: []model.Group{{Name: "trial", Values: []string{"t1"}}},
 		Blocks: []model.Block{
@@ -55,21 +74,22 @@ func newEngine(t *testing.T, opts ...engine.Option) *engine.Engine {
 				Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 5000, Period: time.Minute}}}},
 			},
 		},
+	}, opts...)
+}
+
+// claimsToken builds an unsigned test token from synthetic claims.
+func claimsToken(tb testing.TB, claims map[string]any) string {
+	tb.Helper()
+	raw, err := json.Marshal(claims)
+	if err != nil {
+		tb.Fatal(err)
 	}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
-	}
-	return engine.New(snap, memory.New(), opts...)
+	return "h." + base64.RawURLEncoding.EncodeToString(raw) + ".s"
 }
 
 func token(t *testing.T, sub string) string {
 	t.Helper()
-	raw, err := json.Marshal(map[string]any{"sub": sub})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return "h." + base64.RawURLEncoding.EncodeToString(raw) + ".s"
+	return claimsToken(t, map[string]any{"sub": sub})
 }
 
 func orderRequest(t *testing.T, sub string) engine.Request {
@@ -85,6 +105,70 @@ func decide(t *testing.T, e *engine.Engine, req engine.Request) engine.Decision 
 	return d
 }
 
+func peek(t *testing.T, e *engine.Engine, req engine.Request) engine.Decision {
+	t.Helper()
+	d, err := e.Peek(t.Context(), req)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	return d
+}
+
+// appliedRules lists the rules a decision applied as block/rule, sorted: a
+// decision defines no order of its rule outcomes.
+func appliedRules(d engine.Decision) []string {
+	out := make([]string, 0, len(d.Rules))
+	for _, r := range d.Rules {
+		out = append(out, r.Block+"/"+r.Rule)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// outcomeOf returns the outcome of one applied rule and fails the test when
+// the decision did not apply it.
+func outcomeOf(t *testing.T, d engine.Decision, block, rule string) engine.RuleOutcome {
+	t.Helper()
+	for _, r := range d.Rules {
+		if r.Block == block && r.Rule == rule {
+			return r
+		}
+	}
+	t.Fatalf("the decision applied %q, want %s/%s among them", appliedRules(d), block, rule)
+	return engine.RuleOutcome{}
+}
+
+// headersOf returns the headers of a decision and fails the test when it
+// carries none.
+func headersOf(t *testing.T, d engine.Decision) *engine.Headers {
+	t.Helper()
+	if d.Headers == nil {
+		t.Fatalf("the decision (allowed %t, rules %q) carries no headers", d.Allowed, appliedRules(d))
+	}
+	return d.Headers
+}
+
+// window identifies the window a set of headers reports on.
+type window struct {
+	Block, Rule   string
+	Limit         int64
+	PeriodSeconds int64
+}
+
+func windowOf(h *engine.Headers) window {
+	return window{Block: h.Block, Rule: h.Rule, Limit: h.Limit, PeriodSeconds: h.PeriodSeconds}
+}
+
+// assertNear checks a duration the store derived from the process clock. Each
+// decision reads the clock anew and sees the bucket a few microseconds
+// drained, so the duration may fall short of want by less than a second.
+func assertNear(t *testing.T, what string, got, want time.Duration) {
+	t.Helper()
+	if got > want || got <= want-time.Second {
+		t.Errorf("%s = %s, want %s or less than a second short of it", what, got, want)
+	}
+}
+
 // A group is compared with the key of the predicate that names it after that
 // key's normalization, and the group values are compared as written: a token
 // whose org_id is ACME lands in a group that lists acme, because extraction
@@ -93,7 +177,7 @@ func decide(t *testing.T, e *engine.Engine, req engine.Request) engine.Decision 
 func TestInGroupComparesTheGroupAsWrittenWithTheNormalizedKey(t *testing.T) {
 	engineWithGroupOf := func(t *testing.T, member string) *engine.Engine {
 		t.Helper()
-		p := model.Policy{
+		return engineFor(t, model.Policy{
 			Domain:   domain,
 			Mappings: []model.KeyMapping{{Key: "tenant", Claim: "org_id", Normalization: model.NormalizeLowercase}},
 			Groups:   []model.Group{{Name: "partners", Values: []string{member}}},
@@ -106,75 +190,81 @@ func TestInGroupComparesTheGroupAsWrittenWithTheNormalizedKey(t *testing.T) {
 					Counters: []string{model.KeySub},
 					Rates:    []model.Rate{{Requests: 100, Period: time.Minute}}}},
 			}},
-		}
-		snap, problems := compile.Compile("core-1-core", domain, &p)
-		if len(problems) != 0 {
-			t.Fatalf("compile problems: %v", problems)
-		}
-		return engine.New(snap, memory.New())
+		})
 	}
 	requestOf := func(t *testing.T, orgID string) engine.Request {
 		t.Helper()
-		raw, err := json.Marshal(map[string]any{"sub": "alice", "org_id": orgID})
-		if err != nil {
-			t.Fatal(err)
-		}
 		return engine.Request{Path: "/api/orders", Method: "GET",
-			Token: "h." + base64.RawURLEncoding.EncodeToString(raw) + ".s"}
+			Token: claimsToken(t, map[string]any{"sub": "alice", "org_id": orgID})}
 	}
 
-	lowered := decide(t, engineWithGroupOf(t, "acme"), requestOf(t, "ACME"))
-	if len(lowered.Rules) != 1 || lowered.Rules[0].Rule != "partners" {
-		t.Errorf("org_id ACME against the group [acme]: rules = %+v, want [partners]", lowered.Rules)
-	}
-
-	asWritten := decide(t, engineWithGroupOf(t, "Acme"), requestOf(t, "acme"))
-	if len(asWritten.Rules) != 0 {
-		t.Errorf("org_id acme against the group [Acme]: rules = %+v, want none", asWritten.Rules)
-	}
-}
-
-func TestBypassLiftsItsBlockOnly(t *testing.T) {
-	e := newEngine(t)
-	d := decide(t, e, orderRequest(t, "prometheus"))
-	if !d.Allowed {
-		t.Fatalf("decision = %+v", d)
-	}
-	for _, r := range d.Rules {
-		if r.Block == "cascade" {
-			t.Errorf("rules = %+v: bypass must leave its own block uncounted", d.Rules)
+	t.Run("a group listing acme matches org_id ACME", func(t *testing.T) {
+		d := decide(t, engineWithGroupOf(t, "acme"), requestOf(t, "ACME"))
+		if got, want := appliedRules(d), []string{"api/partners"}; !slices.Equal(got, want) {
+			t.Errorf("org_id ACME against the group [acme]: applied %q, want %q", got, want)
 		}
+	})
+	t.Run("a group listing Acme matches no org_id", func(t *testing.T) {
+		d := decide(t, engineWithGroupOf(t, "Acme"), requestOf(t, "acme"))
+		if got := appliedRules(d); len(got) != 0 {
+			t.Errorf("org_id acme against the group [Acme]: applied %q, want none", got)
+		}
+	})
+}
+
+// Bypass lifts only its block: the additive total still counts.
+func TestBypassLiftsItsBlockOnly(t *testing.T) {
+	d := decide(t, newEngine(t), orderRequest(t, "prometheus"))
+	if !d.Allowed {
+		t.Errorf("Decide(prometheus).Allowed = false, want true")
 	}
-	// Bypass lifts only its block: the additive total still counts.
-	if len(d.Rules) != 1 || d.Rules[0].Block != "total" {
-		t.Errorf("rules = %+v: want the total block alone", d.Rules)
+	if got, want := appliedRules(d), []string{"total/all"}; !slices.Equal(got, want) {
+		t.Errorf("Decide(prometheus) applied %q, want %q", got, want)
 	}
-	if d.Headers == nil || d.Headers.Limit != 5000 {
-		t.Errorf("headers = %+v: want the total window", d.Headers)
+	if got := headersOf(t, d).Limit; got != 5000 {
+		t.Errorf("Decide(prometheus) headers limit = %d, want the total's 5000", got)
 	}
 }
 
+// The cascade applies three windows to alice: the minute window of 100 and the
+// day window of 10000 of everyone, and the minute window of 5000 of the total.
 func TestHeadersComeFromTheStrictestRule(t *testing.T) {
+	h := headersOf(t, decide(t, newEngine(t), orderRequest(t, "alice")))
+	if got, want := windowOf(h), (window{Block: "cascade", Rule: "everyone", Limit: 100, PeriodSeconds: 60}); got != want {
+		t.Errorf("Decide(alice) headers report %+v, want %+v", got, want)
+	}
+	if h.Remaining != 99 {
+		t.Errorf("Decide(alice) headers remaining = %d, want 99", h.Remaining)
+	}
+}
+
+// The names of the declared keys a request carried feed the per-key success
+// counters of the "key declared, tokens arriving, zero extractions" detector.
+func TestDecide_namesTheExtractedKeys(t *testing.T) {
+	d := decide(t, newEngine(t), orderRequest(t, "alice"))
+	if got, want := d.ExtractedKeys, []string{model.KeySub}; !slices.Equal(got, want) {
+		t.Errorf("Decide(alice).ExtractedKeys = %q, want %q", got, want)
+	}
+}
+
+// everyone has a minute window of 100 and a day window of 10000, and its
+// outcome carries the numbers of the minute window, its own strictest.
+func TestRuleOutcomeCarriesTheNumbersOfItsOwnStrictestBucket(t *testing.T) {
+	everyone := outcomeOf(t, decide(t, newEngine(t), orderRequest(t, "alice")), "cascade", "everyone")
+	if everyone.Limit != 100 {
+		t.Errorf("the outcome of everyone has limit %d, want 100", everyone.Limit)
+	}
+	if everyone.Remaining != 99 {
+		t.Errorf("the outcome of everyone has remaining %d, want 99", everyone.Remaining)
+	}
+}
+
+func TestDecide_commitsTheChargeOfAnAdmission(t *testing.T) {
 	e := newEngine(t)
+	decide(t, e, orderRequest(t, "alice"))
 
-	first := decide(t, e, orderRequest(t, "alice"))
-	if !first.Allowed || first.Headers == nil {
-		t.Fatalf("decision = %+v", first)
-	}
-	if first.Headers.Limit != 100 || first.Headers.Remaining != 99 {
-		t.Errorf("headers = %+v: want the per-client minute window, the tightest of three", first.Headers)
-	}
-	if len(first.ExtractedKeys) != 1 || first.ExtractedKeys[0] != model.KeySub {
-		t.Errorf("extracted keys = %v: the success counters need the key names", first.ExtractedKeys)
-	}
-	everyone := first.Rules[0]
-	if everyone.Rule != "everyone" || everyone.Limit != 100 || everyone.Remaining != 99 {
-		t.Errorf("rule outcome = %+v: per-rule numbers must come from its own strictest bucket", everyone)
-	}
-
-	second := decide(t, e, orderRequest(t, "alice"))
-	if second.Headers.Remaining != 98 {
-		t.Errorf("remaining = %d, want 98 on the second request", second.Headers.Remaining)
+	if got := headersOf(t, decide(t, e, orderRequest(t, "alice"))).Remaining; got != 98 {
+		t.Errorf("remaining after the second request of alice = %d, want 98", got)
 	}
 }
 
@@ -184,40 +274,45 @@ func TestHeadersComeFromTheStrictestRule(t *testing.T) {
 // across the first rule's buckets, on an admission, on a refusal that
 // waiting cures, and on one it does not.
 func TestHeaders_nameTheRuleOfTheStrictestWindow(t *testing.T) {
-	p := model.Policy{Domain: domain, Blocks: []model.Block{
+	snap := compiled(t, model.Policy{Domain: domain, Blocks: []model.Block{
 		{Name: "api", Rules: []model.Rule{{Name: "loose", Rates: []model.Rate{
 			{Requests: 1000, Period: time.Minute}, {Requests: 10000, Period: time.Hour}}}}},
 		{Name: "exports", Rules: []model.Rule{{Name: "tight", Rates: []model.Rate{
 			{Requests: 2, Period: time.Minute}}}}},
-	}}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
-	}
-	e := engine.New(snap, memory.New())
+	}})
 	req := engine.Request{Path: "/x", Method: "GET"}
-	named := func(step string, d engine.Decision) {
-		t.Helper()
-		if d.Headers == nil || d.Headers.Block != "exports" || d.Headers.Rule != "tight" ||
-			d.Headers.Limit != 2 || d.Headers.PeriodSeconds != 60 {
-			t.Errorf("%s: headers = %+v, want the exports/tight minute window", step, d.Headers)
+	want := window{Block: "exports", Rule: "tight", Limit: 2, PeriodSeconds: 60}
+
+	t.Run("on an admission", func(t *testing.T) {
+		d := decide(t, engine.New(snap, memory.New()), req)
+		if got := windowOf(headersOf(t, d)); got != want {
+			t.Errorf("headers report %+v, want %+v", got, want)
 		}
-	}
-
-	named("admission", decide(t, e, req))
-	decide(t, e, req)
-	refused := decide(t, e, req)
-	if refused.Allowed || refused.Headers.RetryAfter <= 0 {
-		t.Fatalf("decision = %+v: want a refusal waiting cures", refused)
-	}
-	named("refusal", refused)
-
-	req.Cost = 3
-	never := decide(t, engine.New(snap, memory.New()), req)
-	if !never.CostExceedsCapacity {
-		t.Fatalf("decision = %+v: want a refusal no waiting cures", never)
-	}
-	named("refusal no waiting cures", never)
+	})
+	t.Run("on a refusal that waiting cures", func(t *testing.T) {
+		e := engine.New(snap, memory.New())
+		decide(t, e, req)
+		decide(t, e, req)
+		d := decide(t, e, req)
+		h := headersOf(t, d)
+		if d.Allowed || h.RetryAfter <= 0 {
+			t.Fatalf("the third request: allowed %t, retry after %s; want a refusal with a retry hint",
+				d.Allowed, h.RetryAfter)
+		}
+		if got := windowOf(h); got != want {
+			t.Errorf("headers report %+v, want %+v", got, want)
+		}
+	})
+	t.Run("on a refusal that no waiting cures", func(t *testing.T) {
+		d := decide(t, engine.New(snap, memory.New()), engine.Request{Path: "/x", Method: "GET", Cost: 3})
+		if !d.CostExceedsCapacity {
+			t.Fatalf("Decide(cost 3): allowed %t, cost exceeds capacity false; want a refusal no waiting cures",
+				d.Allowed)
+		}
+		if got := windowOf(headersOf(t, d)); got != want {
+			t.Errorf("headers report %+v, want %+v", got, want)
+		}
+	})
 }
 
 // EffectiveWindow is the time until the window admits one request more, the
@@ -228,47 +323,50 @@ func TestHeaders_nameTheRuleOfTheStrictestWindow(t *testing.T) {
 // quota at the boundary, and a window at its full capacity has nothing to
 // return.
 func TestHeaders_effectiveWindowIsTheTimeToTheNextRequest(t *testing.T) {
-	compiled := func(algorithm string) *compile.Snapshot {
-		p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
+	twoPerHour := func(algorithm string) model.Policy {
+		return model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
 			Name: "exports", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Algorithm: algorithm}}}}}}}
-		snap, problems := compile.Compile("core-1-core", domain, &p)
-		if len(problems) != 0 {
-			t.Fatalf("compile problems: %v", problems)
-		}
-		return snap
 	}
 	req := engine.Request{Path: "/x", Method: "GET"}
-	// The store reads the clock on every decision, so each one sees the
-	// bucket a few microseconds drained.
-	near := func(got, want time.Duration) bool { return got <= want && got > want-time.Second }
-	check := func(step string, h *engine.Headers, window, reset time.Duration) {
-		t.Helper()
-		if !near(h.EffectiveWindow, window) || !near(h.ResetAfter, reset) {
-			t.Errorf("%s: effective window %s and reset %s, want %s and %s",
-				step, h.EffectiveWindow, h.ResetAfter, window, reset)
+
+	t.Run("GCRA after the first admission", func(t *testing.T) {
+		h := headersOf(t, decide(t, engineFor(t, twoPerHour("")), req))
+		assertNear(t, "effective window", h.EffectiveWindow, 30*time.Minute)
+		assertNear(t, "reset", h.ResetAfter, 30*time.Minute)
+	})
+	t.Run("GCRA after the second admission", func(t *testing.T) {
+		e := engineFor(t, twoPerHour(""))
+		decide(t, e, req)
+		h := headersOf(t, decide(t, e, req))
+		assertNear(t, "effective window", h.EffectiveWindow, 30*time.Minute)
+		assertNear(t, "reset", h.ResetAfter, time.Hour)
+	})
+	t.Run("GCRA on a refusal", func(t *testing.T) {
+		e := engineFor(t, twoPerHour(""))
+		decide(t, e, req)
+		decide(t, e, req)
+		h := headersOf(t, decide(t, e, req))
+		assertNear(t, "effective window", h.EffectiveWindow, 30*time.Minute)
+		assertNear(t, "reset", h.ResetAfter, time.Hour)
+		if h.RetryAfter < h.EffectiveWindow {
+			t.Errorf("retry after %s is shorter than the effective window %s", h.RetryAfter, h.EffectiveWindow)
 		}
-	}
-
-	gcra := engine.New(compiled(""), memory.New())
-	check("GCRA, first admission", decide(t, gcra, req).Headers, 30*time.Minute, 30*time.Minute)
-	check("GCRA, second admission", decide(t, gcra, req).Headers, 30*time.Minute, time.Hour)
-	refused := decide(t, gcra, req)
-	check("GCRA, refusal", refused.Headers, 30*time.Minute, time.Hour)
-	if refused.Headers.RetryAfter < refused.Headers.EffectiveWindow {
-		t.Errorf("retry after %s is shorter than the effective window %s",
-			refused.Headers.RetryAfter, refused.Headers.EffectiveWindow)
-	}
-
-	fixed := engine.New(compiled("FixedWindow"), memory.New())
-	h := decide(t, fixed, req).Headers
-	if h.EffectiveWindow <= 0 || h.EffectiveWindow != h.ResetAfter {
-		t.Errorf("fixed window: effective window %s, want the reset %s", h.EffectiveWindow, h.ResetAfter)
-	}
-
-	req.Cost = 3
-	if h := decide(t, engine.New(compiled(""), memory.New()), req).Headers; h.EffectiveWindow >= 0 {
-		t.Errorf("a full window reports an effective window of %s", h.EffectiveWindow)
-	}
+	})
+	t.Run("a fixed window", func(t *testing.T) {
+		h := headersOf(t, decide(t, engineFor(t, twoPerHour("FixedWindow")), req))
+		if h.EffectiveWindow <= 0 {
+			t.Errorf("effective window = %s, want positive", h.EffectiveWindow)
+		}
+		if h.EffectiveWindow != h.ResetAfter {
+			t.Errorf("effective window = %s, want the reset %s", h.EffectiveWindow, h.ResetAfter)
+		}
+	})
+	t.Run("a GCRA window at its full capacity", func(t *testing.T) {
+		d := decide(t, engineFor(t, twoPerHour("")), engine.Request{Path: "/x", Method: "GET", Cost: 3})
+		if got := headersOf(t, d).EffectiveWindow; got >= 0 {
+			t.Errorf("effective window = %s, want negative", got)
+		}
+	})
 }
 
 // A policy change that lowers burst keeps the counter's depth, so the
@@ -278,158 +376,168 @@ func TestHeaders_effectiveWindowIsTheTimeToTheNextRequest(t *testing.T) {
 // request returns 7200 s later, four intervals. retry-after and
 // x-ratelimit-reset carry the same wait.
 func TestHeaders_effectiveWindowCarriesTheDebtOfALoweredBurst(t *testing.T) {
-	compiled := func(burst int64) *compile.Snapshot {
-		p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
-			Name: "exports", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Burst: burst}}}}}}}
-		snap, problems := compile.Compile("core-1-core", domain, &p)
-		if len(problems) != 0 {
-			t.Fatalf("compile problems: %v", problems)
-		}
-		return snap
+	twoPerHour := func(burst int64) *compile.Snapshot {
+		return compiled(t, model.Policy{Domain: domain, Blocks: []model.Block{{Name: "api", Rules: []model.Rule{{
+			Name: "exports", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Burst: burst}}}}}}})
 	}
 	req := engine.Request{Path: "/x", Method: "GET"}
 	counters := memory.New()
-	wide := engine.New(compiled(4), counters)
+	wide := engine.New(twoPerHour(4), counters)
 	for i := range 4 {
 		if d := decide(t, wide, req); !d.Allowed {
-			t.Fatalf("request %d under burst 4 = %+v, want an admission", i+1, d.Headers)
+			t.Fatalf("request %d under burst 4 was refused with headers %+v, want an admission", i+1, d.Headers)
 		}
 	}
 
-	h := decide(t, engine.New(compiled(1), counters), req).Headers
-	near := func(got, want time.Duration) bool { return got <= want && got > want-time.Second }
-	if !near(h.EffectiveWindow, 2*time.Hour) || !near(h.RetryAfter, 2*time.Hour) || !near(h.ResetAfter, 2*time.Hour) {
-		t.Errorf("under burst 1: effective window %s, retry after %s, reset %s, want 2h0m0s each",
-			h.EffectiveWindow, h.RetryAfter, h.ResetAfter)
-	}
+	h := headersOf(t, decide(t, engine.New(twoPerHour(1), counters), req))
+	assertNear(t, "effective window under burst 1", h.EffectiveWindow, 2*time.Hour)
+	assertNear(t, "retry after under burst 1", h.RetryAfter, 2*time.Hour)
+	assertNear(t, "reset under burst 1", h.ResetAfter, 2*time.Hour)
 }
 
+// The trial rule allows t1 ten requests a minute in Shadow, and everyone
+// enforces a hundred.
 func TestShadowReportsWithoutVetoing(t *testing.T) {
 	e := newEngine(t)
-
-	var last engine.Decision
-	for i := range 11 {
-		last = decide(t, e, orderRequest(t, "t1"))
-		if !last.Allowed {
-			t.Fatalf("request %d denied: a shadow rule influenced the verdict", i+1)
+	for i := range 10 {
+		if d := decide(t, e, orderRequest(t, "t1")); !d.Allowed {
+			t.Fatalf("request %d of t1 was refused within both limits", i+1)
 		}
 	}
 
-	if len(last.Rules) != 3 {
-		t.Fatalf("rules = %+v, want trial, everyone, and total", last.Rules)
+	last := decide(t, e, orderRequest(t, "t1"))
+	if !last.Allowed {
+		t.Errorf("the 11th request of t1 was refused: the exhausted shadow rule vetoed it")
 	}
-	trial := last.Rules[0]
-	if !trial.Shadow || trial.Allowed {
-		t.Errorf("trial outcome = %+v: the exhausted shadow rule must report its would-be denial", trial)
+	trial := outcomeOf(t, last, "cascade", "trial")
+	type verdict struct {
+		Shadow, Allowed  bool
+		Limit, Remaining int64
 	}
-	if trial.Limit != 10 || trial.Remaining != 0 || trial.RetryAfter <= 0 {
-		t.Errorf("trial outcome = %+v: the shadow's would-be numbers feed near-limit metrics and audit", trial)
+	got := verdict{trial.Shadow, trial.Allowed, trial.Limit, trial.Remaining}
+	if want := (verdict{Shadow: true, Allowed: false, Limit: 10, Remaining: 0}); got != want {
+		t.Errorf("the 11th request: the trial outcome is %+v, want %+v", got, want)
 	}
-	if !last.Rules[1].Allowed {
-		t.Errorf("everyone outcome = %+v: the enforcing rule is far from its limit", last.Rules[1])
+	if trial.RetryAfter <= 0 {
+		t.Errorf("the 11th request: the trial outcome retries after %s, want a positive wait", trial.RetryAfter)
+	}
+	if everyone := outcomeOf(t, last, "cascade", "everyone"); !everyone.Allowed {
+		t.Errorf("the 11th request: the outcome of everyone, far from its limit, is %+v, want allowed", everyone)
 	}
 }
 
-func TestDenialHeaders(t *testing.T) {
+func TestHeaders_aRefusalNamesTheRefusingWindowWithARetryHint(t *testing.T) {
 	e := newEngine(t)
 	for i := range 100 {
 		if d := decide(t, e, orderRequest(t, "alice")); !d.Allowed {
-			t.Fatalf("request %d denied under a limit of 100", i+1)
+			t.Fatalf("request %d of alice was refused under a limit of 100", i+1)
 		}
 	}
 
 	d := decide(t, e, orderRequest(t, "alice"))
 	if d.Allowed {
-		t.Fatal("request 101 admitted past a 100-per-minute window")
+		t.Fatal("request 101 of alice was admitted past a 100-per-minute window")
 	}
-	if d.Headers == nil || d.Headers.Limit != 100 || d.Headers.RetryAfter <= 0 {
-		t.Errorf("headers = %+v: want the denying window with a positive retry hint", d.Headers)
+	h := headersOf(t, d)
+	if got, want := windowOf(h), (window{Block: "cascade", Rule: "everyone", Limit: 100, PeriodSeconds: 60}); got != want {
+		t.Errorf("headers report %+v, want %+v", got, want)
+	}
+	if h.RetryAfter <= 0 {
+		t.Errorf("headers retry after %s, want a positive wait", h.RetryAfter)
 	}
 }
 
-func TestCostSemantics(t *testing.T) {
-	e := newEngine(t)
-
+func TestDecide_chargesTheRequestCost(t *testing.T) {
 	req := orderRequest(t, "alice")
 	req.Cost = 5
-	if d := decide(t, e, req); d.Headers.Remaining != 95 {
-		t.Errorf("remaining = %d after cost 5, want 95", d.Headers.Remaining)
-	}
-
-	req.Cost = 0 // the protocol default of one
-	if d := decide(t, e, req); d.Headers.Remaining != 94 {
-		t.Errorf("remaining = %d after the default cost, want 94", d.Headers.Remaining)
+	if got := headersOf(t, decide(t, newEngine(t), req)).Remaining; got != 95 {
+		t.Errorf("remaining after a cost of 5 against 100 = %d, want 95", got)
 	}
 }
 
-func TestCostThatNeverFits(t *testing.T) {
+// A zero cost is the protocol's default of one.
+func TestDecide_aZeroCostChargesOne(t *testing.T) {
 	e := newEngine(t)
+	req := orderRequest(t, "alice")
+	req.Cost = 5
+	decide(t, e, req)
+
+	req.Cost = 0
+	if got := headersOf(t, decide(t, e, req)).Remaining; got != 94 {
+		t.Errorf("remaining after a cost of 0 against 95 = %d, want 94", got)
+	}
+}
+
+func TestDecide_refusesACostThatNeverFitsWithoutARetryHint(t *testing.T) {
 	req := orderRequest(t, "alice")
 	req.Cost = 200 // beyond the 100-burst minute window, within the others
 
-	d := decide(t, e, req)
+	d := decide(t, newEngine(t), req)
 	if d.Allowed || !d.CostExceedsCapacity {
-		t.Fatalf("decision = %+v: want a refusal no waiting cures", d)
+		t.Fatalf("Decide(cost 200): allowed %t, cost exceeds capacity %t; want a refusal no waiting cures",
+			d.Allowed, d.CostExceedsCapacity)
 	}
-	if d.Headers.RetryAfter >= 0 {
-		t.Errorf("retry after = %s: no retry hint may reach the response", d.Headers.RetryAfter)
+	if got := headersOf(t, d).RetryAfter; got >= 0 {
+		t.Errorf("Decide(cost 200) headers retry after %s, want negative: no retry hint may reach the response", got)
 	}
 }
 
 func TestExplicitKeysOverrideTheToken(t *testing.T) {
-	e := newEngine(t)
 	req := orderRequest(t, "alice")
 	req.Keys = map[string][]string{model.KeySub: {"t1"}}
 
-	d := decide(t, e, req)
-	if len(d.Rules) != 3 || d.Rules[0].Rule != "trial" {
-		t.Errorf("rules = %+v: explicit keys must win over the token's sub", d.Rules)
+	d := decide(t, newEngine(t), req)
+	if got, want := appliedRules(d), []string{"cascade/everyone", "cascade/trial", "total/all"}; !slices.Equal(got, want) {
+		t.Errorf("Decide(token of alice, keys sub=t1) applied %q, want %q", got, want)
 	}
 }
 
 func TestExtractionSkipsPropagate(t *testing.T) {
-	e := newEngine(t)
-	d := decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET", Token: "garbage"})
+	d := decide(t, newEngine(t), engine.Request{Path: "/api/invoices/1", Method: "GET", Token: "garbage"})
 
-	if len(d.Skips) != 1 || d.Skips[0].Reason != identity.SkipDecodeFailed {
-		t.Fatalf("skips = %v, want one decode_failed for the planned sub key", d.Skips)
+	want := []identity.Skip{{Key: model.KeySub, Reason: identity.SkipDecodeFailed}}
+	if !slices.Equal(d.Skips, want) {
+		t.Errorf(`Decide(token "garbage").Skips = %v, want %v`, d.Skips, want)
 	}
-	// The broken token degrades to anonymity: per-client rules skip, the
-	// unconditional total still enforces.
-	if !d.Allowed || d.Headers == nil || d.Headers.Limit != 5000 {
-		t.Errorf("decision = %+v: want the total block only", d)
+}
+
+// A broken token degrades to anonymity: the per-client rules skip, and the
+// unconditional total still enforces.
+func TestDecide_anUndecodableTokenAppliesOnlyTheRulesWithoutIdentity(t *testing.T) {
+	d := decide(t, newEngine(t), engine.Request{Path: "/api/invoices/1", Method: "GET", Token: "garbage"})
+
+	if !d.Allowed {
+		t.Errorf(`Decide(token "garbage").Allowed = false, want true`)
+	}
+	if got, want := appliedRules(d), []string{"total/all"}; !slices.Equal(got, want) {
+		t.Errorf(`Decide(token "garbage") applied %q, want %q`, got, want)
 	}
 }
 
 func TestOutsideAllRulesIsAllowedWithoutHeaders(t *testing.T) {
-	e := newEngine(t)
-	d := decide(t, e, engine.Request{Path: "/health", Method: "GET"})
+	d := decide(t, newEngine(t), engine.Request{Path: "/health", Method: "GET"})
 	if !d.Allowed || d.Headers != nil || len(d.Rules) != 0 {
-		t.Errorf("decision = %+v: a request outside all rules passes with no headers", d)
+		t.Errorf("Decide(/health): allowed %t, headers %+v, rules %q; want allowed with no headers and no rules",
+			d.Allowed, d.Headers, appliedRules(d))
 	}
 }
 
 func TestHeadersAreDeterministicAcrossRuns(t *testing.T) {
 	run := func() engine.Headers {
-		e := newEngine(t)
-		return *decide(t, e, orderRequest(t, "alice")).Headers
+		return *headersOf(t, decide(t, newEngine(t), orderRequest(t, "alice")))
 	}
 	first := run()
 	for range 3 {
 		if got := run(); got != first {
-			t.Fatalf("headers jittered across identical runs: %+v vs %+v", got, first)
+			t.Fatalf("headers jittered across identical runs: %+v, then %+v", first, got)
 		}
 	}
 }
 
-// TestBucketBudgetBackstop reaches the runtime backstop the only way that is
-// left: by editing a compiled snapshot.
-//
-// The compiler refuses a generation over the budget, so in the component this
-// error is unreachable — which is the point of checking it here. An embedder
-// that builds a snapshot by hand is outside the contract, and the backstop is
-// what keeps that mistake from monopolizing the domain's shard.
-func TestBucketBudgetBackstop(t *testing.T) {
+// budgetSnapshot compiles a domain of 32 rules of four windows each, exactly
+// the bucket budget of one decision.
+func budgetSnapshot(t *testing.T) *compile.Snapshot {
+	t.Helper()
 	periods := []time.Duration{time.Minute, time.Hour, 30 * time.Second, 10 * time.Second}
 	rules := make([]model.Rule, 0, 32)
 	for ri := range 32 {
@@ -439,46 +547,75 @@ func TestBucketBudgetBackstop(t *testing.T) {
 		}
 		rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Rates: rates})
 	}
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
-
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("32 rules x 4 rates is exactly the budget; problems: %v", problems)
-	}
+	snap := compiled(t, model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}})
 	if snap.DecisionBuckets != engine.MaxDecisionBuckets {
-		t.Fatalf("DecisionBuckets = %d, want the budget of %d",
+		t.Fatalf("32 rules of 4 windows compile to %d decision buckets, want the budget of %d",
 			snap.DecisionBuckets, engine.MaxDecisionBuckets)
 	}
+	return snap
+}
 
-	// One bucket past the budget, added behind the compiler's back.
+// oversizedSnapshot builds a domain one bucket past the budget. The compiler
+// refuses such a generation, so the extra block goes in behind its back: what
+// is under test is the engine's own backstop. In the component that compiles
+// its own rules the backstop is unreachable; an embedder that builds a
+// snapshot by hand is outside the contract, and the backstop keeps that
+// mistake from monopolizing the domain's shard. The extra bucket copies the
+// key of the first window of block b, which the store refuses as a duplicate,
+// so a test of the backstop matches ErrTooManyBuckets, not any error.
+func oversizedSnapshot(t *testing.T) *compile.Snapshot {
+	t.Helper()
+	snap := budgetSnapshot(t)
+	smuggled := snap.Blocks[0].Rules[0]
+	smuggled.Rates = smuggled.Rates[:1]
 	extra := snap.Blocks[0]
 	extra.Name = "smuggled"
-	extra.Rules = extra.Rules[:1]
+	extra.Rules = []compile.Rule{smuggled}
 	snap.Blocks = append(snap.Blocks, extra)
+	return snap
+}
 
-	e := engine.New(snap, memory.New())
+func TestDecide_admitsADecisionAtTheBucketBudget(t *testing.T) {
+	e := engine.New(budgetSnapshot(t), memory.New())
+	d, err := e.Decide(t.Context(), engine.Request{Path: "/any", Method: "GET"})
+	if err != nil {
+		t.Fatalf("Decide over %d buckets: %v, want no error", engine.MaxDecisionBuckets, err)
+	}
+	if !d.Allowed {
+		t.Errorf("Decide over %d buckets: allowed false, want true", engine.MaxDecisionBuckets)
+	}
+}
+
+func TestDecide_refusesADecisionPastTheBucketBudget(t *testing.T) {
+	e := engine.New(oversizedSnapshot(t), memory.New())
 	_, err := e.Decide(t.Context(), engine.Request{Path: "/any", Method: "GET"})
 	if !errors.Is(err, engine.ErrTooManyBuckets) {
-		t.Fatalf("Decide error = %v, want ErrTooManyBuckets", err)
+		t.Errorf("Decide over %d buckets: %v, want ErrTooManyBuckets", engine.MaxDecisionBuckets+1, err)
+	}
+}
+
+// The bucket budget is a property of the request rather than of the write, so
+// Peek refuses an oversized decision exactly as Decide does. A management read
+// that slipped past it would report numbers the enforcing path never produces.
+func TestPeek_refusesADecisionPastTheBucketBudget(t *testing.T) {
+	e := engine.New(oversizedSnapshot(t), memory.New())
+	_, err := e.Peek(t.Context(), engine.Request{Path: "/any", Method: "GET"})
+	if !errors.Is(err, engine.ErrTooManyBuckets) {
+		t.Errorf("Peek over %d buckets: %v, want ErrTooManyBuckets", engine.MaxDecisionBuckets+1, err)
 	}
 }
 
 // cacheProbe compiles one per-client rule that matches only alice: whether
 // extraction saw the live token or a poisoned cache entry is visible in the
-// number of applied rules.
+// applied rules.
 func cacheProbe(t *testing.T, opts ...engine.Option) *engine.Engine {
 	t.Helper()
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+	return engineFor(t, model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{{Name: "alice-only", Counters: []string{model.KeySub},
 			Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"}},
 			Rates:   []model.Rate{{Requests: 100, Period: time.Minute}}}},
-	}}}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
-	}
-	return engine.New(snap, memory.New(), opts...)
+	}}}, opts...)
 }
 
 // TestTokenCacheIsolatesOverlays alternates overlaid and clean requests over
@@ -491,20 +628,42 @@ func TestTokenCacheIsolatesOverlays(t *testing.T) {
 		Keys: map[string][]string{model.KeySub: {"mallory"}}}
 	clean := engine.Request{Path: "/x", Method: "GET", Token: tok}
 
-	for step, tc := range []struct {
+	for _, step := range []struct {
+		name string
 		req  engine.Request
-		want int
-	}{{overlaid, 0}, {clean, 1}, {overlaid, 0}, {clean, 1}} {
-		if d := decide(t, e, tc.req); len(d.Rules) != tc.want {
-			t.Fatalf("step %d: %d applied rules, want %d", step, len(d.Rules), tc.want)
+		want []string
+	}{
+		{"an overlaid request that stores the token's extraction", overlaid, nil},
+		{"a clean request that hits the cache", clean, []string{"b/alice-only"}},
+		{"an overlaid request on the hit path", overlaid, nil},
+		{"a clean request after an overlay on the hit path", clean, []string{"b/alice-only"}},
+	} {
+		if got := appliedRules(decide(t, e, step.req)); !slices.Equal(got, step.want) {
+			t.Errorf("%s: applied %q, want %q", step.name, got, step.want)
 		}
 	}
 }
 
 func TestTokenCacheDisabledStillExtracts(t *testing.T) {
 	e := cacheProbe(t, engine.WithTokenCache(0))
-	if d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: token(t, "alice")}); len(d.Rules) != 1 {
-		t.Fatalf("extraction without the cache must still see alice: %d applied rules", len(d.Rules))
+	d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: token(t, "alice")})
+	if got, want := appliedRules(d), []string{"b/alice-only"}; !slices.Equal(got, want) {
+		t.Errorf("Decide(alice) without the cache applied %q, want %q", got, want)
+	}
+}
+
+// probeClient is a client of cacheProbe with the rules its token applies.
+type probeClient struct {
+	sub, token string
+	want       []string
+}
+
+func probeClients(t *testing.T) []probeClient {
+	t.Helper()
+	return []probeClient{
+		{"alice", token(t, "alice"), []string{"b/alice-only"}},
+		{"bob", token(t, "bob"), nil},
+		{"carol", token(t, "carol"), nil},
 	}
 }
 
@@ -513,15 +672,13 @@ func TestTokenCacheDisabledStillExtracts(t *testing.T) {
 // decision must still see its own token's identity.
 func TestTokenCacheRotationKeepsResultsExact(t *testing.T) {
 	e := cacheProbe(t, engine.WithTokenCache(2))
-	subs := []string{"alice", "bob", "carol"}
-	for i := range 12 {
-		sub := subs[i%len(subs)]
-		want := 0
-		if sub == "alice" {
-			want = 1
-		}
-		if d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: token(t, sub)}); len(d.Rules) != want {
-			t.Fatalf("step %d (%s): %d applied rules, want %d", i, sub, len(d.Rules), want)
+	clients := probeClients(t)
+	for round := range 4 {
+		for _, c := range clients {
+			d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: c.token})
+			if got := appliedRules(d); !slices.Equal(got, c.want) {
+				t.Errorf("round %d, %s: applied %q, want %q", round+1, c.sub, got, c.want)
+			}
 		}
 	}
 }
@@ -530,13 +687,12 @@ func TestTokenCacheRotationKeepsResultsExact(t *testing.T) {
 // outside every target reports neither skips nor extracted keys, because
 // identity was never resolved for it.
 func TestNoTargetSkipsIdentityWork(t *testing.T) {
-	e := newEngine(t)
-	d := decide(t, e, engine.Request{Path: "/metrics", Method: "GET", Token: "not-a-token"})
+	d := decide(t, newEngine(t), engine.Request{Path: "/metrics", Method: "GET", Token: "not-a-token"})
 	if !d.Allowed {
-		t.Fatal("a request outside every target is allowed")
+		t.Errorf("Decide(/metrics).Allowed = false, want true")
 	}
 	if d.Skips != nil || d.ExtractedKeys != nil {
-		t.Fatalf("identity must not be resolved outside every target: skips %v, keys %v", d.Skips, d.ExtractedKeys)
+		t.Errorf("Decide(/metrics): skips %v, extracted keys %q; want neither", d.Skips, d.ExtractedKeys)
 	}
 }
 
@@ -546,54 +702,68 @@ func TestNoTargetSkipsIdentityWork(t *testing.T) {
 // covers the locking; the asserts cover the results.
 func TestTokenCacheConcurrentChurn(t *testing.T) {
 	e := cacheProbe(t, engine.WithTokenCache(2))
-	subs := []string{"alice", "bob", "carol"}
-	tokens := make([]string, len(subs))
-	for i, sub := range subs {
-		tokens[i] = token(t, sub)
-	}
+	clients := probeClients(t)
 
 	var wg sync.WaitGroup
 	for g := range 8 {
-		wg.Go(func() { churnTokenCache(t, e, subs, tokens, g) })
+		wg.Go(func() { churnTokenCache(t, e, clients, g) })
 	}
 	wg.Wait()
 }
 
 // churnTokenCache drives one goroutine's share of the churn: 200 decisions
-// rotating through the tokens, each asserting it saw its own token's identity
+// rotating through the clients, each asserting it saw its own token's identity
 // rather than a neighbor's.
-func churnTokenCache(t *testing.T, e *engine.Engine, subs, tokens []string, g int) {
+func churnTokenCache(t *testing.T, e *engine.Engine, clients []probeClient, g int) {
 	t.Helper()
 	for i := range 200 {
-		n := (g + i) % len(subs)
-		d, err := e.Decide(t.Context(), engine.Request{Path: "/x", Method: "GET", Token: tokens[n]})
+		c := clients[(g+i)%len(clients)]
+		d, err := e.Decide(t.Context(), engine.Request{Path: "/x", Method: "GET", Token: c.token})
 		if err != nil {
-			t.Errorf("Decide: %v", err)
+			t.Errorf("Decide(%s): %v", c.sub, err)
 			return
 		}
-		want := 0
-		if subs[n] == "alice" {
-			want = 1
-		}
-		if len(d.Rules) != want {
-			t.Errorf("%s: %d applied rules, want %d", subs[n], len(d.Rules), want)
+		if got := appliedRules(d); !slices.Equal(got, c.want) {
+			t.Errorf("goroutine %d, %s: applied %q, want %q", g, c.sub, got, c.want)
 			return
 		}
 	}
 }
 
+// hugeToken is a token past identity.MaxTokenBytes.
+func hugeToken() string {
+	return "h." + strings.Repeat("A", identity.MaxTokenBytes) + ".s"
+}
+
 // TestOversizedTokenBypassesTheCache pins the order of defenses: the token
-// size bound applies before any hashing or caching, and an oversized token
-// still reports its decode_failed skips exactly like the uncached path.
+// size bound applies before any hashing or caching, so an oversized token is
+// neither a hit nor a miss, however often it repeats.
 func TestOversizedTokenBypassesTheCache(t *testing.T) {
-	e := cacheProbe(t)
-	huge := "h." + strings.Repeat("A", identity.MaxTokenBytes) + ".s"
-	d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: huge})
-	if !d.Allowed || len(d.Rules) != 0 {
-		t.Fatalf("an undecodable token carries no identity: allowed %v, rules %v", d.Allowed, d.Rules)
+	stats := &engine.CacheStats{}
+	e := cacheProbe(t, engine.WithCacheStats(stats))
+	huge := engine.Request{Path: "/x", Method: "GET", Token: hugeToken()}
+	decide(t, e, huge)
+	decide(t, e, huge)
+
+	if got := stats.Misses(); got != 0 {
+		t.Errorf("two requests with an oversized token: %d cache misses, want 0", got)
 	}
-	if len(d.Skips) != 1 || d.Skips[0].Reason != identity.SkipDecodeFailed {
-		t.Fatalf("skips = %v, want one decode_failed", d.Skips)
+	if got := stats.Hits(); got != 0 {
+		t.Errorf("two requests with an oversized token: %d cache hits, want 0", got)
+	}
+}
+
+// An oversized token reports its decode_failed skip exactly like the uncached
+// path, and carries no identity.
+func TestDecide_anOversizedTokenIsUndecodable(t *testing.T) {
+	d := decide(t, cacheProbe(t), engine.Request{Path: "/x", Method: "GET", Token: hugeToken()})
+	if !d.Allowed || len(d.Rules) != 0 {
+		t.Errorf("Decide(oversized token): allowed %t, applied %q; want allowed with no rules",
+			d.Allowed, appliedRules(d))
+	}
+	want := []identity.Skip{{Key: model.KeySub, Reason: identity.SkipDecodeFailed}}
+	if !slices.Equal(d.Skips, want) {
+		t.Errorf("Decide(oversized token).Skips = %v, want %v", d.Skips, want)
 	}
 }
 
@@ -609,140 +779,89 @@ func TestCacheStatsCountEligibleLookups(t *testing.T) {
 	decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET"})
 	decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET", Token: token(t, "bob")})
 
-	if hits, misses := stats.Hits(), stats.Misses(); hits != 1 || misses != 2 {
-		t.Errorf("hits = %d, misses = %d, want 1 and 2", hits, misses)
+	if got := stats.Hits(); got != 1 {
+		t.Errorf("alice twice, no token, bob: %d hits, want 1", got)
+	}
+	if got := stats.Misses(); got != 2 {
+		t.Errorf("alice twice, no token, bob: %d misses, want 2", got)
 	}
 }
 
-// Peek answers what Decide would answer, and charges nothing. It is what the
-// management API reads through, so a listing reporting different numbers from
-// the enforcing path would be worse than no listing at all.
-func TestPeek_answersLikeDecideWithoutCharging(t *testing.T) {
+// Peek reports the remaining of alice's strictest window as it stands: the
+// minute window of 100 holds 100 before anything is charged.
+func TestPeek_chargesNothing(t *testing.T) {
 	e := newEngine(t)
-	req := engine.Request{Path: "/api/invoices/1", Method: "GET", Token: token(t, "alice")}
+	req := orderRequest(t, "alice")
 
-	first, err := e.Peek(t.Context(), req)
-	if err != nil {
-		t.Fatalf("peek: %v", err)
+	if got := headersOf(t, peek(t, e, req)).Remaining; got != 100 {
+		t.Errorf("remaining on the first Peek = %d, want 100", got)
 	}
-	second, err := e.Peek(t.Context(), req)
-	if err != nil {
-		t.Fatalf("peek: %v", err)
-	}
-	if first.Headers == nil || second.Headers == nil {
-		t.Fatal("a matched request must carry headers")
-	}
-	if first.Headers.Remaining != second.Headers.Remaining {
-		t.Errorf("remaining moved between peeks: %d then %d",
-			first.Headers.Remaining, second.Headers.Remaining)
-	}
-
-	decided, err := e.Decide(t.Context(), req)
-	if err != nil {
-		t.Fatalf("decide: %v", err)
-	}
-	if decided.Allowed != first.Allowed {
-		t.Errorf("Decide allowed = %v, Peek predicted %v", decided.Allowed, first.Allowed)
-	}
-	if len(decided.Rules) != len(first.Rules) {
-		t.Errorf("Decide applied %d rules, Peek %d; the two match the same way",
-			len(decided.Rules), len(first.Rules))
-	}
-
-	// Decide charged, which is the whole difference between the two.
-	after, err := e.Peek(t.Context(), req)
-	if err != nil {
-		t.Fatalf("peek: %v", err)
-	}
-	if after.Headers.Remaining != first.Headers.Remaining-1 {
-		t.Errorf("remaining after Decide = %d, want one below the %d Peek reported",
-			after.Headers.Remaining, first.Headers.Remaining)
+	if got := headersOf(t, peek(t, e, req)).Remaining; got != 100 {
+		t.Errorf("remaining on the second Peek = %d, want 100", got)
 	}
 }
 
-// The bucket budget is a property of the request rather than of the write, so
-// Peek refuses an oversized decision exactly as Decide does. A management read
-// that slipped past it would report numbers the enforcing path never produces.
-func TestPeek_refusesTheSameOversizedDecisionAsDecide(t *testing.T) {
-	snap := oversizedSnapshot(t)
-	e := engine.New(snap, memory.New())
-	req := engine.Request{Path: "/any", Method: "GET"}
+// Peek answers what Decide would answer. It is what the management API reads
+// through, so a listing reporting another verdict or other rules than the
+// enforcing path would be worse than no listing at all.
+func TestPeek_answersLikeDecide(t *testing.T) {
+	e := newEngine(t)
+	req := orderRequest(t, "alice")
 
-	if _, err := e.Decide(t.Context(), req); !errors.Is(err, engine.ErrTooManyBuckets) {
-		t.Fatalf("Decide error = %v, want ErrTooManyBuckets", err)
+	peeked := peek(t, e, req)
+	decided := decide(t, e, req)
+	if decided.Allowed != peeked.Allowed {
+		t.Errorf("Decide allowed %t, Peek predicted %t", decided.Allowed, peeked.Allowed)
 	}
-	if _, err := e.Peek(t.Context(), req); !errors.Is(err, engine.ErrTooManyBuckets) {
-		t.Errorf("Peek error = %v, want ErrTooManyBuckets", err)
+	if got, want := appliedRules(peeked), appliedRules(decided); !slices.Equal(got, want) {
+		t.Errorf("Peek applied %q, Decide %q", got, want)
 	}
 }
 
-// oversizedSnapshot builds a domain one bucket past the budget. The compiler
-// refuses such a generation, so the extra block goes in behind its back: what
-// is under test is the engine's own backstop.
-func oversizedSnapshot(t *testing.T) *compile.Snapshot {
-	t.Helper()
+func TestPeek_seesTheChargeDecideCommitted(t *testing.T) {
+	e := newEngine(t)
+	req := orderRequest(t, "alice")
+	decide(t, e, req)
 
-	periods := []time.Duration{time.Minute, time.Hour, 30 * time.Second, 10 * time.Second}
-	rules := make([]model.Rule, 0, 32)
-	for ri := range 32 {
-		rates := make([]model.Rate, 0, len(periods))
-		for _, pd := range periods {
-			rates = append(rates, model.Rate{Requests: 100, Period: pd})
-		}
-		rules = append(rules, model.Rule{Name: fmt.Sprintf("r%d", ri), Rates: rates})
+	if got := headersOf(t, peek(t, e, req)).Remaining; got != 99 {
+		t.Errorf("remaining on a Peek after one Decide against 100 = %d, want 99", got)
 	}
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: rules}}}
-
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("32 rules x 4 rates is exactly the budget; problems: %v", problems)
-	}
-	extra := snap.Blocks[0]
-	extra.Name = "smuggled"
-	extra.Rules = extra.Rules[:1]
-	snap.Blocks = append(snap.Blocks, extra)
-	return snap
 }
 
 // Among refusals, a cost that never fits binds harder than one waiting cures.
 // Reporting the waiting window would send a caller back on a schedule that
-// cannot help: the hour window will refuse the same cost forever.
+// cannot help: the never window refuses the same cost forever.
 func TestHeaders_capacityExceededOutranksALongerWait(t *testing.T) {
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+	e := engineFor(t, model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{
-			// Exhausted after one request of cost 5, and it recovers.
-			{Name: "minute", Rates: []model.Rate{{Requests: 5, Period: time.Hour, Burst: 5}}},
+			// Five deep, one request back every 720 s.
+			{Name: "hour", Rates: []model.Rate{{Requests: 5, Period: time.Hour, Burst: 5}}},
 			// A cost of 5 can never fit a bucket two deep.
 			{Name: "never", Rates: []model.Rate{{Requests: 2, Period: time.Minute, Burst: 2}}},
 		},
-	}}}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
+	}}})
+	// A cost of 2 fits both buckets and leaves the hour bucket three requests,
+	// so a cost of 5 waits there about 1440 s.
+	if d := decide(t, e, engine.Request{Path: "/any", Method: "GET", Cost: 2}); !d.Allowed {
+		t.Fatalf("Decide(cost 2) was refused, want an admission by both windows")
 	}
-	e := engine.New(snap, memory.New())
 
-	decision, err := e.Decide(t.Context(), engine.Request{Path: "/any", Method: "GET", Cost: 5})
-	if err != nil {
-		t.Fatalf("decide: %v", err)
+	d := decide(t, e, engine.Request{Path: "/any", Method: "GET", Cost: 5})
+	if hour := outcomeOf(t, d, "b", "hour"); hour.Allowed || hour.RetryAfter <= 0 {
+		t.Fatalf("Decide(cost 5): the hour rule allowed %t, retry after %s; want a refusal waiting cures",
+			hour.Allowed, hour.RetryAfter)
 	}
-	if decision.Allowed {
-		t.Fatal("a cost of 5 against a bucket of 2 must be refused")
+	if d.Allowed || !d.CostExceedsCapacity {
+		t.Fatalf("Decide(cost 5): allowed %t, cost exceeds capacity %t; want a refusal no waiting cures",
+			d.Allowed, d.CostExceedsCapacity)
 	}
-	if !decision.CostExceedsCapacity {
-		t.Fatal("the refusal is a capacity one, and the decision has to say so")
+	h := headersOf(t, d)
+	if got, want := windowOf(h), (window{Block: "b", Rule: "never", Limit: 2, PeriodSeconds: 60}); got != want {
+		t.Errorf("headers report %+v, want %+v, the window the cost can never fit", got, want)
 	}
-	if decision.Headers == nil {
-		t.Fatal("a refusal carries headers")
-	}
-	if decision.Headers.Limit != 2 {
-		t.Errorf("headers name the window with limit %d, want the one the cost can never fit (2)",
-			decision.Headers.Limit)
-	}
-	if decision.Headers.RetryAfter >= 0 {
-		t.Errorf("RetryAfter = %v, want no hint for a request no waiting cures",
-			decision.Headers.RetryAfter)
+	if h.RetryAfter >= 0 {
+		t.Errorf("headers retry after %s, want negative: no waiting cures the request", h.RetryAfter)
 	}
 }
 
@@ -751,38 +870,28 @@ func TestHeaders_capacityExceededOutranksALongerWait(t *testing.T) {
 // which is the point: the headers of a repeated refusal have to name the same
 // window every time, whatever order the rules happen to be written in.
 func TestHeaders_twoCapacityExceededWindowsTieBreakByKey(t *testing.T) {
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{
+	e := engineFor(t, model.Policy{Domain: domain, Blocks: []model.Block{{
 		Name: "b",
 		Rules: []model.Rule{
 			// First in the snapshot, and the larger key.
 			{Name: "zzz", Rates: []model.Rate{{Requests: 3, Period: time.Minute, Burst: 3}}},
 			{Name: "aaa", Rates: []model.Rate{{Requests: 2, Period: time.Hour, Burst: 2}}},
 		},
-	}}}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
-	}
-	e := engine.New(snap, memory.New())
+	}}})
+	want := window{Block: "b", Rule: "aaa", Limit: 2, PeriodSeconds: 3600}
 
 	for attempt := range 3 {
-		decision, err := e.Decide(t.Context(), engine.Request{Path: "/any", Method: "GET", Cost: 5})
-		if err != nil {
-			t.Fatalf("decide: %v", err)
+		d := decide(t, e, engine.Request{Path: "/any", Method: "GET", Cost: 5})
+		if !d.CostExceedsCapacity {
+			t.Fatalf("attempt %d: Decide(cost 5) cost exceeds capacity false, want true: 5 fits neither window",
+				attempt+1)
 		}
-		if !decision.CostExceedsCapacity {
-			t.Fatal("a cost of 5 fits neither window, and the decision has to say so")
+		h := headersOf(t, d)
+		if got := windowOf(h); got != want {
+			t.Errorf("attempt %d: headers report %+v, want %+v, the smaller key", attempt+1, got, want)
 		}
-		if decision.Headers == nil {
-			t.Fatal("a refusal carries headers")
-		}
-		if decision.Headers.Limit != 2 {
-			t.Errorf("attempt %d: headers name the window with limit %d, want the smaller key (2)",
-				attempt, decision.Headers.Limit)
-		}
-		if decision.Headers.RetryAfter >= 0 {
-			t.Errorf("attempt %d: RetryAfter = %v, want no hint for a request no waiting cures",
-				attempt, decision.Headers.RetryAfter)
+		if h.RetryAfter >= 0 {
+			t.Errorf("attempt %d: headers retry after %s, want negative", attempt+1, h.RetryAfter)
 		}
 	}
 }
@@ -790,7 +899,7 @@ func TestHeaders_twoCapacityExceededWindowsTieBreakByKey(t *testing.T) {
 // Blocks reports what the target phase hit, in snapshot order, which is what
 // the management API lists a path's rules from.
 func TestCandidates_blocksReportsTheTargetedOnesInOrder(t *testing.T) {
-	p := model.Policy{Domain: domain, Blocks: []model.Block{
+	snap := compiled(t, model.Policy{Domain: domain, Blocks: []model.Block{
 		{
 			Name:   "invoices",
 			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/invoices"}}}},
@@ -805,24 +914,25 @@ func TestCandidates_blocksReportsTheTargetedOnesInOrder(t *testing.T) {
 			Name:  "everything",
 			Rules: []model.Rule{{Name: "r", Rates: []model.Rate{{Requests: 1, Period: time.Minute}}}},
 		},
-	}}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
-	}
+	}})
 
-	targeted := match.Match(snap, "/api/invoices/1", "GET").Blocks()
-	got := make([]string, 0, len(targeted))
-	for _, block := range targeted {
-		got = append(got, block.Name)
-	}
-	want := []string{"invoices", "everything"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("Blocks() = %v, want %v in snapshot order", got, want)
-	}
-
-	if blocks := match.Match(snap, "/nothing", "GET").Blocks(); len(blocks) != 1 || blocks[0].Name != "everything" {
-		t.Errorf("a path outside every target still meets the block without one, got %v", blocks)
+	for _, c := range []struct {
+		name, path string
+		want       []string
+	}{
+		{"a path under one block's target", "/api/invoices/1", []string{"invoices", "everything"}},
+		{"a path outside every target", "/nothing", []string{"everything"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			blocks := match.Match(snap, c.path, "GET").Blocks()
+			got := make([]string, 0, len(blocks))
+			for _, block := range blocks {
+				got = append(got, block.Name)
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("Match(%q).Blocks() = %q, want %q", c.path, got, c.want)
+			}
+		})
 	}
 }
 
@@ -831,7 +941,7 @@ func TestCandidates_blocksReportsTheTargetedOnesInOrder(t *testing.T) {
 // of a fixed window, which has no burst. The near-limit margin is a share of
 // that capacity.
 func TestRuleOutcomeCarriesTheCapacityOfItsWindow(t *testing.T) {
-	p := model.Policy{
+	d := decide(t, engineFor(t, model.Policy{
 		Domain: domain,
 		Blocks: []model.Block{{
 			Name: "api",
@@ -842,24 +952,39 @@ func TestRuleOutcomeCarriesTheCapacityOfItsWindow(t *testing.T) {
 				{Name: "fixed", Rates: []model.Rate{{Requests: 100, Period: time.Minute, Algorithm: "FixedWindow"}}},
 			},
 		}},
+	}), engine.Request{Path: "/api/orders", Method: "GET"})
+	if got, want := appliedRules(d), []string{"api/burst", "api/fixed"}; !slices.Equal(got, want) {
+		t.Errorf("Decide(/api/orders) applied %q, want %q", got, want)
 	}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
-	}
-	e := engine.New(snap, memory.New())
 
-	d := decide(t, e, engine.Request{Path: "/api/orders", Method: "GET"})
-	if len(d.Rules) != 2 {
-		t.Fatalf("rules = %+v, want the two rules of the block", d.Rules)
+	for _, c := range []struct {
+		name            string
+		rule            string
+		limit, capacity int64
+	}{
+		{"a GCRA window with a burst below its requests", "burst", 1000, 100},
+		{"a fixed window", "fixed", 100, 100},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := outcomeOf(t, d, "api", c.rule)
+			if r.Limit != c.limit || r.Capacity != c.capacity {
+				t.Errorf("rule %s: limit = %d, capacity = %d, want %d and %d",
+					c.rule, r.Limit, r.Capacity, c.limit, c.capacity)
+			}
+		})
 	}
-	want := map[string][2]int64{"burst": {1000, 100}, "fixed": {100, 100}}
-	for _, r := range d.Rules {
-		limit, capacity := want[r.Rule][0], want[r.Rule][1]
-		if r.Limit != limit || r.Capacity != capacity {
-			t.Errorf("rule %s: limit = %d, capacity = %d, want %d and %d", r.Rule, r.Limit, r.Capacity, limit, capacity)
-		}
-	}
+}
+
+// rolesProbe compiles one rule that applies to a token whose roles claim holds
+// admin, its token cache counted by stats.
+func rolesProbe(t *testing.T, stats *engine.CacheStats) *engine.Engine {
+	t.Helper()
+	return engineFor(t, model.Policy{Domain: domain,
+		Mappings: []model.KeyMapping{{Key: "roles", Claim: "roles", Type: model.ValueStringArray}},
+		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "admins",
+			Matches: []model.Predicate{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
+			Rates:   []model.Rate{{Requests: 100, Period: time.Minute}}}}}}},
+		engine.WithCacheStats(stats))
 }
 
 // An extraction larger than the cache's entry bound is not cached: a stream
@@ -867,42 +992,39 @@ func TestRuleOutcomeCarriesTheCapacityOfItsWindow(t *testing.T) {
 // at its capacity times the claim, past a replica's memory limit. A small
 // extraction is cached as before.
 func TestTokenCacheSkipsALargeExtraction(t *testing.T) {
-	p := model.Policy{Domain: domain,
-		Mappings: []model.KeyMapping{{Key: "roles", Claim: "roles", Type: model.ValueStringArray}},
-		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "admins",
-			Matches: []model.Predicate{{Key: "roles", Operator: model.OperatorContains, Value: "admin"}},
-			Rates:   []model.Rate{{Requests: 100, Period: time.Minute}}}}}}}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
-	}
-	stats := &engine.CacheStats{}
-	e := engine.New(snap, memory.New(), engine.WithCacheStats(stats))
+	t.Run("an extraction past the entry bound", func(t *testing.T) {
+		stats := &engine.CacheStats{}
+		e := rolesProbe(t, stats)
+		// Sixty-three roles of 62 bytes and admin: about 5.6 KiB as the cache
+		// estimates an entry, past its bound of 4 KiB.
+		roles := make([]any, 0, identity.MaxArrayItems)
+		for i := 1; i < identity.MaxArrayItems; i++ {
+			roles = append(roles, fmt.Sprintf("role-%02d-%s", i, strings.Repeat("r", 54)))
+		}
+		roles = append(roles, "admin")
+		large := engine.Request{Path: "/x", Method: "GET",
+			Token: claimsToken(t, map[string]any{"sub": "alice", "roles": roles})}
 
-	roles := make([]string, identity.MaxArrayItems)
-	for i := range roles {
-		roles[i] = fmt.Sprintf("role-%02d-%s", i, strings.Repeat("r", 54))
-	}
-	raw, err := json.Marshal(map[string]any{"sub": "alice", "roles": append(roles, "admin")[1:]})
-	if err != nil {
-		t.Fatal(err)
-	}
-	large := engine.Request{Path: "/x", Method: "GET", Token: "h." + base64.RawURLEncoding.EncodeToString(raw) + ".s"}
-	decide(t, e, large)
-	d := decide(t, e, large)
-	if hits := stats.Hits(); hits != 0 {
-		t.Errorf("a large extraction was cached: %d hits", hits)
-	}
-	if len(d.Rules) != 1 {
-		t.Errorf("an uncached extraction decided differently: rules %v", d.Rules)
-	}
+		decide(t, e, large)
+		d := decide(t, e, large)
+		if got := stats.Hits(); got != 0 {
+			t.Errorf("the same large extraction twice: %d cache hits, want 0", got)
+		}
+		if got, want := appliedRules(d), []string{"b/admins"}; !slices.Equal(got, want) {
+			t.Errorf("the uncached extraction applied %q, want %q", got, want)
+		}
+	})
+	t.Run("a small extraction", func(t *testing.T) {
+		stats := &engine.CacheStats{}
+		e := rolesProbe(t, stats)
+		small := engine.Request{Path: "/x", Method: "GET", Token: token(t, "bob")}
 
-	small := engine.Request{Path: "/x", Method: "GET", Token: token(t, "bob")}
-	decide(t, e, small)
-	decide(t, e, small)
-	if hits := stats.Hits(); hits != 1 {
-		t.Errorf("a small extraction was not cached: %d hits", hits)
-	}
+		decide(t, e, small)
+		decide(t, e, small)
+		if got := stats.Hits(); got != 1 {
+			t.Errorf("the same small extraction twice: %d cache hits, want 1", got)
+		}
+	})
 }
 
 // The direct form's values are normalized as a token's are, so a direct
@@ -910,16 +1032,11 @@ func TestTokenCacheSkipsALargeExtraction(t *testing.T) {
 // the overlay of unnormalized values was what made a counter the management
 // API could not address.
 func TestDecide_theDirectFormIsNormalizedLikeTheToken(t *testing.T) {
-	p := model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "each",
-		Counters: []string{model.KeySub}, Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}}}}}
-	snap, problems := compile.Compile("core-1-core", domain, &p)
-	if len(problems) != 0 {
-		t.Fatalf("compile problems: %v", problems)
-	}
-	e := engine.New(snap, memory.New())
+	e := engineFor(t, model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{Name: "each",
+		Counters: []string{model.KeySub}, Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}}}}})
 
 	if d := decide(t, e, engine.Request{Path: "/x", Method: "GET", Token: token(t, "Alice")}); !d.Allowed {
-		t.Fatal("the first request was refused")
+		t.Fatal("the first request, with a token of Alice, was refused under a limit of 1")
 	}
 	direct := engine.Request{Path: "/x", Method: "GET", Keys: map[string][]string{model.KeySub: {"Alice"}}}
 	if d := decide(t, e, direct); d.Allowed {

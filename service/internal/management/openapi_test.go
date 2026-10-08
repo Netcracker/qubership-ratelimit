@@ -22,13 +22,14 @@ import (
 // fails to decode a response.
 //
 // Every answer of every test in this package goes through validateAgainstSpec,
-// which is the cheapest place to catch that: the drift round 3 fixed by hand
-// (`policies` still required, `NotExists` against a `DoesNotExist` payload, the
-// old key tag) would have failed here.
+// which is the cheapest place to catch that: a document that still requires a
+// field the service dropped, or spells an enum value the service no longer
+// sends, fails here.
 //
-// Route existence is not this validator's job — an unrouted path is skipped,
+// Route existence is not this validator's job. An unrouted path is skipped,
 // because the tests deliberately call unknown paths to exercise the catch-all
-// 404, and meta_test.go already holds route parity in both directions.
+// 404, and TestSpecification_describesExactlyTheRoutesTheAppServes holds route
+// parity in both directions.
 var specRouter = sync.OnceValues(func() (routers.Router, error) {
 	loader := &openapi3.Loader{IsExternalRefsAllowed: false}
 	document, err := loader.LoadFromData(specification)
@@ -87,7 +88,7 @@ func validateAgainstSpec(t *testing.T, request *http.Request, code int, header h
 // The document has to be loadable and internally consistent before it can judge
 // anything, and a suite that never happened to call an endpoint would otherwise
 // leave that unchecked.
-func TestSpecification_loadsAndValidates(t *testing.T) {
+func TestSpecification_isAValidOpenAPIDocument(t *testing.T) {
 	_, err := specRouter()
-	require.NoError(t, err)
+	require.NoError(t, err, "loading and validating the embedded openapi.yaml")
 }

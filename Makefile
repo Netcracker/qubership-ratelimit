@@ -108,7 +108,7 @@ test-engine: ## Run the engine module tests. Its own go.mod hides it from ./... 
 	cd engine && go vet ./... && go test -race ./...
 
 .PHONY: test-unit
-test-unit: fmt vet test-engine ## Run unit tests only — no envtest, no cluster, no network.
+test-unit: fmt vet test-engine ## Run unit tests only: no envtest, no cluster. The engine's Redis suites use REDIS_ADDR or a Docker container and skip without either.
 	go test $(UNIT_PKGS) -coverprofile cover-unit.out
 
 .PHONY: test-unit-race
@@ -207,7 +207,10 @@ build-service: generate fmt vet ## Build the service binary and check it carries
 # default; the operator talks to the cluster of the current kubeconfig, the
 # service to nothing but a directory. The operator is told its Deployment's
 # name the way the chart tells it, and off cluster it warns that there is
-# none to adopt and writes the ConfigMap without an owner.
+# none to adopt and writes the ConfigMap without an owner. Each binary reads
+# its application.yaml through the platform's configloader, from the
+# directory in PROPERTY_FILE_PATH: the loader appends the file name to the
+# value, so the trailing slash is part of it.
 OPERATOR_DEPLOYMENT ?= ratelimit-operator
 # The directory the service reads as its mounted ConfigMap. service-config
 # fills it from the live object of CLOUD_NAMESPACE, the way the kubelet
@@ -222,18 +225,18 @@ OPERATOR_PROBE_ADDR ?= :8091
 
 .PHONY: run
 run: manifests generate fmt vet ## Run the operator and the service from your host, the pair.
-	@go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT) \
+	@PROPERTY_FILE_PATH=operator/ go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT) \
 	  --metrics-bind-address=$(OPERATOR_METRICS_ADDR) --health-probe-bind-address=$(OPERATOR_PROBE_ADDR) & operator=$$!; \
 	trap 'kill $$operator 2>/dev/null' EXIT; \
-	go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
+	PROPERTY_FILE_PATH=service/ go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
 
 .PHONY: run-operator
 run-operator: manifests generate fmt vet ## Run the operator from your host against the current kubeconfig.
-	go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT)
+	PROPERTY_FILE_PATH=operator/ go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT)
 
 .PHONY: run-service
 run-service: generate fmt vet ## Run the service from your host against SERVICE_CONFIG_DIR.
-	go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
+	PROPERTY_FILE_PATH=service/ go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
 
 .PHONY: service-config
 service-config: ## Export the ratelimit-config ConfigMap of CLOUD_NAMESPACE into SERVICE_CONFIG_DIR.

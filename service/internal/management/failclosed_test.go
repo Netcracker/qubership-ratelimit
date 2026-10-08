@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/model"
@@ -58,7 +59,8 @@ func (b *brokenRecords) Reset(ctx context.Context, a records.Addressed) (records
 	return b.Store.Reset(ctx, a)
 }
 
-// break_ swaps in a record store that fails the named step.
+// breakRecords swaps in broken, which fails the steps its flags name and
+// delegates the rest to the record store the fixture built.
 func (h *testAPI) breakRecords(broken *brokenRecords) {
 	broken.Store = h.records
 	h.api.Records = broken
@@ -82,7 +84,7 @@ func TestFailClosed_anAmbiguousAcceptanceNamesItsRecovery(t *testing.T) {
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
 	}, "key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
-	require.Contains(t, body.Message, "retry the same Idempotency-Key")
+	assert.Contains(t, body.Message, "retry the same Idempotency-Key")
 }
 
 func TestFailClosed_anUnreadableTokenRefusesTheExecution(t *testing.T) {
@@ -106,7 +108,7 @@ func TestFailClosed_anAddressedResetThatNeverRanCanBeRetried(t *testing.T) {
 
 	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice",
 		"key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
-	require.Contains(t, body.Message, "nothing was bound")
+	assert.Contains(t, body.Message, "nothing was bound")
 }
 
 // A record whose command ended while this call was walking is answered from what
@@ -123,9 +125,9 @@ func TestFailClosed_aLostLeaseAnswersFromTheRecord(t *testing.T) {
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
 	}, "key-1", listedCaller), http.StatusInternalServerError, CodeInterrupted)
-	require.NotNil(t, body.Meta.PartialReset)
-	require.Equal(t, "id-stolen", body.ID, "the recorded outcome is the one that stands")
-	require.Equal(t, 7, body.Meta.PartialReset.Scanned)
+	assert.Equal(t, "id-stolen", body.ID, "the recorded outcome is the one that stands")
+	require.NotNil(t, body.Meta.PartialReset, "an interrupted command discloses its progress")
+	assert.Equal(t, 7, body.Meta.PartialReset.Scanned)
 }
 
 // stealingRecords finalizes the command behind the walker's back, the way a
@@ -153,26 +155,39 @@ func (s *stealingRecords) Commit(ctx context.Context, c records.Commit) error {
 
 // The limited filter needs the rule's windows, so it judges every candidate
 // before deleting it. Both reset forms carry it.
-func TestLimited_sweepsOnlyTheCountersRefusingRightNow(t *testing.T) {
+
+func TestLimited_aPreviewCountsOnlyTheCountersRefusingRightNow(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
+	preview := h.preview(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}, "limited": true},
+	}, "key-preview")
+
+	require.NotNil(t, preview.MatchedCount, "the answer of a preview carries matchedCount")
+	assert.Equal(t, 1, *preview.MatchedCount, "only the refusing counter matches")
+}
+
+func TestLimited_aSweepResetsOnlyTheCountersRefusingRightNow(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 	selector := map[string]any{"ruleIds": []string{"orders"}, "limited": true}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
-	require.Equal(t, 1, *preview.MatchedCount, "only the refusing counter matches")
 
 	var executed BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
 	}, "key-execute", listedCaller), http.StatusOK, &executed)
-	require.Equal(t, 1, *executed.ResetCount)
 
+	require.NotNil(t, executed.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 1, *executed.ResetCount)
 	_, found := h.remaining(t, "crawler")
-	require.False(t, found, "the refusing counter is gone")
+	assert.False(t, found, "the refusing counter is still listed")
 	remaining, found := h.remaining(t, "alice")
-	require.True(t, found, "and the one still under its limit was left alone")
-	require.Equal(t, int64(2), remaining)
+	assert.True(t, found, "the counter under its limit is gone")
+	assert.Equal(t, int64(2), remaining, "the remaining budget of the counter under its limit")
 }
 
 func TestLimited_addressedResetSkipsACounterUnderItsLimit(t *testing.T) {
@@ -182,15 +197,16 @@ func TestLimited_addressedResetSkipsACounterUnderItsLimit(t *testing.T) {
 	var response ResetResponse
 	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&limited=true",
 		"key-1", listedCaller), http.StatusOK, &response)
-	require.Equal(t, 0, *response.ResetCount, "alice is not refusing, so nothing was reset")
+	require.NotNil(t, response.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 0, *response.ResetCount, "alice is not refusing, so nothing was reset")
 	// keys reports what the command addressed, one per window of the rule;
 	// narrowing it to the refusing subset would leave the body saying the
 	// command never looked at the counter it skipped.
-	require.Len(t, response.Keys, 1, "keys is the computed list, not the subset limited kept")
+	assert.Len(t, response.Keys, 1, "keys is the computed list, not the subset limited kept")
 
 	remaining, found := h.remaining(t, "alice")
-	require.True(t, found)
-	require.Equal(t, int64(2), remaining)
+	assert.True(t, found, "the counter under its limit is gone")
+	assert.Equal(t, int64(2), remaining, "the remaining budget of the counter under its limit")
 }
 
 func TestLimited_addressedResetDropsARefusingCounter(t *testing.T) {
@@ -200,22 +216,23 @@ func TestLimited_addressedResetDropsARefusingCounter(t *testing.T) {
 	var response ResetResponse
 	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler&limited=true",
 		"key-1", listedCaller), http.StatusOK, &response)
-	require.Equal(t, 1, *response.ResetCount)
+	require.NotNil(t, response.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 1, *response.ResetCount)
 
 	_, found := h.remaining(t, "crawler")
-	require.False(t, found)
+	assert.False(t, found, "the refusing counter is still listed")
 }
 
 // StartBackground is what keeps an accepted sweep alive past its request; the
-// runner calls it, and without it the walk would run under a background context
-// that shutdown never reaches.
+// runner calls it, and without it the walk runs under context.Background, which
+// shutdown never reaches.
 func TestBackgroundContext_isTheOneTheRunnerGave(t *testing.T) {
 	h := newTestAPI(t)
-	require.Equal(t, context.Background(), h.api.backgroundContext())
+	require.Equal(t, context.Background(), h.api.backgroundContext(), "before StartBackground")
 
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 
 	h.api.StartBackground(ctx)
-	require.Equal(t, ctx, h.api.backgroundContext())
+	assert.Equal(t, ctx, h.api.backgroundContext(), "after StartBackground")
 }

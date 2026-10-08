@@ -1,10 +1,13 @@
 # Management API: complete scenario reference
 
 A companion to the [management API reference](management-api.md); every call conforms to the OpenAPI document the
-service serves at `GET /openapi.yaml`. The document is built around ONE end-to-end configuration (section 1): every
-example refers to its rules, and all the numbers in the responses are consistent with each other.
+service serves at `GET /ratelimit/v1/openapi.yaml`. The document is built around ONE end-to-end configuration
+(section 1): every example refers to its rules, and all the numbers in the responses are consistent with each other.
 
 ## 0. Setup
+
+The API is off by default: `management.enabled=true` in the service chart turns it on and adds port 8082 to the
+Service ([Management API port](helm-chart.md#management-api-port)).
 
 ```bash
 kubectl port-forward -n core svc/ratelimit 8082:8082 &
@@ -14,7 +17,7 @@ BASE=http://127.0.0.1:8082/ratelimit/v1
 # management.callers, issued for the audience in management.m2m.audience. Every
 # listed caller holds operator, so one token reads, simulates, and mutates.
 TOKEN=$(kubectl create token -n core <caller-serviceaccount> --audience netcracker)
-api() { curl -sS -H "Authorization: Bearer $TOKEN" "$@"; }
+api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
 op()  { api "$@"; }
 ```
 
@@ -242,20 +245,20 @@ view cannot do:
 
 ```bash
 api "$BASE/domains/gateway.public/rules?axis.sub=alice" \
-  | jq '{tochno:        [.blocks[].rules[] | select(.applicability == "always") | .id],
-         teoreticheski: [.blocks[].rules[] | select(.applicability == "conditional") | .id]}'
+  | jq '{always:      [.blocks[].rules[] | select(.applicability == "always") | .id],
+         conditional: [.blocks[].rules[] | select(.applicability == "conditional") | .id]}'
 ```
 
 ```json
-{"tochno": ["quota/daily", "services/per-service",
+{"always": ["quota/daily", "services/per-service",
             "total/all", "search/per-client"],
- "teoreticheski": ["cascade/premium", "cascade/everyone",
-                   "reports/heavy", "reports/gold",
-                   "tenants/per-tenant", "login/anonymous",
-                   "login/authenticated", "total/bots"]}
+ "conditional": ["cascade/premium", "cascade/everyone",
+                 "reports/heavy", "reports/gold",
+                 "tenants/per-tenant", "login/anonymous",
+                 "login/authenticated", "total/bots"]}
 ```
 
-conditionalOn explains each "teoreticheski" entry: premium waits for plan (undecided_condition), everyone may be
+conditionalOn explains each "conditional" entry: premium waits for plan (undecided_condition), everyone may be
 preempted by premium (may_be_preempted, FirstMatch), heavy may be silenced by gold (replacedRules), per-tenant lacks the
 tenant axis (missing_axis). Once you learn the tenant, the refinement narrows monotonically:
 
@@ -291,7 +294,7 @@ evaluatedAt: nothing is reserved, and counters move between the evaluation and t
 The merge form (the default) works like the gateway: extraction from the token, keys on top:
 
 ```bash
-api -X POST "$BASE/simulations" -H 'Content-Type: application/json' -d '{
+api -X POST "$BASE/simulations" -d '{
   "domain": "gateway.public", "path": "/api/invoices/42", "method": "GET",
   "keys": {"sub": ["alice"], "tenant": ["acme"], "plan": ["gold"]}
 }'
@@ -386,8 +389,8 @@ api -X POST "$BASE/simulations" -d '{
 }' | jq '{allowed, refusalReason, headers}'
 # with remaining=3 and cost=5 -> {"allowed": false, "refusalReason": "rate_limited",
 #    "headers": {"block": "quota", "rule": "daily", "algorithm": "gcra",
-#                "periodSeconds": 60, "limit": 100, "remaining": 3,
-#                "retryAfterSeconds": 1.2, "effectiveWindowSeconds": 0.6}}, which is what
+#                "periodSeconds": 60, "limit": 100, "remaining": 3, "retryAfterSeconds": 1.2,
+#                "resetAfterSeconds": 58.2, "effectiveWindowSeconds": 0.6}}, which is what
 # limited=true (cost=1) in the listing will not show
 ```
 
@@ -415,9 +418,9 @@ api -X POST "$BASE/simulations" -d '{
 
 ```json
 [{"key": "sub", "reason": "decode_failed"},
+ {"key": "tenant", "reason": "decode_failed"},
  {"key": "plan", "reason": "decode_failed"},
- {"key": "roles", "reason": "decode_failed"},
- {"key": "tenant", "reason": "decode_failed"}]
+ {"key": "roles", "reason": "decode_failed"}]
 ```
 
 ## 4. Viewing counters
@@ -555,8 +558,8 @@ opk -X DELETE "$BASE/domains/gateway.public/counters?ruleId=quota/daily&axis.sub
 {"dryRun": false, "domain": "gateway.public", "ruleId": "quota/daily",
  "ruleSetVersion": "7c31a9f4e0d2",
  "axes": {"sub": "alice"}, "resetCount": 2,
- "keys": ["rl:v1:{core/gateway.public}:quota/daily:gcra:60:alice:",
-          "rl:v1:{core/gateway.public}:quota/daily:fixedwindow:86400:alice:"]}
+ "keys": ["rl:v1:{core/gateway.public}:quota/daily:fixedwindow:86400:alice:",
+          "rl:v1:{core/gateway.public}:quota/daily:gcra:60:alice:"]}
 ```
 
 ```bash
@@ -607,15 +610,15 @@ recommendation. Idempotency-Key is mandatory on every call (scope: subject+domai
 # step 1: the preview: what matched, and the token
 KEY=$(uuidgen)
 PREVIEW=$(op -X POST "$BASE/domains/gateway.public/counter-resets" \
-  -H "Idempotency-Key: $KEY" -H 'Content-Type: application/json' -d '{
+  -H "Idempotency-Key: $KEY" -d '{
   "selector": {"ruleIds": ["cascade"]},
   "dryRun": true
 }')
 echo "$PREVIEW" | jq '{matchedCount, rules, confirmationToken, confirmationExpiresAt}'
 # {"matchedCount": 63,
-#  "rules": [{"ruleId": "cascade/trial", "matchedCount": 2},
+#  "rules": [{"ruleId": "cascade/everyone", "matchedCount": 41},
 #            {"ruleId": "cascade/premium", "matchedCount": 20},
-#            {"ruleId": "cascade/everyone", "matchedCount": 41}],
+#            {"ruleId": "cascade/trial", "matchedCount": 2}],
 #  "confirmationToken": "ct-5b8e2f9d4a10",
 #  "confirmationExpiresAt": "2026-08-24T14:15:02Z"}
 
@@ -704,7 +707,7 @@ new preview and a new token. Two operators with different keys do not lock each 
 api "$BASE/status"
 # {"replica": "ratelimit-6c9d-x2v", "snapshotSwappedAt": "2026-08-24T13:58:41Z",
 #  "ruleSetVersions": {"gateway.public": "7c31a9f4e0d2"},
-#  "counterStore": {"backend": "redis at redis:6379"}}
+#  "counterStore": {"backend": "redis at redis:6379, provisioned by DBaaS"}}
 ```
 
 Errors are NC.TMFErrorResponse.v1.0: branch on code, and have people quote the id:
@@ -712,7 +715,7 @@ Errors are NC.TMFErrorResponse.v1.0: branch on code, and have people quote the i
 ```bash
 api "$BASE/domains/gateway.typo/rules"
 # {"id": "3f9a...", "code": "RLS-0404", "reason": "Unknown resource",
-#  "message": "domain \"gateway.typo\" is not in the enforced rule set",
+#  "message": "domain gateway.typo is not in the enforced rule set",
 #  "status": "404", "@type": "NC.TMFErrorResponse.v1.0", "meta": {"requestId": "b21c..."}}
 ```
 
