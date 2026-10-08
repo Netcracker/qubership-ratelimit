@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,18 +116,28 @@ func listeningOptions(t *testing.T, dir string) Options {
 // an error.
 func startService(t *testing.T, options Options) *Service {
 	t.Helper()
+	service, stop := runService(t, options)
+	t.Cleanup(func() { require.NoError(t, stop(), "Run") })
+	return service
+}
+
+// runService builds the service in namespace biz and runs it until stop is
+// called or the test ends. stop waits for the run to end and returns its
+// error, the same one on every call; the end of the test does not wait.
+func runService(t *testing.T, options Options) (service *Service, stop func() error) {
+	t.Helper()
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
 	service, err := Build("biz", options)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	done := make(chan error, 1)
 	go func() { done <- service.Run(ctx) }()
-	t.Cleanup(func() {
+	return service, sync.OnceValue(func() error {
 		cancel()
-		require.NoError(t, <-done, "Run")
+		return <-done
 	})
-	return service
 }
 
 // waitReady waits until the gRPC listener is up and a configuration is
@@ -249,15 +262,24 @@ func TestService_servesItsOwnRegistryOnTheMetricsListener(t *testing.T) {
 		`ratelimit_snapshot_rebuilds_total{result="ok"}`)
 }
 
+// The management API answers on its own listener. A request under its base
+// path without a bearer token reaches the API's identity check, which refuses
+// it: 401, or 503 while no token verifier could be built, as on a machine with
+// no service account token. A path outside the API answers 404 on the same
+// listener, so the refusal comes from the API's routes and not from the
+// listener.
 func TestService_servesTheManagementAPIOnItsOwnListener(t *testing.T) {
 	options := listeningOptions(t, t.TempDir())
 	startService(t, options)
-	url := "http://" + options.ManagementAddr + "/api/v1/status"
+	routed := "http://" + options.ManagementAddr + "/ratelimit/v1/status"
+	outside := "http://" + options.ManagementAddr + "/api/v1/status"
 
-	assert.EventuallyWithT(t, func(c *assert.CollectT) {
-		code, body := get(url)
-		assert.NotZero(c, code, "GET %s: %s", url, body)
-	}, 5*time.Second, 20*time.Millisecond, "the management listener to answer GET %s", url)
+	code, body := getOnceListening(t, routed)
+	outsideCode, outsideBody := get(outside)
+
+	assert.Contains(t, []int{http.StatusUnauthorized, http.StatusServiceUnavailable}, code,
+		"GET %s: %s", routed, body)
+	assert.Equal(t, http.StatusNotFound, outsideCode, "GET %s: %s", outside, outsideBody)
 }
 
 // A configuration that changes while the service runs is applied, and the
@@ -317,6 +339,105 @@ type failingResolver struct{}
 func (failingResolver) GetConnection(context.Context, string, map[string]any,
 	rest.BaseDbParams) (map[string]any, error) {
 	return nil, errors.New("no mounted Secret matches, and dbaas-agent answered 401")
+}
+
+// fixedResolver is a DBaaS client that finds the database at one URL.
+type fixedResolver struct{ url string }
+
+func (r fixedResolver) GetConnection(context.Context, string, map[string]any,
+	rest.BaseDbParams) (map[string]any, error) {
+	return map[string]any{"url": r.url}, nil
+}
+
+// warningLog is the platform logger with the warnings it is given kept for the
+// test to read. The service warns from goroutines of its own.
+type warningLog struct {
+	Logger
+
+	mu       sync.Mutex
+	warnings []string
+}
+
+func (w *warningLog) Warnf(format string, args ...any) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.warnings = append(w.warnings, fmt.Sprintf(format, args...))
+}
+
+// logged joins the warnings so far, one per line.
+func (w *warningLog) logged() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return strings.Join(w.warnings, "\n")
+}
+
+// optionsOverRedisAt configures a service that counts in the DBaaS Redis its
+// resolver finds at url, with an empty manifest mounted, the probe, metrics,
+// and management listeners off, and a platform logger that keeps the warnings.
+func optionsOverRedisAt(t *testing.T, url string) (Options, *warningLog) {
+	t.Helper()
+	dir := t.TempDir()
+	writeConfiguration(t, dir)
+	options := listeningOptions(t, dir)
+	options.ProbeAddr, options.MetricsAddr, options.ManagementAddr = "0", "0", "0"
+	options.RedisMicroservice = "ratelimit-service"
+	options.RedisResolver = fixedResolver{url: url}
+	platform := &warningLog{Logger: logging.GetLogger("test")}
+	options.Platform = platform
+	return options, platform
+}
+
+// The service reads the counter store's eviction policy at start, and a store
+// whose policy it cannot read is a warning in the log while the replica runs
+// on: the policy belongs to the Redis adapter's installation, and a replica
+// that refused to start over it would turn a risk under memory pressure into
+// an outage. Nothing listens at the address the resolver names, so the read
+// fails.
+func TestService_warnsOfAnEvictionPolicyItCannotReadAndRunsOn(t *testing.T) {
+	options, platform := optionsOverRedisAt(t, "redis://"+freeAddr(t))
+
+	service := startService(t, options)
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Contains(c, platform.logged(), "maxmemory-policy", "the warnings logged")
+	}, 5*time.Second, 20*time.Millisecond, "a warning about the counter store's eviction policy")
+	waitReady(t, service)
+}
+
+// A replica that shuts down before the counter store answers the read of its
+// eviction policy has nothing to report about the store, and logs no warning.
+// The store at the resolver's address takes the connection and never answers,
+// so the read is in flight when the replica shuts down, and Run waits for it to
+// end.
+func TestService_warnsOfNothingWhenItShutsDownBeforeTheStoreAnswers(t *testing.T) {
+	store, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+	connected := make(chan net.Conn, 1)
+	go func() {
+		if conn, err := store.Accept(); err == nil {
+			connected <- conn
+		}
+	}()
+	options, platform := optionsOverRedisAt(t, "redis://"+store.Addr().String())
+	_, stop := runService(t, options)
+	select {
+	case conn := <-connected:
+		t.Cleanup(func() { _ = conn.Close() })
+	case <-time.After(5 * time.Second):
+		t.Fatal("waited 5s for the read of the eviction policy to connect to the store; none connected")
+	}
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- stop() }()
+
+	select {
+	case err := <-stopped:
+		require.NoError(t, err, "Run")
+	case <-time.After(10 * time.Second):
+		t.Fatal("waited 10s for Run to end after the shutdown; it is still running")
+	}
+	assert.Empty(t, platform.logged(), "the warnings logged")
 }
 
 // The probe, metrics, and management listeners are optional, and "0" turns

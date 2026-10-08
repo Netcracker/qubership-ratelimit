@@ -1,6 +1,7 @@
 package leader
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,12 +24,28 @@ func TestLock_signsTheLeaseInTheGivenNamespaceWithThePodName(t *testing.T) {
 }
 
 // No POD_NAME means no pod: a local run, an envtest. The choice of identity
-// goes back to controller-runtime rather than refusing to start.
+// goes back to controller-runtime rather than refusing to start. A process
+// started outside a pod has the variable unset; a manifest can also set it to
+// nothing.
 func TestLock_isNilOutsideAPod(t *testing.T) {
-	t.Setenv("POD_NAME", "")
+	tests := []struct {
+		name   string
+		setenv func(t *testing.T)
+	}{
+		{"POD_NAME unset", func(t *testing.T) {
+			t.Setenv("POD_NAME", "") // restores the variable when the test ends
+			require.NoError(t, os.Unsetenv("POD_NAME"))
+		}},
+		{"POD_NAME empty", func(t *testing.T) { t.Setenv("POD_NAME", "") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.setenv(t)
 
-	lock, err := Lock(&rest.Config{Host: "https://127.0.0.1:1"}, "biz")
+			lock, err := Lock(&rest.Config{Host: "https://127.0.0.1:1"}, "biz")
 
-	assert.NoError(t, err)
-	assert.Nil(t, lock, "Lock(namespace=biz) with POD_NAME empty")
+			assert.NoError(t, err)
+			assert.Nil(t, lock, "Lock(namespace=biz) with %s", tt.name)
+		})
+	}
 }

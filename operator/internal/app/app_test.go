@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -77,6 +80,7 @@ var _ = Describe("the operator, built without a Deployment to adopt", Ordered, C
 	var (
 		warnings  []string
 		probeAddr string
+		mgr       ctrl.Manager
 	)
 
 	BeforeAll(func() {
@@ -91,7 +95,7 @@ var _ = Describe("the operator, built without a Deployment to adopt", Ordered, C
 		Expect(listener.Close()).To(Succeed())
 
 		GinkgoT().Setenv("POD_NAME", "")
-		mgr, err := Build(cfg, scheme.Scheme, testNamespace, Options{
+		mgr, err = Build(cfg, scheme.Scheme, testNamespace, Options{
 			ProbeAddr: probeAddr, MetricsAddr: "0", Deployment: "ratelimit-operator", Version: "0.0.0-test",
 			LeaderElection: true,
 			Log:            logf.Log,
@@ -213,7 +217,55 @@ var _ = Describe("the operator, built without a Deployment to adopt", Ordered, C
 			return -1
 		}).WithTimeout(20*time.Second).Should(Equal(1.0), "ratelimit_leader to be 1, or -1 while it is not exported")
 	})
+
+	// The policy kind runs on one informer, the unstructured one both
+	// controllers watch. The operator's cache keeps typed, unstructured, and
+	// metadata informers apart, and refuses a read of a kind it holds no
+	// informer of that form for. A refused typed read and a refused metadata
+	// read therefore show that nothing in the running operator started a
+	// second informer of the kind, with a second copy of every policy.
+	//
+	// whileBothControllersRun creates a policy in the domain and waits until
+	// both controllers run, since a controller starts its watches only once it
+	// runs: the writer has run once it wrote the ConfigMap, and the status
+	// reconciler once it wrote the policy's Ready condition.
+	whileBothControllersRun := func(domain string) {
+		watched := createPolicy(domain)
+		Eventually(func() error {
+			return k8sClient.Get(ctx, client.ObjectKey{Namespace: testNamespace, Name: contract.ConfigMapName},
+				&corev1.ConfigMap{})
+		}).WithTimeout(20*time.Second).Should(Succeed(), "the writer to write the ConfigMap")
+		Eventually(conditionsOf(client.ObjectKeyFromObject(watched))).WithTimeout(20*time.Second).
+			Should(readyWithReason(v1.ReasonNoReplicas), "the status reconciler to write the Ready condition")
+	}
+
+	It("starts no typed informer of the policy kind", func() {
+		whileBothControllersRun("gateway.typed")
+
+		err := mgr.GetCache().List(ctx, &v1.RateLimitPolicyList{}, client.InNamespace(testNamespace))
+
+		Expect(err).To(MatchError(isNotCached, "an ErrResourceNotCached"),
+			"a typed list of RateLimitPolicy through the manager's cache")
+	})
+
+	It("starts no metadata informer of the policy kind", func() {
+		whileBothControllersRun("gateway.metadata")
+		list := &metav1.PartialObjectMetadataList{}
+		list.SetGroupVersionKind(v1.GroupVersion.WithKind("RateLimitPolicyList"))
+
+		err := mgr.GetCache().List(ctx, list, client.InNamespace(testNamespace))
+
+		Expect(err).To(MatchError(isNotCached, "an ErrResourceNotCached"),
+			"a metadata list of RateLimitPolicy through the manager's cache")
+	})
 })
+
+// isNotCached reports whether err is the cache's refusal of a read it holds no
+// informer for.
+func isNotCached(err error) bool {
+	var notCached *cache.ErrResourceNotCached
+	return errors.As(err, &notCached)
+}
 
 var _ = Describe("the operator, not built", func() {
 	It("fails on a config no manager can be made from", func() {
