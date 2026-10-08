@@ -235,9 +235,8 @@ type Rule struct {
 	// rule begins as a copy of that body, and every field it writes replaces
 	// the field of the preset whole; a field it leaves out comes from the
 	// preset. A list written empty is a value: counters: [] is one shared
-	// bucket, whatever axes the preset has. name is always the rule's own.
-	// A rule preset body carries no preset of its own, and a rule that
-	// overrides a rule of its block's preset by name writes none either.
+	// bucket, whatever axes the preset has. name is always the rule's own. A
+	// rule that overrides a rule of its block's preset by name carries none.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
@@ -317,7 +316,7 @@ type LimitBlock struct {
 	// field and keeps its position, a rule of a new name is inserted in
 	// front of the rule its before names or appended, and a dropped rule
 	// leaves the preset's rule of that name out. name is always the block's
-	// own. A block preset body carries no preset of its own.
+	// own.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
@@ -343,6 +342,92 @@ type LimitBlock struct {
 	Rules []Rule `json:"rules,omitempty"`
 }
 
+// RulePreset is a rule body a rule of spec.limits takes by name through its
+// preset field: the fields of a rule except preset, before, and dropped, with
+// name as the name of the preset. A body may be partial, a preset of windows
+// alone or of predicates alone. Presets do not chain: a body has no preset
+// field, and before and dropped belong to the rules of a block that takes a
+// block preset. The content of a body is checked through the rules that take
+// it, so a body no rule takes may name a key the domain lacks and no problem
+// reports it.
+type RulePreset struct {
+	// name is the name a rule's preset refers to. It is unique among the
+	// rule presets of the policy and is part of no counter key.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// matches is the conjunction of predicates a rule that takes the preset
+	// starts with. An empty list matches every request the block sees.
+	// +optional
+	// +listType=atomic
+	Matches []Predicate `json:"matches,omitzero"`
+
+	// counters are the axes of the bucket a rule that takes the preset
+	// starts with. An empty list is a single shared bucket.
+	// +optional
+	// +kubebuilder:validation:items:Pattern=`^[a-z][a-zA-Z0-9_]*$`
+	// +kubebuilder:validation:items:MaxLength=63
+	// +listType=atomic
+	Counters []string `json:"counters,omitzero"`
+
+	// rates are the counting windows a rule that takes the preset starts
+	// with, keyed by period, each with its own algorithm.
+	// +optional
+	// +listType=map
+	// +listMapKey=periodSeconds
+	Rates []Rate `json:"rates,omitzero"`
+
+	// behavior is the behavior a rule that takes the preset starts with:
+	// Enforce, Shadow, or Bypass.
+	// +optional
+	Behavior RuleBehavior `json:"behavior,omitempty"`
+
+	// replacedRules are the rules a rule that takes the preset silences.
+	// They are rules of the block that holds that rule.
+	// +optional
+	// +kubebuilder:validation:items:MaxLength=63
+	// +listType=atomic
+	ReplacedRules []string `json:"replacedRules,omitzero"`
+}
+
+// BlockPreset is a block body a block of spec.limits takes by name through
+// its preset field: target, mode, and rules, each optional, with name as the
+// name of the preset. Presets do not chain: a body has no preset field. The
+// rules of a body may take rule presets and carry no before or dropped,
+// which belong to the rules of a block that takes a block preset; the
+// compiler reports a rule that carries one, whether a block takes the preset
+// or not. The content of a body is checked through the blocks that take it.
+type BlockPreset struct {
+	// name is the name a block's preset refers to. It is unique among the
+	// block presets of the policy and is part of no counter key.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// target restricts a block that takes the preset and writes no target
+	// of its own. A block replaces a preset target and cannot remove it.
+	// +optional
+	Target *Target `json:"target,omitempty"`
+
+	// mode is the mode a block that takes the preset starts with. Absent at
+	// every layer, it is All.
+	// +optional
+	Mode BlockMode `json:"mode,omitempty"`
+
+	// rules are the rules a block that takes the preset starts with, merged
+	// by name with the rules the block writes. A rule here may take a rule
+	// preset and carries no before or dropped.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Rules []Rule `json:"rules,omitempty"`
+}
+
 // Presets are the bodies a rule or a block of spec.limits takes by name
 // through its preset field. The operator writes them into the rules and
 // blocks that take them before the policy compiles, so the counter keys, the
@@ -350,26 +435,17 @@ type LimitBlock struct {
 // the resolved rules and blocks under the names of the point of use, and a
 // preset name appears nowhere outside the object.
 type Presets struct {
-	// rules holds rule bodies: the fields of a rule, with name as the name of
-	// the preset. A body may be partial, a preset of windows alone or of
-	// predicates alone. It carries no preset, before, or dropped: presets do
-	// not chain, and before and dropped belong to a block that takes a block
-	// preset. The shape of every body is checked whether a rule takes it or
-	// not; its content is checked through the rules that take it.
+	// rules holds the rule presets.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	Rules []Rule `json:"rules,omitempty"`
+	Rules []RulePreset `json:"rules,omitempty"`
 
-	// blocks holds block bodies: target, mode, and rules, each optional,
-	// with name as the name of the preset. The rules of a body may take rule
-	// presets and carry no before or dropped; the body carries no preset of its
-	// own. The shape of every body is checked whether a block takes it or
-	// not; its content is checked through the blocks that take it.
+	// blocks holds the block presets.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	Blocks []LimitBlock `json:"blocks,omitempty"`
+	Blocks []BlockPreset `json:"blocks,omitempty"`
 }
 
 // RateLimitPolicySpec is the whole rate limit configuration of one domain:

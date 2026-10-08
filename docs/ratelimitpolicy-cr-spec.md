@@ -346,11 +346,11 @@ spec:
 ### Rule presets
 
 `spec.presets.rules[]` holds rule bodies: the fields of a rule, with `name` as the name of the preset. A body may be
-partial. A preset of windows alone is a preset of rates, a preset of predicates alone is a preset of matches. The
-shape of every preset is checked whether a rule uses it or not: a rule preset body carries no `preset`, `before`, or
-`dropped`, so rule presets do not chain, and a chain is `InvalidSpec`. The content of a preset is checked through the
-rules that use it only: a preset no rule uses can hold a window the math cannot enforce or a key the domain lacks,
-and no problem reports it.
+partial. A preset of windows alone is a preset of rates, a preset of predicates alone is a preset of matches. A rule
+preset body has no `preset`, `before`, or `dropped` field: rule presets do not chain, and a body that writes one of
+them is refused under strict field validation, which kubectl asks for by default, and pruned with a warning
+otherwise. The content of a preset is checked through the rules that use it only: a preset no rule uses can hold a
+window the math cannot enforce or a key the domain lacks, and no problem reports it.
 
 A rule of a block takes a preset through `preset`. The rule keeps its own `name`, which stays unique within the
 block and stays the rule's segment of the counter key. Every other field written in the rule replaces the field of
@@ -375,9 +375,9 @@ its own `replacedRules`.
 ### Block presets
 
 `spec.presets.blocks[]` holds block bodies: `target`, `mode`, and `rules`, each optional, with `name` as the name of
-the preset. The rules of a block preset may name rule presets and may not carry `before` or `dropped`. As with rule
-presets, the shape of every block preset is checked whether a block uses it or not, and the content through the
-blocks that use it.
+the preset. A block preset body has no `preset` field. The rules of a block preset may name rule presets and may not
+carry `before` or `dropped`; that shape is checked whether a block uses the preset or not, and the content through
+the blocks that use it.
 
 A block of `limits` takes a preset through `preset` and keeps its own `name`, which stays unique within the policy
 and stays the block's segment of the counter key. `target` and `mode` written in the block replace the preset's
@@ -817,7 +817,7 @@ in them) and contain only root causes:
 | `UnresolvedPresetReference`: `preset` names a preset that does not exist; `before` names a rule that is neither in the block preset nor written earlier in the list; `dropped` names a rule the block preset does not hold | blocking |
 | `IncompatibleOperator` / `InvalidCounterAxis`: the key type does not suit the operator or the axis | blocking |
 | `InvalidSpec`: a structural defect invisible to the schema: predicate arity, `Bypass` without `replacedRules` in `All`, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, an empty segment), an unknown field or enum value of a newer schema | blocking |
-| `InvalidSpec` on presets: a preset body that names a preset or carries `before` or `dropped`; a preset declared twice or without a name; `before` or `dropped` in a block without `preset`; `dropped` beside any field other than `name`; `before` on a rule the block preset holds; `preset` on a rule that overrides a rule of its block preset by name; a block with no rules after resolution | blocking |
+| `InvalidSpec` on presets: a rule of a block preset that carries `before` or `dropped`; a preset declared twice or without a name; `before` or `dropped` in a block without `preset`; `dropped` beside any field other than `name`; `before` on a rule the block preset holds; `preset` on a rule that overrides a rule of its block preset by name; a block with no rules after resolution | blocking |
 | `InvalidWindow`: a window the math cannot enforce | blocking |
 | `DomainBudgetExceeded`: the worst case of a decision above 128 buckets | blocking |
 | `ResolvedPolicyTooLarge`: the estimated serialized size of the resolved policy is above 1.5 MiB (1572864 bytes) | blocking |
@@ -847,6 +847,9 @@ Schema (OpenAPI):
   by `type`; the remaining lists are atomic;
 - `preset` and `before` follow the pattern and the length of a rule or block name; `rules` of a block is optional,
   and the compiler requires at least one rule after resolution;
+- a rule preset body has the fields of a rule except `preset`, `before`, and `dropped`, and a block preset body has
+  `target`, `mode`, and `rules`: presets do not chain, and a body that writes a `preset` is refused as a field the
+  schema does not define, or pruned for a client that does not ask for strict field validation;
 - enums for `mode`, `behavior`, `algorithm`, `type`, `normalization`, `operator`, `methods`; `periodSeconds` is
   1..86400; `requests` and `burst` are 1..2 147 483 647; `ruleProblems[].message` ≤ 1024 characters and
   `ruleProblems` ≤ 64 entries, both cut by the operator before the write; `status.problems` counts every problem,

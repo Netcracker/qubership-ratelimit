@@ -51,7 +51,7 @@ var _ = Describe("rule presets", Ordered, Label("presets"), func() {
 			}
 		}
 		p := newPolicy(domain, []v1.LimitBlock{block("orders", ordersPath), block("catalog", catalogPath)})
-		p.Spec.Presets = &v1.Presets{Rules: []v1.Rule{{
+		p.Spec.Presets = &v1.Presets{Rules: []v1.RulePreset{{
 			Name:     "standard",
 			Behavior: behavior,
 			Rates: []v1.Rate{{
@@ -234,11 +234,11 @@ var _ = Describe("block presets", Ordered, Label("presets"), func() {
 				Rules: []v1.Rule{partnerBefore, {Name: "anonymous", Dropped: true}}},
 		})
 		p.Spec.Presets = &v1.Presets{
-			Rules: []v1.Rule{
+			Rules: []v1.RulePreset{
 				{Name: "internal-bypass", Behavior: internal.Behavior, Matches: internal.Matches},
 				{Name: "standard", Counters: perUserRule.Counters, Rates: perUserRule.Rates},
 			},
-			Blocks: []v1.LimitBlock{{Name: "cascade", Mode: v1.BlockModeFirstMatch, Rules: []v1.Rule{
+			Blocks: []v1.BlockPreset{{Name: "cascade", Mode: v1.BlockModeFirstMatch, Rules: []v1.Rule{
 				{Name: "internal", Preset: "internal-bypass"},
 				{Name: "per-user", Preset: "standard"},
 				anonymous,

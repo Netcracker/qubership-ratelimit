@@ -61,16 +61,16 @@ type Resolved struct {
 // list, and a dropped rule the block's preset does not hold are
 // UnresolvedPresetReference. A resolved policy estimated above
 // [MaxResolvedSize] is ResolvedPolicyTooLarge. A preset declared twice or
-// without a name, a preset body that names a preset or carries before or
-// dropped, before or dropped in a block without a preset, dropped beside
-// any field other than name, before on a rule the block's preset holds, and
-// preset on a rule that overrides a rule of the block's preset by name are
+// without a name, a rule of a block preset that carries before or dropped,
+// before or dropped in a block without a preset, dropped beside any field
+// other than name, before on a rule the block's preset holds, and preset on
+// a rule that overrides a rule of the block's preset by name are
 // InvalidSpec. The estimate, [Resolved.EstimatedSize], is made before any
 // preset is written into a block or a rule and never falls below the
 // resolved size, so it can refuse a policy whose resolved size is below the
 // bound.
 func Resolve(spec *v1.RateLimitPolicySpec) (*Resolved, []v1.RuleProblem) {
-	r := &resolver{rulePresets: map[string]*v1.Rule{}, blockPresets: map[string]*v1.LimitBlock{}}
+	r := &resolver{rulePresets: map[string]*v1.RulePreset{}, blockPresets: map[string]*v1.BlockPreset{}}
 	r.declareRulePresets(spec)
 	r.declareBlockPresets(spec)
 	uses := r.checkReferences(spec)
@@ -90,13 +90,13 @@ func Resolve(spec *v1.RateLimitPolicySpec) (*Resolved, []v1.RuleProblem) {
 		block := &out.Spec.Limits[b]
 		if block.Preset != "" {
 			out.BlockPresets[block.Name] = block.Preset
-			*block = mergeBlock(block, r.blockPresets[block.Preset])
+			*block = mergeBlock(block, blockOf(r.blockPresets[block.Preset]))
 		}
 		for i := range block.Rules {
 			rule := &block.Rules[i]
 			if rule.Preset != "" {
 				out.Presets[RuleRef{Block: block.Name, Rule: rule.Name}] = rule.Preset
-				*rule = mergeRule(rule, r.rulePresets[rule.Preset])
+				*rule = mergeRule(rule, ruleOf(r.rulePresets[rule.Preset]))
 			}
 		}
 		applyBlockDefaults(block)
@@ -107,8 +107,8 @@ func Resolve(spec *v1.RateLimitPolicySpec) (*Resolved, []v1.RuleProblem) {
 // resolver collects the presets of one spec and the problems found on the
 // way, so the checks stay small and report through one place.
 type resolver struct {
-	rulePresets  map[string]*v1.Rule
-	blockPresets map[string]*v1.LimitBlock
+	rulePresets  map[string]*v1.RulePreset
+	blockPresets map[string]*v1.BlockPreset
 	problems     []v1.RuleProblem
 }
 
@@ -121,9 +121,10 @@ func (r *resolver) fail(block, rule, reason, format string, args ...any) {
 	})
 }
 
-// declareRulePresets indexes the rule presets by name and checks the shape
-// of each, whether a rule takes it or not. A problem of a preset has no block
-// and no rule to be addressed to, so the message names the preset.
+// declareRulePresets indexes the rule presets by name and reports one
+// declared twice or without a name, whether a rule takes it or not. A
+// problem of a preset has no block and no rule to be addressed to, so the
+// message names the preset.
 func (r *resolver) declareRulePresets(spec *v1.RateLimitPolicySpec) {
 	if spec.Presets == nil {
 		return
@@ -138,25 +139,14 @@ func (r *resolver) declareRulePresets(spec *v1.RateLimitPolicySpec) {
 			r.fail("", "", v1.ProblemInvalidSpec, "rule preset %q is declared twice", preset.Name)
 			continue
 		}
-		// Reported, and indexed all the same: a rule that takes the preset
-		// is then told about the chain, not that the preset is not
-		// declared.
-		if preset.Preset != "" {
-			r.fail("", "", v1.ProblemInvalidSpec,
-				"rule preset %q names preset %q; a preset body carries no preset of its own", preset.Name, preset.Preset)
-		}
-		if preset.Before != "" || preset.Dropped {
-			r.fail("", "", v1.ProblemInvalidSpec,
-				"rule preset %q carries before or dropped, which a rule of a block that takes a block preset carries", preset.Name)
-		}
 		r.rulePresets[preset.Name] = preset
 	}
 }
 
 // declareBlockPresets indexes the block presets by name and checks the shape
-// of each, whether a block takes it or not: a body carries no preset, and
-// its rules carry no before or dropped. A rule preset its rules name is a
-// reference, checked through the blocks that take the body.
+// of each, whether a block takes it or not: its rules carry no before or
+// dropped. A rule preset its rules name is a reference, checked through the
+// blocks that take the body.
 func (r *resolver) declareBlockPresets(spec *v1.RateLimitPolicySpec) {
 	if spec.Presets == nil {
 		return
@@ -170,10 +160,6 @@ func (r *resolver) declareBlockPresets(spec *v1.RateLimitPolicySpec) {
 		if _, dup := r.blockPresets[preset.Name]; dup {
 			r.fail("", "", v1.ProblemInvalidSpec, "block preset %q is declared twice", preset.Name)
 			continue
-		}
-		if preset.Preset != "" {
-			r.fail("", "", v1.ProblemInvalidSpec,
-				"block preset %q names preset %q; a preset body carries no preset of its own", preset.Name, preset.Preset)
 		}
 		for _, rule := range preset.Rules {
 			if rule.Before != "" || rule.Dropped {
@@ -245,7 +231,7 @@ func (r *resolver) checkRulePreset(block string, rule *v1.Rule, uses *presetUses
 // rule's before names a rule of the preset or a new rule written earlier.
 // The rule presets the preset's own rules take count once per block that
 // takes the preset, less the rules the block drops.
-func (r *resolver) checkBlockUse(block *v1.LimitBlock, preset *v1.LimitBlock, uses *presetUses) {
+func (r *resolver) checkBlockUse(block *v1.LimitBlock, preset *v1.BlockPreset, uses *presetUses) {
 	held := map[string]*v1.Rule{}
 	for i := range preset.Rules {
 		held[preset.Rules[i].Name] = &preset.Rules[i]
@@ -319,12 +305,12 @@ func (r *resolver) checkSize(spec *v1.RateLimitPolicySpec, uses presetUses) int 
 	}
 	total := serializedSize(written)
 	for name, n := range uses.rules {
-		preset := r.rulePresets[name].DeepCopy()
+		preset := ruleOf(r.rulePresets[name])
 		applyRuleDefaults(preset)
 		total += n * serializedSize(preset)
 	}
 	for name, n := range uses.blocks {
-		preset := r.blockPresets[name].DeepCopy()
+		preset := blockOf(r.blockPresets[name])
 		applyBlockDefaults(preset)
 		total += n * serializedSize(preset)
 	}
@@ -345,6 +331,29 @@ func serializedSize(v any) int {
 		panic(fmt.Sprintf("marshal a RateLimitPolicy spec: %v", err))
 	}
 	return len(raw)
+}
+
+// ruleOf is the rule a rule preset stands for: the body under the preset's
+// name, copied, with no preset, before, or dropped. It serializes to the
+// same JSON as the preset, so the size estimate may count either.
+func ruleOf(preset *v1.RulePreset) *v1.Rule {
+	body := preset.DeepCopy()
+	return &v1.Rule{
+		Name:          body.Name,
+		Matches:       body.Matches,
+		Counters:      body.Counters,
+		Rates:         body.Rates,
+		Behavior:      body.Behavior,
+		ReplacedRules: body.ReplacedRules,
+	}
+}
+
+// blockOf is the block a block preset stands for: the body under the
+// preset's name, copied, with no preset. It serializes to the same JSON as
+// the preset, so the size estimate may count either.
+func blockOf(preset *v1.BlockPreset) *v1.LimitBlock {
+	body := preset.DeepCopy()
+	return &v1.LimitBlock{Name: body.Name, Target: body.Target, Mode: body.Mode, Rules: body.Rules}
 }
 
 // mergeBlock is the block of the point of use over its preset: a copy of the

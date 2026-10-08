@@ -15,8 +15,8 @@ import (
 // rules, and its own rules merge with the preset's by name.
 
 // internalBypass is the rule preset the cascade starts with.
-func internalBypass() v1.Rule {
-	return v1.Rule{
+func internalBypass() v1.RulePreset {
+	return v1.RulePreset{
 		Name:     "internal-bypass",
 		Matches:  []v1.Predicate{{Key: "sub", Operator: v1.OperatorEquals, Value: "prometheus"}},
 		Behavior: v1.RuleBehaviorBypass,
@@ -26,8 +26,8 @@ func internalBypass() v1.Rule {
 // planCascade is the block preset of the resource specification: a
 // FirstMatch cascade of plans with no target, so every block that takes it
 // brings one. Two of its rules take rule presets.
-func planCascade() v1.LimitBlock {
-	return v1.LimitBlock{
+func planCascade() v1.BlockPreset {
+	return v1.BlockPreset{
 		Name: "plan-cascade",
 		Mode: v1.BlockModeFirstMatch,
 		Rules: []v1.Rule{
@@ -51,8 +51,8 @@ func cascadeSpec(blocks ...v1.LimitBlock) *v1.RateLimitPolicySpec {
 	return &v1.RateLimitPolicySpec{
 		Domain: testDomain,
 		Presets: &v1.Presets{
-			Rules:  []v1.Rule{internalBypass(), standardClient()},
-			Blocks: []v1.LimitBlock{planCascade()},
+			Rules:  []v1.RulePreset{internalBypass(), standardClient()},
+			Blocks: []v1.BlockPreset{planCascade()},
 		},
 		Limits: blocks,
 	}
@@ -64,6 +64,25 @@ func ruleNames(block v1.LimitBlock) []string {
 		names = append(names, rule.Name)
 	}
 	return names
+}
+
+// The fields of a block preset are the fields of a block except preset, the
+// one authoring field of a block. Both sets are read from the types, so a
+// field added to LimitBlock and left out of BlockPreset fails here rather
+// than being unavailable to a preset without a word.
+func TestResolve_aBlockPresetHasEveryFieldOfABlockExceptPreset(t *testing.T) {
+	blockFields := map[string]bool{}
+	for _, field := range reflect.VisibleFields(reflect.TypeFor[v1.LimitBlock]()) {
+		if field.Name != "Preset" {
+			blockFields[field.Name] = true
+		}
+	}
+	presetFields := map[string]bool{}
+	for _, field := range reflect.VisibleFields(reflect.TypeFor[v1.BlockPreset]()) {
+		presetFields[field.Name] = true
+	}
+
+	assert.Equal(t, blockFields, presetFields)
 }
 
 func TestResolve_aBlockTakesTheModeAndTheRulesOfItsPresetAndKeepsItsNameAndItsTarget(t *testing.T) {
@@ -232,13 +251,13 @@ func TestResolve_aDroppedRuleCarriesNothingBesideItsName(t *testing.T) {
 // counters by the first two, behavior by the last two, rates by the outer
 // two, and matches by the first layer alone.
 func TestResolve_threeLayersApplyToOneRuleInOrder(t *testing.T) {
-	base := v1.Rule{Name: "base", Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorExists}},
+	base := v1.RulePreset{Name: "base", Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorExists}},
 		Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(100)}}
 	spec := &v1.RateLimitPolicySpec{
 		Domain: testDomain,
 		Presets: &v1.Presets{
-			Rules: []v1.Rule{base},
-			Blocks: []v1.LimitBlock{{Name: "cascade", Rules: []v1.Rule{
+			Rules: []v1.RulePreset{base},
+			Blocks: []v1.BlockPreset{{Name: "cascade", Rules: []v1.Rule{
 				{Name: "per-user", Preset: "base", Counters: []string{}, Behavior: v1.RuleBehaviorShadow},
 			}}},
 		},
@@ -366,35 +385,30 @@ func TestResolve_aRulePresetOnlyAnUnusedBlockPresetNamesIsSilent(t *testing.T) {
 
 // The shape of a block preset is checked whether a block takes it or not.
 func TestResolve_rejectsTheShapeOfABlockPresetNoBlockTakes(t *testing.T) {
-	withRules := func(rules ...v1.Rule) v1.LimitBlock { return v1.LimitBlock{Name: "cascade", Rules: rules} }
+	withRules := func(rules ...v1.Rule) v1.BlockPreset { return v1.BlockPreset{Name: "cascade", Rules: rules} }
 	cases := []struct {
 		name    string
-		presets []v1.LimitBlock
+		presets []v1.BlockPreset
 		message string
 	}{
 		{
-			name:    "a block preset that names a preset",
-			presets: []v1.LimitBlock{planCascade(), {Name: "chained", Preset: "plan-cascade"}},
-			message: `block preset "chained" names preset "plan-cascade"; a preset body carries no preset of its own`,
-		},
-		{
 			name:    "a rule of a block preset with before",
-			presets: []v1.LimitBlock{withRules(v1.Rule{Name: "a", Before: "b", Rates: []v1.Rate{minuteRate(1)}})},
+			presets: []v1.BlockPreset{withRules(v1.Rule{Name: "a", Before: "b", Rates: []v1.Rate{minuteRate(1)}})},
 			message: `rule "a" of block preset "cascade" carries before or dropped, which a block that takes the preset carries`,
 		},
 		{
 			name:    "a rule of a block preset with dropped",
-			presets: []v1.LimitBlock{withRules(v1.Rule{Name: "a", Dropped: true})},
+			presets: []v1.BlockPreset{withRules(v1.Rule{Name: "a", Dropped: true})},
 			message: `rule "a" of block preset "cascade" carries before or dropped, which a block that takes the preset carries`,
 		},
 		{
 			name:    "a block preset declared twice",
-			presets: []v1.LimitBlock{planCascade(), planCascade()},
+			presets: []v1.BlockPreset{planCascade(), planCascade()},
 			message: `block preset "plan-cascade" is declared twice`,
 		},
 		{
 			name:    "a block preset without a name",
-			presets: []v1.LimitBlock{{Rules: []v1.Rule{simpleRule("a")}}},
+			presets: []v1.BlockPreset{{Rules: []v1.Rule{simpleRule("a")}}},
 			message: "a block preset without a name",
 		},
 	}
@@ -402,7 +416,7 @@ func TestResolve_rejectsTheShapeOfABlockPresetNoBlockTakes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := &v1.RateLimitPolicySpec{
 				Domain:  testDomain,
-				Presets: &v1.Presets{Rules: []v1.Rule{internalBypass(), standardClient()}, Blocks: tc.presets},
+				Presets: &v1.Presets{Rules: []v1.RulePreset{internalBypass(), standardClient()}, Blocks: tc.presets},
 				Limits:  []v1.LimitBlock{{Name: "api", Rules: []v1.Rule{simpleRule("total")}}},
 			}
 
@@ -415,33 +429,12 @@ func TestResolve_rejectsTheShapeOfABlockPresetNoBlockTakes(t *testing.T) {
 	}
 }
 
-func TestResolve_aRulePresetWithBeforeOrDroppedIsInvalid(t *testing.T) {
-	cases := map[string]v1.Rule{
-		"before":  {Name: "p", Before: "q", Rates: []v1.Rate{minuteRate(1)}},
-		"dropped": {Name: "p", Dropped: true},
-	}
-	for name, preset := range cases {
-		t.Run(name, func(t *testing.T) {
-			spec := specWithPresets([]v1.Rule{preset},
-				v1.LimitBlock{Name: "api", Rules: []v1.Rule{simpleRule("total")}})
-
-			resolved, problems := Resolve(spec)
-
-			assert.Nil(t, resolved)
-			require.Len(t, problems, 1)
-			assert.Equal(t, v1.RuleProblem{Reason: v1.ProblemInvalidSpec,
-				Message: `rule preset "p" carries before or dropped, which a rule of a block that takes a block preset carries`},
-				problems[0])
-		})
-	}
-}
-
 // A block that holds no rule once its preset is resolved is the engine's
 // "a block without rules", reported with the block's preset named.
 func TestCompile_aBlockWithNoRulesAfterResolutionIsInvalid(t *testing.T) {
 	spec := &v1.RateLimitPolicySpec{
 		Domain:  testDomain,
-		Presets: &v1.Presets{Blocks: []v1.LimitBlock{{Name: "one", Rules: []v1.Rule{simpleRule("only")}}}},
+		Presets: &v1.Presets{Blocks: []v1.BlockPreset{{Name: "one", Rules: []v1.Rule{simpleRule("only")}}}},
 		Limits:  []v1.LimitBlock{{Name: "api", Preset: "one", Rules: []v1.Rule{{Name: "only", Dropped: true}}}},
 	}
 
@@ -471,10 +464,9 @@ func TestCompile_aPolicyWithBlockPresetsCompilesLikeThePolicyWrittenOut(t *testi
 	withPresets.Mappings = []v1.ClaimMapping{{Key: "plan", Claim: "plan", Normalization: v1.NormalizeLowercase}}
 	withPresets.Groups = []v1.Group{{Name: "partners", Values: []string{"00000000-0000-4000-8000-00000000c001"}}}
 
-	internal := internalBypass()
-	internal.Name = "internal"
-	perUser := standardClient()
-	perUser.Name = "per-user"
+	bypass, standard := internalBypass(), standardClient()
+	internal := v1.Rule{Name: "internal", Matches: bypass.Matches, Behavior: bypass.Behavior}
+	perUser := v1.Rule{Name: "per-user", Counters: standard.Counters, Rates: standard.Rates}
 	perUserCatalog := perUser
 	perUserCatalog.Rates = []v1.Rate{minuteRate(300)}
 	enterprise, anonymous := planCascade().Rules[1], planCascade().Rules[3]
@@ -510,12 +502,12 @@ func TestCompile_aPolicyWithBlockPresetsCompilesLikeThePolicyWrittenOut(t *testi
 func TestCompile_theDecisionBudgetChargesABlockPresetOncePerBlock(t *testing.T) {
 	windows := []v1.Rate{{Requests: 1, PeriodSeconds: 10}, {Requests: 1, PeriodSeconds: 60},
 		{Requests: 1, PeriodSeconds: 3600}, {Requests: 1, PeriodSeconds: 86400}}
-	body := v1.LimitBlock{Name: "wide"}
+	body := v1.BlockPreset{Name: "wide"}
 	for i := range 5 {
 		body.Rules = append(body.Rules, v1.Rule{Name: fmt.Sprintf("r%d", i), Rates: windows})
 	}
 	stamped := func(blocks int) *v1.RateLimitPolicySpec {
-		spec := &v1.RateLimitPolicySpec{Domain: testDomain, Presets: &v1.Presets{Blocks: []v1.LimitBlock{body}}}
+		spec := &v1.RateLimitPolicySpec{Domain: testDomain, Presets: &v1.Presets{Blocks: []v1.BlockPreset{body}}}
 		for i := range blocks {
 			spec.Limits = append(spec.Limits, v1.LimitBlock{Name: fmt.Sprintf("b%d", i), Preset: "wide",
 				Target: prefixTarget(fmt.Sprintf("/api/%d", i))})
@@ -544,8 +536,8 @@ func TestResolve_estimatesABlockPresetOncePerBlockLessTheRulesDropped(t *testing
 	spec := &v1.RateLimitPolicySpec{
 		Domain: testDomain,
 		Presets: &v1.Presets{
-			Rules:  []v1.Rule{standardClient()},
-			Blocks: []v1.LimitBlock{{Name: "body", Rules: bodyRules}},
+			Rules:  []v1.RulePreset{standardClient()},
+			Blocks: []v1.BlockPreset{{Name: "body", Rules: bodyRules}},
 		},
 		Limits: []v1.LimitBlock{
 			{Name: "x", Preset: "body"},

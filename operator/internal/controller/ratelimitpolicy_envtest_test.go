@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -67,6 +68,41 @@ func predicateRule(name string, predicates ...ratelimitv1.Predicate) ratelimitv1
 	rule := ruleWith(name)
 	rule.Matches = predicates
 	return rule
+}
+
+// policyWithPresets is a policy with one rule preset and one block preset,
+// each taken once: the object the specs on the shape of a preset body edit.
+func policyWithPresets() *ratelimitv1.RateLimitPolicy {
+	withPresets := policyWith("gateway.public",
+		blockWith("api", ratelimitv1.Rule{Name: "per-user", Preset: "standard-client"}),
+		ratelimitv1.LimitBlock{Name: "orders", Preset: "cascade"})
+	withPresets.Spec.Presets = &ratelimitv1.Presets{
+		Rules:  []ratelimitv1.RulePreset{{Name: "standard-client", Counters: []string{"sub"}}},
+		Blocks: []ratelimitv1.BlockPreset{{Name: "cascade", Rules: []ratelimitv1.Rule{ruleWith("total")}}},
+	}
+	return withPresets
+}
+
+// strayPreset is the preset name the specs on the shape of a preset body
+// write into a field the body cannot carry.
+const strayPreset = "other"
+
+// presetBody is the first body under spec.presets.<list> of an unstructured
+// spec: the map a field the typed body cannot carry is written into.
+func presetBody(spec map[string]any, list string) map[string]any {
+	return spec["presets"].(map[string]any)[list].([]any)[0].(map[string]any)
+}
+
+// unstructuredWith is a policy as unstructured, with its spec edited in
+// place: the way to write a field the typed object cannot carry.
+func unstructuredWith(typed *ratelimitv1.RateLimitPolicy, edit func(spec map[string]any)) *unstructured.Unstructured {
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typed)
+	Expect(err).NotTo(HaveOccurred())
+	object := &unstructured.Unstructured{Object: raw}
+	object.SetAPIVersion(ratelimitv1.GroupVersion.String())
+	object.SetKind("RateLimitPolicy")
+	edit(object.Object["spec"].(map[string]any))
+	return object
 }
 
 var _ = Describe("RateLimitPolicy", func() {
@@ -289,7 +325,7 @@ var _ = Describe("RateLimitPolicy", func() {
 			// not define, and the create would succeed without a word.
 			policy := policyWith("gateway.public", blockWith("api",
 				ratelimitv1.Rule{Name: "per-user", Preset: "standard-client"}))
-			policy.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.Rule{{
+			policy.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.RulePreset{{
 				Name:     "standard-client",
 				Counters: []string{"sub"},
 				Rates:    []ratelimitv1.Rate{{Requests: 100, PeriodSeconds: 60}},
@@ -310,7 +346,7 @@ var _ = Describe("RateLimitPolicy", func() {
 					{Name: "partner", Before: "total", Rates: []ratelimitv1.Rate{{Requests: 5, PeriodSeconds: 60}}},
 					{Name: "total", Dropped: true},
 				}})
-			policy.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.LimitBlock{{
+			policy.Spec.Presets = &ratelimitv1.Presets{Blocks: []ratelimitv1.BlockPreset{{
 				Name:  "cascade",
 				Mode:  ratelimitv1.BlockModeFirstMatch,
 				Rules: []ratelimitv1.Rule{ruleWith("total")},
@@ -342,12 +378,52 @@ var _ = Describe("RateLimitPolicy", func() {
 
 		It("rejects two rule presets of one name", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
-			policy.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.Rule{
+			policy.Spec.Presets = &ratelimitv1.Presets{Rules: []ratelimitv1.RulePreset{
 				{Name: "standard-client", Counters: []string{"sub"}},
 				{Name: "standard-client", Counters: []string{"path"}},
 			}}
 
 			Expect(create(policy)).To(MatchError(ContainSubstring("Duplicate value")))
+		})
+
+		// A typed client cannot write any of these fields, so the object is
+		// built as unstructured. The server's default field validation prunes
+		// the field with a warning instead; the spec "prunes the preset a rule
+		// preset names for a client that does not ask for strict field
+		// validation" pins that.
+		for _, field := range []struct {
+			path string
+			edit func(spec map[string]any)
+		}{
+			{"spec.presets.rules[0].preset", func(spec map[string]any) { presetBody(spec, "rules")["preset"] = strayPreset }},
+			{"spec.presets.rules[0].before", func(spec map[string]any) { presetBody(spec, "rules")["before"] = strayPreset }},
+			{"spec.presets.rules[0].dropped", func(spec map[string]any) { presetBody(spec, "rules")["dropped"] = true }},
+			{"spec.presets.blocks[0].preset", func(spec map[string]any) { presetBody(spec, "blocks")["preset"] = strayPreset }},
+		} {
+			It("refuses "+field.path+" under strict field validation", func() {
+				chained := unstructuredWith(policyWithPresets(), field.edit)
+
+				err := k8sClient.Create(ctx, chained, client.FieldValidation(metav1.FieldValidationStrict))
+
+				Expect(err).To(MatchError(ContainSubstring(`unknown field "` + field.path + `"`)))
+			})
+		}
+
+		It("prunes the preset a rule preset names for a client that does not ask for strict field validation", func() {
+			chained := unstructuredWith(policyWithPresets(), func(spec map[string]any) {
+				presetBody(spec, "rules")["preset"] = strayPreset
+			})
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, chained))).To(Succeed())
+			})
+			Expect(k8sClient.Create(ctx, chained)).To(Succeed())
+
+			stored := &unstructured.Unstructured{}
+			stored.SetGroupVersionKind(chained.GroupVersionKind())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(chained), stored)).To(Succeed())
+			rules, _, err := unstructured.NestedSlice(stored.Object, "spec", "presets", "rules")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rules[0]).NotTo(HaveKey("preset"))
 		})
 
 		It("accepts the mappings and groups of the one object", func() {

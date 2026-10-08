@@ -22,7 +22,7 @@ import (
 // handed, and what the status says when a reference does not resolve.
 
 // specWithPresets builds the domain's spec from rule presets and blocks.
-func specWithPresets(presets []v1.Rule, blocks ...v1.LimitBlock) *v1.RateLimitPolicySpec {
+func specWithPresets(presets []v1.RulePreset, blocks ...v1.LimitBlock) *v1.RateLimitPolicySpec {
 	return &v1.RateLimitPolicySpec{
 		Domain:  testDomain,
 		Presets: &v1.Presets{Rules: presets},
@@ -35,9 +35,9 @@ func specWithPresets(presets []v1.Rule, blocks ...v1.LimitBlock) *v1.RateLimitPo
 const perUserName = "per-user"
 
 // standardClient is a partial preset: axes and windows, no predicates.
-func standardClient() v1.Rule {
+func standardClient() v1.RulePreset {
 	burst := int32(20)
-	return v1.Rule{
+	return v1.RulePreset{
 		Name:     "standard-client",
 		Counters: []string{"sub"},
 		Rates: []v1.Rate{
@@ -63,7 +63,7 @@ func resolvedRule(t *testing.T, resolved *Resolved, rule string) v1.Rule {
 }
 
 func TestResolve_aRuleTakesEveryFieldOfItsPresetAndKeepsItsName(t *testing.T) {
-	spec := specWithPresets([]v1.Rule{standardClient()},
+	spec := specWithPresets([]v1.RulePreset{standardClient()},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-client"}}})
 
 	resolved, problems := Resolve(spec)
@@ -83,32 +83,57 @@ func TestResolve_aRuleTakesEveryFieldOfItsPresetAndKeepsItsName(t *testing.T) {
 	assert.Equal(t, map[RuleRef]string{{Block: "api", Rule: perUserName}: "standard-client"}, resolved.Presets)
 }
 
-// Every field of a rule except its name and the authoring fields preset,
-// before, and dropped is one the rule takes from the preset when it leaves the
-// field out. The set of fields is read from the type, so a field added to
-// Rule and left out of the merge fails here rather than being dropped on the
-// way to the engine.
-func TestResolve_aRuleTakesEveryFieldOfTheRuleTypeItLeavesOut(t *testing.T) {
-	own := map[string]bool{"Name": true, "Preset": true, "Before": true, "Dropped": true}
-	preset := v1.Rule{Name: "p"}
+// nameField is the one field of a rule preset that is the preset's own:
+// every other field is one a rule takes from it.
+const nameField = "Name"
+
+// The fields of a rule preset are the fields of a rule except name and the
+// authoring fields preset, before, and dropped. Both sets are read from the
+// types, so a field added to Rule and left out of RulePreset fails here
+// rather than being unavailable to a preset without a word.
+func TestResolve_aRulePresetHasEveryFieldOfARuleExceptTheAuthoringOnes(t *testing.T) {
+	own := map[string]bool{nameField: true, "Preset": true, "Before": true, "Dropped": true}
+	ruleFields := map[string]bool{}
+	for _, field := range reflect.VisibleFields(reflect.TypeFor[v1.Rule]()) {
+		if !own[field.Name] {
+			ruleFields[field.Name] = true
+		}
+	}
+	presetFields := map[string]bool{}
+	for _, field := range reflect.VisibleFields(reflect.TypeFor[v1.RulePreset]()) {
+		if field.Name != nameField {
+			presetFields[field.Name] = true
+		}
+	}
+
+	assert.Equal(t, ruleFields, presetFields)
+}
+
+// Every field of a rule preset except its name is one the rule takes from
+// the preset when it leaves the field out. The set of fields is read from the
+// type, so a field added to RulePreset and left out of ruleOf, the conversion
+// the merge starts from, fails here rather than being dropped on the way to
+// the engine.
+func TestResolve_aRuleTakesEveryFieldOfItsPresetItLeavesOut(t *testing.T) {
+	preset := v1.RulePreset{Name: "p"}
 	presetValue := reflect.ValueOf(&preset).Elem()
 	for i := range presetValue.NumField() {
-		if !own[presetValue.Type().Field(i).Name] {
+		if presetValue.Type().Field(i).Name != nameField {
 			fill(t, presetValue.Field(i))
 		}
 	}
 
-	resolved, problems := Resolve(specWithPresets([]v1.Rule{preset},
+	resolved, problems := Resolve(specWithPresets([]v1.RulePreset{preset},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "r", Preset: "p"}}}))
 
 	require.Empty(t, problems)
 	got := reflect.ValueOf(resolvedRule(t, resolved, "r"))
-	for i := range got.NumField() {
-		field := got.Type().Field(i)
-		if own[field.Name] {
+	for i := range presetValue.NumField() {
+		field := presetValue.Type().Field(i)
+		if field.Name == nameField {
 			continue
 		}
-		assert.Equal(t, presetValue.Field(i).Interface(), got.Field(i).Interface(),
+		assert.Equal(t, presetValue.Field(i).Interface(), got.FieldByName(field.Name).Interface(),
 			"field %s of the preset did not reach the rule that took it", field.Name)
 	}
 }
@@ -146,15 +171,15 @@ func fill(t *testing.T, v reflect.Value) {
 // specification, with the left-out counterpart of each list beside it.
 func TestResolve_aFieldWrittenAtThePointOfUseReplacesThePresetsWhole(t *testing.T) {
 	counting := standardClient()
-	bypass := v1.Rule{
+	bypass := v1.RulePreset{
 		Name:     "internal-bypass",
 		Matches:  []v1.Predicate{{Key: "sub", Operator: v1.OperatorEquals, Value: "prometheus"}},
 		Behavior: v1.RuleBehaviorBypass,
 	}
-	replacing := v1.Rule{Name: "standard-client", Rates: []v1.Rate{minuteRate(100)}, ReplacedRules: []string{"a"}}
+	replacing := v1.RulePreset{Name: "standard-client", Rates: []v1.Rate{minuteRate(100)}, ReplacedRules: []string{"a"}}
 	cases := []struct {
 		name   string
-		preset v1.Rule
+		preset v1.RulePreset
 		use    v1.Rule
 		want   func(t *testing.T, got v1.Rule)
 	}{
@@ -203,7 +228,7 @@ func TestResolve_aFieldWrittenAtThePointOfUseReplacesThePresetsWhole(t *testing.
 		},
 		{
 			name:   "a window written without algorithm over a FixedWindow preset is GCRA",
-			preset: v1.Rule{Name: "standard-client", Rates: []v1.Rate{{Requests: 20000, PeriodSeconds: 86400, Algorithm: v1.AlgorithmFixedWindow}}},
+			preset: v1.RulePreset{Name: "standard-client", Rates: []v1.Rate{{Requests: 20000, PeriodSeconds: 86400, Algorithm: v1.AlgorithmFixedWindow}}},
 			use:    v1.Rule{Name: "r", Preset: "standard-client", Rates: []v1.Rate{minuteRate(300)}},
 			want: func(t *testing.T, got v1.Rule) {
 				assert.Equal(t, []v1.Rate{{Requests: 300, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}}, got.Rates,
@@ -240,7 +265,7 @@ func TestResolve_aFieldWrittenAtThePointOfUseReplacesThePresetsWhole(t *testing.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := specWithPresets([]v1.Rule{tc.preset}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{tc.use}})
+			spec := specWithPresets([]v1.RulePreset{tc.preset}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{tc.use}})
 
 			resolved, problems := Resolve(spec)
 
@@ -260,8 +285,8 @@ func TestResolve_aFieldWrittenAtThePointOfUseReplacesThePresetsWhole(t *testing.
 // spec "stores mode, behavior, and algorithm only where the author wrote
 // them".
 func TestResolve_writesTheDefaultsAfterTheLastLayer(t *testing.T) {
-	shadowTrial := v1.Rule{Name: "trial", Behavior: v1.RuleBehaviorShadow, Rates: []v1.Rate{minuteRate(5)}}
-	spec := specWithPresets([]v1.Rule{shadowTrial, standardClient()},
+	shadowTrial := v1.RulePreset{Name: "trial", Behavior: v1.RuleBehaviorShadow, Rates: []v1.Rate{minuteRate(5)}}
+	spec := specWithPresets([]v1.RulePreset{shadowTrial, standardClient()},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{
 			{Name: "from-shadow", Preset: "trial"},
 			{Name: "from-counting", Preset: "standard-client"},
@@ -300,7 +325,7 @@ func TestResolve_aSpecWithoutPresetsResolvesToItselfWithTheDefaults(t *testing.T
 }
 
 func TestResolve_leavesTheSpecItWasGivenUntouched(t *testing.T) {
-	spec := specWithPresets([]v1.Rule{standardClient()},
+	spec := specWithPresets([]v1.RulePreset{standardClient()},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-client"}}})
 	written := spec.DeepCopy()
 
@@ -311,7 +336,7 @@ func TestResolve_leavesTheSpecItWasGivenUntouched(t *testing.T) {
 }
 
 func TestResolve_aRuleNamingAPresetTheSpecDoesNotDeclareIsAnUnresolvedReference(t *testing.T) {
-	spec := specWithPresets([]v1.Rule{standardClient()},
+	spec := specWithPresets([]v1.RulePreset{standardClient()},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-clinet"}}})
 
 	resolved, problems := Resolve(spec)
@@ -326,28 +351,23 @@ func TestResolve_aRuleNamingAPresetTheSpecDoesNotDeclareIsAnUnresolvedReference(
 	}, problems[0])
 }
 
-// The shape of a preset is checked whether a rule takes it or not; the three
-// shapes a preset body may not have are reported with the preset named in
-// the message, since a preset has no block and no rule to be addressed to.
+// The shape of a preset is checked whether a rule takes it or not; a shape
+// a preset body may not have is reported with the preset named in the
+// message, since a preset has no block and no rule to be addressed to.
 func TestResolve_rejectsTheShapeOfAPresetNoRuleTakes(t *testing.T) {
 	cases := []struct {
 		name    string
-		presets []v1.Rule
+		presets []v1.RulePreset
 		message string
 	}{
 		{
-			name:    "a preset that names a preset",
-			presets: []v1.Rule{standardClient(), {Name: "chained", Preset: "standard-client"}},
-			message: `rule preset "chained" names preset "standard-client"; a preset body carries no preset of its own`,
-		},
-		{
 			name:    "a preset declared twice",
-			presets: []v1.Rule{standardClient(), standardClient()},
+			presets: []v1.RulePreset{standardClient(), standardClient()},
 			message: `rule preset "standard-client" is declared twice`,
 		},
 		{
 			name:    "a preset without a name",
-			presets: []v1.Rule{{Rates: []v1.Rate{minuteRate(1)}}},
+			presets: []v1.RulePreset{{Rates: []v1.Rate{minuteRate(1)}}},
 			message: "a rule preset without a name",
 		},
 	}
@@ -365,28 +385,14 @@ func TestResolve_rejectsTheShapeOfAPresetNoRuleTakes(t *testing.T) {
 	}
 }
 
-// A preset that names a preset is declared, whatever its shape: the rule
-// that takes it is told about the chain and nothing else.
-func TestResolve_aRuleTakingAChainedPresetIsReportedTheChainAlone(t *testing.T) {
-	spec := specWithPresets([]v1.Rule{standardClient(), {Name: "chained", Preset: "standard-client"}},
-		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "chained"}}})
-
-	resolved, problems := Resolve(spec)
-
-	assert.Nil(t, resolved)
-	require.Len(t, problems, 1)
-	assert.Equal(t, v1.ProblemInvalidSpec, problems[0].Reason)
-	assert.Contains(t, problems[0].Message, `rule preset "chained" names preset "standard-client"`)
-}
-
 // widePredicates is the number of predicates of a wide preset: each carries a
 // value of the longest length the schema admits, so the body serializes to
 // about 600 KB, and two copies fit under MaxResolvedSize where three do not.
 const widePredicates = 2000
 
 // bigPreset is a preset of widePredicates predicates.
-func bigPreset(name string) v1.Rule {
-	preset := v1.Rule{Name: name, Rates: []v1.Rate{minuteRate(100)}}
+func bigPreset(name string) v1.RulePreset {
+	preset := v1.RulePreset{Name: name, Rates: []v1.Rate{minuteRate(100)}}
 	for i := range widePredicates {
 		preset.Matches = append(preset.Matches, v1.Predicate{
 			Key: "sub", Operator: v1.OperatorIn, Values: []string{fmt.Sprintf("%0256d", i)},
@@ -401,15 +407,15 @@ func bigPreset(name string) v1.Rule {
 // that takes it. The expected number is computed here from the literal forms
 // of both, which is what a reader of the limits page would compute.
 func TestResolve_estimatesTheSpecAsWrittenPlusEachPresetOncePerUse(t *testing.T) {
-	preset := v1.Rule{Name: "p", Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(100)}}
-	spec := specWithPresets([]v1.Rule{preset}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{
+	preset := v1.RulePreset{Name: "p", Counters: []string{"sub"}, Rates: []v1.Rate{minuteRate(100)}}
+	spec := specWithPresets([]v1.RulePreset{preset}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{
 		{Name: "a", Preset: "p"},
 		{Name: "b", Preset: "p"},
 		{Name: "c", Rates: []v1.Rate{minuteRate(10)}},
 	}})
 	writtenWithDefaults := v1.RateLimitPolicySpec{
 		Domain:  testDomain,
-		Presets: &v1.Presets{Rules: []v1.Rule{preset}},
+		Presets: &v1.Presets{Rules: []v1.RulePreset{preset}},
 		Limits: []v1.LimitBlock{{Name: "api", Mode: v1.BlockModeAll, Rules: []v1.Rule{
 			{Name: "a", Preset: "p", Behavior: v1.RuleBehaviorEnforce},
 			{Name: "b", Preset: "p", Behavior: v1.RuleBehaviorEnforce},
@@ -447,21 +453,21 @@ func TestResolve_theEstimateIsAtLeastTheResolvedSize(t *testing.T) {
 		}
 		return rules
 	}
-	bypass := v1.Rule{Name: "bypass", Behavior: v1.RuleBehaviorBypass,
+	bypass := v1.RulePreset{Name: "bypass", Behavior: v1.RuleBehaviorBypass,
 		Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorEquals, Value: "prometheus"}}}
 	specs := map[string]*v1.RateLimitPolicySpec{
 		"no preset, every default left out": {Domain: testDomain, Limits: []v1.LimitBlock{
 			{Name: "a", Rules: plain(40)}, {Name: "b", Rules: plain(40)},
 		}},
-		"a preset taken as is by many rules": specWithPresets([]v1.Rule{standardClient()},
+		"a preset taken as is by many rules": specWithPresets([]v1.RulePreset{standardClient()},
 			v1.LimitBlock{Name: "api", Rules: append(plain(40), v1.Rule{Name: "x", Preset: "standard-client"},
 				v1.Rule{Name: "y", Preset: "standard-client"})}),
-		"a preset every field of which the rule replaces": specWithPresets([]v1.Rule{standardClient()},
+		"a preset every field of which the rule replaces": specWithPresets([]v1.RulePreset{standardClient()},
 			v1.LimitBlock{Name: "api", Rules: []v1.Rule{{
 				Name: "x", Preset: "standard-client", Counters: []string{"path"}, Behavior: v1.RuleBehaviorShadow,
 				Rates: []v1.Rate{minuteRate(1)}, Matches: []v1.Predicate{{Key: "sub", Operator: v1.OperatorExists}},
 			}}}),
-		"a Bypass preset": specWithPresets([]v1.Rule{bypass},
+		"a Bypass preset": specWithPresets([]v1.RulePreset{bypass},
 			v1.LimitBlock{Name: "api", Rules: append(plain(40), v1.Rule{Name: "internal", Preset: "bypass"})}),
 	}
 	for name, spec := range specs {
@@ -480,7 +486,7 @@ func TestResolve_refusesAPolicyEstimatedAboveTheSizeBound(t *testing.T) {
 	// that copy; two rules taking it bring the estimate to three copies,
 	// about 1.8 MB, over the 1.5 MiB bound.
 	preset := bigPreset("wide")
-	spec := specWithPresets([]v1.Rule{preset}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{
+	spec := specWithPresets([]v1.RulePreset{preset}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{
 		{Name: "a", Preset: "wide"}, {Name: "b", Preset: "wide"},
 	}})
 
@@ -495,7 +501,7 @@ func TestResolve_refusesAPolicyEstimatedAboveTheSizeBound(t *testing.T) {
 
 func TestResolve_acceptsAPolicyEstimatedBelowTheSizeBound(t *testing.T) {
 	// The same preset taken by one rule: two copies, about 1.2 MB.
-	spec := specWithPresets([]v1.Rule{bigPreset("wide")},
+	spec := specWithPresets([]v1.RulePreset{bigPreset("wide")},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "a", Preset: "wide"}}})
 
 	resolved, problems := Resolve(spec)
@@ -509,7 +515,7 @@ func TestResolve_acceptsAPolicyEstimatedBelowTheSizeBound(t *testing.T) {
 // point of use, where every byte of it is one byte of the estimate.
 func TestResolve_acceptsAnEstimateAtTheBoundAndRefusesOneByteOver(t *testing.T) {
 	spec := func(pad int) *v1.RateLimitPolicySpec {
-		return specWithPresets([]v1.Rule{standardClient()}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{
+		return specWithPresets([]v1.RulePreset{standardClient()}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{
 			{Name: "a", Preset: "standard-client"},
 			{Name: "pad", Rates: []v1.Rate{minuteRate(1)}, Matches: []v1.Predicate{
 				{Key: "sub", Operator: v1.OperatorEquals, Value: strings.Repeat("x", pad)}}},
@@ -538,7 +544,7 @@ func TestResolve_acceptsAnEstimateAtTheBoundAndRefusesOneByteOver(t *testing.T) 
 // so a policy whose resolved form fits under the bound can still be refused.
 func TestResolve_countsAFieldTheRuleReplacesInBothLayers(t *testing.T) {
 	own := bigPreset("own").Matches
-	spec := specWithPresets([]v1.Rule{bigPreset("wide")},
+	spec := specWithPresets([]v1.RulePreset{bigPreset("wide")},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "a", Preset: "wide", Matches: own}}})
 	writtenOut := &v1.RateLimitPolicySpec{Domain: testDomain, Limits: []v1.LimitBlock{
 		{Name: "api", Rules: []v1.Rule{{Name: "a", Matches: own, Rates: []v1.Rate{minuteRate(100)}}}},
@@ -557,7 +563,7 @@ func TestResolve_countsAFieldTheRuleReplacesInBothLayers(t *testing.T) {
 // written and nothing about what the engine builds from it, so renaming a
 // preset moves no bucket.
 func TestCompile_aPolicyWithPresetsCompilesLikeThePolicyWrittenOut(t *testing.T) {
-	internalBypass := v1.Rule{
+	internalBypass := v1.RulePreset{
 		Name:     "internal-bypass",
 		Matches:  []v1.Predicate{{Key: "sub", Operator: v1.OperatorEquals, Value: "prometheus"}},
 		Behavior: v1.RuleBehaviorBypass,
@@ -565,7 +571,7 @@ func TestCompile_aPolicyWithPresetsCompilesLikeThePolicyWrittenOut(t *testing.T)
 	target := func(prefix string) *v1.Target {
 		return &v1.Target{Routes: []v1.Route{{Path: v1.PathMatch{Type: v1.PathMatchPrefix, Value: prefix}}}}
 	}
-	withPresets := specWithPresets([]v1.Rule{internalBypass, standardClient()},
+	withPresets := specWithPresets([]v1.RulePreset{internalBypass, standardClient()},
 		v1.LimitBlock{Name: "orders", Target: target("/orders"), Mode: v1.BlockModeFirstMatch, Rules: []v1.Rule{
 			{Name: "internal", Preset: "internal-bypass"},
 			{Name: perUserName, Preset: "standard-client"},
@@ -574,10 +580,9 @@ func TestCompile_aPolicyWithPresetsCompilesLikeThePolicyWrittenOut(t *testing.T)
 			{Name: "internal", Preset: "internal-bypass"},
 			{Name: "per-user", Preset: "standard-client", Rates: []v1.Rate{minuteRate(300)}},
 		}})
-	internal := internalBypass
-	internal.Name = "internal"
-	perUser := standardClient()
-	perUser.Name = perUserName
+	internal := v1.Rule{Name: "internal", Matches: internalBypass.Matches, Behavior: internalBypass.Behavior}
+	standard := standardClient()
+	perUser := v1.Rule{Name: perUserName, Counters: standard.Counters, Rates: standard.Rates}
 	perUserCatalog := perUser
 	perUserCatalog.Rates = []v1.Rate{minuteRate(300)}
 	writtenOut := &v1.RateLimitPolicySpec{Domain: testDomain, Limits: []v1.LimitBlock{
@@ -607,7 +612,7 @@ func objectWithSpec(spec *v1.RateLimitPolicySpec) v1.RateLimitPolicy {
 // previous release depends on: the configuration the operator writes is the
 // resolved spec, and a preset field never reaches a payload.
 func TestCompile_theBundleAndThePayloadCarryNoPreset(t *testing.T) {
-	object := objectWithSpec(specWithPresets([]v1.Rule{standardClient()},
+	object := objectWithSpec(specWithPresets([]v1.RulePreset{standardClient()},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: perUserName, Preset: "standard-client"}}}))
 
 	result := compileOf(object)
@@ -671,11 +676,11 @@ func TestCompile_anUnresolvedPresetKeepsTheLastGoodGenerationServing(t *testing.
 // while the same preset taken by a rule is reported at that rule, with the
 // preset named in the message.
 func TestCompile_thePresetsContentIsCheckedThroughTheRulesThatTakeIt(t *testing.T) {
-	ghost := v1.Rule{Name: "by-ghost", Matches: []v1.Predicate{{Key: "ghost", Operator: v1.OperatorExists}},
+	ghost := v1.RulePreset{Name: "by-ghost", Matches: []v1.Predicate{{Key: "ghost", Operator: v1.OperatorExists}},
 		Rates: []v1.Rate{minuteRate(10)}}
 
 	t.Run("a preset no rule takes is silent", func(t *testing.T) {
-		object := objectWithSpec(specWithPresets([]v1.Rule{ghost},
+		object := objectWithSpec(specWithPresets([]v1.RulePreset{ghost},
 			v1.LimitBlock{Name: "api", Rules: []v1.Rule{simpleRule("total")}}))
 
 		outcome := compileOf(object).Policies[key()]
@@ -686,7 +691,7 @@ func TestCompile_thePresetsContentIsCheckedThroughTheRulesThatTakeIt(t *testing.
 	})
 
 	t.Run("a preset a rule takes is reported at that rule", func(t *testing.T) {
-		object := objectWithSpec(specWithPresets([]v1.Rule{ghost},
+		object := objectWithSpec(specWithPresets([]v1.RulePreset{ghost},
 			v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "per-ghost", Preset: "by-ghost"}}}))
 
 		outcome := compileOf(object).Policies[key()]
@@ -705,8 +710,8 @@ func TestCompile_thePresetsContentIsCheckedThroughTheRulesThatTakeIt(t *testing.
 // in a block that takes no preset, keep the engine's message.
 func TestCompile_thePresetIsNamedAtTheRuleThatTookItAlone(t *testing.T) {
 	ghost := []v1.Predicate{{Key: "ghost", Operator: v1.OperatorExists}}
-	byGhost := v1.Rule{Name: "by-ghost", Matches: ghost, Rates: []v1.Rate{minuteRate(10)}}
-	object := objectWithSpec(specWithPresets([]v1.Rule{byGhost},
+	byGhost := v1.RulePreset{Name: "by-ghost", Matches: ghost, Rates: []v1.Rate{minuteRate(10)}}
+	object := objectWithSpec(specWithPresets([]v1.RulePreset{byGhost},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{
 			{Name: "per-ghost", Preset: "by-ghost"},
 			{Name: "plain", Matches: ghost, Rates: []v1.Rate{minuteRate(10)}},
@@ -734,7 +739,7 @@ func TestCompile_thePresetIsNamedAtTheRuleThatTookItAlone(t *testing.T) {
 // here because the resolver hands the engine an empty non-nil list where a
 // written-out policy would have carried none.
 func TestCompile_anEmptyCountersListFromAPresetIsOneSharedBucket(t *testing.T) {
-	spec := specWithPresets([]v1.Rule{standardClient()},
+	spec := specWithPresets([]v1.RulePreset{standardClient()},
 		v1.LimitBlock{Name: "api", Rules: []v1.Rule{{Name: "shared", Preset: "standard-client", Counters: []string{}}}})
 	resolved, problems := Resolve(spec)
 	require.Empty(t, problems)
@@ -753,8 +758,8 @@ func TestCompile_anEmptyCountersListFromAPresetIsOneSharedBucket(t *testing.T) {
 // compiler cannot tell it from one the author wrote, so the documents say to
 // remove it before the rule takes a preset.
 func TestResolve_aRuleThatWritesEnforceOverAShadowPresetStaysEnforce(t *testing.T) {
-	trial := v1.Rule{Name: "trial", Behavior: v1.RuleBehaviorShadow, Rates: []v1.Rate{minuteRate(5)}}
-	spec := specWithPresets([]v1.Rule{trial}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{
+	trial := v1.RulePreset{Name: "trial", Behavior: v1.RuleBehaviorShadow, Rates: []v1.Rate{minuteRate(5)}}
+	spec := specWithPresets([]v1.RulePreset{trial}, v1.LimitBlock{Name: "api", Rules: []v1.Rule{
 		{Name: "stored-default", Preset: "trial", Behavior: v1.RuleBehaviorEnforce},
 	}})
 

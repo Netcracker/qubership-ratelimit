@@ -164,7 +164,7 @@ spec:
                         field and keeps its position, a rule of a new name is inserted in
                         front of the rule its before names or appended, and a dropped rule
                         leaves the preset's rule of that name out. name is always the block's
-                        own. A block preset body carries no preset of its own.
+                        own.
                       maxLength: 63
                       minLength: 1
                       pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
@@ -282,9 +282,8 @@ spec:
                               rule begins as a copy of that body, and every field it writes replaces
                               the field of the preset whole; a field it leaves out comes from the
                               preset. A list written empty is a value: counters: [] is one shared
-                              bucket, whatever axes the preset has. name is always the rule's own.
-                              A rule preset body carries no preset of its own, and a rule that
-                              overrides a rule of its block's preset by name writes none either.
+                              bucket, whatever axes the preset has. name is always the rule's own. A
+                              rule that overrides a rule of its block's preset by name carries none.
                             maxLength: 63
                             minLength: 1
                             pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
@@ -505,52 +504,38 @@ spec:
                   object before it compiles.
                 properties:
                   blocks:
-                    description: |-
-                      blocks holds block bodies: target, mode, and rules, each optional,
-                      with name as the name of the preset. The rules of a body may take rule
-                      presets and carry no before or dropped; the body carries no preset of its
-                      own. The shape of every body is checked whether a block takes it or
-                      not; its content is checked through the blocks that take it.
+                    description: blocks holds the block presets.
                     items:
                       description: |-
-                        LimitBlock is a target plus the rules that count the traffic it selects.
-                        Blocks always add up: a request that lands in several blocks has to fit the
-                        verdict of each.
+                        BlockPreset is a block body a block of spec.limits takes by name through
+                        its preset field: target, mode, and rules, each optional, with name as the
+                        name of the preset. Presets do not chain: a body has no preset field. The
+                        rules of a body may take rule presets and carry no before or dropped,
+                        which belong to the rules of a block that takes a block preset; the
+                        compiler reports a rule that carries one, whether a block takes the preset
+                        or not. The content of a body is checked through the blocks that take it.
                       properties:
                         mode:
                           description: |-
-                            mode selects how the rules of the block combine. It has no effect across
-                            blocks. Absent, it is All, or the mode of the preset the block takes.
+                            mode is the mode a block that takes the preset starts with. Absent at
+                            every layer, it is All.
                           enum:
                           - All
                           - FirstMatch
                           type: string
                         name:
-                          description: name is unique within its policy and is part
-                            of the counter key.
-                          maxLength: 63
-                          minLength: 1
-                          pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
-                          type: string
-                        preset:
                           description: |-
-                            preset names the entry of spec.presets.blocks the block starts from.
-                            target and mode written in the block replace the preset's whole; left
-                            out, they come from the preset. The rules merge with the preset's by
-                            name: a rule of a name the preset holds overrides that rule field by
-                            field and keeps its position, a rule of a new name is inserted in
-                            front of the rule its before names or appended, and a dropped rule
-                            leaves the preset's rule of that name out. name is always the block's
-                            own. A block preset body carries no preset of its own.
+                            name is the name a block's preset refers to. It is unique among the
+                            block presets of the policy and is part of no counter key.
                           maxLength: 63
                           minLength: 1
                           pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
                           type: string
                         rules:
                           description: |-
-                            rules are the counters of the block. A block that takes a preset may
-                            leave them out and take the preset's; a block that holds no rule once
-                            its preset, if any, is resolved is rejected by the compiler.
+                            rules are the rules a block that takes the preset starts with, merged
+                            by name with the rules the block writes. A rule here may take a rule
+                            preset and carries no before or dropped.
                           items:
                             description: Rule is one counter of a block.
                             properties:
@@ -659,9 +644,8 @@ spec:
                                   rule begins as a copy of that body, and every field it writes replaces
                                   the field of the preset whole; a field it leaves out comes from the
                                   preset. A list written empty is a value: counters: [] is one shared
-                                  bucket, whatever axes the preset has. name is always the rule's own.
-                                  A rule preset body carries no preset of its own, and a rule that
-                                  overrides a rule of its block's preset by name writes none either.
+                                  bucket, whatever axes the preset has. name is always the rule's own. A
+                                  rule that overrides a rule of its block's preset by name carries none.
                                 maxLength: 63
                                 minLength: 1
                                 pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
@@ -737,8 +721,8 @@ spec:
                           x-kubernetes-list-type: map
                         target:
                           description: |-
-                            target restricts the block. An absent target lets the block see the whole
-                            domain.
+                            target restricts a block that takes the preset and writes no target
+                            of its own. A block replaces a preset target and cannot remove it.
                           properties:
                             routes:
                               description: routes is an OR-list. A block without a
@@ -808,31 +792,22 @@ spec:
                     - name
                     x-kubernetes-list-type: map
                   rules:
-                    description: |-
-                      rules holds rule bodies: the fields of a rule, with name as the name of
-                      the preset. A body may be partial, a preset of windows alone or of
-                      predicates alone. It carries no preset, before, or dropped: presets do
-                      not chain, and before and dropped belong to a block that takes a block
-                      preset. The shape of every body is checked whether a rule takes it or
-                      not; its content is checked through the rules that take it.
+                    description: rules holds the rule presets.
                     items:
-                      description: Rule is one counter of a block.
+                      description: |-
+                        RulePreset is a rule body a rule of spec.limits takes by name through its
+                        preset field: the fields of a rule except preset, before, and dropped, with
+                        name as the name of the preset. A body may be partial, a preset of windows
+                        alone or of predicates alone. Presets do not chain: a body has no preset
+                        field, and before and dropped belong to the rules of a block that takes a
+                        block preset. The content of a body is checked through the rules that take
+                        it, so a body no rule takes may name a key the domain lacks and no problem
+                        reports it.
                       properties:
-                        before:
-                          description: |-
-                            before places a rule that is new to a block taking a block preset in
-                            front of the rule it names: a rule of the preset, or a new rule
-                            written earlier in the same list. Without it a new rule goes after
-                            the preset's rules. It is accepted on a new rule only; a rule that
-                            overrides a rule of the preset by name keeps the preset's position.
-                          maxLength: 63
-                          minLength: 1
-                          pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
-                          type: string
                         behavior:
                           description: |-
-                            behavior selects what the rule does with the verdict. Absent, it is
-                            Enforce, or the behavior of the preset the rule takes.
+                            behavior is the behavior a rule that takes the preset starts with:
+                            Enforce, Shadow, or Bypass.
                           enum:
                           - Enforce
                           - Shadow
@@ -840,25 +815,18 @@ spec:
                           type: string
                         counters:
                           description: |-
-                            counters are the axes of the bucket. An empty list gives the rule a
-                            single shared bucket. A rule whose axis the request does not carry, such
-                            as sub for an anonymous caller, does not match: there is nothing to
-                            key the bucket by.
+                            counters are the axes of the bucket a rule that takes the preset
+                            starts with. An empty list is a single shared bucket.
                           items:
                             maxLength: 63
                             pattern: ^[a-z][a-zA-Z0-9_]*$
                             type: string
                           type: array
                           x-kubernetes-list-type: atomic
-                        dropped:
-                          description: |-
-                            dropped leaves the preset's rule of this name out of a block that takes a
-                            block preset. A dropped rule carries nothing beside name.
-                          type: boolean
                         matches:
                           description: |-
-                            matches is a conjunction of predicates. An empty list matches every
-                            request the block sees.
+                            matches is the conjunction of predicates a rule that takes the preset
+                            starts with. An empty list matches every request the block sees.
                           items:
                             description: |-
                               Predicate is one condition on the identity of the caller. Paths and methods
@@ -911,29 +879,17 @@ spec:
                           type: array
                           x-kubernetes-list-type: atomic
                         name:
-                          description: name is unique within its block and is part
-                            of the counter key.
-                          maxLength: 63
-                          minLength: 1
-                          pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
-                          type: string
-                        preset:
                           description: |-
-                            preset names the entry of spec.presets.rules the rule starts from. The
-                            rule begins as a copy of that body, and every field it writes replaces
-                            the field of the preset whole; a field it leaves out comes from the
-                            preset. A list written empty is a value: counters: [] is one shared
-                            bucket, whatever axes the preset has. name is always the rule's own.
-                            A rule preset body carries no preset of its own, and a rule that
-                            overrides a rule of its block's preset by name writes none either.
+                            name is the name a rule's preset refers to. It is unique among the
+                            rule presets of the policy and is part of no counter key.
                           maxLength: 63
                           minLength: 1
                           pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
                           type: string
                         rates:
                           description: |-
-                            rates are the counting windows of the rule, keyed by period. A rule with
-                            behavior Bypass carries none; every other rule carries at least one.
+                            rates are the counting windows a rule that takes the preset starts
+                            with, keyed by period, each with its own algorithm.
                           items:
                             description: |-
                               Rate is one counting window of a rule. Windows of a rule are independent
@@ -982,11 +938,8 @@ spec:
                           x-kubernetes-list-type: map
                         replacedRules:
                           description: |-
-                            replacedRules silences rules of the same block, which is how a narrow
-                            rule overrides a broad one. It is available only in an All block, where
-                            the order of the list carries no meaning of its own. A rule with
-                            behavior Shadow silences nothing, so the rules it names keep enforcing
-                            until it is switched to Enforce.
+                            replacedRules are the rules a rule that takes the preset silences.
+                            They are rules of the block that holds that rule.
                           items:
                             maxLength: 63
                             type: string
