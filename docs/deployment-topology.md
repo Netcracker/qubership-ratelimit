@@ -234,7 +234,7 @@ contents from `BASELINE_ORIGIN`:
 
 | Scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | Deployment (`REPLICAS` replicas, one active), ServiceAccount, Role/RoleBinding; with `MONITORING_ENABLED`, PodMonitor and PrometheusRule | Deployment (`REPLICAS` replicas), Service `ratelimit`, ServiceAccount, HPA, EnvoyFilters; with `redis.dbaas.enabled`, InternalDatabase and DatabaseSecretClaim; with `management.enabled`, the AuthorizationPolicy; with `MONITORING_ENABLED`, PodMonitor, PrometheusRule, GrafanaDashboard |
+| single namespace | Deployment (`REPLICAS`, one active), SA, Role/RoleBinding; with `MONITORING_ENABLED`, PodMonitor and PrometheusRule | Deployment (`REPLICAS`), Service, SA, HPA, EnvoyFilters; with `redis.dbaas.enabled`, InternalDatabase and DatabaseSecretClaim; with `management.enabled`, AuthorizationPolicy; with `MONITORING_ENABLED`, PodMonitor, PrometheusRule, GrafanaDashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | nothing: an empty release | only EnvoyFilters that target the baseline RLS; no Deployment, no Service, no ServiceAccount |
 
