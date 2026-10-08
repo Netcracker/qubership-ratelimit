@@ -202,8 +202,14 @@ func TestAPredicateHoldsPerItsOperator(t *testing.T) {
 			map[string][]string{model.KeySub: {"alice"}}, []string{"r"}},
 		{"equals miss", model.Predicate{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"},
 			map[string][]string{model.KeySub: {"bob"}}, nil},
+		{"equals on absent key", model.Predicate{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"},
+			map[string][]string{}, nil},
+		{"equals on two values", model.Predicate{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"},
+			map[string][]string{model.KeySub: {"alice", "bob"}}, nil},
 		{"in hit", model.Predicate{Key: model.KeySub, Operator: model.OperatorIn, Values: []string{"a", "b"}},
 			map[string][]string{model.KeySub: {"b"}}, []string{"r"}},
+		{"in miss", model.Predicate{Key: model.KeySub, Operator: model.OperatorIn, Values: []string{"a", "b"}},
+			map[string][]string{model.KeySub: {"c"}}, nil},
 		{"ingroup hit", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
 			map[string][]string{model.KeySub: {"bob"}}, []string{"r"}},
 		{"ingroup miss", model.Predicate{Key: model.KeySub, Operator: model.OperatorInGroup, Value: "vip"},
@@ -214,8 +220,12 @@ func TestAPredicateHoldsPerItsOperator(t *testing.T) {
 			map[string][]string{"roles": {"user", "admin"}}, []string{"r"}},
 		{"contains never substring", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
 			map[string][]string{"roles": {"administrator"}}, nil},
+		{"contains on absent key", model.Predicate{Key: "roles", Operator: model.OperatorContains, Value: "admin"},
+			map[string][]string{}, nil},
 		{"exists", model.Predicate{Key: "tenant", Operator: model.OperatorExists},
 			map[string][]string{"tenant": {"acme"}}, []string{"r"}},
+		{"exists on absent", model.Predicate{Key: "tenant", Operator: model.OperatorExists},
+			map[string][]string{}, nil},
 		{"notexists on absent", model.Predicate{Key: "tenant", Operator: model.OperatorDoesNotExist},
 			map[string][]string{}, []string{"r"}},
 		{"notexists on present", model.Predicate{Key: "tenant", Operator: model.OperatorDoesNotExist},
@@ -474,6 +484,65 @@ func TestAFirstMatchCascadeEndsAtTheFirstMatchedRuleThatIsNotShadow(t *testing.T
 
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("Evaluate(sub=%s) applied %+v, want %+v", tc.sub, got, tc.want)
+			}
+		})
+	}
+}
+
+// A rule whose counter axis is absent does not match, so a FirstMatch cascade
+// passes the request on to the next rule instead of ending there.
+func TestAFirstMatchRuleWithoutItsCounterAxisPassesTheRequestOn(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
+		Domain: domain,
+		Blocks: []model.Block{{Name: "cascade", Mode: model.ModeFirstMatch,
+			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
+			Rules: []model.Rule{
+				{Name: "per-user", Counters: []string{model.KeySub}, Rates: minuteRate()},
+				{Name: "anonymous", Rates: minuteRate()},
+			}}},
+	})
+
+	cases := []struct {
+		name string
+		keys map[string][]string
+		want []string
+	}{
+		{"a request without a sub", nil, []string{"anonymous"}},
+		{"a request with a sub", map[string][]string{model.KeySub: {"alice"}}, []string{"per-user"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ruleNames(evaluate(snap, request{Path: "/x", Method: "GET", Keys: tc.keys}))
+
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("Evaluate(%v) matched %v, want %v", tc.keys, got, tc.want)
+			}
+		})
+	}
+}
+
+// The method is a counter axis like any other built-in key: the request's
+// method keys the bucket, so each method counts apart.
+func TestTheMethodAxisKeysTheBucketByTheRequestsMethod(t *testing.T) {
+	snap := mustCompile(t, model.Policy{
+		Domain: domain,
+		Blocks: []model.Block{{Name: "b",
+			Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/"}}}},
+			Rules:  []model.Rule{{Name: "per-method", Counters: []string{model.KeyMethod}, Rates: minuteRate()}}}},
+	})
+
+	for _, tc := range []struct{ method, axis string }{
+		{"GET", ":GET:"},
+		{"POST", ":POST:"},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			got := evaluate(snap, request{Path: "/x", Method: tc.method})
+
+			if names := ruleNames(got); !slices.Equal(names, []string{"per-method"}) {
+				t.Fatalf("%s /x matched %v, want [per-method]", tc.method, names)
+			}
+			if key := got.Rules[0].Buckets[0].Key; !strings.HasSuffix(key, tc.axis) {
+				t.Errorf("bucket key of b/per-method for %s = %q, want it to end in the axis %q", tc.method, key, tc.axis)
 			}
 		})
 	}
