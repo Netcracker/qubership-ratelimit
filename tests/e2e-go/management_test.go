@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gstruct"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -117,7 +117,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		}
 	})
 
-	It("answers a viewer through the gateway and lists the domain", func() {
+	It("lists the domain to a viewer through the gateway", func() {
 		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
 			map[string]string{"Authorization": "Bearer " + managementToken("e2e@example.com", "viewer")})
 		Expect(code).To(Equal(http.StatusOK),
@@ -150,13 +150,13 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		// of its own, and so does the API for a token without the role. What
 		// separates them is the body, because every answer the API writes is
 		// either a listing or a TMF error carrying an RLS code. A refusal that
-		// carries neither never reached the service.
-		if code != 0 {
-			Expect(body).NotTo(ContainSubstring(errorCodePrefix),
-				"the refusal came from the API, so the port is open to the whole mesh")
-			Expect(body).NotTo(ContainSubstring(`"items"`),
-				"the API answered a pod outside the allowed list")
-		}
+		// carries neither never reached the service. For a connection the
+		// mesh reset, code 0, the body is curl's error line, which carries
+		// neither as well.
+		Expect(body).NotTo(ContainSubstring(errorCodePrefix),
+			"the refusal came from the API, so the port is open to the whole mesh")
+		Expect(body).NotTo(ContainSubstring(`"items"`),
+			"the API answered a pod outside the allowed list")
 	})
 
 	// The reset flows. Each spends a path's budget through the private
@@ -164,7 +164,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 	// proves the lift by the gateway admitting the path again. That last step
 	// is the point: an API answer alone says what the API believes it did,
 	// the gateway says what the counters now are.
-	It("runs the bulk flow: preview, execute, retry", func() {
+	It("lifts a spent budget through a previewed, executed, and retried bulk reset", func() {
 		probePath := spendBudget(limitedDomain, limitedPrefix, limitedRule, limit, &limitedApplied)
 
 		operator := map[string]string{
@@ -180,11 +180,11 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			selector+`,"dryRun":true}`, with(operator, "Idempotency-Key", previewKey))
 		Expect(code).To(Equal(http.StatusOK), "the preview did not answer 200; body: %s", body)
 		preview := decodeBulk(body)
-		Expect(preview.DryRun).To(BeTrue())
-		Expect(preview.ConfirmationToken).NotTo(BeEmpty(), "the preview minted no confirmation token")
-		Expect(preview.MatchedCount).NotTo(BeNil())
-		Expect(*preview.MatchedCount).To(BeNumerically(">=", 1),
-			"the preview matched no counter, so there was nothing to reset: %s", body)
+		Expect(preview).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"DryRun":            BeTrue(),
+			"ConfirmationToken": Not(BeEmpty()),
+			"MatchedCount":      gstruct.PointTo(BeNumerically(">=", 1)),
+		}), "the preview answer: %s", body)
 
 		// Step two, the execution, with the previewed token and a key of its
 		// own.
@@ -194,9 +194,10 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			with(operator, "Idempotency-Key", executeKey))
 		Expect(code).To(Equal(http.StatusOK), "the execution did not answer 200; body: %s", body)
 		executed := decodeBulk(body)
-		Expect(executed.DryRun).To(BeFalse())
-		Expect(executed.ResetCount).NotTo(BeNil())
-		Expect(*executed.ResetCount).To(BeNumerically(">=", 1), "the execution reset nothing: %s", body)
+		Expect(executed).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"DryRun":     BeFalse(),
+			"ResetCount": gstruct.PointTo(BeNumerically(">=", 1)),
+		}), "the execution answer: %s", body)
 
 		// The retry: the same key and the same command answer the recorded
 		// outcome, not a second sweep. The token was consumed by the
@@ -209,11 +210,11 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			"the retry answered a different outcome than the one recorded")
 
 		// And the gateway agrees: the budget is whole again.
-		Expect(gatewayGet("private-gateway", probePath, nil)).To(BeNumerically("<", 300),
-			"the private gateway still refuses the path after the bulk reset")
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(beAdmitted(),
+			"GET %s through private-gateway after the bulk reset", probePath)
 	})
 
-	It("runs the addressed DELETE", func() {
+	It("lifts a spent budget through an addressed DELETE of its counter", func() {
 		probePath := spendBudget(limitedDomain, limitedPrefix, limitedRule, limit, &limitedApplied)
 
 		operator := map[string]string{
@@ -233,13 +234,14 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			ResetCount *int     `json:"resetCount"`
 		}
 		Expect(json.Unmarshal([]byte(body), &reset)).To(Succeed(), "body: %s", body)
-		Expect(reset.RuleID).To(Equal(limitedRule))
-		Expect(reset.Keys).NotTo(BeEmpty(), "the DELETE addressed no key")
-		Expect(reset.ResetCount).NotTo(BeNil())
-		Expect(*reset.ResetCount).To(BeNumerically(">=", 1), "the DELETE reset nothing: %s", body)
+		Expect(reset).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
+			"RuleID":     Equal(limitedRule),
+			"Keys":       Not(BeEmpty()),
+			"ResetCount": gstruct.PointTo(BeNumerically(">=", 1)),
+		}), "the DELETE answer: %s", body)
 
-		Expect(gatewayGet("private-gateway", probePath, nil)).To(BeNumerically("<", 300),
-			"the private gateway still refuses the path after the addressed reset")
+		Expect(gatewayGet("private-gateway", probePath, nil)).To(beAdmitted(),
+			"GET %s through private-gateway after the addressed reset", probePath)
 	})
 })
 
@@ -251,8 +253,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 // another call already spent would prove nothing.
 func spendBudget(domain, prefix, rule string, limit int32, applied *bool) string {
 	if !*applied {
-		blocks := prefixLimits(prefix, "per-path", []string{"path"}, limit, 3600)
-		blocks[0].Rules[0].Rates[0].Algorithm = v1.AlgorithmGCRA
+		blocks := hourlyGCRALimits(prefix, "per-path", limit)
 		Expect(apply(newPolicy(domain, blocks))).To(Succeed())
 		*applied = true
 		waitApplied(domain)
@@ -268,19 +269,17 @@ func spendBudget(domain, prefix, rule string, limit int32, applied *bool) string
 	return path
 }
 
-// decodeBulk reads the fields of a bulk answer the flows assert on.
-func decodeBulk(body string) struct {
+// bulkAnswer holds the fields of a bulk answer the flows assert on.
+type bulkAnswer struct {
 	DryRun            bool   `json:"dryRun"`
 	ConfirmationToken string `json:"confirmationToken"`
 	MatchedCount      *int   `json:"matchedCount"`
 	ResetCount        *int   `json:"resetCount"`
-} {
-	var result struct {
-		DryRun            bool   `json:"dryRun"`
-		ConfirmationToken string `json:"confirmationToken"`
-		MatchedCount      *int   `json:"matchedCount"`
-		ResetCount        *int   `json:"resetCount"`
-	}
+}
+
+// decodeBulk reads a bulk answer.
+func decodeBulk(body string) bulkAnswer {
+	var result bulkAnswer
 	Expect(json.Unmarshal([]byte(body), &result)).To(Succeed(), "body: %s", body)
 	return result
 }
@@ -302,8 +301,6 @@ func with(headers map[string]string, name, value string) map[string]string {
 	return out
 }
 
-// managementPort reports the container port the release exposes for the
-// management API, 0 when the chart rendered without it.
 // listedDomains reads the domain names out of a listing body.
 func listedDomains(body string) ([]string, error) {
 	var listing struct {
@@ -321,17 +318,12 @@ func listedDomains(body string) ([]string, error) {
 	return domains, nil
 }
 
+// managementPort reports the container port the release exposes for the
+// management API, 0 when the chart rendered without it.
 func managementPort() int32 {
 	pods := servicePods()
 	Expect(pods).NotTo(BeEmpty(), "no running replica to read the ports of")
-	for _, c := range pods[0].Spec.Containers {
-		for _, p := range c.Ports {
-			if p.Name == "management" {
-				return p.ContainerPort
-			}
-		}
-	}
-	return 0
+	return int32(namedPort(pods[0], "management"))
 }
 
 // serviceHost is the contract's Service, which is what an in-mesh caller
@@ -432,14 +424,7 @@ func managementToken(subject string, roles ...string) string {
 	payload := map[string]any{}
 	setClaim(payload, identity.subjectClaim, subject)
 	setClaim(payload, identity.rolesClaim, issued)
-
-	seg := func(v any) string {
-		raw, err := json.Marshal(v)
-		Expect(err).NotTo(HaveOccurred())
-		return base64.RawURLEncoding.EncodeToString(raw)
-	}
-	header := seg(map[string]string{"alg": "none", "typ": "JWT"})
-	return header + "." + seg(payload) + "."
+	return unsignedToken(payload)
 }
 
 // setClaim writes a value at a dotted path, creating the objects along it:
@@ -502,10 +487,9 @@ func runInNamespace(name string, command []string) string {
 		},
 	}
 	_ = k8s.Delete(ctx, pod)
-	Eventually(func() bool {
-		err := k8s.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})
-		return apierrors.IsNotFound(err)
-	}).WithTimeout(time.Minute).Should(BeTrue(), "the previous probe pod never went away")
+	Eventually(func() error {
+		return k8s.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})
+	}).WithTimeout(time.Minute).Should(Satisfy(apierrors.IsNotFound), "the previous probe pod %s never went away", name)
 	Expect(k8s.Create(ctx, pod)).To(Succeed())
 
 	var finished corev1.Pod

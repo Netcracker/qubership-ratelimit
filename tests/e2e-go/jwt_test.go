@@ -3,8 +3,6 @@
 package e2e
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -17,16 +15,22 @@ import (
 
 // Identity extraction end to end: a bearer token travels through the gateway
 // as a descriptor, the mapping turns its claim into a key, and the key
-// becomes the axis of a per-client bucket. No other suite sends a single
-// token, so this is the only proof the whole path is wired - including the
-// extraction metrics the dead-claim-path detector stands on.
+// becomes the axis of a per-client bucket. No other suite sends a token
+// through a claim mapping, so this is the only proof the whole path is wired -
+// including the extraction metrics the dead-claim-path detector stands on.
 var _ = Describe("identity extraction through the gateway", Ordered, Label("jwt"), func() {
 	const (
 		domain    = "gateway.public"
 		probePath = "/e2e"
 		limit     = 2
 	)
-	var applied bool
+	var (
+		applied bool
+
+		// tokensBefore is the scrape taken before the first token of the
+		// per-client spec: the extraction series grow from it.
+		tokensBefore map[string]*dto.MetricFamily
+	)
 
 	BeforeAll(func() {
 		// The fixture half runs once even across flake retries: the budget
@@ -57,78 +61,39 @@ var _ = Describe("identity extraction through the gateway", Ordered, Label("jwt"
 	AfterAll(func() { deletePolicies(domain) })
 
 	It("counts each client in its own bucket", func() {
-		beforeFamilies := scrapeAllReplicas()
+		tokensBefore = scrapeAllReplicas()
 
-		clientA := map[string]string{"Authorization": "Bearer " + unsignedJWT("acme-a")}
+		clientA := map[string]string{"Authorization": "Bearer " + unsignedToken(map[string]string{"org_id": "acme-a"})}
 		codes := gatewayBurst("public-gateway", probePath, limit+1, clientA)
-		for i, code := range codes[:limit] {
-			Expect(code).NotTo(Equal(429), "request %d of client A's budget was refused", i+1)
-		}
+		Expect(codes[:limit]).NotTo(ContainElement(429), "client A's requests within its budget of %d", limit)
 		Expect(codes[limit]).To(Equal(429),
 			"client A's request over the budget was admitted; the per-tenant bucket is not keyed")
 
 		// A different claim value is a different bucket: client B must be
 		// admitted while client A stands refused.
-		clientB := map[string]string{"Authorization": "Bearer " + unsignedJWT("acme-b")}
+		clientB := map[string]string{"Authorization": "Bearer " + unsignedToken(map[string]string{"org_id": "acme-b"})}
 		Expect(gatewayGet("public-gateway", probePath, clientB)).NotTo(Equal(429),
 			"client B was refused out of client A's bucket")
+	})
 
+	It("grows the domain's extraction series with every token sent", func() {
 		// The detector's two halves moved, both on this domain: tokens
 		// arrived, and the declared key extracted values for them. Both are
 		// read with the domain label, which is what keeps one domain's
-		// traffic from answering for another domain's declared keys.
+		// traffic from answering for another domain's declared keys. The
+		// per-client spec sent limit+1 tokens of client A and one of client B.
 		sent := float64(limit + 2)
 		extractions := map[string]string{"domain": domain, "key": "tenant"}
 		tokens := map[string]string{"domain": domain}
-		Eventually(func() bool {
+		Eventually(func(g Gomega) {
 			after := scrapeAllReplicas()
-			return counterSum(after, "ratelimit_extractions_total", extractions)-
-				counterSum(beforeFamilies, "ratelimit_extractions_total", extractions) >= sent &&
-				counterSum(after, "ratelimit_tokens_seen_total", tokens)-
-					counterSum(beforeFamilies, "ratelimit_tokens_seen_total", tokens) >= sent
-		}).WithTimeout(30*time.Second).Should(BeTrue(),
+			g.Expect(counterSum(after, "ratelimit_extractions_total", extractions)-
+				counterSum(tokensBefore, "ratelimit_extractions_total", extractions)).To(BeNumerically(">=", sent),
+				`growth of ratelimit_extractions_total{domain=%q,key="tenant"}`, domain)
+			g.Expect(counterSum(after, "ratelimit_tokens_seen_total", tokens)-
+				counterSum(tokensBefore, "ratelimit_tokens_seen_total", tokens)).To(BeNumerically(">=", sent),
+				"growth of ratelimit_tokens_seen_total{domain=%q}", domain)
+		}).WithTimeout(30*time.Second).Should(Succeed(),
 			"the extraction series of %s did not grow with the tokens", domain)
 	})
 })
-
-// unsignedJWT builds an alg-none token with one org_id claim. The engine
-// decodes the payload and never verifies - the gateway owns signatures - so
-// an empty signature segment is a valid fixture.
-func unsignedJWT(orgID string) string {
-	seg := func(v map[string]string) string {
-		raw, err := json.Marshal(v)
-		Expect(err).NotTo(HaveOccurred())
-		return base64.RawURLEncoding.EncodeToString(raw)
-	}
-	header := seg(map[string]string{"alg": "none", "typ": "JWT"})
-	payload := seg(map[string]string{"org_id": orgID})
-	return header + "." + payload + "."
-}
-
-// counterSum adds up every series of the family that carries the given
-// labels - counters arrive per replica, and the union is what a burst
-// touched.
-func counterSum(families map[string]*dto.MetricFamily, name string, labels map[string]string) float64 {
-	family := families[name]
-	if family == nil {
-		return 0
-	}
-	total := 0.0
-	for _, m := range family.Metric {
-		carried := map[string]string{}
-		for _, pair := range m.Label {
-			carried[pair.GetName()] = pair.GetValue()
-		}
-		matches := true
-		for k, v := range labels {
-			if carried[k] != v {
-				matches = false
-				break
-			}
-		}
-		if matches {
-			total += m.GetCounter().GetValue()
-		}
-	}
-	return total
-}

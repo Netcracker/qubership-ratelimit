@@ -3,8 +3,9 @@
 package e2e
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"io"
 	"slices"
 	"strings"
 	"time"
@@ -38,20 +39,32 @@ func getPolicy(name string) (*v1.RateLimitPolicy, error) {
 	return &p, err
 }
 
-// policyCondition returns the status of one condition, "" while it is absent -
-// the shape Eventually wants.
-func policyCondition(name, conditionType string) func() string {
-	return func() string {
+// conditionOf returns one condition of a policy, the zero Condition while the
+// policy or the condition is absent - the shape Eventually wants, and one a
+// failed wait prints whole.
+func conditionOf(name, conditionType string) func() metav1.Condition {
+	return func() metav1.Condition {
 		p, err := getPolicy(name)
 		if err != nil {
-			return ""
+			return metav1.Condition{}
 		}
-		c := meta.FindStatusCondition(p.Status.Conditions, conditionType)
-		if c == nil {
-			return ""
+		if c := meta.FindStatusCondition(p.Status.Conditions, conditionType); c != nil {
+			return *c
 		}
-		return string(c.Status)
+		return metav1.Condition{}
 	}
+}
+
+// policyCondition returns the status of one condition, "" while it is absent.
+func policyCondition(name, conditionType string) func() string {
+	condition := conditionOf(name, conditionType)
+	return func() string { return string(condition().Status) }
+}
+
+// readyReason returns the reason of the Ready condition, "" while it is absent.
+func readyReason(name string) func() string {
+	ready := conditionOf(name, v1.ConditionReady)
+	return func() string { return ready().Reason }
 }
 
 // generations returns (observed, active), zeros while the status is not there.
@@ -77,17 +90,8 @@ func serviceLogsSince(since time.Time) func() string {
 			return ""
 		}
 		var out strings.Builder
-		sinceTime := metav1.NewTime(since)
 		for i := range pods.Items {
-			req := clientset.CoreV1().Pods(namespace).GetLogs(pods.Items[i].Name,
-				&corev1.PodLogOptions{SinceTime: &sinceTime})
-			stream, err := req.Stream(ctx)
-			if err != nil {
-				continue
-			}
-			logs, _ := io.ReadAll(stream)
-			_ = stream.Close()
-			out.Write(logs)
+			out.WriteString(podLogs(pods.Items[i].Name, &since))
 		}
 		return out.String()
 	}
@@ -172,6 +176,29 @@ func prefixLimits(prefix, rule string, counters []string, requests, periodSecond
 	}}
 }
 
+// hourlyGCRALimits is prefixLimits counted per path under GCRA, requests an
+// hour. A 3600 s fixed window resets at the top of the hour, so a run whose
+// last request crossed hh:00 would have it admitted; GCRA with the default
+// burst admits the requests at once and then refuses until the next one is
+// due, with no calendar boundary for a run to cross.
+func hourlyGCRALimits(prefix, rule string, requests int32) []v1.LimitBlock {
+	blocks := prefixLimits(prefix, rule, []string{"path"}, requests, 3600)
+	blocks[0].Rules[0].Rates[0].Algorithm = v1.AlgorithmGCRA
+	return blocks
+}
+
+// unsignedToken builds an alg-none JWT that carries the given claims. Neither
+// the engine nor the management API verifies a signature - the gateway owns
+// signatures - so an empty signature segment is a valid fixture.
+func unsignedToken(claims any) string {
+	segment := func(v any) string {
+		raw, err := json.Marshal(v)
+		Expect(err).NotTo(HaveOccurred())
+		return base64.RawURLEncoding.EncodeToString(raw)
+	}
+	return segment(map[string]string{"alg": "none", "typ": "JWT"}) + "." + segment(claims) + "."
+}
+
 // deletePolicies removes the policies of the given domains from the baseline
 // namespace and returns once every running replica reports the domain gone,
 // so that a container's cleanup cannot leave the next container a domain
@@ -231,7 +258,8 @@ func waitApplied(domains ...string) {
 			g.Expect(p.Status.ObservedGeneration).To(Equal(p.Generation), "the operator has not observed the edit")
 			g.Expect(p.Status.ActiveGeneration).NotTo(BeZero(), "no generation of %s is enforced", domain)
 			want = applied.Domain{Generation: p.Status.ActiveGeneration, UID: string(p.UID)}
-		}).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed())
+		}).WithTimeout(time.Minute).WithPolling(time.Second).Should(Succeed(),
+			"the operator to observe the latest generation of %s and name an active one", domain)
 		Eventually(func() []string {
 			return replicasReporting(domain, func(d applied.Domain, ok bool) bool {
 				return !ok || d.Generation != want.Generation || d.UID != want.UID
