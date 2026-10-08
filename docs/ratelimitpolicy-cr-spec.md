@@ -45,9 +45,9 @@ counter key segments), `{` and `}` (Redis Cluster hash tags, which change slot r
 namespace and domain inside the hash tag), spaces, and uppercase letters; domains are compared as strings,
 case-sensitively. The naming convention is `<type>.<name>`: `gateway.public`, `gateway.private`, `service.billing`.
 
-A request for a domain that has no rules **is allowed** and counted in the `unknown_domain` metric; this is not an
-error. Consequence: a typo in the domain silently switches the limits off; the metric must stay at zero and sits under
-an alert.
+A request for a domain that has no rules **is allowed** and counted in `ratelimit_unknown_domain_checks_total`; this
+is not an error. Consequence: a typo in the domain silently switches the limits off; the metric must stay at zero and
+sits under an alert.
 
 In a composite, the gateways of all namespaces send one domain and the policy lives in the baseline: requests from the
 baseline and from the satellites are indistinguishable and are charged to the same buckets
@@ -56,8 +56,9 @@ baseline and from the satellites are indistinguishable and are charged to the sa
 ## One object per domain
 
 - **A singleton by construction.** The `metadata.name == spec.domain` rule (CEL) plus the uniqueness of object names
-  within a namespace make a second policy for a domain unrepresentable: the API server rejects the `create` with
-  `AlreadyExists`. No "which of the two wins" arbitration is needed; the state is unreachable.
+  within a namespace make a second policy for a domain unrepresentable: the API server rejects a mismatch with
+  `metadata.name has to equal spec.domain: the policy is the singleton of its domain`, and a second object of the
+  same name with `AlreadyExists`. No "which of the two wins" arbitration is needed; the state is unreachable.
 - **Everything in one object.** The claim mapping, the groups, and the rules change in one edit and apply atomically: a
   request never sees old extraction mixed with new rules. The compiler checks references from rules to keys and groups
   inside the one object; there is no cross-object arbitration.
@@ -158,8 +159,8 @@ spec:
 | --- | --- | --- |
 | `domain` | string, required | binding to the traffic source (see above); equals `metadata.name` |
 | `mappings` | list | extraction of keys from token claims; empty = built-in keys only |
-| `groups` | list | named value lists; an `InGroup` predicate refers to a group by name and compares its values with the predicate's key after that key's normalization |
-| `limits` | list of blocks | block = `target` + `mode` + `rules`; blocks are always additive with each other |
+| `groups` | list | named value lists, `values` at least one per group; an `InGroup` predicate refers to a group by name and compares its values with the predicate's key after that key's normalization |
+| `limits` | list of blocks, required, at least one | block = `target` + `mode` + `rules`; blocks are always additive with each other |
 
 ### The mappings[] entry
 
@@ -167,7 +168,7 @@ spec:
 | --- | --- | --- |
 | `key` | string, required | descriptor key name: the shared key pattern `^[a-z][a-zA-Z0-9_]*$`, at most 63 characters; `path`/`method`/`token` are forbidden; `sub` is an allowed override |
 | `claim` | string | dot-separated path in the token payload (`realm_access.roles`) |
-| `claimPath` | list of strings | the same path segment by segment, for claim names with dots; exactly one of `claim`/`claimPath` |
+| `claimPath` | list of strings, at least one | the same path segment by segment, for claim names with dots; exactly one of `claim`/`claimPath` |
 | `type` | `String` (default) \| `StringArray` | shape of the value; an array key is a set of elements |
 | `normalization` | `None` (default) \| `Lowercase` | value normalization |
 | `fallbacks` | list of paths | tried in order when the primary path is empty; the first non-empty result wins |
@@ -187,18 +188,18 @@ responsibility. The compiler adds no normalization of its own.
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string, required | unique within the policy; part of the counter key |
-| `target.routes` | list of routes | an OR list; no `target` = the block sees all traffic of the domain |
-| `target.routes[].path` | `{type, value}` | `type: Exact \| Prefix \| Template` |
+| `target.routes` | list of routes, at least one when `target` is set | an OR list; no `target` = the block sees all traffic of the domain |
+| `target.routes[].path` | `{type, value}`, required with both fields | `type: Exact \| Prefix \| Template`; `value` starts with `/` |
 | `target.routes[].methods` | list of enum values: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `CONNECT`, `OPTIONS`, `TRACE` | OR over the values; absent = any method |
 | `mode` | `All` (default) \| `FirstMatch` | how the block's rules combine |
-| `rules` | list of rules | the block's counters |
+| `rules` | list of rules, required, at least one | the block's counters |
 
 ### The rules[] rule
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string, required | unique within the block; part of the counter key |
-| `matches` | list of predicates | a conjunction; the key is `sub`, a `mappings` key, or a capture of its own block (`path`/`method`/`token` are forbidden: routes go in `target`); empty = everyone |
+| `matches` | list of predicates, each with `key` and `operator` | a conjunction; the key is `sub`, a `mappings` key, or a capture of its own block (`path`/`method`/`token` are forbidden: routes go in `target`); empty = everyone |
 | `counters` | list of keys | bucket axes: `sub`, `path`, `method`, a scalar `mappings` key, or a capture; empty = one shared bucket |
 | `rates` | list of entries | counting windows; absent in a rule with `behavior: Bypass` |
 | `behavior` | `Enforce` (default) \| `Shadow` \| `Bypass` | Shadow: count and write metrics, never refuse; Bypass: skip without going to the store |
@@ -208,8 +209,8 @@ responsibility. The compiler adds no normalization of its own.
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `requests` | int32, 1..2 147 483 647 | the window's quota |
-| `periodSeconds` | int32 | window length in seconds, 1..86400 (one day); unique within the rule |
+| `requests` | int32, required, 1..2 147 483 647 | the window's quota |
+| `periodSeconds` | int32, required | window length in seconds, 1..86400 (one day); unique within the rule |
 | `burst` | int32, 1..2 147 483 647 | only with the `GCRA` algorithm; defaults to `requests` (a full bucket) |
 | `algorithm` | `GCRA` (default) \| `FixedWindow` | a property of the window; every entry is an independent bucket |
 
@@ -227,7 +228,7 @@ set. Operators are predicates over sets, which is where their applicability to t
 | Operator | Parameter | Meaning | Scalar | Array |
 | --- | --- | --- | --- | --- |
 | `Equals` | `value` | the set equals `{v}` | ✓ | rejected (`IncompatibleOperator`) |
-| `In` | `values` | the intersection with the list is non-empty | ✓ | ✓ ("any element is in the list") |
+| `In` | `values`, at least one | the intersection with the list is non-empty | ✓ | ✓ ("any element is in the list") |
 | `InGroup` | `value` (group name) | the intersection with the group is non-empty | ✓ | ✓ ("any element is in the group") |
 | `Contains` | `value` | the element belongs to the set; never a substring match | ≡ `Equals` | ✓ |
 | `Exists` | none | the set is non-empty | ✓ | ✓ |
@@ -300,8 +301,8 @@ component, enforces that a token is required.
    come from the strictest decision; per-descriptor verdicts (statuses) are not returned in v1: if you need a separate
    verdict, send separate checks. A request without descriptors is one decision over an empty request: the domain's
    unconditional limits apply. An empty value of a descriptor entry means the key is absent, as in the identity layer.
-   The number of descriptors is unbounded: the 128-bucket budget applies to the gRPC call as a whole, summed over all
-   its descriptors; exceeding it is an explicit refusal (`OVER_LIMIT`), not an error.
+   A check carries at most 16 descriptors: one with more is refused as `OVER_LIMIT` (`too_many_descriptors`) before
+   any decision is made. The 128-bucket budget binds each descriptor's decision on its own.
 9. **A key is a set** (a scalar is a one-element set, an array is its elements, a missing key is the empty set);
    operators are predicates over sets. The compiler rejects an incompatible operator/type pair as a blocking
    `IncompatibleOperator` problem; it never reaches the matcher.
@@ -399,7 +400,8 @@ own subtree, so one string addresses an exact bucket and safely bounds scans and
 The hash tag is on the domain, and this is a load-bearing decision: a request's verdict covers several buckets and must
 be charged atomically, in one server-side script. A shared slot for all keys of a domain makes such a script valid on
 any Redis topology, including Cluster. The price is accepted deliberately: the throughput of one domain is bounded by
-one shard; domains spread freely across shards.
+one shard, and the service's single-address client puts every domain of an installation on the same Redis; the
+measured ceilings are in [limits](limits.md).
 
 `requests` and `burst` are deliberately not part of the key: editing a limit reinterprets the live state rather than
 resetting it. Fixed window keeps the spent count (a quota raised in the middle of the day remembers what was consumed),
@@ -484,11 +486,12 @@ liveness of the operator; CEL on the CRD for the same checks was rejected after 
 forces list bounds for its own sake and a second copy of the compiler's rules ([limits](limits.md)).
 
 **The operator's RBAC** is a namespace-scoped Role, the only Role of the delivery: `ratelimitpolicies` get/list/watch,
-`ratelimitpolicies/status` update/patch, Lease create/update/get (the Lease covers the overlap of two operator pods
-during a rollout), the EndpointSlice of the Service `ratelimit` get/list/watch, the ConfigMap `ratelimit-config`
-get/list/watch/create/update/patch/delete, its own Deployment get (the ConfigMap's owner), `events` create/patch. There
-is no ClusterRole; the CRD comes from the cluster chart `ratelimit-crds`. The service pod carries no Role and mounts
-no ServiceAccount token (`automountServiceAccountToken: false`).
+`ratelimitpolicies/status` update, Lease get/create/update (the Lease covers the overlap of two operator pods during a
+rollout), EndpointSlices get/list/watch across the namespace (the operator reads the one of the Service `ratelimit`),
+ConfigMaps create, the ConfigMap `ratelimit-config` by name get/list/watch/update, its own Deployment by name get (the
+ConfigMap's owner), `events` create/patch in the core and `events.k8s.io` groups. There is no ClusterRole; the CRD
+comes from the cluster chart `ratelimit-crds`. The service pod carries no Role and mounts no ServiceAccount token
+(`automountServiceAccountToken: false`).
 
 ## Status
 
@@ -523,7 +526,7 @@ status:
   - type: Ready                        # ALL ready replicas enforce the latest generation
     status: "False"                    # in progress: Stalled below says this is not a breakage
     reason: Propagating
-    message: '2 of 3 replicas enforce generation 7; ratelimit-service-7c9d-x2k1 reports 6'
+    message: '2 of 3 replicas enforce generation 7; ratelimit-service-7c9d-x2k1 report another'
     lastTransitionTime: "2026-09-02T12:00:05Z"
     observedGeneration: 7
   - type: Stalled                      # stuck; under an alert
@@ -544,7 +547,7 @@ pair from the `/debug/applied` payload.
 | Situation | `Ready` | `Stalled` | reason |
 | --- | --- | --- | --- |
 | all ready replicas enforce the latest generation | True | False | `AllReplicas` |
-| the operator has not yet reached the latest generation | False | False | `Reconciling` |
+| no ready replica reports the latest generation yet, within the threshold (90 s) | False | False | `Reconciling` |
 | the kubelet is projecting the new generation into the replicas, the lag is below the threshold (90 s) | False | False | `Propagating` |
 | there is no ready replica at all | False | False | `NoReplicas` |
 | a replica lags longer than the threshold (90 s, above the kubelet sync period): the kubelet has not projected the update or the replica's watcher is broken | False | True | `ReplicaStale` |
@@ -570,12 +573,13 @@ and a pod that joined or left retakes the round, so an EndpointSlice change is s
 generation and UID from that payload. The `ratelimit_policy_applied_generation{domain}` gauge stays for Prometheus and
 alerts but is not the source of `Ready`. The `/debug/` prefix is read-only diagnostics on the cluster-internal metrics
 port: no mutations, no authentication, not part of the management API, and outside the compatibility promises. From
-the probe result the operator writes `status.replicas` and the conditions; it writes only on a change and with a
-`resourceVersion` precondition, and `lastCheckTime` is the time the fleet was asked, the freshness of the answers the
-status rests on, never older than the interval plus the length of a round. `summary` repeats `applied/total` as one
-string, because the `REPLICAS` printer column is a JSONPath expression and cannot join two numbers. `NoReplicas` is
-written by the operator when the EndpointSlice holds no ready endpoint; when the operator itself is not running, nobody
-writes: the status freezes, and the age of `lastCheckTime` shows it.
+the probe result the operator writes `status.replicas` and the conditions, with a `resourceVersion` precondition.
+`lastCheckTime` is the time the fleet was asked, the freshness of the answers the status rests on; the operator
+rewrites it with every status change and otherwise at most every 5 minutes, so an unchanged status carries a stamp
+up to 5 minutes old. `summary` repeats `applied/total` as one string, because the `REPLICAS` printer column is a
+JSONPath expression and cannot join two numbers. `NoReplicas` is written by the operator when the EndpointSlice holds
+no ready endpoint; when the operator itself is not running, nobody writes: the status freezes, and a `lastCheckTime`
+older than 5 minutes shows it.
 
 Scaling and rollouts do not make `Ready` flicker: a new pod enters the denominator only once ready, and it becomes ready
 after its first applied manifest, already with the current generation; a terminating pod leaves the denominator
@@ -614,7 +618,8 @@ in them) and contain only root causes:
 | `CaptureShadowsMappedKey`: shadowing; inside the block the capture is in effect | informational |
 
 At least one blocking entry makes the whole generation invalid. Printer columns: `READY`, `REPLICAS` (`applied/total`),
-`RULES`, `PROBLEMS`, `AGE`; the domain is not duplicated, since it is the object's name.
+`RULES`, `PROBLEMS`, `AGE`; the domain is not duplicated, since it is the object's name. A zero in `RULES` or
+`PROBLEMS` prints as an empty cell, the same as a status nobody has written.
 
 ## Validations: schema and compiler
 
@@ -627,19 +632,20 @@ their origin are in [limits](limits.md).
 Schema (OpenAPI):
 
 - `domain`: format and length, see the binding section; the same pattern on the chart values side;
-- block, rule, group, and key names: a pattern and a length ≤ 63 (they are part of the counter key); every descriptor
-  key (`mappings[].key`, `Template` placeholders, `matches[].key`, `counters[]`) uses one pattern,
+- block, rule, group, and key names: a pattern and a length ≤ 63 (block and rule names are segments of the counter
+  key; group names and descriptor key names are not, only descriptor values are); every descriptor key
+  (`mappings[].key`, `Template` placeholders, `matches[].key`, `counters[]`) uses one pattern,
   `^[a-z][a-zA-Z0-9_]*$`, camelCase allowed (`{orderId}` in the examples is valid); predicate values, group values, and
-  claim paths ≤ 256, the engine's sanitary limit on an extracted value, so a longer literal can never match; a route
-  path ≤ 2048 (the conventional URL limit);
+  claim paths ≤ 256 characters, where the engine skips an extracted value longer than 256 bytes, so a non-ASCII
+  literal past 256 bytes passes the schema and never matches; a route path ≤ 2048 (the conventional URL limit);
 - uniqueness through list types: `limits`, `rules`, and `groups` are a `map` by `name`, `mappings` a `map` by `key`,
   `rates` a `map` by `periodSeconds`, `methods` a `set`; `conditions` a `map` by `type`; the remaining lists are
   atomic;
 - enums for `mode`, `behavior`, `algorithm`, `type`, `normalization`, `operator`, `methods`; `periodSeconds` is
   1..86400; `requests` and `burst` are 1..2 147 483 647; `ruleProblems[].message` ≤ 1024 characters and
   `ruleProblems` ≤ 64 entries, both cut by the operator before the write; `status.problems` counts every problem,
-  past 64 too, so a `PROBLEMS` column of 70 beside 64 entries is expected; required fields are marked `+required`,
-  optional ones `+optional`;
+  past 64 too, so a `PROBLEMS` column of 70 beside 64 entries is expected; required fields are marked in the field
+  reference;
 - apart from the status's `ruleProblems`, there is no `maxItems` on the lists: the only CEL rule walks no lists, and
   the bounds that mean something to the engine are held by the compiler.
 
@@ -660,7 +666,8 @@ last-good:
   `claim`/`claimPath`; `Template`: segments are literals or a single `{name}`, placeholders do not repeat and do not
   coincide with the built-in keys `path`, `method`, `token`, `sub` (for `sub` the ban is fundamental: the caller
   controls the path, and a capture would let it assign itself an identity); an unknown field or enum value of a
-  newer schema: the object is decoded strictly (`DisallowUnknownFields`), and the field path goes into the message;
+  newer schema: the object is decoded strictly (`sigs.k8s.io/json.UnmarshalStrict`), and the field path goes into
+  the message;
 - windows (`InvalidWindow`, the engine's window check): `burst` only with GCRA; `requests ≤ periodSeconds × 10⁶`;
   with an emission < 100 µs `periodSeconds × 10⁶` is divisible by `requests` without remainder;
   `burst × emission ≤ 10¹⁵ µs`;

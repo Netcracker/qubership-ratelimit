@@ -16,6 +16,10 @@ tags are the stand's. Every command below ran there, except where the text says 
 
 ## 0. Setup and the first look
 
+The `api` and `op` commands of sections 0, 1, 2, 6, and 7 need the management API, which the service chart exposes
+only with `management.enabled: true` (off by default, see [Management API port](helm-chart.md#management-api-port));
+the `kubectl` and `/debug/*` commands do not.
+
 ```bash
 NS=ratelimit-e2e             # the namespace of the installation
 DOMAIN=gateway.public        # the policy is named after its domain
@@ -92,11 +96,30 @@ ones kept first when the list is cut. Anything other than `True`, `n/n`, and a b
 | `Ready: False`, reason `Propagating` or `Reconciling`, `Stalled: False` | a rollout in progress, nothing to do yet | 4 if it lasts |
 | `Ready: False`, reason `ReplicaStale`, `Stalled: True` | a service replica lags past 90 s | 4 |
 | `Ready: False`, reason `ReplicaFormatUnsupported`, `Stalled: True` | a service replica refuses the manifest's format version | 4, and 5 for the order of the fix |
-| `Ready: False`, reason `NoReplicas` | no ready service replica | 4 |
+| `Ready: False`, reason `NoReplicas` | no ready service replica; the pod state shows whether it is the Secret (1) or the manifest (9) | 4 |
 | `Ready: Unknown`, reason `ProbeFailed` | the operator cannot read the service replicas | 4 |
 | `Accepted: False`, reason `CompilationFailed` | the same as `NotCompiled`, seen from the object's side | 3 or 5 |
-| `Ready: False`, reason `Reconciling` that lasts, with `ratelimit_config_write_errors_total` growing | the operator cannot write `ratelimit-config` | 9 |
+| `Ready: False`, reason `Reconciling`, then `ReplicaStale` after 90 s, with `ratelimit_config_write_errors_total` growing | the operator cannot write `ratelimit-config` | 9 |
 | a fresh service pod NotReady with no other symptom | no ConfigMap in its volume yet | 9 |
+
+An alert of the two charts' PrometheusRules ([Alerts](helm-chart.md#alerts)) lands in the same sections. The hold is
+the chart value named, with its default:
+
+| Alert | Severity | Fires on | Held | Section |
+| --- | --- | --- | --- | --- |
+| `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1`, every reason, `NotCompiled` included | `policyAlerts.stalledFor`, 5m | 4; 3 or 5 on `NotCompiled`; `ConfigMapTooLarge` as in the status table |
+| `RatelimitNotReadyLong` | warning | `ratelimit_policy_ready == 0`, whatever the reason | `policyAlerts.notReadyFor`, 30m | the status table, by the `Ready` reason |
+| `RatelimitNoReplicas` | critical | `Ready: False` with reason `NoReplicas` | `policyAlerts.noReplicasFor`, 5m | 4 |
+| `RatelimitChecksStopped` | warning | ready replicas enforce the domain and no check of it arrived in `policyAlerts.checksStoppedWindow`, 10m | `policyAlerts.checksStoppedFor`, 15m | 10 |
+| `RatelimitRuleProblems` | warning | a blocking problem on the latest generation | `policyAlerts.ruleProblemsFor`, 5m | 3, or 5 for an unknown field |
+| `RatelimitConfigWriteErrors` | critical | a failed write of `ratelimit-config` within `policyAlerts.configWriteErrorsWindow`, 15m | none | 9 |
+| `RatelimitNoOperatorLeader` | critical | no scrape of the namespace reports `ratelimit_leader 1` | `policyAlerts.noLeaderFor`, 5m | 10 |
+| `RatelimitUnknownDomain` | warning | a check for a domain no policy claims within 5m | `alerts.unknownDomainFor`, 5m | 2 |
+| `RatelimitStoreErrors` | critical | a failed store decision within 5m | `alerts.storeErrorsFor`, 5m | 1 |
+| `RatelimitDecisionLatencyHigh` | warning | the p99 of a check above `alerts.latencyBudgetSeconds`, 0.01 s | `alerts.latencyFor`, 10m | 10 |
+| `RatelimitKeyDeclaredNotExtracted` | warning | a declared key with no extraction within `alerts.keyNotExtractedWindow`, 15m, while the domain's tokens arrive | `alerts.keyNotExtractedFor`, 30m | 2, and stage one of the [rollout procedure](rollout-procedure.md) |
+| `RatelimitDomainBudgetNearLimit` | warning | `ratelimit_domain_decision_buckets` at or above `alerts.domainBudgetWarnAt`, 104 of the 128 | none | 3, the `DomainBudgetExceeded` reason |
+| `RatelimitConfigurationAbsent` | warning | `ratelimit_config_absent 1` on a service pod | `alerts.configAbsentFor`, 5m | 9 |
 
 The full status, and the three numbers that summarize it:
 
@@ -117,13 +140,17 @@ kubectl get rlp -n "$NS" "$DOMAIN" \
    {"type": "Stalled", "status": "False", "reason": "Progressing"}]}
 ```
 
+`replicas.lastCheckTime` is the time of the probe round the status rests on. The operator rewrites it with every
+status change and otherwise once it is 5 minutes old, so an age past 5 minutes and a probe cycle means that no
+operator is writing the status: the pod is down, or no pod holds the Lease (section 10).
+
 The service's own view, per replica, through the management API:
 
 ```bash
 api "$BASE/status" | jq
 # {"replica": "ratelimit-service-686d7856bf-jbccp", "snapshotSwappedAt": "2026-09-21T13:20:59Z",
 #  "ruleSetVersions": {"gateway.private": "957f8204794e", "gateway.public": "5ff0f5a9e94d"},
-#  "counterStore": {"backend": "redis at e2e-redis:6379"}}
+#  "counterStore": {"backend": "redis at e2e-redis:6379, provisioned by DBaaS"}}
 api "$BASE/domains" | jq
 # {"items": [{"domain": "gateway.public", "ruleSetVersion": "5ff0f5a9e94d", "blocks": 2, "rules": 12,
 #             "effectiveKeys": ["method", "path", "plan", "roles", "sub"], "listValuedKeys": ["roles"]}, ...]}
@@ -399,7 +426,11 @@ ratelimit_extractions_total{domain="gateway.public",key="roles"} 44
 ratelimit_tokens_seen_total{domain="gateway.public"} 69
 ```
 
-The gap between the tokens seen and the extractions is the warm-up probes without a token and the simulations.
+The gap between the tokens seen and the extractions has two sources. The service counts the token before the decision
+and the extractions after it, so a check whose decision failed in the store (section 1) adds to the first series only.
+A token the mapping cannot read adds to the first series and to `ratelimit_extraction_skips_total`, by key and
+reason. The 25 on the stand match the 25 checks that section 1 answered as unavailable. A request without a token and
+a simulation move neither series.
 
 ## 3. A rejected edit
 
@@ -407,6 +438,16 @@ An edit that passes the schema but not the compiler lands in etcd and is refused
 enforced, the previous good generation keeps serving. The author has to read the status to know. An edit that fails
 the schema never gets that far: `kubectl apply` refuses it on the spot, for example `burst: 0` answers
 `spec.limits[0].rules[0].rates[0].burst in body should be greater than or equal to 1`, and nothing changes.
+
+The refusals an author meets first, as `kubectl apply` prints them, and the one the binaries print at start:
+
+| Message | Cause | Action |
+| --- | --- | --- |
+| `metadata.name has to equal spec.domain: the policy is the singleton of its domain` | the object's name differs from `spec.domain`; the CRD's validation rule refuses it | name the object after its domain |
+| `spec.limits[0].rules[0].rates[0].burst in body should be greater than or equal to 1` | a value outside the schema's range; the path names the field | fix the value at the path; the [resource specification](ratelimitpolicy-cr-spec.md) has the ranges |
+| `spec.limits[0].target.routes[0].path.type: Unsupported value: "GlobMatch": supported values: "Exact", "Prefix", "Template"` | a value outside an enum of the installed CRD | use one of the listed values; a value a newer CRD release defines needs that release (section 5) |
+| `strict decoding error: unknown field "spec.futureField"` | a field the installed CRD does not define: a typo, or a field of a newer CRD release | fix the name, or install the CRD release that defines it (section 5) |
+| `CLOUD_NAMESPACE must be set` | the operator or the service started without the variable, which the charts set from the pod's namespace, so this is a run outside the charts; the process logs the line and exits | set it to the namespace the installation serves |
 
 **Signal.** `READY False`, `PROBLEMS` above zero, the gauges, and one `Warning` event per generation that does not
 compile:
@@ -480,10 +521,14 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 **What traffic sees meanwhile.** `activeGeneration` is enforced, and the management API keeps reporting its rule set:
 `GET /domains` showed `ruleSetVersion 5ff0f5a9e94d` with 12 rules throughout, and the manifest kept generation 1. If
 `activeGeneration` is `0`, the domain has no last-good and enforces nothing; the `Ready` message says
-`no generation is enforced: domain is unprotected`. That is the one case to treat as an incident rather than a review
-comment. A domain that lost its last-good to an operator upgrade has a `Warning` event with reason `LastGoodLost`,
-`last-good generation N does not compile with this operator build`, and the same line in the operator's log; the
-`Ready` message carries it only until the configuration writer drops the saved generation. The saved spec is gone
+`no generation is enforced: domain is unprotected`. That is the case to treat as an incident; a domain held on
+last-good is the author's to fix, and `RatelimitStalled` pages on both (section 4). A domain that lost its last-good
+has a `Warning` event with reason `LastGoodLost` and the same line in the operator's log, with one of two messages.
+`last-good generation N does not compile with this operator build: <problem>` follows an operator upgrade whose
+compiler refuses the saved spec. `last-good generation N was saved from a read that did not carry every field` means
+the saved generation is the one the operator reads with a field this build does not define (section 5). The `Ready`
+message
+carries the loss only until the configuration writer drops the saved generation. The saved spec is gone
 then, and rolling the operator back does not bring it back: apply a generation that compiles. The API server deletes
 the event after its `--event-ttl`, one hour by default; for an older loss, search the operator's log for
 `dropped a saved last-good generation; the domain enforces nothing`, which carries the domain and the reason as fields.
@@ -550,16 +595,19 @@ ratelimit_policy_replicas{domain="gateway.public",state="total"} 3
 ```
 
 The alert is the operator chart's `RatelimitStalled`, `ratelimit_policy_stalled == 1` held for `policyAlerts.stalledFor`
-([Helm doc](helm-chart.md)); the
-generation each service pod enforces stays readable per pod:
+([Helm doc](helm-chart.md)). It fires on every `Stalled` reason, `NotCompiled` and `ConfigMapTooLarge` included, so a
+rejected edit (section 3) pages critical after the same hold. The generation each service pod enforces stays readable
+per pod:
 
 ```promql
 ratelimit_policy_applied_generation{domain="gateway.public"}    # one series per service pod
 ```
 
-**Diagnose, "report another".** The pod enforces a generation other than the one the manifest carries. Three causes. The
-kubelet has not projected the ConfigMap update into the pod yet: that resolves within the sync period and stays
-`Propagating` below the threshold. The replica's watch of the mounted directory stopped delivering. Or the validated
+**Diagnose, "report another".** The pod enforces a generation other than the one the status calls active. Four
+causes. The operator could not write the manifest: the manifest's generation is the one the replicas report, below
+`activeGeneration`, and `ratelimit_config_write_errors_total` grows (section 9). The kubelet has not projected the
+ConfigMap update into the pod yet: that resolves within the sync period and stays `Propagating` below the threshold.
+The replica's watch of the mounted directory stopped delivering. Or the validated
 spec of that one domain does not compile in the replica's build, a version skew inside the compiler rather than the
 format: the replica keeps the last-good engine of the domain and reports the generation it came from, the other domains
 of the namespace move on, and the log names the domain in the line `keeping the last-good engine`. A domain the replica
@@ -575,7 +623,8 @@ curl -s http://127.0.0.1:8080/debug/applied | jq
 kubectl logs -n "$NS" <the pod the message names> --since=15m | grep -E 'configuration|compile|refused' | tail -20
 ```
 
-The manifest holds the generation the operator wrote; `/debug/applied` holds the one the replica applied. A gap that
+The manifest holds the generation the operator wrote; `/debug/applied` holds the one the replica applied. A manifest
+that agrees with `/debug/applied` and lags `activeGeneration` is the failed write. A gap that
 outlasts the sync period, with no `configuration applied` line in the log, is a watch that stopped. A gap on one domain,
 with the apply in the log and the `does not compile` line beside it, is the compiler skew. Image version skew during a
 rollout of the service shows as a refusal, `ReplicaFormatUnsupported`, as one domain held at its last-good generation,
@@ -606,6 +655,22 @@ pods, so a `DENY` on the metrics port blocks every replica alike; the operator n
 
 When no replica answers, the condition is `Ready: Unknown` with reason `ProbeFailed` instead: the operator reports that
 it cannot read the fleet rather than a count it does not have.
+
+**Diagnose, `NoReplicas`.** The EndpointSlice of the Service `ratelimit` has no ready endpoint, so nothing enforces
+the policy and every check is decided by the gateway's failure mode (section 1); the alert is `RatelimitNoReplicas`.
+The pod state shows which of three cases it is:
+
+```bash
+kubectl get pods -n "$NS" -l app.kubernetes.io/name=ratelimit-service
+kubectl describe pod -n "$NS" <a service pod> | grep -A5 '^Events'
+```
+
+A pod in `ContainerCreating` with `secret "ratelimit-service-redis" not found` in its events waits for the Secret:
+the store's volume is not optional, so the pod does not start before dbaas-operator writes it (section 1). A pod
+`Running` with `0/1` ready has started and waits for its first manifest: `/readyz` answers `503` until the replica
+applies one, and the ConfigMap volume is optional, so the pod exists before the operator writes (section 9); a pod
+that refuses the manifest it finds stays there too (section 5). No pod at all is the Deployment: its replica count,
+or a scheduling failure in its events.
 
 **Diagnose, `ReplicaFormatUnsupported`.** A replica refuses the manifest: its `formatVersion` is one the replica does
 not read, a field the replica's strict decoder does not define, or a payload of a domain that does not decompress or
@@ -689,9 +754,10 @@ patched through the status subresource came back as `patched (no change)`, dropp
 did not move. The status is the operator's own and changes with every release, so a strict read of it would refuse new
 generations for the length of every operator rollout.
 
-The manifest skew has its own signal: `Ready: False` with reason `ReplicaFormatUnsupported` and `Stalled: True`, with
-`Accepted: True` on the policy and every replica Ready on its previous snapshot. Section 4 has the readout of the
-refusal on `/debug/applied`.
+The manifest skew has its own signal once the policy moves a generation: `Ready: False` with reason
+`ReplicaFormatUnsupported` and `Stalled: True`, with `Accepted: True` on the policy and every replica Ready on its
+previous snapshot. Until then every replica stays `AllReplicas` on its snapshot (section 4). Section 4 has the readout
+of the refusal on `/debug/applied`.
 
 **Diagnose.** Compare the versions: the two images, the schema the object uses, the manifest's format version, and the
 versions a replica reads:
@@ -717,7 +783,10 @@ read yet.
 **What traffic sees meanwhile.** Last-good, as in section 3: `/debug/applied` stayed at generation 9 and the domain
 listing kept its 12 rules and its rule set version throughout. A policy whose only generation carries the field has
 no last-good and enforces nothing: on the stand such a policy reported `no generation is enforced: domain is
-unprotected` and listed zero rules. Under `ReplicaFormatUnsupported` traffic sees the previous snapshot: a replica that
+unprotected` and listed zero rules. A domain whose saved last-good is the generation that carries the field loses
+it as well, with the event `LastGoodLost`, `last-good generation N was saved from a read that did not carry every
+field` (section 3): the operator saved that generation from a read made before the CRD defined the field, and its
+next read carries the field. Under `ReplicaFormatUnsupported` traffic sees the previous snapshot: a replica that
 refuses a manifest stays Ready on the last configuration it applied. A replica that starts after the refusal has no
 snapshot to keep, so it stays NotReady and out of Endpoints until a manifest it reads arrives.
 
@@ -728,7 +797,8 @@ Deployments to one version, in the order the format versions allow. An upgrade i
 operator. The new service reads N and N-1, so it reads what the old operator writes and the new operator's N once it
 arrives. A rollback reverses the order, the operator first, then the service: the old operator's N-1 is read by both
 service versions. A service rolled back first refuses the new operator's N and starts its fresh pods NotReady. A fresh
-installation needs no order: the service waits NotReady until the operator writes.
+installation installs the operator before the service: the service stays NotReady until the operator writes, and the
+service chart's EnvoyFilters are live from the moment it is installed.
 
 A rollback of the operator across a format increment starts it without last-good: the older operator does not read
 the newer manifest, writes the namespace again from the live objects, and a domain whose latest generation does not
@@ -881,11 +951,12 @@ logs the outcome, the bulk form logs the acceptance with the hash of the selecti
 ```bash
 kubectl logs -n "$NS" deploy/ratelimit-service --since=24h | grep 'management mutation'
 # management mutation subject=operator@example.com idempotencyKey=CE81F29B-... domain=gateway.public
-#   endpoint=counters ruleId=api/per-client axes=map[sub:alice] dryRun=false outcome=reset count=1
+#   endpoint=counters ruleId=api/per-client axes={"sub":"alice"} dryRun=false outcome=reset count=1
 # management mutation subject=operator@example.com idempotencyKey=69DA3B84-... domain=gateway.public
-#   endpoint=counters ruleId=api/per-client axes=map[sub:alice] dryRun=true outcome=previewed count=1
+#   endpoint=counters ruleId=api/per-client axes={"sub":"alice"} dryRun=true outcome=previewed count=1
 # management mutation accepted subject=operator@example.com idempotencyKey=08439BE2-... domain=gateway.public
 #   endpoint=counter-resets command=execute-selector selection=72a94e83cf44e26d dryRun=false
+#   selector={"ruleIds":["api"]}
 ```
 
 The service writes nothing to the API server, so there is no Kubernetes Event per mutation: the log line is the
@@ -909,8 +980,9 @@ stand runs no Argo CD, so this table is the mapping the check implements, not an
 A sync wave that waits on the policy closes only when every service replica enforces the rule; a Helm release closes on
 the Deployments, before a later generation reaches the replicas. A wave that stays Progressing longer than the rollout
 and the kubelet sync period take is `NoReplicas` or `ProbeFailed`. A wave that turns Degraded on `NotCompiled` or
-`ConfigMapTooLarge` is a review comment for the author of the policy, not a rollback of the release. A wave that turns
-Degraded on `ReplicaFormatUnsupported` is the version skew of section 5, a matter of the two releases.
+`ConfigMapTooLarge` is a rejected edit (section 3): the fix is the author's, not a rollback of the release, and
+`RatelimitStalled` pages on it all the same. A wave that turns Degraded on `ReplicaFormatUnsupported` is the version
+skew of section 5, a matter of the two releases.
 
 ## 9. The ConfigMap channel
 
@@ -995,10 +1067,59 @@ curl -s http://127.0.0.1:8080/debug/applied | jq '.configAbsent'   # through the
 kubectl get cm -n "$NS" ratelimit-config -o name
 ```
 
+## 10. Alerts the status does not show
+
+Three alerts come from the scrape alone; the policy status does not show them. None of them was run on the stand: the
+entries below state what the rule, the series, and the code establish, and the commands carry no output.
+
+**`RatelimitChecksStopped`.** Ready replicas enforce the domain, `ratelimit_policy_replicas{state="applied"}` above
+zero, and `ratelimit_checks_total` of the domain did not move within `policyAlerts.checksStoppedWindow`, 10m: the
+gateway sends no checks, so its traffic passes unlimited. Four causes: the filter is off, `runtime.enabledPercent: 0`
+or a runtime override of `ratelimit.<gateway>.enabled` ([rollout procedure](rollout-procedure.md), section 4); its
+`EnvoyFilter` is gone; its domain differs from the policy's, and then `ratelimit_unknown_domain_checks_total` grows
+(section 2); or the path from the gateway to the Service `ratelimit` is broken. A gateway that carries no traffic at
+all fires the same way, so a domain idle for long stretches needs a wider window.
+
+```bash
+kubectl get envoyfilter -n "$NS"
+kubectl get endpointslice -n "$NS" -l kubernetes.io/service-name=ratelimit
+```
+
+**`RatelimitNoOperatorLeader`.** No scrape of the namespace reports `ratelimit_leader 1` for `policyAlerts.noLeaderFor`,
+5m: no operator pod holds the Lease `ratelimit.netcracker.com`, so no policy is compiled, no status is written, and
+`ratelimit-config` is not maintained; the replicas keep enforcing what they applied, and `lastCheckTime` ages
+(section 0). The gauge is set once a pod is elected and the process ends when it loses the Lease, so the alert is an
+operator pod that is not running, not elected, or not scraped: the Deployment, the Lease's holder, the log, and the
+operator chart's PodMonitor, in that order. A pod that restarts without turning Ready is the missing CRD of section 0.
+
+```bash
+kubectl get deploy -n "$NS" ratelimit-operator
+kubectl get lease -n "$NS" ratelimit.netcracker.com -o jsonpath='{.spec.holderIdentity} {.spec.renewTime}{"\n"}'
+kubectl logs -n "$NS" deploy/ratelimit-operator --since=10m | tail
+```
+
+**`RatelimitDecisionLatencyHigh`.** The p99 of `ratelimit_check_duration_seconds`, the whole gRPC check as the gateway
+waits for it, is above `alerts.latencyBudgetSeconds`, 0.01 s, for `alerts.latencyFor`, 10m. The budget sits below
+`filter.timeout` of the service chart, past which a check is decided by the gateway's failure mode (section 1), so the
+alert comes before the timeout turns checks into that failure mode. Two halves carry the time: the store, whose
+`ratelimit_store_roundtrip_seconds` histogram measures one atomic decision, and the identity extraction, whose cache
+reports `ratelimit_token_cache_hits_total` and `ratelimit_token_cache_misses_total`:
+
+```promql
+histogram_quantile(0.99, sum by (le) (rate(ratelimit_check_duration_seconds_bucket[5m])))
+histogram_quantile(0.99, sum by (le) (rate(ratelimit_store_roundtrip_seconds_bucket[5m])))
+sum(rate(ratelimit_token_cache_misses_total[5m]))
+  / (sum(rate(ratelimit_token_cache_hits_total[5m])) + sum(rate(ratelimit_token_cache_misses_total[5m])))
+```
+
+A store roundtrip that carries the p99 is section 1, the distance to the Redis or its load; a slow check over a fast
+store is the service pods themselves, their CPU and the extraction the cache misses count.
+
 ## Appendix: the metrics an operator reads
 
-Each chart ships its own PodMonitor. The RLS, store, and management metrics are scraped from the service pods; the
-controller and probe metrics from the operator pod.
+Each chart ships its own PodMonitor. The RLS and store metrics are scraped from the service pods, and the controller
+and probe metrics from the operator pod. The management API carries no series of its own; its journal is the log line
+of section 7.
 
 | Metric | On | Read it for |
 | --- | --- | --- |
@@ -1008,6 +1129,8 @@ controller and probe metrics from the operator pod.
 | `ratelimit_unknown_domain_checks_total` | service pods | a domain typo between the gateway and the policy (section 2) |
 | `ratelimit_extractions_total{domain, key}`, `ratelimit_tokens_seen_total{domain}` | service pods | the extraction detector (section 2) |
 | `ratelimit_store_errors_total{domain, reason}`, `ratelimit_store_roundtrip_seconds{domain}` | service pods | the store (section 1) |
+| `ratelimit_check_duration_seconds{domain}` | service pods | the whole check as the gateway waits for it; `RatelimitDecisionLatencyHigh` (section 10) |
+| `ratelimit_token_cache_hits_total`, `ratelimit_token_cache_misses_total` | service pods | the extraction half of a slow check (section 10) |
 | `ratelimit_policy_ready{domain, reason}`, `ratelimit_policy_generation_lag{domain}` | operator pod | the status as gauges |
 | `ratelimit_policy_stalled{domain, reason}` | operator pod | `1` is a breakage: `ReplicaStale` or `ReplicaFormatUnsupported` (section 4), `NotCompiled` (sections 3 and 5), or `ConfigMapTooLarge`; `Progressing` at `0` |
 | `ratelimit_policy_replicas{domain, state}` | operator pod | `applied` against `total`: the numbers behind `REPLICAS` (section 4) |

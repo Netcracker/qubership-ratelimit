@@ -34,11 +34,12 @@ info:
 
     Errors: every non-2xx the SERVICE forms is NC.TMFErrorResponse.v1.0 (see the TmfErrorResponse schema); clients branch on `code`, never on prose. The perimeter answers before the service on an invalid or expired token, in its own format - never parse an arbitrary 401 as TMF, and do not expect X-Request-Id on one.
     Catalog:
-    * RLS-0400 - invalid request (query, body, cursor, header patterns)
+    * RLS-0400 - invalid request (query, body, cursor, header patterns; a body over 1 MiB, 1048576 bytes; on
+      GET /rules, GET /counters, and DELETE /counters, a query parameter the endpoint does not define)
     * RLS-0401 - authentication required
     * RLS-0403 - access denied
     * RLS-0404 - unknown resource (domain, rule, window)
-    * RLS-0409 - conflict; meta.conflictType names the recovery (stale If-Match; same Idempotency-Key with a different canonical command; a confirmation token whose selection,
+    * RLS-0409 - conflict; meta.conflictType names the recovery (same Idempotency-Key with a different canonical command; a confirmation token whose selection,
       domain, subject, or rule-set version no longer matches; an expectedRuleSetVersion that no longer matches)
     * RLS-0410 - confirmation token expired or already used
     * RLS-0422 - selection exceeds the synchronous work limit (a failure
@@ -49,7 +50,7 @@ info:
     * RLS-0500 - internal error
     * RLS-0503 - counter store unavailable
 
-    Traceability: every response the service forms carries the X-Request-Id header - a caller-supplied value round-trips, an absent one is generated - and the same id runs through the operator log, the audit journal, and the meta.requestId of every error body. Quote it when asking what happened.
+    Traceability: every response the service forms carries the X-Request-Id header - a caller-supplied value round-trips, an absent one is generated - and the same id runs through the operator log, the audit journal, and the meta.requestId of every error body. Quote it when asking what happened. The one exception is the refusal of a body over 1 MiB (1048576 bytes): the HTTP server's body limit refuses it before the request-id middleware runs, so that 400 carries no X-Request-Id header and an empty meta.requestId.
 servers:
 - url: /ratelimit/v1
 security:
@@ -84,6 +85,8 @@ paths:
                   blocks: 8
                   rules: 15
                   effectiveKeys:
+                  - method
+                  - path
                   - plan
                   - roles
                   - sub
@@ -210,6 +213,8 @@ paths:
                     domain: gateway.public
                     ruleSetVersion: 7c31a9f4e0d2
                     effectiveKeys:
+                    - method
+                    - path
                     - plan
                     - roles
                     - sub
@@ -252,7 +257,8 @@ paths:
                         - algorithm: gcra
                           requests: 10
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 10
                       - id: cascade/premium
                         block: cascade
                         rule: premium
@@ -269,7 +275,7 @@ paths:
                         - algorithm: gcra
                           requests: 300
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
                           burst: 50
                       - id: cascade/everyone
                         block: cascade
@@ -281,7 +287,7 @@ paths:
                         - algorithm: gcra
                           requests: 100
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
                           burst: 20
                     - block: quota
                       mode: All
@@ -299,11 +305,12 @@ paths:
                         - algorithm: gcra
                           requests: 100
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 100
                         - algorithm: fixedwindow
                           requests: 10000
                           periodSeconds: 86400
-                          period: 24h
+                          period: 24h0m0s
                     - block: reports
                       mode: All
                       routes:
@@ -323,7 +330,8 @@ paths:
                         - algorithm: gcra
                           requests: 5
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 5
                       - id: reports/gold
                         block: reports
                         rule: gold
@@ -343,7 +351,8 @@ paths:
                         - algorithm: gcra
                           requests: 20
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 20
                     - block: services
                       mode: All
                       routes:
@@ -362,7 +371,8 @@ paths:
                         - algorithm: gcra
                           requests: 60
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 60
                     - block: tenants
                       mode: All
                       routes:
@@ -393,7 +403,8 @@ paths:
                         - algorithm: gcra
                           requests: 1000
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 1000
                     - block: login
                       mode: All
                       routes:
@@ -414,7 +425,8 @@ paths:
                         - algorithm: gcra
                           requests: 20
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 20
                       - id: login/authenticated
                         block: login
                         rule: authenticated
@@ -428,7 +440,8 @@ paths:
                         - algorithm: gcra
                           requests: 100
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 100
                     - block: total
                       mode: All
                       routes:
@@ -449,7 +462,8 @@ paths:
                         - algorithm: gcra
                           requests: 1
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 1
                       - id: total/all
                         block: total
                         rule: all
@@ -459,7 +473,8 @@ paths:
                         - algorithm: gcra
                           requests: 5000
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 5000
                     - block: search
                       mode: All
                       routes:
@@ -476,13 +491,16 @@ paths:
                         - algorithm: gcra
                           requests: 30
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 30
                 scopedToSub:
                   summary: ?axis.sub=alice - every rule annotated with applicability
                   value:
                     domain: gateway.public
                     ruleSetVersion: 7c31a9f4e0d2
                     effectiveKeys:
+                    - method
+                    - path
                     - plan
                     - roles
                     - sub
@@ -526,7 +544,8 @@ paths:
                         - algorithm: gcra
                           requests: 10
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 10
                         applicability: never
                       - id: cascade/premium
                         block: cascade
@@ -544,7 +563,7 @@ paths:
                         - algorithm: gcra
                           requests: 300
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
                           burst: 50
                         applicability: conditional
                         conditionalOn:
@@ -560,7 +579,7 @@ paths:
                         - algorithm: gcra
                           requests: 100
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
                           burst: 20
                         applicability: conditional
                         conditionalOn:
@@ -582,11 +601,12 @@ paths:
                         - algorithm: gcra
                           requests: 100
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 100
                         - algorithm: fixedwindow
                           requests: 10000
                           periodSeconds: 86400
-                          period: 24h
+                          period: 24h0m0s
                         applicability: always
                     - block: reports
                       mode: All
@@ -607,7 +627,8 @@ paths:
                         - algorithm: gcra
                           requests: 5
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 5
                         applicability: conditional
                         conditionalOn:
                         - reason: may_be_preempted
@@ -631,7 +652,8 @@ paths:
                         - algorithm: gcra
                           requests: 20
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 20
                         applicability: conditional
                         conditionalOn:
                         - reason: undecided_condition
@@ -654,7 +676,8 @@ paths:
                         - algorithm: gcra
                           requests: 60
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 60
                         applicability: always
                     - block: tenants
                       mode: All
@@ -687,7 +710,8 @@ paths:
                         - algorithm: gcra
                           requests: 1000
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 1000
                         applicability: conditional
                         conditionalOn:
                         - reason: missing_axis
@@ -712,7 +736,8 @@ paths:
                         - algorithm: gcra
                           requests: 20
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 20
                         applicability: conditional
                         conditionalOn:
                         - reason: undecided_condition
@@ -730,7 +755,8 @@ paths:
                         - algorithm: gcra
                           requests: 100
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 100
                         applicability: conditional
                         conditionalOn:
                         - reason: undecided_condition
@@ -755,7 +781,8 @@ paths:
                         - algorithm: gcra
                           requests: 1
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 1
                         applicability: conditional
                         conditionalOn:
                         - reason: undecided_condition
@@ -769,7 +796,8 @@ paths:
                         - algorithm: gcra
                           requests: 5000
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 5000
                         applicability: always
                     - block: search
                       mode: All
@@ -787,7 +815,8 @@ paths:
                         - algorithm: gcra
                           requests: 30
                           periodSeconds: 60
-                          period: 1m
+                          period: 1m0s
+                          burst: 30
                         applicability: always
           headers:
             X-Request-Id:
@@ -806,7 +835,7 @@ paths:
                 id: b3e51f28-9c04-4d67-a1f5-2e8b0d7c4a19
                 code: RLS-0404
                 reason: Unknown resource
-                message: domain "gateway.typo" is not in the enforced rule set
+                message: domain gateway.typo is not in the enforced rule set
                 status: '404'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -816,8 +845,8 @@ paths:
               $ref: '#/components/headers/XRequestId'
         '400':
           description: 'Invalid request: method without path, an unknown or repeated
-            axis name, a key both supplied and declared absent, or malformed parameters
-            (RLS-0400).'
+            axis name, a key both supplied and declared absent, a query parameter
+            the endpoint does not define, or malformed parameters (RLS-0400).'
           content:
             application/json:
               schema:
@@ -826,7 +855,7 @@ paths:
                 id: 1c67e2a9-4b58-4d30-8f12-6a9d0c5b3e74
                 code: RLS-0400
                 reason: Invalid request
-                message: method is meaningful only with path
+                message: method filters a route match and is meaningful only with path
                 status: '400'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -977,7 +1006,7 @@ paths:
                 id: e9c2a750-4f18-4b3d-86e2-1d5a9f0c7b34
                 code: RLS-0404
                 reason: Unknown resource
-                message: domain "gateway.typo" is not in the enforced rule set
+                message: domain gateway.typo is not in the enforced rule set
                 status: '404'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -987,7 +1016,8 @@ paths:
               $ref: '#/components/headers/XRequestId'
         '400':
           description: 'Invalid request: a cursor presented with different selectors
-            or after its TTL, or malformed parameters (RLS-0400).'
+            or after its TTL, a query parameter the endpoint does not define, or
+            malformed parameters (RLS-0400).'
           content:
             application/json:
               schema:
@@ -1028,7 +1058,7 @@ paths:
         parameters.
 
         A partial axis selection ("all paths of alice"), a rule set, a
-        block, a policy, a cross-rule sweep, a whole domain - anything whose
+        block, a cross-rule sweep, a whole domain - anything whose
         keys cannot be computed - is a counter-resets action (POST
         /domains/{domain}/counter-resets): those selections scan, and a scan
         deserves a preview, a work budget, and an explicit body. A partial axis
@@ -1084,8 +1114,7 @@ paths:
       - name: ruleId
         in: query
         required: true
-        description: One full block/rule triple; prefix forms are refused
-          here.
+        description: One full block/rule id; a bare block name is refused here.
         schema:
           type: string
         example: cascade/everyone
@@ -1160,8 +1189,8 @@ paths:
                       sub: alice
                     resetCount: 2
                     keys:
-                    - 'rl:v1:{core-1-core/gateway.public}:quota/daily:gcra:60:alice:'
                     - 'rl:v1:{core-1-core/gateway.public}:quota/daily:fixedwindow:86400:alice:'
+                    - 'rl:v1:{core-1-core/gateway.public}:quota/daily:gcra:60:alice:'
                 preview:
                   summary: The same selection with dryRun=true - matched, not deleted,
                     no token needed
@@ -1174,8 +1203,8 @@ paths:
                       sub: alice
                     matchedCount: 2
                     keys:
-                    - 'rl:v1:{core-1-core/gateway.public}:quota/daily:gcra:60:alice:'
                     - 'rl:v1:{core-1-core/gateway.public}:quota/daily:fixedwindow:86400:alice:'
+                    - 'rl:v1:{core-1-core/gateway.public}:quota/daily:gcra:60:alice:'
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
@@ -1199,7 +1228,8 @@ paths:
                     id: 6c1d9e42-7a30-4b5f-8e21-3d9f0a7c4b16
                     code: RLS-0409
                     reason: Conflict
-                    message: this Idempotency-Key was used with a different command
+                    message: this Idempotency-Key is already bound to a different command;
+                      a new command needs a new key
                     status: '409'
                     '@type': NC.TMFErrorResponse.v1.0
                     meta:
@@ -1211,8 +1241,8 @@ paths:
                     id: 4a92c7e0-5d31-4b68-9f04-2e7c1a8d5b39
                     code: RLS-0409
                     reason: Conflict
-                    message: the enforced rule set is 9d02e5b7c4a1, not 7c31a9f4e0d2;
-                      re-read GET /rules and repeat
+                    message: the enforced rule set is now 9d02e5b7c4a1, not the 7c31a9f4e0d2
+                      this call pinned; re-read the rules and repeat the command
                     status: '409'
                     '@type': NC.TMFErrorResponse.v1.0
                     meta:
@@ -1233,7 +1263,7 @@ paths:
                 id: 1a84d6f3-0b29-4e75-9c48-6f2e3d1b8a50
                 code: RLS-0404
                 reason: Unknown resource
-                message: domain "gateway.typo" is not in the enforced rule set
+                message: domain gateway.typo is not in the enforced rule set
                 status: '404'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1242,9 +1272,10 @@ paths:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
         '400':
-          description: 'Invalid request: a partial axis selection, a prefix ruleId,
-            or malformed parameters - the addressed form refuses rather than silently
-            widening (RLS-0400).'
+          description: 'Invalid request: a partial axis selection, a bare block name
+            as ruleId, a query parameter the endpoint does not define, or malformed
+            parameters - the addressed form refuses rather than silently widening
+            (RLS-0400).'
           content:
             application/json:
               schema:
@@ -1253,8 +1284,9 @@ paths:
                 id: 7b40e2d9-3c58-4f16-a2e7-9d0b5c8f1a73
                 code: RLS-0400
                 reason: Invalid request
-                message: the rule declares axes [sub, path] and the selection
-                  names only sub; use the counter-resets action
+                message: the addressed reset needs one value for every axis of
+                  reports/heavy [sub path]; a partial selection is a counter-resets action,
+                  never a silently wider reset
                 status: '400'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1281,7 +1313,7 @@ paths:
 
         The sweep runs synchronously to completion - previews and executions alike - and the work is bounded server-side, not by the client's patience. Each batch is ONE atomic store script: verify the fencing token, delete the batch, advance the recorded progress. A walker that lost its lease deletes nothing further - there is no gap between the check and the deletions for an expired lease to fall into - and the terminal outcome commits the same way, only under a live matching token. Progress lives in the record and advances with the deletions it counts, so what happened is never unknown. The walk has a DEADLINE (a server constant, on the order of a minute): hitting it is a failure AFTER acceptance, recorded as RLS-0422 with the partial disclosure in meta.partialReset - deletions stand, and finishing the job means narrower selections or per-rule commands. Any other unforeseen error the walker can still record - a defect, an answer the walk cannot decode - ends the sweep the same way the deadline does, but as RLS-0501: the walker catches it, records the failed outcome with the progress so far under its live token, and answers it. The one error it cannot record is the store itself failing: that call answers RLS-0503, the record stays ACCEPTED, and recovery runs on the lease - a retry meets 202 while the lease lives, and finalizes RLS-0501 once it expired. The deadline keeps its own code (RLS-0422) because its recovery differs: narrowing the selection helps there, retrying the same width does not. A client that disconnects mid-walk changes nothing for the sweep: an accepted command runs to its recorded outcome, and a retry replays it - acceptance, not the connection, is the commitment. Real selections fit comfortably: a domain is one store slot, and walking a few hundred thousand keys takes seconds; size the client timeout for that. v1 provides no explicit asynchronous submission mode - an accepted command may outlive its client connection, and the only 202 in this contract answers a retry that met its own command still in flight; a detached mode returns only if legitimate domains outgrow the deadline.
 
-        The record shares the counters' store and their fate: losing the store empties both, and a re-executed reset over an emptied store deletes nothing that mattered. While the store is unreachable, idempotency lookups fail closed with RLS-0503 - an outage is never read as an empty record. PARTIAL state loss is engineered away, not assumed away: the store runs WITHOUT eviction (records and counters are correctness state, not cache, so memory pressure fails writes instead of silently dropping keys), acceptance is one atomic write in one slot (the token, the record, and the lease cannot be lost separately), and after a failover the residual window is bounded to acceptances not yet replicated - a deployment closes even that by requiring replica acknowledgement on acceptance.
+        The record shares the counters' store and their fate: losing the store empties both, and a re-executed reset over an emptied store deletes nothing that mattered. While the store is unreachable, idempotency lookups fail closed with RLS-0503 - an outage is never read as an empty record. PARTIAL state loss is engineered away, not assumed away: the store runs WITHOUT eviction (records and counters are correctness state, not cache, so memory pressure fails writes instead of silently dropping keys), acceptance is one atomic write in one slot (the token, the record, and the lease cannot be lost separately), and after a failover the residual window is bounded to acceptances not yet replicated.
 
         ### Retry
 
@@ -1327,14 +1359,14 @@ paths:
                 value:
                   selector:
                     ruleIds:
-                    - invoices-api/cascade
+                    - cascade
                   dryRun: true
               executeSelector:
                 summary: 'Step two: execute it with the previewed token'
                 value:
                   selector:
                     ruleIds:
-                    - invoices-api/cascade
+                    - cascade
                   confirmationToken: ct-5b8e2f9d4a10
               tenantUsers:
                 summary: Preview a tenant's users (OR within the axis)
@@ -1376,12 +1408,12 @@ paths:
                     - 'rl:v1:{core-1-core/gateway.public}:cascade/everyone:gcra:60:crawler:'
                     truncated: true
                     rules:
-                    - ruleId: cascade/trial
-                      matchedCount: 2
-                    - ruleId: cascade/premium
-                      matchedCount: 20
                     - ruleId: cascade/everyone
                       matchedCount: 41
+                    - ruleId: cascade/premium
+                      matchedCount: 20
+                    - ruleId: cascade/trial
+                      matchedCount: 2
                     confirmationToken: ct-5b8e2f9d4a10
                     confirmationExpiresAt: '2026-08-24T14:15:02Z'
                 executed:
@@ -1395,12 +1427,12 @@ paths:
                     - 'rl:v1:{core-1-core/gateway.public}:cascade/everyone:gcra:60:crawler:'
                     truncated: true
                     rules:
-                    - ruleId: cascade/trial
-                      resetCount: 2
-                    - ruleId: cascade/premium
-                      resetCount: 20
                     - ruleId: cascade/everyone
                       resetCount: 41
+                    - ruleId: cascade/premium
+                      resetCount: 20
+                    - ruleId: cascade/trial
+                      resetCount: 2
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
@@ -1410,11 +1442,12 @@ paths:
           $ref: '#/components/responses/Error'
         '409':
           description: 'Conflict (RLS-0409); meta.conflictType names the recovery:
-            stale_confirmation - the token''s selection, domain, subject, or rule-set
-            version no longer match, run a new preview; command_mismatch - this
-            Idempotency-Key was bound to a different canonical command, use a new
-            key or restore the original body; sweep_in_flight - another sweep of
-            the domain is running, nothing was bound, retry after Retry-After.'
+            stale_confirmation - the token''s selection, domain, or subject no longer
+            match, run a new preview; stale_rule_set - the enforced set changed since
+            the preview, run a new preview; command_mismatch - this Idempotency-Key
+            was bound to a different canonical command, use a new key or restore the
+            original body; sweep_in_flight - another sweep of the domain is running,
+            nothing was bound, retry after Retry-After.'
           content:
             application/json:
               schema:
@@ -1429,7 +1462,7 @@ paths:
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
                   requestId: d19c4b72
-                  conflictType: stale_confirmation
+                  conflictType: stale_rule_set
           headers:
             Retry-After:
               description: 'Present on sweep_in_flight: seconds until the running
@@ -1450,7 +1483,7 @@ paths:
                 id: 9e5a2f80-1c67-4b39-8d24-7f0b3e6c1a58
                 code: RLS-0410
                 reason: Confirmation token gone
-                message: the confirmation token expired; run a new preview
+                message: the confirmation token expired or was already used; run a new preview
                 status: '410'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1471,7 +1504,7 @@ paths:
                 id: 7f30b9e2-5d16-4a08-b7c3-9e4a1f6d2c85
                 code: RLS-0404
                 reason: Unknown resource
-                message: domain "gateway.typo" is not in the enforced rule set
+                message: domain gateway.typo is not in the enforced rule set
                 status: '404'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1481,8 +1514,8 @@ paths:
               $ref: '#/components/headers/XRequestId'
         '400':
           description: 'Invalid request: a body matching none of the four shapes,
-            an unknown selector member, or confirmDomain differing from the path
-            domain (RLS-0400).'
+            an unknown selector member, confirmDomain differing from the path domain,
+            or a body over 1 MiB, 1048576 bytes (RLS-0400).'
           content:
             application/json:
               schema:
@@ -1491,8 +1524,8 @@ paths:
                 id: 8a24f9c1-6e07-4b53-9d28-3f1c7e0b5a92
                 code: RLS-0400
                 reason: Invalid request
-                message: confirmDomain "gateway.typo" does not match the path domain
-                  "gateway.public"
+                message: confirmDomain gateway.typo does not match the path domain
+                  gateway.public
                 status: '400'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1523,8 +1556,7 @@ paths:
                 id: 5b07e9d2-1c84-4f36-a0d5-8e2b6c9f4a71
                 code: RLS-0503
                 reason: Counter store unavailable
-                message: the counter store did not answer while sweeping; the outcome
-                  could not be recorded - a retry replays an interrupted failure
+                message: the counter store did not answer while recording the outcome
                 status: '503'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1539,8 +1571,9 @@ paths:
             a retry can see this answer; the original call holds until its outcome.'
           headers:
             Retry-After:
-              description: Seconds until the sweep lease expires - the latest moment
-                the outcome, or the right to finalize, becomes available.
+              description: How long to wait before polling again - 5 seconds, or the
+                remaining sweep lease when that is shorter. The remaining lease itself
+                travels only on the 409 sweep_in_flight answer.
               required: true
               schema:
                 type: integer
@@ -1563,8 +1596,8 @@ paths:
                 id: c4a81f37-9d02-4e65-b1f8-2a7c5e9d0b46
                 code: RLS-0422
                 reason: Selection exceeds the synchronous work limit
-                message: the walk hit the server deadline; deletions made so far
-                  stand - narrow the selection or reset per rule
+                message: the selection did not finish within the server's work limit;
+                  narrow it, or reset rule by rule
                 status: '422'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1609,8 +1642,7 @@ paths:
                 id: e9b04c72-6a15-4d38-9f27-1c8e5a3d7b60
                 code: RLS-0501
                 reason: Command interrupted after acceptance
-                message: the sweep was interrupted after acceptance; progress below
-                  is exact up to the last batch that ran, and its deletions stand
+                message: the command was interrupted after acceptance
                 status: '500'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1716,10 +1748,10 @@ paths:
                 - id: quota/daily
                   mode: enforce
                   allowed: true
-                  limit: 10000
-                  remaining: 8734
-                  algorithm: fixedwindow
-                  periodSeconds: 86400
+                  limit: 100
+                  remaining: 61
+                  algorithm: gcra
+                  periodSeconds: 60
                 - id: tenants/per-tenant
                   mode: enforce
                   allowed: true
@@ -1734,7 +1766,6 @@ paths:
                   remaining: 4310
                   algorithm: gcra
                   periodSeconds: 60
-                skips: []
                 extractedKeys:
                 - plan
                 - sub
@@ -1756,7 +1787,7 @@ paths:
                 id: c5d17a94-2e63-4f80-8b19-0a7c4e9f3d26
                 code: RLS-0404
                 reason: Unknown resource
-                message: domain "gateway.typo" is not in the enforced rule set
+                message: domain gateway.typo is not in the enforced rule set
                 status: '404'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1766,7 +1797,8 @@ paths:
               $ref: '#/components/headers/XRequestId'
         '400':
           description: 'Invalid request: an identity form violated (token form without
-            a token, keys form with an empty map) or malformed body (RLS-0400).'
+            a token, keys form with an empty map), a malformed body, or a body over
+            1 MiB, 1048576 bytes (RLS-0400).'
           content:
             application/json:
               schema:
@@ -1775,7 +1807,7 @@ paths:
                 id: 8c53a0e7-1d49-4b26-9f38-6e2a7d0c4b91
                 code: RLS-0400
                 reason: Invalid request
-                message: identitySource token requires the token field
+                message: the token form needs a token
                 status: '400'
                 '@type': NC.TMFErrorResponse.v1.0
                 meta:
@@ -1809,7 +1841,7 @@ paths:
                 ruleSetVersions:
                   gateway.public: 7c31a9f4e0d2
                 counterStore:
-                  backend: redis at redis:6379
+                  backend: redis at redis:6379, provisioned by DBaaS
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
@@ -1854,7 +1886,7 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        A bearer JWT issued by the platform identity provider. Authentication is the perimeter's job: the gateway's auth extension validates the token (signature, expiry, issuer) before the request reaches the service, and the mesh restricts the service's ingress to that gateway. Authorization is the service's own, and its trust boundary is explicit: identity is read from EXACTLY ONE source - the bearer token in the Authorization header, whose signature the gateway has already validated; no auxiliary identity header (X-Forwarded-User and kin) is ever consulted, so none can be spoofed. What makes the unvalidated read safe is a DEPLOYMENT REQUIREMENT, not an assumption: the mesh must restrict the service's ingress to the gateway alone; a deployment that cannot enforce that must validate the token signature in-service instead. The service enforces the role model per path and verb - viewer holds every GET and POST /simulations; operator holds the mutations (DELETE on counters, POST on counter-resets) plus everything viewer holds. Role names and claim locations are deployment configuration; viewer and operator are the canonical defaults. The subject also feeds the audit journal, the Idempotency-Key scope, and the confirmation-token binding. A request without a bearer token is refused outright (401) - but that is hygiene, not the defense: the service does not validate signatures, so with the ingress requirement broken a forged token would pass. The model's security rests on that requirement, or on in-service validation where the mesh cannot provide it. An invalid token is normally rejected at the gateway, in the perimeter's own error format. Roles cannot narrow to particular axis values: whoever holds viewer sees axis values (client ids), which is a documented property of the access model, not an accident.
+        A bearer JWT issued by the platform identity provider. Authentication is the perimeter's job: the gateway's auth extension validates the token (signature, expiry, issuer) before the request reaches the service, and the mesh restricts the service's ingress to that gateway. Authorization is the service's own, and its trust boundary is explicit: identity is read from EXACTLY ONE source - the bearer token in the Authorization header, whose signature the gateway has already validated; no auxiliary identity header (X-Forwarded-User and kin) is ever consulted, so none can be spoofed. The service does not verify token signatures and has no setting that turns verification on: the AuthorizationPolicy the service chart renders, which admits the private gateway alone to the management port, is the only protection of the port, and it holds only for a pod inside the mesh (see the Management API port section of the chart documentation). The service enforces the role model per path and verb - viewer holds every GET and POST /simulations; operator holds the mutations (DELETE on counters, POST on counter-resets) plus everything viewer holds. Role names and claim locations are deployment configuration; viewer and operator are the canonical defaults. The subject also feeds the audit journal, the Idempotency-Key scope, and the confirmation-token binding. A request without a bearer token is refused outright (401) - but that is hygiene, not the defense: where the policy does not hold, a forged token passes. The model's security rests on that policy alone. An invalid token is normally rejected at the gateway, in the perimeter's own error format. Roles cannot narrow to particular axis values: whoever holds viewer sees axis values (client ids), which is a documented property of the access model, not an accident.
   parameters:
     domain:
       name: domain
@@ -1871,8 +1903,9 @@ components:
       style: form
       explode: true
       description: |
-        Rule selection; repeatable, and 1-2 segment values are prefix forms
-        (policy, policy/block).
+        Rule selection; repeatable. A value is a block name, which selects
+        every rule of the block, or a full block/rule id. There is no policy
+        segment: a domain has one policy.
       schema:
         type: array
         items:
@@ -1945,7 +1978,7 @@ components:
             id: 3f9a7b2c-8e15-4d60-a2c9-1b4f6d8e0a37
             code: RLS-0404
             reason: Unknown resource
-            message: domain "gateway.typo" is not in the enforced rule set
+            message: domain gateway.typo is not in the enforced rule set
             status: '404'
             '@type': NC.TMFErrorResponse.v1.0
             meta:
@@ -2014,7 +2047,7 @@ components:
           description: The error code's title - constant per code, never per instance.
         message:
           type: string
-          example: domain "gateway.typo" is not in the enforced rule set
+          example: domain gateway.typo is not in the enforced rule set
           description: Human-readable detail of this instance; free to change, never
             a contract.
         referenceError:
@@ -2060,12 +2093,11 @@ components:
               - stale_confirmation
               - stale_rule_set
               - sweep_in_flight
-              - stale_if_match
               description: 'Which conflict this 409 is, because each recovers differently:
                 command_mismatch - new Idempotency-Key or the original body; stale_confirmation
                 - new preview; stale_rule_set - re-read the enforced set and repeat;
-                sweep_in_flight - retry after Retry-After; stale_if_match - re-read
-                the ETag, merge, retry. Present on every 409 the service forms.'
+                sweep_in_flight - retry after Retry-After. Present on every 409 the
+                service forms.'
         errors:
           type: array
           items:
@@ -2176,8 +2208,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/BlockView'
-          description: The compiled blocks, ordered by policy name and authored
-            position.
+          description: The compiled blocks, in authored order.
       description: The compiled rule set of one domain - what the decision path
         actually enforces, which can be a last-good generation rather than the latest
         object.
@@ -2317,10 +2348,11 @@ components:
             unknown keys; conditional - for some completions (conditionalOn names
             the gates); never - for none. Judged by the engine''s own semantics:
             conditions against the supplied values (groups already resolved), counter-axis
-            availability (a block''s capture axes count as present - any request
-            that reaches the Template route carries them), FirstMatch preemption,
-            bypass cut-offs, replaces, and keys declared known-absent via the absent
-            parameter.'
+            availability (a capture every route of the block produces counts as present,
+            since any request that reaches the block carries it; a capture only some
+            routes produce stays a missing_axis gate unless path names the route),
+            FirstMatch preemption, bypass cut-offs, replaces, and keys declared
+            known-absent via the absent parameter.'
         conditionalOn:
           type: array
           items:
@@ -2375,14 +2407,14 @@ components:
           description: The window length in seconds - the canonical representation.
         period:
           type: string
-          example: 1m
-          description: The same window as a human-readable duration, derived from
-            periodSeconds for display.
+          example: 1m0s
+          description: The same window as a duration in Go's syntax (1m0s, 24h0m0s),
+            derived from periodSeconds for display.
         burst:
           type: integer
           format: int64
-          description: Momentary allowance above the steady rate, when the rule
-            declares one.
+          description: The momentary allowance of a gcra window - the declared burst,
+            or requests when the rule declares none. Absent on a fixedwindow window.
     CounterList:
       type: object
       required:
@@ -2656,7 +2688,7 @@ components:
         longest retryAfterSeconds - the constraint that actually binds the client.
         Then, on an admission, the window with the least remaining. Every remaining
         tie breaks by the lexicographically smallest counter key, which orders by
-        the block/rule triple, then algorithm, then periodSeconds - the same
+        the block/rule id, then algorithm, then periodSeconds - the same
         on every replica.'
       oneOf:
       - $ref: '#/components/schemas/RuleOutcomeAdmitted'
@@ -2708,7 +2740,7 @@ components:
           properties:
             backend:
               type: string
-              example: redis at redis:6379
+              example: redis at redis:6379, provisioned by DBaaS
               description: Human-readable backend description, as the startup log
                 prints it.
           description: Where the counters live.
@@ -2770,7 +2802,7 @@ components:
         id:
           type: string
           example: cascade/everyone
-          description: The block/rule triple - the identity shared by counters
+          description: The block/rule id - the identity shared by counters
             and metrics.
         mode:
           type: string
@@ -2834,7 +2866,7 @@ components:
         id:
           type: string
           example: cascade/everyone
-          description: The block/rule triple - the identity shared by counters
+          description: The block/rule id - the identity shared by counters
             and metrics.
         mode:
           type: string
@@ -2898,7 +2930,7 @@ components:
         id:
           type: string
           example: cascade/everyone
-          description: The block/rule triple - the identity shared by counters
+          description: The block/rule id - the identity shared by counters
             and metrics.
         mode:
           type: string
@@ -2953,7 +2985,7 @@ components:
         retryable refusals, by the longest retryAfterSeconds - the constraint that
         actually binds the client. Then, on an admission, the window with the least
         remaining. Every remaining tie breaks by the lexicographically smallest
-        counter key, which orders by the block/rule triple, then algorithm,
+        counter key, which orders by the block/rule id, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
       - block
@@ -3011,7 +3043,7 @@ components:
         key. Then retryable refusals, by the longest retryAfterSeconds - the constraint
         that actually binds the client. Then, on an admission, the window with the
         least remaining. Every remaining tie breaks by the lexicographically smallest
-        counter key, which orders by the block/rule triple, then algorithm,
+        counter key, which orders by the block/rule id, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
       - block
@@ -3075,7 +3107,7 @@ components:
         key. Then retryable refusals, by the longest retryAfterSeconds - the constraint
         that actually binds the client. Then, on an admission, the window with the
         least remaining. Every remaining tie breaks by the lexicographically smallest
-        counter key, which orders by the block/rule triple, then algorithm,
+        counter key, which orders by the block/rule id, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
       - block
@@ -3434,11 +3466,12 @@ components:
           minItems: 1
           items:
             type: string
-            description: A full block/rule id or a 1-2 segment prefix form.
-          description: Full ids and 1-2 segment prefix forms mix freely.
+            description: A block name, which selects every rule of the block, or a
+              full block/rule id.
+          description: Block names and full ids mix freely.
           example:
-          - invoices-api/cascade
-          - search-api
+          - cascade
+          - search/per-client
         algorithm:
           type: string
           description: Window filter; values as the rule listing reports in rates[].

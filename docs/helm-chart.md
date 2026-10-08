@@ -74,7 +74,7 @@ values:
 
 | Deployment scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | the operator (Deployment, SA, Role/RoleBinding), its PodMonitor and PrometheusRule | the service (Deployment, Service, SA), the AuthorizationPolicy, the filters, its PodMonitor and PrometheusRule, the dashboard |
+| single namespace | the operator (Deployment, SA, Role/RoleBinding); with `MONITORING_ENABLED`, its PodMonitor and PrometheusRule | the service (Deployment, Service, SA, HPA) and the EnvoyFilters; with `redis.dbaas.enabled`, InternalDatabase and DatabaseSecretClaim; with `management.enabled`, the AuthorizationPolicy; with `MONITORING_ENABLED`, PodMonitor, PrometheusRule, and the dashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | nothing: an empty release | only the filters, which target the baseline RLS; no service, no Service, no ServiceAccount |
 
@@ -84,9 +84,10 @@ both binaries:
 - the Service `ratelimit`;
 - its gRPC port 9000, named `grpc`;
 - the probe port, published on the Service under the name `metrics` (the service's metrics port, 8080);
-- the ConfigMap `ratelimit-config`;
-- the mode rule: satellite iff `BASELINE_ORIGIN` is non-empty;
-- one namespace for both charts.
+- the ConfigMap `ratelimit-config`.
+
+The mode rule, satellite iff `BASELINE_ORIGIN` is non-empty, is the `ratelimit.mode` helper in the `_helpers.tpl` of
+each namespace chart, and the two namespace charts are installed in one namespace; the CRD chart has neither.
 
 The templates of both charts carry the same names and ports as fixed strings. A CI test renders both charts and
 compares the rendered names and ports with the constants (see "Installation and upgrade"). A satellite release of the
@@ -168,10 +169,19 @@ only the keys its templates read:
 | `APPLICATION_NAME`, `MANAGED_BY`, `ARTIFACT_DESCRIPTOR_VERSION` | both | `app.kubernetes.io/part-of` and `managed-by` on every object (`MANAGED_BY` is `Helm` in `values.yaml`, and empty renders empty); `version` on the Deployment and its pods (empty renders empty) |
 | `DEPLOYMENT_SESSION_ID` | both | `deployment.netcracker.com/sessionId` on every object but the pods; required, and the schema refuses an empty one |
 | `PAAS_PLATFORM`, `READONLY_CONTAINER_FILE_SYSTEM_ENABLED` | both | on `KUBERNETES` the container runs as group 10001 and, with the flag set (the default), on a read-only root filesystem; on `OPENSHIFT` the platform assigns both and the root filesystem is writable |
-| `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; unset and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`, `recreate` and `best_effort_controlled_rollout` stop the old pods first, which leaves the gateways without an RLS endpoint during a service rollout |
+| `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; the four types and what each does to the RLS endpoint are described below the table |
 | `LIVENESS_PROBE_INITIAL_DELAY_SECONDS` | both | the delay before the first liveness probe, 15 by default |
-| `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`. While it is on, the Deployment renders no `replicas`, so an upgrade keeps the scaled count; off, both directions are `Disabled` and `REPLICAS` sizes the service |
+| `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`; the keys are listed under "Values reference", and what `HPA_ENABLED` does to `replicas` is described below the table |
 | `CLOUD_TOPOLOGIES` | both | the platform's list of topologies; when set, it replaces `CLOUD_TOPOLOGY_KEY` with one constraint per entry, each with its `topologyKey` and optional `maxSkew` and `whenUnsatisfiable` |
+
+The rollout types: unset and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`; `recreate` stops every old pod
+first and leaves the gateways without an RLS endpoint during a service rollout; `best_effort_controlled_rollout` is
+`maxSurge: 0, maxUnavailable: 80%`, which at one replica does the same and at two or more keeps at least one old replica
+serving until the new ones are Ready; `custom_rollout` alone reads `DEPLOYMENT_STRATEGY_MAXSURGE` and
+`DEPLOYMENT_STRATEGY_MAXUNAVAILABLE`, `25%` each when unset, and the other types ignore them. With `HPA_ENABLED` the
+Deployment renders no `replicas`, so an upgrade keeps the scaled count, and an upgrade that turns the autoscaler on
+starts at one replica, the API default, until the HPA raises it to `HPA_MIN_REPLICAS` on its next sync; with the
+autoscaler off, both directions are `Disabled` and `REPLICAS` sizes the service.
 
 The resource parameters are required in the schema of each chart: the four sizes and `REPLICAS` in both, and the
 service's profiles also carry the `HPA_*` parameters. An installation without `-f resource-profiles/<profile>.yaml`
@@ -245,9 +255,9 @@ ARTIFACT_DESCRIPTOR_VERSION: ""
 DEPLOYMENT_SESSION_ID: ""            # required, the schema refuses it empty
 PAAS_PLATFORM: KUBERNETES            # Deployment.yaml: the container's security context
 READONLY_CONTAINER_FILE_SYSTEM_ENABLED: true
-LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15   # Deployment.yaml; DEPLOYMENT_STRATEGY_TYPE is not set here: recreate
-                                     #   and best_effort_controlled_rollout leave the gateways without an RLS
-                                     #   endpoint during the rollout
+LIVENESS_PROBE_INITIAL_DELAY_SECONDS: 15   # Deployment.yaml; DEPLOYMENT_STRATEGY_TYPE is not set here: recreate,
+                                     #   and best_effort_controlled_rollout at one replica, leave the gateways
+                                     #   without an RLS endpoint during the rollout; see "Platform parameters"
 
 LOG_LEVEL: info                      # Deployment.yaml: goes out as LOGGING_LEVEL_ROOT (the platform logger);
                                      # NOT --zap-log-level: LOG_LEVEL only applies until configloader initializes
@@ -256,6 +266,10 @@ redis:                               # InternalDatabase.yaml, DatabaseSecretClai
   dbaas:                             #   from DBaaS"
     enabled: true                    # render the InternalDatabase and the DatabaseSecretClaim; false = the Secret
                                      #   <SERVICE_NAME>-redis is written by someone else in DBaaS's format (CI)
+
+API_DBAAS_ADDRESS: http://dbaas-aggregator.dbaas:8080   # _helpers.tpl (ratelimit.dbaasNamespace): the platform's address of
+                                     #   dbaas-aggregator; the second label of its host names the dbaas-operator's
+                                     #   namespace on both objects, see "The counter store from DBaaS"
 
 metrics:                             # (there are no port values: probes 8081, metrics 8080, and management 8082
                                      #   are fixed in the templates)
@@ -298,10 +312,11 @@ filter:                              # EnvoyFilter.yaml: installation defaults; 
                                      # times out and when its counter store fails (the service answers UNAVAILABLE)
   rateLimitedStatus: 429             # refusal status for the client; Envoy ignores values < 400
   grpcAsResourceExhausted: false     # RESOURCE_EXHAUSTED instead of UNAVAILABLE for gRPC calls behind the gateway
-  xRateLimitHeaders: "OFF"           # the filter always gets OFF: the response carries no per-descriptor statuses
-                                     # for Envoy to render headers from; the service sends x-ratelimit-*,
-                                     # retry-after, and the ratelimit-policy and ratelimit fields of
-                                     # draft-ietf-httpapi-ratelimit-headers-11 itself, as ready-made headers
+  xRateLimitHeaders: "OFF"           # the filter's enable_x_ratelimit_headers, OFF or DRAFT_VERSION_03; the
+                                     # service sends x-ratelimit-*, retry-after, and the ratelimit-policy and
+                                     # ratelimit fields of draft-ietf-httpapi-ratelimit-headers-11 itself, as
+                                     # ready-made headers, and DRAFT_VERSION_03 changes nothing while its responses
+                                     # carry no per-descriptor statuses for Envoy to render headers from
 
 runtime:                             # EnvoyFilter.yaml: gateway-side kill switches for the filter, independent of
   enabledPercent: 100                # behavior: Shadow; rendered as Envoy runtime fractions
@@ -335,6 +350,7 @@ gateways:                            # EnvoyFilter.yaml and validateDomains: two
     enabled: true
     domain: gateway.public           # the linking key: must equal the policy's spec.domain; the pattern is the CRD's;
                                      #   in a composite, one domain per role across all namespaces = a shared budget
+    # namespace: the Gateway's namespace, where the EnvoyFilter is created; NAMESPACE when unset
     # timeout / failClosed / rateLimitedStatus / grpcAsResourceExhausted:
     #   per-gateway overrides of the filter.* defaults; the typical case is a private
     #   gateway failing closed while the public one fails open
@@ -347,8 +363,38 @@ CLOUD_TOPOLOGY_KEY: kubernetes.io/hostname   # Deployment.yaml: topologySpreadCo
                                      #   per {topologyKey, maxSkew, whenUnsatisfiable} entry
 ```
 
-The service release creates the EnvoyFilters in its own namespace, the same one as the Gateway (`targetRefs` resolves
-in the namespace of the EnvoyFilter itself; Istio forbids cross-namespace references).
+The service's resource profile, `helm-templates/ratelimit-service/resource-profiles/<profile>.yaml`, carries the
+`HPA_*` keys beside `REPLICAS` and the sizes, and `HorizontalPodAutoscaler.yaml` reads them. The values below are the
+`prod` profile's; `dev` sets `HPA_ENABLED: false` and `HPA_MIN_REPLICAS: 1`, and `prod-nonha` sets
+`HPA_MIN_REPLICAS: 1`:
+
+```yaml
+HPA_ENABLED: true                    # the autoscaler owns the count: the Deployment renders no replicas, and an
+                                     #   upgrade that turns it on starts at one replica until the first sync; false
+                                     #   renders both directions Disabled, and REPLICAS sizes the service (the
+                                     #   object is rendered either way)
+HPA_MIN_REPLICAS: 2                  # minReplicas; REPLICAS when unset
+HPA_MAX_REPLICAS: 5                  # maxReplicas; with HPA_ENABLED the render fails without it:
+                                     #   `HPA_MAX_REPLICAS is required when HPA_ENABLED is true`
+HPA_AVG_CPU_UTILIZATION_TARGET_PERCENT: 75   # the CPU target as a percent of CPU_LIMIT, rendered as the
+                                     #   utilization of CPU_REQUEST it amounts to; 75 when unset
+HPA_SCALING_UP_STABILIZATION_WINDOW_SECONDS: 60    # behavior.scaleUp.stabilizationWindowSeconds; 0 when unset
+HPA_SCALING_UP_PODS_VALUE: 1         # the Pods policy of scaleUp: value and periodSeconds, rendered when the
+HPA_SCALING_UP_PODS_PERIOD_SECONDS: 60   #   value is set, with an empty period when the period is not; set both
+HPA_SCALING_DOWN_STABILIZATION_WINDOW_SECONDS: 300  # behavior.scaleDown.stabilizationWindowSeconds; 300 when unset
+HPA_SCALING_DOWN_PODS_VALUE: 1       # the Pods policy of scaleDown, as above
+HPA_SCALING_DOWN_PODS_PERIOD_SECONDS: 60
+# Platform parameters no profile sets; the schema admits them and the template reads them when they are passed:
+# HPA_SCALING_UP_PERCENT_VALUE and HPA_SCALING_UP_PERCENT_PERIOD_SECONDS, a Percent policy of scaleUp beside the
+#   Pods one, rendered when the value is set (set both); HPA_SCALING_DOWN_PERCENT_VALUE and
+#   HPA_SCALING_DOWN_PERCENT_PERIOD_SECONDS, the same for scaleDown;
+# HPA_SCALING_UP_SELECT_POLICY and HPA_SCALING_DOWN_SELECT_POLICY, Min, Max, or Disabled; Max when unset, and
+#   Disabled whatever is set while HPA_ENABLED is false
+```
+
+The service release creates each EnvoyFilter in the namespace of its Gateway, `gateways.<role>.namespace`, which is
+the release's own namespace by default, where qubership-core-mesh-config puts the gateways (`targetRefs` resolves in
+the namespace of the EnvoyFilter itself; Istio forbids cross-namespace references).
 
 What is **deliberately absent** from values:
 
@@ -431,7 +477,7 @@ typed_config:
   failure_mode_deny: <failClosed>
   status_on_error: { code: 503 }         # only with failClosed: otherwise deny would answer with the default 500
   timeout: <timeout>
-  enable_x_ratelimit_headers: "OFF"      # always OFF: the service sends the headers itself
+  enable_x_ratelimit_headers: <xRateLimitHeaders>   # OFF by default: the service sends the headers itself
   rate_limited_status: { code: <rateLimitedStatus> }
   rate_limited_as_resource_exhausted: <grpcAsResourceExhausted>
   stat_prefix: <gateway statPrefix>
@@ -494,6 +540,10 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 
 - `REPLICAS` replicas, 2 in `dev-ha` and `prod`: only the Lease holder writes the status and `ratelimit-config`, another
   replica is a standby, and the Lease keeps one writer while two pods overlap during a rollout;
+- args: `--health-probe-bind-address=:8081`, `--metrics-bind-address=:8080`, and `--deployment=<SERVICE_NAME>`, the
+  operator's own Deployment, the owner of `ratelimit-config` (the `microservice.name` property when the flag is
+  empty); `-kubeconfig`, controller-runtime's flag, is not passed: the pod uses the in-cluster configuration, and the
+  flag serves a run outside the cluster;
 - env: `LOGGING_LEVEL_ROOT` (not `--zap-log-level`), `CLOUD_NAMESPACE` from a fieldRef (the namespace scope is
   mandatory, the process does not start without it), `POD_NAME` from a fieldRef (the Lease identity);
 - the ConfigMap `ratelimit-config` is not rendered here either: the operator creates it on the first reconcile with an
@@ -515,7 +565,9 @@ delivery that a Role is bound to; the service pod mounts no token at all:
   `--metrics-bind-address=:8080` (and `--management-bind-address=:8082` when `management.enabled`); the configuration
   flags stay at their defaults, `--config-dir=/etc/ratelimit/config` (the contract constant, the mount point of the
   volume above) and `--config-resync=10s` (the timer that re-reads the directory when the watch missed a swap, or when
-  the directory did not exist at start); no `--service-name`: the service reads no EndpointSlice;
+  the directory did not exist at start) and `--rls-drain-timeout=10s` (how long in-flight checks may delay the
+  shutdown before the gRPC listener is closed; it fits inside the `terminationGracePeriodSeconds: 30` below); no
+  `--service-name`: the service reads no EndpointSlice;
 - env: `LOGGING_LEVEL_ROOT` (not `--zap-log-level`), `CLOUD_NAMESPACE` and `POD_NAME` from fieldRefs (the Downward API;
   the namespace is the installation scope and the namespace segment in counter keys), `SERVICE_VERSION` (the image tag,
   reported as `ratelimit_build_info`; the pipeline passes no build argument to the image, so without it every scrape
@@ -574,9 +626,14 @@ next connection on, without a restart. DBaaS itself never changes this password:
 users, and the aggregator refuses a password change for such adapters. Connection properties with `tls: true`, which
 the aggregator adds when the adapter is installed with TLS, fail the start: the service connects in plain text.
 
-Both objects carry `spec.operatorNamespace`, the namespace in the host of `API_DBAAS_ADDRESS` (the platform parameter,
-`http://dbaas-aggregator.dbaas:8080` by default, so `dbaas`): a dbaas-operator reconciles only the objects that name
-its own namespace, and it runs beside its aggregator. An address whose host carries no namespace fails the render.
+Both objects carry `spec.operatorNamespace`, read out of `API_DBAAS_ADDRESS` (the platform parameter,
+`http://dbaas-aggregator.dbaas:8080` by default): a dbaas-operator reconciles only the objects that name its own
+namespace, and it runs beside its aggregator. The expected form is `http://<aggregator>.<namespace>:<port>`, and the
+chart takes the second label of the host, `dbaas` by default, without checking that it is a namespace. A host of one
+label fails the render with
+`at '/API_DBAAS_ADDRESS': '<address>' does not match pattern '^https?://[^.:/]+\\.[^.:/]+'`; a host of another
+shape passes, an IP address included (`http://10.0.0.1:8080` renders `operatorNamespace: "0"`), and the objects then
+name a namespace no dbaas-operator runs in, so the Secret is never written and the pods wait in `ContainerCreating`.
 
 The chart needs, and does not install:
 
@@ -599,8 +656,32 @@ finalizer, so its deletion drops nothing, and the adapter's Redis Deployment sta
 attach to.
 
 `redis.dbaas.enabled=false` renders neither object for a cluster without DBaaS: the Deployment still mounts
-`<SERVICE_NAME>-redis`, and whoever sets up the cluster writes it in the same format, `connectionProperties.json` and a
-`metadata.json` naming the classifier and type `redis`. The e2e workflow does exactly that for its own Redis.
+`<SERVICE_NAME>-redis`, and whoever sets up the cluster writes it in the same format, as the e2e workflow does for its
+own Redis:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ratelimit-service-redis        # <SERVICE_NAME>-redis
+  namespace: <NAMESPACE>
+stringData:
+  connectionProperties.json: |
+    {"host": "<redis host>", "port": 6379, "password": "<password>"}
+  metadata.json: |
+    {"classifier": {"microserviceName": "ratelimit-service", "namespace": "<NAMESPACE>", "scope": "service"},
+     "type": "redis"}
+```
+
+The DBaaS client picks the Secret by its `metadata.json`: `classifier` has to equal the service's own,
+`{microserviceName: <SERVICE_NAME>, namespace: <NAMESPACE>, scope: service}`, `type` has to be `redis`, and `userRole`
+stays absent or empty, since the service requests no role; `name`, `namespace`, and `id` are optional and take no
+part in the match. Of
+`connectionProperties.json` the service reads `host` and `port` (a number or a string), or `url`, a `redis://` URL,
+where either is missing; `password`, and `username` for a database that has one (the databases of the DBaaS Redis
+adapter authenticate by password alone); and `tls`, which has to be absent or `false`. A Secret that does not match
+fails the start as above, and one without an address fails it with
+`the connection properties carry neither a host and a port nor a url`.
 
 ## Metrics: the naming contract
 
@@ -678,8 +759,9 @@ including `Propagating` while the kubelet projects an update and `Ready: Unknown
 `BASELINE_ORIGIN`; both charts go into one namespace. An upgrade installs the service chart before the operator chart,
 and a rollback reverses the order.
 The service reads the current and the previous manifest format version, and the operator writes the current one. In
-that order the service reads what the operator writes at either end of the pair's rollout. A fresh installation needs
-no order: the service waits NotReady until the operator writes; the e2e workflow installs the operator first. The CRD
+that order the service reads what the operator writes at either end of the pair's rollout. A fresh installation goes
+CRD release, operator chart, service chart: the service stays NotReady until the operator writes, and the service
+chart's EnvoyFilters are live from the moment it is installed; the e2e workflow installs in that order. The CRD
 release is installed and upgraded before any namespace (see "The CRD chart"). Namespaces can be upgraded in any order.
 An upgrade with `--reuse-values` from a release installed before a value existed fails the render on that value
 (`nil pointer evaluating`), because Helm then replaces the chart's defaults with the old release's. This applies to
@@ -723,13 +805,16 @@ The operator chart, group `ratelimit-operator`:
 
 | Alert | Severity | Fires when |
 | --- | --- | --- |
-| `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1` for `stalledFor`, with the reason in the label: `ReplicaStale`, `ReplicaFormatUnsupported`, or `ConfigMapTooLarge` |
+| `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1` for `stalledFor`, with the reason in the label: `ReplicaStale`, `ReplicaFormatUnsupported`, `ConfigMapTooLarge`, or `NotCompiled`, a generation that does not compile, which `RatelimitRuleProblems` reports as a warning too |
 | `RatelimitNotReadyLong` | warning | `ratelimit_policy_ready == 0` for `notReadyFor`: the latest generation is not the one enforced |
 | `RatelimitNoReplicas` | critical | `ratelimit_policy_ready{reason="NoReplicas"} == 0` for `noReplicasFor`: the operator observed no ready service replica, so the gateway's failure mode decides every check of the domain; a fleet it could not observe is `ProbeFailed` and does not fire |
-| `RatelimitChecksStopped` | warning | `ratelimit_policy_replicas{state="applied"} > 0` while the domain's `ratelimit_checks_total` has no rate over `checksStoppedWindow`, for `checksStoppedFor`: the filter is off, removed, or on another domain, and the traffic passes unlimited with every status Ready; an idle gateway fires too |
+| `RatelimitChecksStopped` | warning | `ratelimit_policy_replicas{state="applied"} > 0` while the domain's `ratelimit_checks_total` has no rate over `checksStoppedWindow`, for `checksStoppedFor`: the filter is off, removed, or on another domain, and traffic passes unlimited with every status Ready; an idle gateway fires too (the composite case is below the table) |
 | `RatelimitRuleProblems` | warning | `ratelimit_policy_rule_problems{severity="blocking"} > 0` for `ruleProblemsFor`: the latest generation is not enforced and last-good runs instead |
 | `RatelimitConfigWriteErrors` | critical | `increase(ratelimit_config_write_errors_total[configWriteErrorsWindow]) > 0` by `reason`, with no hold: policy changes stop reaching the service |
 | `RatelimitNoOperatorLeader` | critical | `absent(ratelimit_leader == 1)` for `noLeaderFor`: no operator pod holds the Lease, so nothing compiles policies or writes `ratelimit-config` |
+
+`RatelimitChecksStopped` sums the domain's checks over every gateway, so in a composite one gateway's disabled
+filter does not fire it while the other gateways keep sending.
 
 Every rule carries a `summary` and a `description`; the description names the number, what it means for traffic, and
 where to look next, which is the sentence the [runbook](runbook.md) expands.
@@ -811,4 +896,6 @@ what one replica enforces, for a human with a port-forward. The management role 
   timeout. TLS is not configured in a traffic policy either way; ambient provides mTLS.
 - **A redirect when a limit fires.** The filter's local reply is the plain `rateLimitedStatus` (429 by default) with
   `retry-after`, which is what an API client can act on. No `local_reply_config` mapper turns it into a 302.
-- **Alert rules**, as above.
+- **An `AuthorizationPolicy` or a `NetworkPolicy` on the RLS port 9000.** Neither namespace chart renders one; the
+  only AuthorizationPolicy of the delivery covers the management port 8082, behind `management.enabled`. Where direct
+  callers of the RLS must be restricted, the installation adds the policy ([engine](engine.md), "Token and identity").

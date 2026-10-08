@@ -41,7 +41,7 @@ limit below 1 is an error.
 | A duplicate key in one decision is an error | two evaluations of one state in one commit lose one charge |
 | An empty bucket list is not passed | a request outside the rules is allowed without a trip to the store |
 | Time is taken from the store, not from the caller | engine replicas drift apart in their clocks; a shared bucket must not |
-| State expires on its own (a TTL derived from the window) | there is no separate cleaner |
+| State expires on its own: a fixed-window key at the window boundary, a GCRA key when its bucket drains | there is no separate cleaner |
 | `Reset` of missing keys is a successful no-op | management operations are retried |
 | Windows arrive resolved and having passed `algo.Check` | the store does not re-validate; an unchecked window is undefined behavior |
 | `Remaining` is non-negative; `CostExceedsCapacity` tells "will never fit" from "wait" | for a cost that can never fit, retry headers would be a lie |
@@ -69,9 +69,11 @@ rl:v1:{<namespace>/<domain>}:<block>/<rule>:<algorithm>:<window>:<axes...>:
 ```
 
 Every segment is terminated with `:`, the last one included: a bucket key is the prefix of its own subtree, so scans
-and partial resets need no hand-built prefixes. `DomainPrefix` enumerates a domain, `RulePrefix` resets a whole
-rule, `Bucket` is the window key. The `{ns/domain}` hash tag keeps all buckets of a decision in one Redis Cluster
-slot, which is what makes the atomic script valid on any
+and partial resets need no hand-built prefixes. `DomainPrefix` enumerates a domain, `BlockPrefix` scopes a scan to one
+block, `RulePrefix` resets a whole rule, `RatePrefix` is the window key that compilation builds once, `Bucket` appends
+the axis values to it, and `DomainTag` is the hash tag alone, for the management records that share a domain's slot
+with its counters. The `{ns/domain}` hash tag keeps all buckets of a decision in one Redis Cluster slot, which is what
+makes the atomic script valid on any
 topology; an empty namespace or domain is a panic (an empty `{}` is not a tag for Redis). The component substitutes the
 namespace segment (its own, via the Downward API): Redis is dedicated to the installation, and the segment is insurance
 against two installations connecting to one store by mistake; the `/` separator is unambiguous, since it is forbidden
