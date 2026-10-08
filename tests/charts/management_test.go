@@ -183,25 +183,31 @@ func projectedFiles(spec node, name string) map[string]string {
 			continue
 		}
 		for _, source := range volume.at("projected", "sources").list() {
-			kinds, _ := source.v.(map[string]any)
-			for kind := range kinds {
-				switch kind {
-				case "serviceAccountToken":
-					files[source.at(kind, "path").str2()] = "serviceAccountToken"
-				case "configMap":
-					for _, item := range source.at(kind, "items").list() {
-						files[item.at("path").str2()] = "configMap " + source.at(kind, "name").str2() + " key " +
-							item.at("key").str2()
-					}
-				case "downwardAPI":
-					for _, item := range source.at(kind, "items").list() {
-						files[item.at("path").str2()] = "downwardAPI " + item.at("fieldRef", "fieldPath").str2()
-					}
-				default:
-					files["<"+kind+">"] = "unread source"
-				}
-			}
+			addSourceFiles(files, source)
 		}
 	}
 	return files
+}
+
+// addSourceFiles adds the files of one projected source to files, in the form
+// projectedFiles describes.
+func addSourceFiles(files map[string]string, source node) {
+	kinds, _ := source.v.(map[string]any)
+	for kind := range kinds {
+		switch kind {
+		case "serviceAccountToken":
+			files[source.at(kind, "path").str2()] = "serviceAccountToken"
+		case "configMap":
+			for _, item := range source.at(kind, "items").list() {
+				files[item.at("path").str2()] = "configMap " + source.at(kind, "name").str2() + " key " +
+					item.at("key").str2()
+			}
+		case "downwardAPI":
+			for _, item := range source.at(kind, "items").list() {
+				files[item.at("path").str2()] = "downwardAPI " + item.at("fieldRef", "fieldPath").str2()
+			}
+		default:
+			files["<"+kind+">"] = "unread source"
+		}
+	}
 }
