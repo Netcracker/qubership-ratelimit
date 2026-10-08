@@ -5,6 +5,7 @@ package m2m
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,16 +91,13 @@ func NewVerifier(ctx context.Context, cfg Config) (tokenverifier.Verifier, error
 	if err != nil {
 		return nil, fmt.Errorf("read the pod's ServiceAccount token: %w", err)
 	}
-	var claims jwt.RegisteredClaims
-	if _, _, err := jwt.NewParser().ParseUnverified(own, &claims); err != nil {
-		return nil, fmt.Errorf("read the issuer of the pod's ServiceAccount token: %w", err)
-	}
-	if claims.Issuer == "" {
-		return nil, errors.New("the pod's ServiceAccount token carries no issuer")
+	issuer, err := issuerOf(own)
+	if err != nil {
+		return nil, err
 	}
 
 	client := &http.Client{Timeout: cfg.Timeout, Transport: bearer{base: cfg.Transport, cfg: cfg}}
-	jwksURI, err := discover(ctx, client, claims.Issuer, cfg.Timeout)
+	jwksURI, err := discover(ctx, client, issuer, cfg.Timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -123,12 +121,44 @@ func NewVerifier(ctx context.Context, cfg Config) (tokenverifier.Verifier, error
 		return nil, fmt.Errorf("fetch the key set at %s: %w", jwksURI, err)
 	}
 	parser := jwt.NewParser(
+		jwt.WithValidMethods(signingMethods),
 		jwt.WithExpirationRequired(),
 		jwt.WithLeeway(leeway),
-		jwt.WithIssuer(claims.Issuer),
+		jwt.WithIssuer(issuer),
 		jwt.WithAudience(cfg.Audience),
 	)
 	return tokenverifier.NewVerifier(parser, keyFunc, tokenverifier.ValidateIssuedAt)
+}
+
+// signingMethods are the algorithms a caller's token may be signed with: the
+// asymmetric ones an API server signs ServiceAccount tokens with, RSA or
+// ECDSA. A token of any other, none or an HMAC among them, is refused before
+// a key is looked up.
+var signingMethods = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"}
+
+// issuerOf reads the iss claim of the pod's own token. The token is the
+// kubelet's, read from the pod's volume, and only its issuer is taken: it
+// names the discovery to read, and a caller's token is then checked against
+// that issuer and the keys the discovery serves.
+func issuerOf(own string) (string, error) {
+	segments := strings.Split(own, ".")
+	if len(segments) != 3 {
+		return "", errors.New("the pod's ServiceAccount token is not a JWT")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(segments[1])
+	if err != nil {
+		return "", fmt.Errorf("decode the pod's ServiceAccount token: %w", err)
+	}
+	var claims struct {
+		Issuer string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("read the claims of the pod's ServiceAccount token: %w", err)
+	}
+	if claims.Issuer == "" {
+		return "", errors.New("the pod's ServiceAccount token carries no issuer")
+	}
+	return claims.Issuer, nil
 }
 
 // discover reads the URL of the key set from the issuer's OIDC discovery,

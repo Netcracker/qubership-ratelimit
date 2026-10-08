@@ -118,12 +118,28 @@ func TestNewVerifier_checksATokenAsThePlatformDoes(t *testing.T) {
 		{"another key under the cluster's key id", c.token(t, stranger, "cluster", nil), jwt.ErrTokenSignatureInvalid},
 		{"an unknown key id", c.token(t, stranger, "idp", nil), jwt.ErrTokenUnverifiable},
 		{"no expiry", c.token(t, c.key, "cluster", jwt.MapClaims{"exp": nil}), jwt.ErrTokenRequiredClaimMissing},
+		{"an HMAC signature under the cluster's key id", hmacToken(t, c), jwt.ErrTokenSignatureInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := verifier.Verify(ctx, tc.token)
 			assert.ErrorIs(t, err, tc.want)
 		})
 	}
+}
+
+// hmacToken is a token of the cluster's issuer and audience signed with HS256
+// under the cluster's key id: an algorithm no API server signs with, which the
+// verifier refuses before it looks a key up.
+func hmacToken(t *testing.T, c *cluster) string {
+	t.Helper()
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"iss": c.server.URL, "aud": []string{audience}, "sub": "system:serviceaccount:biz:ui-backend",
+		"iat": time.Now().Unix(), "exp": time.Now().Add(10 * time.Minute).Unix(),
+	})
+	token.Header["kid"] = "cluster"
+	signed, err := token.SignedString([]byte("a shared secret"))
+	require.NoError(t, err)
+	return signed
 }
 
 // The discovery is read with the pod's own token as the bearer, which the API
@@ -219,5 +235,14 @@ func TestNewVerifier_refusesAnUnknownKeyWithoutWaitingForTheRefresh(t *testing.T
 		assert.ErrorIs(t, err, jwt.ErrTokenUnverifiable)
 		assert.Less(t, time.Since(start), unknownKeyWait+500*time.Millisecond,
 			"an unknown key waited on the refresh limiter")
+	}
+}
+
+// A pod token that is not a JWT names no issuer to read the discovery of.
+func TestNewVerifier_refusesAPodTokenThatIsNotAJWT(t *testing.T) {
+	for _, own := range []string{"opaque", "a.!!!.c", "a." + base64.RawURLEncoding.EncodeToString([]byte("[]")) + ".c"} {
+		_, err := NewVerifier(context.Background(), Config{Audience: audience,
+			Token: func() (string, error) { return own, nil }})
+		assert.ErrorContains(t, err, "the pod's ServiceAccount token", "pod token %q", own)
 	}
 }
