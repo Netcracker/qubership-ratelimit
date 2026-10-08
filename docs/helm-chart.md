@@ -74,7 +74,7 @@ values:
 
 | Deployment scheme | `ratelimit-operator` renders | `ratelimit-service` renders |
 | --- | --- | --- |
-| single namespace | the operator (Deployment, SA, Role/RoleBinding); behind `MONITORING_ENABLED`, its PodMonitor and PrometheusRule | the service (Deployment, Service, SA, HorizontalPodAutoscaler), the filters; behind `redis.dbaas.enabled`, the InternalDatabase and the DatabaseSecretClaim; behind `management.enabled`, the AuthorizationPolicy; behind `MONITORING_ENABLED`, its PodMonitor, PrometheusRule, and dashboard |
+| single namespace | the operator (Deployment, SA, Role/RoleBinding); with `MONITORING_ENABLED`, its PodMonitor and PrometheusRule | the service (Deployment, Service, SA, HPA) and the EnvoyFilters; with `redis.dbaas.enabled`, InternalDatabase and DatabaseSecretClaim; with `management.enabled`, the AuthorizationPolicy; with `MONITORING_ENABLED`, PodMonitor, PrometheusRule, and the dashboard |
 | composite, baseline | the same | the same |
 | composite, satellite | nothing: an empty release | only the filters, which target the baseline RLS; no service, no Service, no ServiceAccount |
 
@@ -169,10 +169,19 @@ only the keys its templates read:
 | `APPLICATION_NAME`, `MANAGED_BY`, `ARTIFACT_DESCRIPTOR_VERSION` | both | `app.kubernetes.io/part-of` and `managed-by` on every object (`MANAGED_BY` is `Helm` in `values.yaml`, and empty renders empty); `version` on the Deployment and its pods (empty renders empty) |
 | `DEPLOYMENT_SESSION_ID` | both | `deployment.netcracker.com/sessionId` on every object but the pods; required, and the schema refuses an empty one |
 | `PAAS_PLATFORM`, `READONLY_CONTAINER_FILE_SYSTEM_ENABLED` | both | on `KUBERNETES` the container runs as group 10001 and, with the flag set (the default), on a read-only root filesystem; on `OPENSHIFT` the platform assigns both and the root filesystem is writable |
-| `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it. Unset and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`. `recreate` stops every old pod first and leaves the gateways without an RLS endpoint during a service rollout. `best_effort_controlled_rollout` is `maxSurge: 0, maxUnavailable: 80%`: at one replica it does the same, and at two or more at least one old replica keeps serving until new ones are Ready. `custom_rollout` alone reads `DEPLOYMENT_STRATEGY_MAXSURGE` and `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE`, `25%` each when unset; the other types ignore them |
+| `DEPLOYMENT_STRATEGY_TYPE`, `DEPLOYMENT_STRATEGY_MAXSURGE`, `DEPLOYMENT_STRATEGY_MAXUNAVAILABLE` | both | the rollout, read the way the platform's other services read it; the four types and what each does to the RLS endpoint are described below the table |
 | `LIVENESS_PROBE_INITIAL_DELAY_SECONDS` | both | the delay before the first liveness probe, 15 by default |
-| `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`; the keys are listed under "Values reference". With `HPA_ENABLED` the Deployment renders no `replicas`, so an upgrade keeps the scaled count, and an upgrade that turns the autoscaler on starts at one replica, the API default, until the HPA raises it to `HPA_MIN_REPLICAS` on its next sync; off, both directions are `Disabled` and `REPLICAS` sizes the service |
+| `HPA_*` | the service chart | the platform's HorizontalPodAutoscaler on CPU, from the resource profile: off in `dev`, between `HPA_MIN_REPLICAS` and `HPA_MAX_REPLICAS` in the others, at a target that is a share of `CPU_LIMIT`; the keys are listed under "Values reference", and what `HPA_ENABLED` does to `replicas` is described below the table |
 | `CLOUD_TOPOLOGIES` | both | the platform's list of topologies; when set, it replaces `CLOUD_TOPOLOGY_KEY` with one constraint per entry, each with its `topologyKey` and optional `maxSkew` and `whenUnsatisfiable` |
+
+The rollout types: unset and `ramped_slow_rollout` are `maxSurge: 1, maxUnavailable: 0`; `recreate` stops every old pod
+first and leaves the gateways without an RLS endpoint during a service rollout; `best_effort_controlled_rollout` is
+`maxSurge: 0, maxUnavailable: 80%`, which at one replica does the same and at two or more keeps at least one old replica
+serving until the new ones are Ready; `custom_rollout` alone reads `DEPLOYMENT_STRATEGY_MAXSURGE` and
+`DEPLOYMENT_STRATEGY_MAXUNAVAILABLE`, `25%` each when unset, and the other types ignore them. With `HPA_ENABLED` the
+Deployment renders no `replicas`, so an upgrade keeps the scaled count, and an upgrade that turns the autoscaler on
+starts at one replica, the API default, until the HPA raises it to `HPA_MIN_REPLICAS` on its next sync; with the
+autoscaler off, both directions are `Disabled` and `REPLICAS` sizes the service.
 
 The resource parameters are required in the schema of each chart: the four sizes and `REPLICAS` in both, and the
 service's profiles also carry the `HPA_*` parameters. An installation without `-f resource-profiles/<profile>.yaml`
@@ -799,7 +808,7 @@ The operator chart, group `ratelimit-operator`:
 | `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1` for `stalledFor`, with the reason in the label: `ReplicaStale`, `ReplicaFormatUnsupported`, `ConfigMapTooLarge`, or `NotCompiled`, a generation that does not compile, which `RatelimitRuleProblems` reports as a warning too |
 | `RatelimitNotReadyLong` | warning | `ratelimit_policy_ready == 0` for `notReadyFor`: the latest generation is not the one enforced |
 | `RatelimitNoReplicas` | critical | `ratelimit_policy_ready{reason="NoReplicas"} == 0` for `noReplicasFor`: the operator observed no ready service replica, so the gateway's failure mode decides every check of the domain; a fleet it could not observe is `ProbeFailed` and does not fire |
-| `RatelimitChecksStopped` | warning | `ratelimit_policy_replicas{state="applied"} > 0` while the domain's `ratelimit_checks_total` has no rate over `checksStoppedWindow`, for `checksStoppedFor`: the filter is off, removed, or on another domain, and the traffic passes unlimited with every status Ready; an idle gateway fires too. The expression sums the domain's checks over every gateway, so in a composite one gateway's disabled filter does not fire it while the others send |
+| `RatelimitChecksStopped` | warning | `ratelimit_policy_replicas{state="applied"} > 0` while the domain's `ratelimit_checks_total` has no rate over `checksStoppedWindow`, for `checksStoppedFor`: the filter is off, removed, or on another domain, and traffic passes unlimited with every status Ready; an idle gateway fires too; the sum runs over every gateway of the domain, so one disabled filter in a composite does not fire it |
 | `RatelimitRuleProblems` | warning | `ratelimit_policy_rule_problems{severity="blocking"} > 0` for `ruleProblemsFor`: the latest generation is not enforced and last-good runs instead |
 | `RatelimitConfigWriteErrors` | critical | `increase(ratelimit_config_write_errors_total[configWriteErrorsWindow]) > 0` by `reason`, with no hold: policy changes stop reaching the service |
 | `RatelimitNoOperatorLeader` | critical | `absent(ratelimit_leader == 1)` for `noLeaderFor`: no operator pod holds the Lease, so nothing compiles policies or writes `ratelimit-config` |
