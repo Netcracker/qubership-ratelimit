@@ -41,26 +41,52 @@ func newFixture(t *testing.T) *fixture {
 	return &fixture{t: t, dir: t.TempDir()}
 }
 
+// spec is the spec of domain with one rule of requests a minute.
 func spec(domain string, requests int32) v1.RateLimitPolicySpec {
 	return v1.RateLimitPolicySpec{Domain: domain, Limits: []v1.LimitBlock{{
 		Name: "api", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: requests, PeriodSeconds: 60}}}}}}}
 }
 
 // write puts the specs in the directory under a manifest at the given
-// generation for every domain.
+// generation for every domain, each spec under its own domain.
 func (f *fixture) write(generation int64, specs ...v1.RateLimitPolicySpec) manifest.Manifest {
 	f.t.Helper()
-	m := manifest.Manifest{OperatorVersion: "t", Domains: map[string]manifest.Domain{}}
+	payloads := make(map[string]any, len(specs))
 	for _, s := range specs {
-		compressed, hash, err := manifest.EncodePayload(s)
+		payloads[s.Domain] = s
+	}
+	return f.writePayloads(generation, payloads)
+}
+
+// writePayloads puts each payload in the directory under the key of its
+// domain, and a manifest that names every domain at the given generation with
+// the hash its payload has.
+func (f *fixture) writePayloads(generation int64, payloads map[string]any) manifest.Manifest {
+	f.t.Helper()
+	m := manifest.Manifest{OperatorVersion: "t", Domains: map[string]manifest.Domain{}}
+	for domain, payload := range payloads {
+		compressed, hash, err := manifest.EncodePayload(payload)
 		require.NoError(f.t, err)
-		require.NoError(f.t, os.WriteFile(filepath.Join(f.dir, manifest.PayloadKey(s.Domain)), compressed, 0o600))
-		m.Domains[s.Domain] = manifest.Domain{Generation: generation, UID: "uid-" + s.Domain, Hash: hash}
+		f.writeCompressed(domain, compressed)
+		m.Domains[domain] = manifest.Domain{Generation: generation, UID: "uid-" + domain, Hash: hash}
 	}
 	raw, err := manifest.Encode(m)
 	require.NoError(f.t, err)
 	f.writeManifest(raw)
 	return m
+}
+
+// writePayload replaces the payload of domain and leaves the manifest as it is.
+func (f *fixture) writePayload(domain string, payload any) {
+	f.t.Helper()
+	compressed, _, err := manifest.EncodePayload(payload)
+	require.NoError(f.t, err)
+	f.writeCompressed(domain, compressed)
+}
+
+func (f *fixture) writeCompressed(domain string, compressed []byte) {
+	f.t.Helper()
+	require.NoError(f.t, os.WriteFile(filepath.Join(f.dir, manifest.PayloadKey(domain)), compressed, 0o600))
 }
 
 func (f *fixture) writeManifest(raw []byte) {
@@ -73,33 +99,67 @@ func (f *fixture) remove(name string) {
 	require.NoError(f.t, os.Remove(filepath.Join(f.dir, name)))
 }
 
+// apply writes the specs at generation, reads the directory, and applies the
+// reading, which is what the watcher does on a change.
+func (f *fixture) apply(a *Applier, generation int64, specs ...v1.RateLimitPolicySpec) {
+	f.t.Helper()
+	f.write(generation, specs...)
+	cfg, err := Read(f.dir)
+	require.NoError(f.t, err)
+	a.Apply(cfg)
+}
+
 func newApplier() *Applier {
 	return &Applier{Namespace: testNamespace, Store: store.New(), Counters: memory.New(), Log: logr.Discard()}
 }
 
+// gzipped compresses raw the way the operator compresses a payload.
+func gzipped(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, err := zw.Write(raw)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
 // The reader: what it applies, and every way it refuses.
 
-func TestRead_theDirectoryAsTheKubeletWritesIt(t *testing.T) {
+func TestRead_returnsTheManifestAndTheSpecOfEveryDomain(t *testing.T) {
 	f := newFixture(t)
 	want := f.write(3, spec("gateway.public", 10), spec("gateway.private", 20))
 
 	cfg, err := Read(f.dir)
+
 	require.NoError(t, err)
 	assert.Equal(t, want.Domains, cfg.Manifest.Domains)
-	assert.Len(t, cfg.Specs, 2)
-	assert.Equal(t, int32(10), cfg.Specs["gateway.public"].Limits[0].Rules[0].Rates[0].Requests)
+	assert.Equal(t, map[string]v1.RateLimitPolicySpec{
+		"gateway.public":  spec("gateway.public", 10),
+		"gateway.private": spec("gateway.private", 20),
+	}, cfg.Specs)
 }
 
-func TestRead_anEmptyDirectoryIsAbsentAndAMissingOneToo(t *testing.T) {
-	f := newFixture(t)
-	_, err := Read(f.dir)
+// An empty directory is the volume mounted optional before the ConfigMap
+// exists.
+func TestRead_reportsAnEmptyDirectoryAsAbsent(t *testing.T) {
+	_, err := Read(newFixture(t).dir)
+
 	assert.ErrorIs(t, err, ErrAbsent)
-	_, err = Read(filepath.Join(f.dir, "not-mounted"))
-	assert.ErrorIs(t, err, ErrAbsent, "before the volume is mounted the directory is not there at all")
 }
 
-func TestRead_refusals(t *testing.T) {
-	sound := func(f *fixture) { f.write(1, spec("gateway.public", 10)) }
+// Before the volume is mounted the directory is not there at all.
+func TestRead_reportsAMissingDirectoryAsAbsent(t *testing.T) {
+	_, err := Read(filepath.Join(newFixture(t).dir, "not-mounted"))
+
+	assert.ErrorIs(t, err, ErrAbsent)
+}
+
+// Every row starts from a sound directory and damages one part of it. The
+// refusal carries the format version the manifest declared, zero when it
+// could not be read that far, and a reason that names what was refused: the
+// reason is what the replica reports on the applied endpoint.
+func TestRead_refusesAReadingItCannotApplyWhole(t *testing.T) {
 	cases := map[string]struct {
 		damage  func(f *fixture)
 		version int
@@ -126,50 +186,28 @@ func TestRead_refusals(t *testing.T) {
 			version: 1, reason: "read the payload",
 		},
 		"a payload whose hash disagrees with the manifest": {
-			damage: func(f *fixture) {
-				other, _, err := manifest.EncodePayload(spec("gateway.public", 11))
-				require.NoError(t, err)
-				require.NoError(t, os.WriteFile(filepath.Join(f.dir, manifest.PayloadKey("gateway.public")), other, 0o600))
-			},
+			damage:  func(f *fixture) { f.writePayload("gateway.public", spec("gateway.public", 11)) },
 			version: 1, reason: "does not match",
 		},
 		"a payload with a field the spec does not define": {
+			// The hash is over the bytes as written, so it agrees; the strict
+			// decode is what refuses.
 			damage: func(f *fixture) {
-				// The hash is over the bytes as written, so it agrees; the
-				// strict decode is what refuses.
-				raw := map[string]any{"domain": "gateway.public", "limits": []any{}, "futureField": true}
-				compressed, hash, err := manifest.EncodePayload(raw)
-				require.NoError(t, err)
-				require.NoError(t, os.WriteFile(filepath.Join(f.dir, manifest.PayloadKey("gateway.public")), compressed, 0o600))
-				m := manifest.Manifest{OperatorVersion: "t", Domains: map[string]manifest.Domain{
-					"gateway.public": {Generation: 1, UID: "u", Hash: hash}}}
-				encoded, err := manifest.Encode(m)
-				require.NoError(t, err)
-				f.writeManifest(encoded)
+				f.writePayloads(1, map[string]any{
+					"gateway.public": map[string]any{"domain": "gateway.public", "limits": []any{}, "futureField": true},
+				})
 			},
 			version: 1, reason: "futureField",
 		},
 		"a payload that decompresses past the decoder's limit": {
 			damage: func(f *fixture) {
-				var buf bytes.Buffer
-				zw := gzip.NewWriter(&buf)
-				_, err := zw.Write(bytes.Repeat([]byte{'0'}, manifest.MaxPayloadSize+1))
-				require.NoError(t, err)
-				require.NoError(t, zw.Close())
-				require.NoError(t, os.WriteFile(filepath.Join(f.dir, manifest.PayloadKey("gateway.public")), buf.Bytes(), 0o600))
+				f.writeCompressed("gateway.public", gzipped(f.t, bytes.Repeat([]byte{'0'}, manifest.MaxPayloadSize+1)))
 			},
 			version: 1, reason: "decompresses past",
 		},
 		"a payload that belongs to another domain": {
 			damage: func(f *fixture) {
-				compressed, hash, err := manifest.EncodePayload(spec("gateway.other", 10))
-				require.NoError(t, err)
-				require.NoError(t, os.WriteFile(filepath.Join(f.dir, manifest.PayloadKey("gateway.public")), compressed, 0o600))
-				m := manifest.Manifest{OperatorVersion: "t", Domains: map[string]manifest.Domain{
-					"gateway.public": {Generation: 1, UID: "u", Hash: hash}}}
-				encoded, err := manifest.Encode(m)
-				require.NoError(t, err)
-				f.writeManifest(encoded)
+				f.writePayloads(1, map[string]any{"gateway.public": spec("gateway.other", 10)})
 			},
 			version: 1, reason: `for domain "gateway.other"`,
 		},
@@ -177,155 +215,197 @@ func TestRead_refusals(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t)
-			sound(f)
+			f.write(1, spec("gateway.public", 10))
 			tc.damage(f)
 
 			_, err := Read(f.dir)
+
 			var refusal *Refusal
-			require.ErrorAs(t, err, &refusal, "%v", err)
-			assert.Equal(t, tc.version, refusal.FormatVersion)
-			assert.Contains(t, refusal.Error(), tc.reason)
+			require.ErrorAs(t, err, &refusal)
+			assert.Equal(t, tc.version, refusal.FormatVersion, "the declared format version")
+			assert.ErrorContains(t, refusal, tc.reason)
 		})
 	}
 }
 
 // The applier: the Ready gate and the report.
 
-func TestApplier_isNotReadyUntilTheFirstApplyAndStaysReadyAfter(t *testing.T) {
+// The versions are reported before anything is applied, so the operator can
+// read them off a NotReady replica.
+func TestApplier_isNotReadyBeforeTheFirstApply(t *testing.T) {
 	a := newApplier()
-	assert.False(t, a.Ready())
+
 	report := a.Report()
+
+	assert.False(t, a.Ready())
 	assert.Empty(t, report.Domains)
-	assert.Equal(t, manifest.SupportedVersions(), report.FormatVersions,
-		"the versions are reported before anything is applied, so the operator can read them off a NotReady replica")
-
-	// An explicitly empty manifest is a configuration.
-	a.Apply(Configuration{Manifest: manifest.Manifest{FormatVersion: 1, Domains: map[string]manifest.Domain{}}})
-	assert.True(t, a.Ready())
-	assert.False(t, a.Store.HasDomain("gateway.public"), "every request is an unknown domain")
-
-	// A refusal after the first apply keeps the replica Ready on its snapshot.
-	a.Refuse(&Refusal{FormatVersion: 99, Err: errors.New("unsupported")})
-	assert.True(t, a.Ready())
-	require.NotNil(t, a.Report().Refusal)
-	assert.Equal(t, 99, a.Report().Refusal.FormatVersion)
-	assert.Equal(t, "unsupported", a.Report().Refusal.Reason)
+	assert.Equal(t, manifest.SupportedVersions(), report.FormatVersions)
 }
 
-func TestApplier_aRefusalBeforeTheFirstApplyIsReportedAndNotReady(t *testing.T) {
+// An explicitly empty manifest is a configuration: the replica is Ready, and
+// every request is an unknown domain.
+func TestApplier_isReadyAfterApplyingAnEmptyManifest(t *testing.T) {
 	a := newApplier()
+
+	a.Apply(Configuration{Manifest: manifest.Manifest{FormatVersion: 1, Domains: map[string]manifest.Domain{}}})
+
+	assert.True(t, a.Ready())
+	assert.False(t, a.Store.HasDomain("gateway.public"))
+}
+
+// A refusal after the first apply keeps the replica Ready on its snapshot.
+func TestApplier_staysReadyThroughARefusalAfterTheFirstApply(t *testing.T) {
+	a := newApplier()
+	a.Apply(Configuration{Manifest: manifest.Manifest{FormatVersion: 1, Domains: map[string]manifest.Domain{}}})
+
+	a.Refuse(&Refusal{FormatVersion: 99, Err: errors.New("unsupported")})
+
+	assert.True(t, a.Ready())
+	assert.Equal(t, &applied.Refusal{FormatVersion: 99, Reason: "unsupported"}, a.Report().Refusal)
+}
+
+func TestApplier_staysNotReadyThroughARefusalBeforeTheFirstApply(t *testing.T) {
+	a := newApplier()
+
 	a.Refuse(&Refusal{FormatVersion: 2, Err: errors.New("no")})
+
 	assert.False(t, a.Ready())
-	assert.Equal(t, 2, a.Report().Refusal.FormatVersion)
-	assert.Empty(t, a.Report().Domains)
+	report := a.Report()
+	assert.Equal(t, &applied.Refusal{FormatVersion: 2, Reason: "no"}, report.Refusal)
+	assert.Empty(t, report.Domains)
 }
 
 // The report is one set's facts: a refused reading rides on the set it left
-// in place, with that set's generations, and the applied set that follows
-// carries the new generation and no refusal. No reader can pair the two.
-func TestApplier_reportsTheRefusalOnTheSetItLeftInPlace(t *testing.T) {
+// in place, with that set's generations.
+func TestApplier_reportsARefusalWithTheGenerationsOfTheSetItLeftInPlace(t *testing.T) {
 	f := newFixture(t)
-	f.write(4, spec("gateway.public", 10))
-	cfg, err := Read(f.dir)
-	require.NoError(t, err)
 	a := newApplier()
-	a.Apply(cfg)
+	f.apply(a, 4, spec("gateway.public", 10))
 
 	a.Refuse(&Refusal{FormatVersion: 99, Err: errors.New("unsupported")})
-	refused := a.Store.Load()
-	report := ReportOf(refused)
-	assert.Equal(t, int64(4), report.Domains["gateway.public"].Generation)
-	require.NotNil(t, report.Refusal)
-	assert.Equal(t, 99, report.Refusal.FormatVersion)
 
-	f.write(5, spec("gateway.public", 11))
-	cfg, err = Read(f.dir)
-	require.NoError(t, err)
-	a.Apply(cfg)
-	report = a.Report()
-	assert.Equal(t, int64(5), report.Domains["gateway.public"].Generation)
-	assert.Nil(t, report.Refusal, "the applied set answers the refused reading")
-	assert.Equal(t, 99, ReportOf(refused).Refusal.FormatVersion, "the set a reader holds is not rewritten under it")
+	report := a.Report()
+	assert.Equal(t, int64(4), report.Domains["gateway.public"].Generation)
+	assert.Equal(t, &applied.Refusal{FormatVersion: 99, Reason: "unsupported"}, report.Refusal)
 }
 
-func TestApplier_compilesEveryDomainAndReportsItsGeneration(t *testing.T) {
+// The applied set that follows a refusal carries the new generation and no
+// refusal, and the refused set a reader may still hold is not rewritten under
+// it. No reader can pair the refusal with the generation that answered it.
+func TestApplier_reportsNoRefusalAfterTheNextApply(t *testing.T) {
 	f := newFixture(t)
-	f.write(4, spec("gateway.public", 10), spec("gateway.private", 20))
-	cfg, err := Read(f.dir)
-	require.NoError(t, err)
-
 	a := newApplier()
-	a.Apply(cfg)
+	f.apply(a, 4, spec("gateway.public", 10))
+	a.Refuse(&Refusal{FormatVersion: 99, Err: errors.New("unsupported")})
+	refused := a.Store.Load()
+
+	f.apply(a, 5, spec("gateway.public", 11))
+
+	report := a.Report()
+	assert.Equal(t, int64(5), report.Domains["gateway.public"].Generation)
+	assert.Nil(t, report.Refusal)
+	assert.Equal(t, &applied.Refusal{FormatVersion: 99, Reason: "unsupported"}, ReportOf(refused).Refusal,
+		"the refusal of the set a reader already held")
+}
+
+func TestApplier_bindsEveryDomainAtTheGenerationOfTheManifest(t *testing.T) {
+	f := newFixture(t)
+	a := newApplier()
+
+	f.apply(a, 4, spec("gateway.public", 10), spec("gateway.private", 20))
+
 	assert.True(t, a.Store.HasDomain("gateway.public"))
 	assert.True(t, a.Store.HasDomain("gateway.private"))
 	report := a.Report()
 	assert.Equal(t, int64(4), report.Domains["gateway.public"].Generation)
 	assert.Equal(t, "uid-gateway.public", report.Domains["gateway.public"].UID)
+	assert.Equal(t, int64(4), report.Domains["gateway.private"].Generation)
 	assert.Nil(t, report.Refusal)
+}
 
-	// The report is the rule set's own facts: the generation rides on the
-	// domain the engine is bound to, so the report and the rules a reader
-	// pairs it with come from one load.
+// The generation rides on the domain the engine is bound to, so the report
+// and the rules a reader pairs it with come from one load.
+func TestApplier_reportsTheAppliedFactsOfTheCurrentRuleSet(t *testing.T) {
+	f := newFixture(t)
+	a := newApplier()
+	f.apply(a, 4, spec("gateway.public", 10))
+
+	report := a.Report()
+
 	d, ok := a.Store.Load().Domain("gateway.public")
 	require.True(t, ok)
-	assert.Equal(t, report.Domains["gateway.public"], applied.Domain{Generation: d.Generation, UID: d.UID, AppliedAt: d.AppliedAt})
-	assert.Equal(t, a.Store.SwappedAt(), a.Store.Load().SwappedAt(), "the swap time is stamped on the set that was swapped in")
+	assert.Equal(t, applied.Domain{Generation: d.Generation, UID: d.UID, AppliedAt: d.AppliedAt},
+		report.Domains["gateway.public"])
+}
 
-	// The handler serves the same report.
+func TestApplier_servesTheReportAsJSON(t *testing.T) {
+	f := newFixture(t)
+	a := newApplier()
+	f.apply(a, 4, spec("gateway.public", 10), spec("gateway.private", 20))
+
 	recorder := httptest.NewRecorder()
 	a.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, contract.AppliedPath, nil))
-	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
 	var served applied.Report
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &served))
-	assert.Equal(t, report.Domains["gateway.private"].Generation, served.Domains["gateway.private"].Generation)
+	assert.Equal(t, int64(4), served.Domains["gateway.private"].Generation)
 	assert.Equal(t, manifest.SupportedVersions(), served.FormatVersions)
 }
 
+// A domain whose payload hash did not move keeps its engine, and with it the
+// warm token cache, while its generation moves with the manifest. The domain
+// whose payload changed is the control.
 func TestApplier_reusesTheEngineOfAnUnchangedDomain(t *testing.T) {
 	f := newFixture(t)
-	f.write(1, spec("gateway.public", 10), spec("gateway.private", 20))
-	cfg, err := Read(f.dir)
-	require.NoError(t, err)
 	a := newApplier()
-	a.Apply(cfg)
-	before := a.Store.Engine("gateway.public")
+	f.apply(a, 1, spec("gateway.public", 10), spec("gateway.private", 20))
+	unchanged := a.Store.Engine("gateway.public")
 	changed := a.Store.Engine("gateway.private")
 
-	f.write(2, spec("gateway.public", 10), spec("gateway.private", 21))
-	cfg, err = Read(f.dir)
-	require.NoError(t, err)
-	a.Apply(cfg)
-	assert.Same(t, before, a.Store.Engine("gateway.public"), "same hash, same engine, warm cache kept")
-	assert.NotSame(t, changed, a.Store.Engine("gateway.private"))
-	assert.Equal(t, int64(2), a.Report().Domains["gateway.public"].Generation,
-		"the generation moves with the manifest even when the payload did not")
+	f.apply(a, 2, spec("gateway.public", 10), spec("gateway.private", 21))
+
+	assert.Same(t, unchanged, a.Store.Engine("gateway.public"), "the engine of the unchanged gateway.public")
+	assert.NotSame(t, changed, a.Store.Engine("gateway.private"), "the engine of the changed gateway.private")
+	assert.Equal(t, int64(2), a.Report().Domains["gateway.public"].Generation)
 }
 
 // The swap time moves only when the enforced rules change while the replica
 // runs. It used to be set on every apply, the first one after a restart
 // included, so a restarted replica reported a rule change that never happened.
-func TestApplier_stampsTheSwapTimeOnlyWhenTheRulesChange(t *testing.T) {
+func TestApplier_leavesTheSwapTimeAtZeroOnTheFirstApply(t *testing.T) {
 	metrics.SnapshotTimestamp.Set(0)
 	f := newFixture(t)
-	f.write(1, spec("gateway.public", 10))
-	cfg, err := Read(f.dir)
-	require.NoError(t, err)
 	a := newApplier()
 
-	a.Apply(cfg)
-	assert.Zero(t, testutil.ToFloat64(metrics.SnapshotTimestamp), "the first apply after a start is not a change")
+	f.apply(a, 1, spec("gateway.public", 10))
 
-	f.write(2, spec("gateway.public", 10))
-	cfg, err = Read(f.dir)
-	require.NoError(t, err)
-	a.Apply(cfg)
-	assert.Zero(t, testutil.ToFloat64(metrics.SnapshotTimestamp), "a new generation of the same payload is not a change")
+	assert.Zero(t, testutil.ToFloat64(metrics.SnapshotTimestamp))
+}
 
-	f.write(3, spec("gateway.public", 11))
-	cfg, err = Read(f.dir)
-	require.NoError(t, err)
-	a.Apply(cfg)
-	assert.Positive(t, testutil.ToFloat64(metrics.SnapshotTimestamp), "a changed payload is")
+// A new generation of the same payload is not a change of the rules.
+func TestApplier_leavesTheSwapTimeOnANewGenerationOfTheSamePayload(t *testing.T) {
+	f := newFixture(t)
+	a := newApplier()
+	f.apply(a, 1, spec("gateway.public", 10))
+	metrics.SnapshotTimestamp.Set(0)
+
+	f.apply(a, 2, spec("gateway.public", 10))
+
+	assert.Zero(t, testutil.ToFloat64(metrics.SnapshotTimestamp))
+}
+
+// A changed payload stamps the swap time. This is the control of the two tests
+// that leave the swap time at zero.
+func TestApplier_stampsTheSwapTimeWhenAPayloadChanges(t *testing.T) {
+	f := newFixture(t)
+	a := newApplier()
+	f.apply(a, 1, spec("gateway.public", 10))
+	metrics.SnapshotTimestamp.Set(0)
+
+	f.apply(a, 2, spec("gateway.public", 11))
+
+	assert.Positive(t, testutil.ToFloat64(metrics.SnapshotTimestamp))
 }
 
 // A spec the operator validated under rules this build does not share: two
@@ -338,51 +418,56 @@ func badSpec(domain string) v1.RateLimitPolicySpec {
 		}}}}
 }
 
+// The rules enforced a moment ago stay enforced, the design's last-good, and
+// the domain is reported at the generation it enforces, so the operator sees
+// this replica behind on that one domain while the others move on. The
+// manifest was applied, so nothing is refused.
 func TestApplier_aSpecThatDoesNotCompileHereKeepsTheLastGoodEngine(t *testing.T) {
 	f := newFixture(t)
-	f.write(4, spec("gateway.public", 10), spec("gateway.private", 20))
-	cfg, err := Read(f.dir)
-	require.NoError(t, err)
 	a := newApplier()
-	a.Apply(cfg)
+	f.apply(a, 4, spec("gateway.public", 10), spec("gateway.private", 20))
 	lastGood := a.Store.Engine("gateway.public")
 
-	f.write(5, badSpec("gateway.public"), spec("gateway.private", 21))
-	cfg, err = Read(f.dir)
-	require.NoError(t, err, "the payload decodes; it is the compiler that objects")
-	a.Apply(cfg)
+	f.apply(a, 5, badSpec("gateway.public"), spec("gateway.private", 21))
 
 	assert.True(t, a.Ready())
-	assert.Same(t, lastGood, a.Store.Engine("gateway.public"),
-		"the rules enforced a moment ago stay enforced; the design's last-good, and this replica has it")
-	assert.Equal(t, int64(4), a.Report().Domains["gateway.public"].Generation,
-		"reported at the generation it enforces, so the operator sees this replica behind on the one domain")
-	assert.Equal(t, int64(5), a.Report().Domains["gateway.private"].Generation, "the other domain moves on")
-	assert.Nil(t, a.Report().Refusal, "not a refusal: the manifest was applied, one domain on last-good")
+	assert.Same(t, lastGood, a.Store.Engine("gateway.public"), "the engine of gateway.public")
+	report := a.Report()
+	assert.Equal(t, int64(4), report.Domains["gateway.public"].Generation)
+	assert.Equal(t, int64(5), report.Domains["gateway.private"].Generation)
+	assert.Nil(t, report.Refusal)
+}
 
-	// The good payload back under a new generation: applied, reported.
-	f.write(6, spec("gateway.public", 10), spec("gateway.private", 21))
-	cfg, err = Read(f.dir)
-	require.NoError(t, err)
-	a.Apply(cfg)
-	assert.Same(t, lastGood, a.Store.Engine("gateway.public"), "same payload hash as generation 4")
+// The hash kept with a last-good engine is the one of its own payload, so the
+// good payload back under a new generation reuses that engine.
+func TestApplier_reusesTheLastGoodEngineWhenItsPayloadReturns(t *testing.T) {
+	f := newFixture(t)
+	a := newApplier()
+	f.apply(a, 4, spec("gateway.public", 10), spec("gateway.private", 20))
+	lastGood := a.Store.Engine("gateway.public")
+	f.apply(a, 5, badSpec("gateway.public"), spec("gateway.private", 21))
+
+	f.apply(a, 6, spec("gateway.public", 10), spec("gateway.private", 21))
+
+	assert.Same(t, lastGood, a.Store.Engine("gateway.public"), "the engine of the payload of generation 4")
 	assert.Equal(t, int64(6), a.Report().Domains["gateway.public"].Generation)
 }
 
+// A domain this replica never applied has nothing to keep: it is claimed, so
+// a request for it is not an unknown domain, and it enforces nothing, reported
+// at generation zero so the operator sees this replica behind.
 func TestApplier_aSpecThatDoesNotCompileHereAndWasNeverAppliedClaimsTheDomainEmpty(t *testing.T) {
 	f := newFixture(t)
-	f.write(5, badSpec("gateway.public"), spec("gateway.private", 20))
-	cfg, err := Read(f.dir)
-	require.NoError(t, err)
-
 	a := newApplier()
-	a.Apply(cfg)
+
+	f.apply(a, 5, badSpec("gateway.public"), spec("gateway.private", 20))
+
 	assert.True(t, a.Ready())
-	assert.True(t, a.Store.HasDomain("gateway.public"), "claimed, so the request is not an unknown domain")
-	assert.Empty(t, a.Store.Load().Snapshot("gateway.public").Blocks, "and nothing to keep, so empty")
-	assert.Equal(t, int64(0), a.Report().Domains["gateway.public"].Generation,
-		"reported at zero: the operator sees this replica behind, not enforcing")
-	assert.Equal(t, int64(5), a.Report().Domains["gateway.private"].Generation, "the other domain is untouched")
+	require.True(t, a.Store.HasDomain("gateway.public"))
+	assert.Empty(t, a.Store.Load().Snapshot("gateway.public").Blocks)
+	report := a.Report()
+	assert.Equal(t, int64(0), report.Domains["gateway.public"].Generation)
+	assert.Equal(t, int64(5), report.Domains["gateway.private"].Generation, "the other domain is untouched")
 }
 
 // The watcher: one apply per change of the manifest, through file events
@@ -400,70 +485,144 @@ func startWatcher(t *testing.T, dir string, a *Applier) {
 	})
 }
 
-func TestWatcher_appliesWhatIsThereAndThenEachChange(t *testing.T) {
+// waitForGeneration waits until the applier reports generation for
+// gateway.public.
+func waitForGeneration(t *testing.T, a *Applier, generation int64) {
+	t.Helper()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, generation, a.Report().Domains["gateway.public"].Generation,
+			"the reported generation of gateway.public")
+	}, 2*time.Second, 10*time.Millisecond, "waiting for the watcher to apply generation %d", generation)
+}
+
+func waitForRefusal(t *testing.T, a *Applier) {
+	t.Helper()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.NotNil(c, a.Report().Refusal, "the reported refusal")
+	}, 2*time.Second, 10*time.Millisecond, "waiting for the watcher to refuse the manifest")
+}
+
+func waitForAbsence(t *testing.T, a *Applier) {
+	t.Helper()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.True(c, a.Report().ConfigAbsent, "the reported absence")
+	}, 2*time.Second, 10*time.Millisecond, "waiting for the watcher to report the manifest gone")
+}
+
+// unsupported is a manifest of a format version this reader does not accept.
+var unsupported = []byte(`{"formatVersion": 99, "operatorVersion": "x", "domains": {}}`)
+
+func TestWatcher_appliesTheConfigurationPresentAtStart(t *testing.T) {
+	f := newFixture(t)
+	f.write(1, spec("gateway.public", 10))
+	a := newApplier()
+
+	startWatcher(t, f.dir, a)
+
+	waitForGeneration(t, a, 1)
+}
+
+func TestWatcher_appliesAChangedManifest(t *testing.T) {
 	f := newFixture(t)
 	f.write(1, spec("gateway.public", 10))
 	a := newApplier()
 	startWatcher(t, f.dir, a)
-
-	require.Eventually(t, a.Ready, 2*time.Second, 10*time.Millisecond, "the first read is at start")
-	assert.Equal(t, int64(1), a.Report().Domains["gateway.public"].Generation)
+	waitForGeneration(t, a, 1)
 
 	f.write(2, spec("gateway.public", 11))
-	require.Eventually(t, func() bool { return a.Report().Domains["gateway.public"].Generation == 2 },
-		2*time.Second, 10*time.Millisecond)
 
-	// A refusal is reported, the snapshot stays.
-	f.writeManifest([]byte(`{"formatVersion": 99, "operatorVersion": "x", "domains": {}}`))
-	require.Eventually(t, func() bool { return a.Report().Refusal != nil }, 2*time.Second, 10*time.Millisecond)
+	waitForGeneration(t, a, 2)
+}
+
+// A refusal is reported, and the snapshot stays.
+func TestWatcher_keepsTheSnapshotThroughARefusedManifest(t *testing.T) {
+	f := newFixture(t)
+	f.write(1, spec("gateway.public", 10))
+	a := newApplier()
+	startWatcher(t, f.dir, a)
+	waitForGeneration(t, a, 1)
+
+	f.writeManifest(unsupported)
+
+	waitForRefusal(t, a)
 	assert.True(t, a.Store.HasDomain("gateway.public"))
-	assert.Equal(t, int64(2), a.Report().Domains["gateway.public"].Generation)
+	assert.Equal(t, int64(1), a.Report().Domains["gateway.public"].Generation)
+}
 
-	// The files vanish: still Ready, still generation 2, and the absence is
-	// reported and counted, since nothing will rebuild what the replica holds.
+// The files vanish: the replica stays Ready on what it applied, and the
+// absence is reported and counted, since nothing will rebuild what it holds.
+func TestWatcher_keepsTheSnapshotWhenTheManifestVanishes(t *testing.T) {
+	t.Cleanup(func() { metrics.ConfigAbsent.Set(0) })
+	f := newFixture(t)
+	f.write(1, spec("gateway.public", 10))
+	a := newApplier()
+	startWatcher(t, f.dir, a)
+	waitForGeneration(t, a, 1)
+
 	f.remove(contract.ManifestKey)
-	require.Eventually(t, func() bool { return a.Report().ConfigAbsent }, 2*time.Second, 10*time.Millisecond,
-		"a vanished configuration is not reported")
+
+	waitForAbsence(t, a)
 	assert.Equal(t, 1.0, testutil.ToFloat64(metrics.ConfigAbsent))
 	assert.True(t, a.Ready())
-	assert.Equal(t, int64(2), a.Report().Domains["gateway.public"].Generation)
+	assert.Equal(t, int64(1), a.Report().Domains["gateway.public"].Generation)
+}
 
-	// The good manifest comes back, and the refusal and the absence go.
+// A good manifest that comes back after a refusal and a removal is applied,
+// and the refusal and the absence both go.
+func TestWatcher_aGoodManifestClearsAPendingRefusalAndAbsence(t *testing.T) {
+	t.Cleanup(func() { metrics.ConfigAbsent.Set(0) })
+	f := newFixture(t)
+	f.write(1, spec("gateway.public", 10))
+	a := newApplier()
+	startWatcher(t, f.dir, a)
+	waitForGeneration(t, a, 1)
+	f.writeManifest(unsupported)
+	waitForRefusal(t, a)
+	f.remove(contract.ManifestKey)
+	waitForAbsence(t, a)
+
 	f.write(3, spec("gateway.public", 11))
-	require.Eventually(t, func() bool {
-		return a.Report().Refusal == nil && a.Report().Domains["gateway.public"].Generation == 3
-	}, 2*time.Second, 10*time.Millisecond)
-	assert.False(t, a.Report().ConfigAbsent)
+
+	waitForGeneration(t, a, 3)
+	report := a.Report()
+	assert.Nil(t, report.Refusal)
+	assert.False(t, report.ConfigAbsent)
 	assert.Zero(t, testutil.ToFloat64(metrics.ConfigAbsent))
 }
 
-func TestWatcher_staysNotReadyWithoutAConfigurationAndWatchesADirectoryThatAppearsLater(t *testing.T) {
-	// The volume mounted optional and empty, then written; and the directory
-	// that is not there at all until it is.
-	root := t.TempDir()
-	dir := filepath.Join(root, "config")
+// The directory is not there at all until it is. No timeout turns a missing
+// configuration into an empty one: the replica stays NotReady across the
+// resyncs of the Never window, and the resync timer then finds the directory
+// and applies it. The window is the behavior here, not a wait for a condition.
+func TestWatcher_staysNotReadyUntilAMissingDirectoryAppears(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "config")
 	a := newApplier()
 	startWatcher(t, dir, a)
 
-	time.Sleep(300 * time.Millisecond)
-	assert.False(t, a.Ready(), "no timeout turns a missing configuration into an empty one")
+	assert.Never(t, a.Ready, 300*time.Millisecond, 10*time.Millisecond,
+		"the replica turned Ready with no directory to read")
 
 	require.NoError(t, os.Mkdir(dir, 0o750))
 	f := &fixture{t: t, dir: dir}
 	f.write(1, spec("gateway.public", 10))
-	require.Eventually(t, a.Ready, 3*time.Second, 10*time.Millisecond, "the resync timer finds the directory and its contents")
+	require.Eventually(t, a.Ready, 3*time.Second, 10*time.Millisecond,
+		"waiting for the resync timer to find the directory and apply its contents")
 }
 
+// The kubelet's periodic refresh rewrites unchanged files, and the same
+// manifest is the same configuration: no second swap. The window covers two
+// resyncs of the watcher, so a read that applied the manifest again would
+// show within it.
 func TestWatcher_appliesTheSameManifestOnce(t *testing.T) {
 	f := newFixture(t)
 	f.write(1, spec("gateway.public", 10))
 	a := newApplier()
 	startWatcher(t, f.dir, a)
-	require.Eventually(t, a.Ready, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, a.Ready, 2*time.Second, 10*time.Millisecond, "waiting for the read at start")
 	swapped := a.Store.SwappedAt()
 
-	// The kubelet's periodic refresh rewrites unchanged files.
 	f.write(1, spec("gateway.public", 10))
-	time.Sleep(500 * time.Millisecond)
-	assert.Equal(t, swapped, a.Store.SwappedAt(), "the same manifest is the same configuration; no swap")
+
+	assert.Never(t, func() bool { return !a.Store.SwappedAt().Equal(swapped) },
+		500*time.Millisecond, 10*time.Millisecond, "the rule set was swapped again for the same manifest")
 }
