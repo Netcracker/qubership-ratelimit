@@ -130,10 +130,10 @@ responseHeaders:
 # open it.
 #
 # The port is exposed on the component's own Service, ratelimit, not on a
-# Service of its own. What keeps the port safe is the AuthorizationPolicy,
-# and that is enforced by ztunnel at the pod: a second Service would change
-# nothing about who can reach the port, and would add a second name for the
-# platform's HTTPRoute to get right. The gateway's route names port 8082 on
+# Service of its own. What limits who reaches the port is the
+# AuthorizationPolicy, and that is enforced by ztunnel at the pod: a second
+# Service would change nothing about who can reach the port, and would add a
+# second name for the platform's HTTPRoute to get right. The gateway's route names port 8082 on
 # the one Service, which is what backendRefs.port is for.
 management:
   enabled: false

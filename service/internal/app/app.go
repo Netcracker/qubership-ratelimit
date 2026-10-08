@@ -16,7 +16,8 @@ import (
 	"time"
 
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
-	"github.com/netcracker/qubership-core-lib-go/v3/security/tokenverifier"
+	"github.com/netcracker/qubership-core-lib-go/v3/cloudprovidergetter"
+	"github.com/netcracker/qubership-core-lib-go/v3/security/tokensource"
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus"
@@ -29,6 +30,7 @@ import (
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/service/internal/config"
 	"github.com/netcracker/qubership-ratelimit/service/internal/debug"
+	"github.com/netcracker/qubership-ratelimit/service/internal/m2m"
 	"github.com/netcracker/qubership-ratelimit/service/internal/management"
 	"github.com/netcracker/qubership-ratelimit/service/internal/redisconn"
 	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
@@ -205,7 +207,13 @@ func Build(namespace string, options Options) (*Service, error) {
 			Namespace: namespace,
 			Callers:   callers,
 			NewVerifier: func(ctx context.Context) (management.Verifier, error) {
-				return tokenverifier.NewKubernetesVerifier(ctx, audience)
+				return m2m.NewVerifier(ctx, m2m.Config{
+					Audience: audience,
+					Token: func() (string, error) {
+						return tokensource.GetServiceAccountToken(ctx)
+					},
+					Anonymous: cloudprovidergetter.GetCloudProvider(ctx) == cloudprovidergetter.CloudProviderGKE,
+				})
 			},
 			Replica:        options.Replica,
 			CounterBackend: backend.Description,

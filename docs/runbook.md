@@ -1012,7 +1012,7 @@ kubectl logs -n "$NS" deploy/ratelimit-service | grep -E 'token verifier|managem
 
 ```text
 management API callers=[system:serviceaccount:core:ui-backend] audience=netcracker
-management API token verifier unavailable, retrying in 4s: unexpected issue during oidc call to '...'
+management API token verifier unavailable, retrying in 4s: OIDC discovery at .../.well-known/openid-configuration: ...
 management API token verifier is ready
 ```
 
@@ -1021,19 +1021,21 @@ call from the API server's side shows whether the endpoint answers:
 
 ```bash
 kubectl get --raw /.well-known/openid-configuration | jq .issuer
-kubectl auth can-i get /.well-known/openid-configuration --as="system:serviceaccount:$NS:ratelimit-service"
+kubectl auth can-i get /.well-known/openid-configuration \
+  --as="system:serviceaccount:$NS:ratelimit-service" --as-group=system:serviceaccounts
 ```
 
 **Act.** A discovery error that names a certificate (`x509: certificate signed by unknown authority`) is a base image
 without the cluster's ServiceAccount CA in its trust store: the service reaches the discovery over TLS against the
 system trust store. An error that says the token could not be acquired is a pod without the `serviceaccount` volume,
-which the chart renders only with `management.enabled`. A refused connection or a timeout is the network between the
-pod and the API server. A `401` that names the signature for a token the API server just issued, while the verifier is
-ready, is a key set the service could not fetch after the discovery; the service fetches it again on the next unknown
-key, at most every five minutes. A `401` that names the audience is a caller that sends a token for another audience:
-the release's `management.m2m.audience` and the caller's token have to agree, which the platform's clients do with
-`KUBERNETES_M2M_ENABLED=true` and the default `netcracker`. A `403` is a caller missing from `management.callers`;
-the start line lists the ones the service read.
+which the chart renders only with `management.enabled`. A refused connection or a timeout is the network between the pod
+and the API server, or an API server that accepts the connection and does not answer: each request to it is given ten
+seconds. A `401` that names the signature for a token the API server just issued, while the verifier is ready, is a key
+set the service could not fetch after the discovery; the service fetches it again on the next unknown key, at most every
+five minutes. A `401` that names the audience is a caller that sends a token for another audience: the release's
+`management.m2m.audience` and the caller's token have to agree, which the platform's clients do with
+`KUBERNETES_M2M_ENABLED=true` and the default `netcracker`. A `403` is a caller missing from `management.callers`; the
+start line lists the ones the service read.
 
 ## Appendix: the metrics an operator reads
 

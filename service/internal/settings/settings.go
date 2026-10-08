@@ -1,6 +1,6 @@
 // Package settings reads the properties of the data plane: where the
-// counters live, the near-limit margin of the metrics, and the claims and
-// roles the management API authorizes against. The counter store comes from
+// counters live, the near-limit margin of the metrics, and the callers and
+// the token audience the management API authenticates against. The counter store comes from
 // the connection the DBaaS Secret carries; the rest read configloader and
 // return a value the wiring uses, where a bad value is logged and replaced by
 // the default, never fatal, because none of these is worth a pod that does

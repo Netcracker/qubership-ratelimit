@@ -68,7 +68,9 @@ type API struct {
 	// it under the runner's context, which the verifier's key refresh lives
 	// as long as, and calls it again until it succeeds; until then every
 	// request is refused with CodeVerifierUnavailable, and so is every request
-	// when NewVerifier is nil.
+	// when NewVerifier is nil. It has to return within a bounded time, success
+	// or not: the next attempt starts only after it does, so it bounds its own
+	// requests rather than relying on the runner's context to end them.
 	NewVerifier func(ctx context.Context) (Verifier, error)
 
 	// Replica names this pod for the status endpoint and for the operations it

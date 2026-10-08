@@ -476,7 +476,8 @@ name and reads `/debug/applied` on it. The `management` port is added behind `ma
 ### Role.yaml (operator chart)
 
 Everything is namespace-scoped, and there is no ClusterRole. The operator's ServiceAccount is the only one of the
-delivery that a Role is bound to; the service pod mounts no token at all:
+delivery that a Role is bound to; the service pod mounts its token only with `management.enabled`, to verify the
+management API's callers, and its ServiceAccount has no Role:
 
 | Resource | Verbs | Purpose |
 | --- | --- | --- |
