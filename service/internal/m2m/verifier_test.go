@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MicahParks/jwkset"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,9 +63,16 @@ func (c *cluster) podToken() (string, error) {
 		SignedString(jwt.UnsafeAllowNoneSignatureType)
 }
 
-// token signs claims over a ServiceAccount token's defaults with key under kid;
-// a claim overridden with nil is left out.
+// token signs claims over a ServiceAccount token's defaults with key under kid,
+// with RS256 as an API server signs; a claim overridden with nil is left out.
 func (c *cluster) token(t *testing.T, key *rsa.PrivateKey, kid string, override jwt.MapClaims) string {
+	t.Helper()
+	return c.tokenSignedWith(t, jwt.SigningMethodRS256, key, kid, override)
+}
+
+// tokenSignedWith is token signed with method.
+func (c *cluster) tokenSignedWith(t *testing.T, method *jwt.SigningMethodRSA, key *rsa.PrivateKey, kid string,
+	override jwt.MapClaims) string {
 	t.Helper()
 	now := time.Now()
 	claims := jwt.MapClaims{
@@ -79,7 +87,7 @@ func (c *cluster) token(t *testing.T, key *rsa.PrivateKey, kid string, override 
 		}
 		claims[name] = value
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token := jwt.NewWithClaims(method, claims)
 	token.Header["kid"] = kid
 	signed, err := token.SignedString(key)
 	require.NoError(t, err)
@@ -236,6 +244,45 @@ func TestNewVerifier_refusesAnUnknownKeyWithoutWaitingForTheRefresh(t *testing.T
 		assert.Less(t, time.Since(start), unknownKeyWait+500*time.Millisecond,
 			"an unknown key waited on the refresh limiter")
 	}
+}
+
+// Every token under a key id the key set does not hold, signed with an
+// algorithm the verifier accepts, is refused as such, the second one in a
+// refresh window too; the management API names the unknown key in its 401
+// detail on jwkset.ErrKeyNotFound. The second token used to get the refresh
+// limiter's error instead, and its caller was told that the signature could not
+// be verified.
+func TestNewVerifier_refusesEveryUnknownKeyAsAKeyTheClusterDoesNotHold(t *testing.T) {
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+	stranger, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	_, first := verifier.Verify(ctx, c.token(t, stranger, "idp", nil))
+	_, second := verifier.Verify(ctx, c.token(t, stranger, "idp", nil))
+
+	assert.ErrorIs(t, first, jwkset.ErrKeyNotFound, "the first token under the unknown key id")
+	assert.ErrorIs(t, second, jwkset.ErrKeyNotFound, "the second token under it, inside the refresh window")
+}
+
+// A token under a key id the key set holds whose lookup fails for another
+// reason, an algorithm the key does not carry, is not refused as an unknown
+// key. This is the control of
+// TestNewVerifier_refusesEveryUnknownKeyAsAKeyTheClusterDoesNotHold.
+func TestNewVerifier_refusesAnAlgorithmTheKeyDoesNotCarryAsAKnownKey(t *testing.T) {
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+
+	_, err = verifier.Verify(ctx, c.tokenSignedWith(t, jwt.SigningMethodRS512, c.key, "cluster", nil))
+
+	assert.ErrorIs(t, err, jwt.ErrTokenUnverifiable)
+	assert.NotErrorIs(t, err, jwkset.ErrKeyNotFound)
 }
 
 // A pod token that is not a JWT names no issuer to read the discovery of.
