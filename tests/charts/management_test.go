@@ -1,6 +1,7 @@
 package charts
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,6 +60,37 @@ func TestServiceChart_handsTheGatewayDomainsToTheService(t *testing.T) {
 	})
 }
 
+// The service chart hands management.callers to the service as one
+// comma-separated MANAGEMENT_CALLERS, each entry as it was given, so a
+// <namespace>/<name> caller keeps its namespace.
+func TestServiceChart_handsTheCallersToTheService(t *testing.T) {
+	value, ok := envOf(t, render(t, serviceChart, "biz", "--set", "management.enabled=true",
+		"--set", "management.callers={ui-backend,platform/ops-backend}"), "MANAGEMENT_CALLERS")
+
+	require.True(t, ok, "MANAGEMENT_CALLERS is rendered with management.enabled=true")
+	assert.Equal(t, "ui-backend,platform/ops-backend", value, "MANAGEMENT_CALLERS")
+}
+
+// The service chart hands management.m2m.audience to the service as
+// MANAGEMENT_M2M_AUDIENCE: netcracker, the audience of the platform's
+// machine-to-machine tokens, by default, and a set audience as it was given,
+// including one of a single character, the shortest the schema admits.
+func TestServiceChart_handsTheTokenAudienceToTheService(t *testing.T) {
+	t.Run("the default is netcracker", func(t *testing.T) {
+		value, ok := envOf(t, render(t, serviceChart, "biz", "--set", "management.enabled=true",
+			"--set", "management.callers={ui-backend}"), "MANAGEMENT_M2M_AUDIENCE")
+
+		require.True(t, ok, "MANAGEMENT_M2M_AUDIENCE is rendered with management.enabled=true")
+		assert.Equal(t, "netcracker", value, "MANAGEMENT_M2M_AUDIENCE")
+	})
+	t.Run("an audience of one character is handed over", func(t *testing.T) {
+		value, _ := envOf(t, render(t, serviceChart, "biz", "--set", "management.enabled=true",
+			"--set", "management.callers={ui-backend}", "--set", "management.m2m.audience=a"), "MANAGEMENT_M2M_AUDIENCE")
+
+		assert.Equal(t, "a", value, "MANAGEMENT_M2M_AUDIENCE")
+	})
+}
+
 // A gateway domain the CRD's spec.domain pattern cannot carry is no gateway's
 // domain, and the schema refuses it at install time.
 func TestServiceChart_refusesAGatewayDomainOffTheDomainPattern(t *testing.T) {
@@ -68,6 +100,63 @@ func TestServiceChart_refusesAGatewayDomainOffTheDomainPattern(t *testing.T) {
 
 	require.Error(t, err, "helm template with management.gatewayDomains={Gateway_Private}")
 	assert.Contains(t, string(out), "gatewayDomains", "the refusal names the key it refused")
+}
+
+// The schema refuses an empty management.m2m.audience at install time, and
+// the refusal names it.
+func TestServiceChart_refusesAnEmptyTokenAudience(t *testing.T) {
+	out, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true",
+		"--set", "management.callers={ui-backend}", "--set", "management.m2m.audience=")
+
+	require.Error(t, err, "helm template with management.m2m.audience=")
+	assert.Contains(t, string(out), "audience", "the refusal names the key it refused")
+}
+
+// The schema admits a caller whose namespace and name are as long as
+// Kubernetes allows, a 63-character DNS label and a 253-character DNS
+// subdomain, and the service gets the entry whole.
+func TestServiceChart_acceptsACallerWithTheLongestServiceAccountNames(t *testing.T) {
+	caller := strings.Repeat("s", 63) + "/" + strings.Repeat("n", 253)
+	value, _ := envOf(t, render(t, serviceChart, "biz", "--set", "management.enabled=true",
+		"--set", "management.callers={"+caller+"}"), "MANAGEMENT_CALLERS")
+
+	assert.Equal(t, caller, value, "MANAGEMENT_CALLERS")
+}
+
+// The schema refuses a caller that names no possible ServiceAccount: one with
+// an uppercase letter, a namespace past the 63 characters of a DNS label, or
+// a name past the 253 characters of a DNS subdomain. The refusal names
+// callers.
+func TestServiceChart_refusesACallerThatNoServiceAccountCanHave(t *testing.T) {
+	for _, c := range []struct{ name, caller string }{
+		{"an uppercase letter", "UI-backend"},
+		{"a namespace of 64 characters", strings.Repeat("s", 64) + "/ops-backend"},
+		{"a name of 254 characters", strings.Repeat("n", 254)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true",
+				"--set", "management.callers={"+c.caller+"}")
+
+			require.Error(t, err, "helm template with management.callers={%s}", c.caller)
+			assert.Contains(t, string(out), "callers", "the refusal names the key it refused")
+		})
+	}
+}
+
+// The pod's projected ServiceAccount token names no audience, so the kubelet
+// requests it for the API server, as it does the token it automounts: the
+// service authenticates its OIDC discovery and key-set requests to the API
+// server with it.
+func TestServiceChart_projectsTheTokenForTheAPIServer(t *testing.T) {
+	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
+		"--set", "management.callers={ui-backend}")
+
+	volumes := keyed(only(t, objects, "Deployment").at("spec", "template", "spec", "volumes"), "name")
+	require.Contains(t, volumes, "serviceaccount", "volumes of the pod")
+	sources := keyed(volumes["serviceaccount"].at("projected", "sources"), "serviceAccountToken", "path")
+	require.Contains(t, sources, "token", "projected sources of the serviceaccount volume")
+	assert.NotContains(t, sources["token"].at("serviceAccountToken").v, "audience",
+		"the serviceAccountToken source of the serviceaccount volume")
 }
 
 // The service exempts the API's paths only in a domain a gateway's filter
