@@ -126,7 +126,7 @@ func TestCounters_aStretchOfEmptyStepsEndsThePageWithACursor(t *testing.T) {
 	h.api.Counters = stub
 
 	var page CounterList
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", viewerRoles(), nil),
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", listedCaller, nil),
 		http.StatusOK, &page)
 
 	assert.Empty(t, page.Items)
@@ -147,7 +147,7 @@ func TestCounters_aCursorTheStoreRefusesIsABadRequest(t *testing.T) {
 
 	body := requireError(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&cursor="+url.QueryEscape(stale),
-		viewerRoles(), nil), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller, nil), http.StatusBadRequest, CodeInvalidRequest)
 
 	assert.Equal(t, []string{"cursor"}, body.Meta.Fields)
 	assert.Equal(t, []string{"a-node-that-left@7"}, store.presented,
@@ -160,7 +160,7 @@ func TestCounters_reportsAFailedScanAsAnOutage(t *testing.T) {
 	h := newTestAPI(t)
 	h.api.Counters = failingSteps{Store: h.counters}
 
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters", listedCaller, nil),
 		http.StatusServiceUnavailable, CodeStoreDown)
 }
 
@@ -201,7 +201,7 @@ func TestCounters_aStepAsksForTheRoomLeftOnThePage(t *testing.T) {
 	var page CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client"+
 		"&pageSize=4&axis.sub=client-01&axis.sub=client-03&axis.sub=client-04"+
-		"&axis.sub=client-05&axis.sub=client-06&axis.sub=client-07", viewerRoles(), nil),
+		"&axis.sub=client-05&axis.sub=client-06&axis.sub=client-07", listedCaller, nil),
 		http.StatusOK, &page)
 
 	assert.Equal(t, []string{"client-01", "client-03", "client-04", "client-05"}, subsOf(page.Items))

@@ -28,21 +28,21 @@ func TestManagement_refusesAnIdentityValueTheNormalizationWouldChange(t *testing
 		field string
 	}{
 		{name: "the listing", field: "axis.sub", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.call(t, http.MethodGet, counters+"?axis.sub=Alice", viewerRoles(), nil)
+			return h.call(t, http.MethodGet, counters+"?axis.sub=Alice", listedCaller, nil)
 		}},
 		{name: "the applicability analysis", field: "axis.sub", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.call(t, http.MethodGet, rules+"?axis.sub=Alice", viewerRoles(), nil)
+			return h.call(t, http.MethodGet, rules+"?axis.sub=Alice", listedCaller, nil)
 		}},
 		{name: "the addressed reset", field: "axis.sub", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.reset(t, "ruleId=orders/per-client&axis.sub=Alice", "key-reset", operatorRoles())
+			return h.reset(t, "ruleId=orders/per-client&axis.sub=Alice", "key-reset", listedCaller)
 		}},
 		{name: "the bulk reset", field: "selector.axes", send: func(t *testing.T, h *testAPI) *testResponse {
 			return h.bulk(t, map[string]any{
 				"selector": map[string]any{"axes": map[string][]string{model.KeySub: {"Alice"}}}, "dryRun": true,
-			}, "key-bulk", operatorRoles())
+			}, "key-bulk", listedCaller)
 		}},
 		{name: "the simulation", field: "keys", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+			return h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 				Domain: testDomain, Path: "/api/orders", Method: "GET",
 				Keys: map[string][]string{model.KeySub: {"Alice"}},
 			})
@@ -64,7 +64,7 @@ func TestManagement_refusesAnIdentityValueTheNormalizationWouldChange(t *testing
 		h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 2)
 
 		var list CounterList
-		decode(t, h.call(t, http.MethodGet, counters+"?axis.sub=alice", viewerRoles(), nil), http.StatusOK, &list)
+		decode(t, h.call(t, http.MethodGet, counters+"?axis.sub=alice", listedCaller, nil), http.StatusOK, &list)
 		assert.Equal(t, []string{"alice"}, subsOf(list.Items), "GET %s?axis.sub=alice", counters)
 	})
 }
@@ -112,18 +112,18 @@ func TestManagement_acceptsACapturedValueAsGiven(t *testing.T) {
 		send func(t *testing.T, h *testAPI) *testResponse
 	}{
 		{name: "the listing", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.call(t, http.MethodGet, counters+"?axis.plan=Gold", viewerRoles(), nil)
+			return h.call(t, http.MethodGet, counters+"?axis.plan=Gold", listedCaller, nil)
 		}},
 		{name: "the listing by the capturing rule", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.call(t, http.MethodGet, counters+"?ruleId=plans/per-plan&axis.plan=Gold", viewerRoles(), nil)
+			return h.call(t, http.MethodGet, counters+"?ruleId=plans/per-plan&axis.plan=Gold", listedCaller, nil)
 		}},
 		{name: "the applicability analysis", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.call(t, http.MethodGet, rules+"?axis.plan=Gold", viewerRoles(), nil)
+			return h.call(t, http.MethodGet, rules+"?axis.plan=Gold", listedCaller, nil)
 		}},
 		{name: "the bulk reset preview", send: func(t *testing.T, h *testAPI) *testResponse {
 			return h.bulk(t, map[string]any{
 				"selector": map[string]any{"axes": map[string][]string{"plan": {"Gold"}}}, "dryRun": true,
-			}, "key-bulk", operatorRoles())
+			}, "key-bulk", listedCaller)
 		}},
 	}
 	for _, tc := range cases {
@@ -139,7 +139,7 @@ func TestCounters_listsACapturedCounterUnderTheValueAsSent(t *testing.T) {
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?ruleId=plans/per-plan&axis.plan=Gold", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=plans/per-plan&axis.plan=Gold", listedCaller, nil),
 		http.StatusOK, &list)
 
 	require.Len(t, list.Items, 1, "the captured counter is not listed")
@@ -151,7 +151,7 @@ func TestReset_resetsACapturedCounterUnderTheValueAsSent(t *testing.T) {
 	h := capturedPlanAPI(t)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=plans/per-plan&axis.plan=Gold", "key-reset", operatorRoles()),
+	decode(t, h.reset(t, "ruleId=plans/per-plan&axis.plan=Gold", "key-reset", listedCaller),
 		http.StatusOK, &response)
 
 	require.NotNil(t, response.ResetCount, "the answer of an execution carries resetCount")
@@ -167,19 +167,19 @@ func TestManagement_refusesTheValueWhereTheMappingSuppliesTheKey(t *testing.T) {
 	}{
 		{name: "the listing by the mapped rule", field: "axis.plan",
 			send: func(t *testing.T, h *testAPI) *testResponse {
-				return h.call(t, http.MethodGet, counters+"?ruleId=other/per-plan&axis.plan=Gold", viewerRoles(), nil)
+				return h.call(t, http.MethodGet, counters+"?ruleId=other/per-plan&axis.plan=Gold", listedCaller, nil)
 			}},
 		{name: "the reset of the mapped rule", field: "axis.plan", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.reset(t, "ruleId=other/per-plan&axis.plan=Gold", "key-reset-other", operatorRoles())
+			return h.reset(t, "ruleId=other/per-plan&axis.plan=Gold", "key-reset-other", listedCaller)
 		}},
 		{name: "the bulk reset of the mapped rule", field: "selector.axes",
 			send: func(t *testing.T, h *testAPI) *testResponse {
 				return h.bulk(t, map[string]any{"selector": map[string]any{
 					"ruleIds": []string{"other/per-plan"}, "axes": map[string][]string{"plan": {"Gold"}},
-				}, "dryRun": true}, "key-bulk-other", operatorRoles())
+				}, "dryRun": true}, "key-bulk-other", listedCaller)
 			}},
 		{name: "the simulation", field: "keys", send: func(t *testing.T, h *testAPI) *testResponse {
-			return h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+			return h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 				Domain: testDomain, Path: "/other", Method: "GET", Keys: map[string][]string{"plan": {"Gold"}},
 			})
 		}},

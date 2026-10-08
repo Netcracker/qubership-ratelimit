@@ -138,12 +138,14 @@ plane:
   the identity keys with the claim paths behind them and every group resolved into the values the engine tests.
   Both answer JSON, or YAML on `?format=yaml` or an Accept header that asks for it, and every method but GET is 405.
   Every document is built from one load of the rule set, so a request that lands inside an apply describes one state
-  whole. No mutations, no authentication; this is not the management API (a separate port behind the private gateway,
+  whole. No mutations, no authentication; this is not the management API (a separate port with its own authentication,
   see [helm](helm-chart.md)) and it is outside the compatibility promises. The binary's version is the
   `ratelimit_build_info` gauge, labelled by component.
-- **Management API** lives in the service, on a port of its own behind an AuthorizationPolicy that admits the private
-  gateway alone ([helm](helm-chart.md)). Its command records live in the counter store, so the service writes nothing
-  to the API server.
+- **Management API** lives in the service, on a port of its own. The service verifies every caller's Kubernetes
+  ServiceAccount token against the API server's OIDC discovery and admits the ServiceAccounts the release lists, and an
+  AuthorizationPolicy keeps the port to their workloads ([helm](helm-chart.md)). Its command records live in the counter
+  store, so the service writes nothing to the API server; it reads the OIDC discovery with the pod's own token, whose
+  ServiceAccount has no Role.
 
 ## Validation: schema and compiler
 

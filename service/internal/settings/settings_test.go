@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/netcracker/qubership-ratelimit/service/internal/management"
 	"github.com/netcracker/qubership-ratelimit/service/internal/redisconn"
 	"github.com/netcracker/qubership-ratelimit/service/internal/rls"
 )
@@ -154,25 +153,6 @@ func TestNearLimitRatio_readsARatioInsideTheInterval(t *testing.T) {
 	assert.Empty(t, warned)
 }
 
-func TestManagementClaims_unsetAreTheDefaultClaimNames(t *testing.T) {
-	readEnvironment()
-
-	assert.Equal(t, management.DefaultClaimNames, ManagementClaims())
-}
-
-// A role list is comma separated, read with the blanks around an entry and the
-// empty entries dropped. The operator list, left unset, is the canonical name.
-func TestManagementRoles_dropsTheBlankEntriesOfAList(t *testing.T) {
-	t.Setenv("MANAGEMENT_ROLES_VIEWER", "ro, , auditor,")
-	readEnvironment()
-
-	assert.Equal(t, management.RoleMapping{
-		Viewer:   []string{"ro", "auditor"},
-		Operator: []string{management.RoleOperator},
-		Explicit: true,
-	}, ManagementRoles())
-}
-
 // MANAGEMENT_GATEWAY_DOMAINS is a comma-separated list, read with the blanks
 // around an entry and the empty entries dropped.
 func TestManagementGatewayDomains_readsACommaSeparatedList(t *testing.T) {
@@ -188,38 +168,41 @@ func TestManagementGatewayDomains_unsetIsNoDomain(t *testing.T) {
 	assert.Empty(t, ManagementGatewayDomains())
 }
 
-// An installation that leaves the operator list empty is read-only. The chart
-// renders the empty list as an empty variable, and reading it back as the
-// default "operator" would grant every mutation to a token carrying that role.
-func TestManagementRoles_anEmptyOperatorListGrantsNoOperatorRole(t *testing.T) {
-	t.Setenv("MANAGEMENT_ROLES_VIEWER", "rl-viewer")
-	t.Setenv("MANAGEMENT_ROLES_OPERATOR", "")
+// MANAGEMENT_CALLERS names ServiceAccounts as <name> in the release's
+// namespace or <namespace>/<name> elsewhere, and each comes back as the sub
+// claim of its tokens. An entry of another shape is reported and left out
+// rather than granting operator to a name nobody can hold.
+func TestManagementCallers_readsBothFormsAsTokenSubjects(t *testing.T) {
+	var warned []string
+	warn := func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+	t.Setenv("MANAGEMENT_CALLERS", "ui-backend, platform/ops-backend,, Bad/Name, a/b/c")
 	readEnvironment()
 
-	assert.Equal(t, management.RoleMapping{Viewer: []string{"rl-viewer"}, Explicit: true}, ManagementRoles())
+	assert.Equal(t, []string{
+		"system:serviceaccount:biz:ui-backend",
+		"system:serviceaccount:platform:ops-backend",
+	}, ManagementCallers("biz", warn))
+	assert.Len(t, warned, 2, "the entries of another shape are not both reported")
 }
 
-// Two empty lists, which the schema refuses and the environment can still
-// produce, grant nothing only because the mapping is explicit: a mapping that
-// is not passes the token's roles through as the canonical names.
-func TestManagementRoles_twoEmptyListsStayAnExplicitMapping(t *testing.T) {
-	t.Setenv("MANAGEMENT_ROLES_VIEWER", "")
-	t.Setenv("MANAGEMENT_ROLES_OPERATOR", "")
+func TestManagementCallers_unsetIsNoCaller(t *testing.T) {
 	readEnvironment()
 
-	assert.Equal(t, management.RoleMapping{Explicit: true}, ManagementRoles())
+	assert.Empty(t, ManagementCallers("biz", func(string, ...any) {}))
 }
 
-// An unset list is the canonical name, which is what a deployment that issues
-// viewer and operator verbatim relies on.
-func TestManagementRoles_unsetIsTheCanonicalName(t *testing.T) {
+// The audience defaults to the platform's machine-to-machine convention.
+func TestManagementAudience_unsetIsThePlatformConvention(t *testing.T) {
 	readEnvironment()
 
-	assert.Equal(t, management.RoleMapping{
-		Viewer:   []string{management.RoleViewer},
-		Operator: []string{management.RoleOperator},
-		Explicit: true,
-	}, ManagementRoles())
+	assert.Equal(t, "netcracker", ManagementAudience())
+}
+
+func TestManagementAudience_readsTheConfiguredAudience(t *testing.T) {
+	t.Setenv("MANAGEMENT_M2M_AUDIENCE", "ratelimit-e2e")
+	readEnvironment()
+
+	assert.Equal(t, "ratelimit-e2e", ManagementAudience())
 }
 
 // RESPONSE_HEADERS_IETF turns the ratelimit-policy and ratelimit fields off

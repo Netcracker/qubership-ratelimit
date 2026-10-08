@@ -1,21 +1,23 @@
 {{- if ne (include "ratelimit.mode" .) "satellite" }}
 {{- if and .Values.management.enabled .Values.management.authorizationPolicy.enabled }}
-{{- $allowed := .Values.management.authorizationPolicy.allowedServiceAccounts }}
-{{- if not $allowed }}
-{{- $gateway := required "management.authorizationPolicy needs ISTIO_PRIVATE_GATEWAY_NAME, or an explicit allowedServiceAccounts list" .Values.ISTIO_PRIVATE_GATEWAY_NAME }}
-{{- /* Istio's automated deployment names the generated Deployment, Service, and
-       ServiceAccount after the gateway AND its class, so a Gateway named
-       private-gateway runs as private-gateway-istio. Naming it after the
-       gateway alone denies the gateway itself. */}}
-{{- $allowed = list (printf "%s-istio" $gateway) }}
+{{- /* The principals: allowedServiceAccounts when it is set, the callers
+       otherwise. An entry of either list is <name> in NAMESPACE or
+       <namespace>/<name> in its own namespace. */}}
+{{- $entries := .Values.management.authorizationPolicy.allowedServiceAccounts | default .Values.management.callers }}
+{{- $principals := list }}
+{{- range $entries }}
+{{- $parts := splitList "/" . }}
+{{- if eq (len $parts) 2 }}
+{{- $principals = append $principals (printf "cluster.local/ns/%s/sa/%s" (index $parts 0) (index $parts 1)) }}
+{{- else }}
+{{- $principals = append $principals (printf "cluster.local/ns/%s/sa/%s" $.Values.NAMESPACE .) }}
+{{- end }}
 {{- end }}
 # Who may reach the management port.
 #
-# The service reads the subject and the roles out of the bearer token without
-# verifying the signature, because the gateway's JWT filter has already verified
-# it. Every workload in the mesh can mint such a token, so the only thing
-# standing between the mesh and an endpoint that lifts a rate limit is this
-# policy.
+# The service verifies every token, so this policy is the second check rather
+# than the only one: it keeps the port to the workloads that call it, and a
+# token copied out of a listed caller does not open it to another workload.
 #
 # DENY with notPrincipals rather than ALLOW: an ALLOW policy applies to the
 # whole workload, so it would have to enumerate the gRPC and metrics ports as
@@ -48,8 +50,8 @@ spec:
       from:
         - source:
             notPrincipals:
-              {{- range $allowed }}
-              - cluster.local/ns/{{ $.Values.NAMESPACE }}/sa/{{ . }}
+              {{- range $principals }}
+              - {{ . }}
               {{- end }}
 {{- end }}
 {{- end }}

@@ -1,29 +1,35 @@
 package management
 
 import (
-	"encoding/base64"
-	"encoding/json"
-	"slices"
+	"context"
+	"errors"
+	"fmt"
 	"strings"
+	"time"
 
+	"github.com/MicahParks/jwkset"
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/netcracker/qubership-core-lib-go/v3/security/token"
+	"github.com/netcracker/qubership-core-lib-go/v3/security/tokenverifier"
 )
 
-// Roles this API knows. They are canonical names: which IdP role maps onto
-// which is deployment configuration, not a property of the service.
+// Roles this API knows. Every caller listed in [API.Callers] holds operator;
+// viewer is the role the read-only endpoints require, held through operator.
 const (
 	RoleViewer   = "viewer"
 	RoleOperator = "operator"
 )
 
-// Subject is who is calling, as the bearer token describes them.
+// Subject is who is calling: the Kubernetes ServiceAccount the bearer token
+// was issued to, as the verified token names it.
 //
-// The trust boundary is explicit and narrow: identity is read from exactly one
-// place, the bearer token in Authorization, whose signature the gateway's auth
-// extension has already checked. No auxiliary identity header is ever read, not
-// X-Forwarded-User and not any other, because a header the service trusts is a
-// header an attacker forges.
+// Identity is read from exactly one place, the bearer token in Authorization,
+// verified in this service. No header that names a user is read, not
+// X-Forwarded-User and not any other: the caller keeps the record of which
+// user asked.
 type Subject struct {
+	// Name is the token's sub claim, system:serviceaccount:<namespace>:<name>.
 	Name  string
 	Roles []string
 }
@@ -39,91 +45,124 @@ func (s Subject) Can(role string) bool {
 	return false
 }
 
-// ClaimNames says which claims carry the subject and its roles. IdPs disagree
-// about both, so the names are configuration rather than a constant.
-//
-// Either name may be a dotted path, because the roles of a realm often sit
-// nested: Keycloak issues them under realm_access.roles, and reading only
-// top-level claims would leave that deployment with no roles at all.
-type ClaimNames struct {
-	Subject string
-	Roles   string
-}
+// Verifier checks a bearer token's signature, issuer, audience, expiry, and
+// issue time, and returns the parsed token.
+type Verifier = tokenverifier.Verifier
 
-// DefaultClaimNames are the usual spellings.
-var DefaultClaimNames = ClaimNames{Subject: "sub", Roles: "roles"}
+// verifierRetryFirst and verifierRetryMax bound the wait between two attempts
+// to build the verifier. Tests shorten them.
+var (
+	verifierRetryFirst = time.Second
+	verifierRetryMax   = time.Minute
+)
 
-// RoleMapping translates the role names an IdP issues into the two this API
-// authorizes against.
-//
-// An IdP rarely issues "viewer" and "operator" verbatim. Without a mapping the
-// token has to carry those exact strings, and a deployment whose IdP issues
-// ratelimit-operator gets 403 on every call with nothing in the service able to
-// change it.
-//
-// The zero mapping keeps the canonical names, which is what a deployment that
-// already issues them wants. A role held on neither list is dropped rather than
-// passed through: authorizing against a name nobody configured is how a role
-// from another system becomes a grant here.
-type RoleMapping struct {
-	Viewer   []string
-	Operator []string
-
-	// Explicit says the lists are the whole mapping, as configuration set them:
-	// an empty list maps nothing onto its role, so a deployment that leaves
-	// operator empty grants no mutation. Without it, two empty lists pass the
-	// canonical names through.
-	Explicit bool
-}
-
-// canonical maps the roles a token carries onto the ones this API knows.
-func (m RoleMapping) canonical(issued []string) []string {
-	if !m.Explicit && len(m.Viewer) == 0 && len(m.Operator) == 0 {
-		return issued
+// buildVerifier calls NewVerifier until it succeeds or ctx ends, waiting
+// twice as long after each failure, up to verifierRetryMax, and installs the
+// verifier it gets. A failure is logged with the builder's error, which names
+// the discovery call that failed and never a token.
+func (a *API) buildVerifier(ctx context.Context) {
+	if a.NewVerifier == nil {
+		return
 	}
-	var out []string
-	for _, role := range issued {
-		switch {
-		case slices.Contains(m.Operator, role):
-			out = append(out, RoleOperator)
-		case slices.Contains(m.Viewer, role):
-			out = append(out, RoleViewer)
+	delay := verifierRetryFirst
+	for {
+		verifier, err := a.NewVerifier(ctx)
+		if err == nil {
+			a.verifier.Store(&verifier)
+			a.Log.InfoC(ctx, "management API token verifier is ready")
+			return
 		}
+		a.Log.ErrorC(ctx, "management API token verifier unavailable, retrying in %v: %v", delay, oneLine(err))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, verifierRetryMax)
 	}
-	return out
 }
 
-// withIdentity reads the caller out of the bearer token and refuses the request
-// without one.
+// withIdentity verifies the bearer token and sets the caller it names.
 //
-// The signature is not checked here, deliberately: the gateway's auth extension
-// has already validated it, and the mesh is required to keep this service's
-// ingress to the gateway. That requirement is the security of the model: a
-// deployment that cannot meet it has to validate signatures in the service
-// instead. The 401 below is hygiene, not defense: it keeps an unauthenticated
-// call from being processed, but it would not stop a forged token if the
-// ingress requirement were broken.
-func withIdentity(claims ClaimNames, roles RoleMapping) fiber.Handler {
+// Until the verifier exists every request is refused with
+// CodeVerifierUnavailable, so a client can tell an API that cannot check
+// tokens yet from a counter store that is down. A request without a bearer
+// token, with a token the verifier refuses, or with a verified token that is
+// not a Kubernetes ServiceAccount token is refused with CodeUnauthorized; the
+// detail names the class of the refusal and never quotes the token, which is a
+// live credential. A verified caller in Callers holds operator, and any other
+// holds no role, which requireRole answers with CodeForbidden.
+func (a *API) withIdentity() fiber.Handler {
+	listed := make(map[string]bool, len(a.Callers))
+	for _, caller := range a.Callers {
+		listed[caller] = true
+	}
 	return func(c *fiber.Ctx) error {
-		token, ok := bearerToken(c)
+		verifier := a.verifier.Load()
+		if verifier == nil {
+			return verifierUnavailable()
+		}
+		raw, ok := bearerToken(c)
 		if !ok {
 			return errorf(CodeUnauthorized,
-				"no bearer token on the request; call through the platform gateway")
+				"no bearer token on the request; send a Kubernetes ServiceAccount token")
 		}
-		subject, err := subjectFromToken(token, claims, roles)
+		verified, err := (*verifier).Verify(c.UserContext(), raw)
 		if err != nil {
-			// The token is unreadable rather than merely unsigned. The detail
-			// never quotes the token: it is a live credential.
-			return errorf(CodeUnauthorized,
-				"the bearer token could not be read as a JWT payload")
+			// The key id tells a key of another issuer from a key set the
+			// service never fetched; the token itself is a live credential
+			// and stays out.
+			var kid any
+			if verified != nil {
+				kid = verified.Header["kid"]
+			}
+			a.Log.DebugC(c.UserContext(), "management API refused a bearer token kid=%v error=%v",
+				logSafe(fmt.Sprint(kid)), oneLine(err))
+			return errorf(CodeUnauthorized, refusal(err))
 		}
-		if subject.Name == "" {
+		name, err := token.GetSubject(verified)
+		if err != nil || name == "" || !token.IsKubernetesToken(verified) {
 			return errorf(CodeUnauthorized,
-				"the bearer token carries no "+claims.Subject+" claim to audit the call against")
+				"the bearer token is not a Kubernetes ServiceAccount token")
+		}
+		subject := Subject{Name: name}
+		if listed[name] {
+			subject.Roles = []string{RoleOperator}
 		}
 		c.Locals(localSubject, subject)
 		return c.Next()
 	}
+}
+
+// refusal names the class of a token the verifier refused, in the words the
+// 401 detail carries. The verifier's own error is not quoted: its text is the
+// parser's and changes with the library.
+func refusal(err error) string {
+	switch {
+	case errors.Is(err, jwt.ErrTokenMalformed):
+		return "the bearer token is not a well-formed JWT"
+	case errors.Is(err, jwt.ErrTokenExpired):
+		return "the bearer token has expired"
+	case errors.Is(err, jwt.ErrTokenNotValidYet), errors.Is(err, jwt.ErrTokenUsedBeforeIssued):
+		return "the bearer token is not valid yet"
+	case errors.Is(err, jwt.ErrTokenInvalidAudience):
+		return "the bearer token is not issued for the audience of this API"
+	case errors.Is(err, jwt.ErrTokenInvalidIssuer):
+		return "the bearer token was not issued by this cluster"
+	case errors.Is(err, jwkset.ErrKeyNotFound):
+		return "the bearer token is signed with a key this cluster does not hold"
+	case errors.Is(err, jwt.ErrTokenSignatureInvalid), errors.Is(err, jwt.ErrTokenUnverifiable):
+		return "the signature of the bearer token could not be verified"
+	default:
+		return "the bearer token was not accepted"
+	}
+}
+
+// oneLine is err's text on one line: an error that wraps a library's
+// multi-line explanation would otherwise split one log record into several,
+// the later ones without a timestamp.
+func oneLine(err error) string {
+	return strings.Join(strings.Fields(err.Error()), " ")
 }
 
 // requireRole gates one handler on a role.
@@ -143,79 +182,18 @@ func requireRole(role string, next fiber.Handler) fiber.Handler {
 	}
 }
 
-// subjectFromToken decodes the JWT payload. The signature is the gateway's
-// business; this only reads.
-func subjectFromToken(token string, claims ClaimNames, roles RoleMapping) (Subject, error) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return Subject{}, errBadToken
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return Subject{}, errBadToken
-	}
-	var body map[string]any
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return Subject{}, errBadToken
-	}
-
-	subject := Subject{}
-	if name, ok := claimAt(body, claims.Subject).(string); ok {
-		subject.Name = name
-	}
-	subject.Roles = roles.canonical(stringsOf(claimAt(body, claims.Roles)))
-	return subject, nil
-}
-
-// claimAt walks a dotted path into the payload. A path of one segment is an
-// ordinary top-level claim, which is what most IdPs issue.
-func claimAt(body map[string]any, path string) any {
-	var value any = body
-	for segment := range strings.SplitSeq(path, ".") {
-		object, ok := value.(map[string]any)
-		if !ok {
-			return nil
-		}
-		value = object[segment]
-	}
-	return value
-}
-
-// errBadToken is the one error subjectFromToken reports: what exactly was
-// wrong with a credential is not something to tell the caller, and not
-// something to log.
-var errBadToken = errorf(CodeUnauthorized, "unreadable bearer token")
-
-// stringsOf reads a claim that may be a single string or a list of them.
-func stringsOf(claim any) []string {
-	switch value := claim.(type) {
-	case string:
-		return []string{value}
-	case []any:
-		out := make([]string, 0, len(value))
-		for _, item := range value {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	default:
-		return nil
-	}
-}
-
 // bearerToken pulls the credential out of the Authorization header.
 func bearerToken(c *fiber.Ctx) (string, bool) {
 	header := c.Get(fiber.HeaderAuthorization)
 	if header == "" {
 		return "", false
 	}
-	scheme, token, found := strings.Cut(header, " ")
+	scheme, raw, found := strings.Cut(header, " ")
 	if !found || !strings.EqualFold(scheme, "Bearer") {
 		return "", false
 	}
-	token = strings.TrimSpace(token)
-	return token, token != ""
+	raw = strings.TrimSpace(raw)
+	return raw, raw != ""
 }
 
 // subjectOf returns the caller. Handlers run behind withIdentity, so the value

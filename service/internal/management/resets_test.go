@@ -17,11 +17,11 @@ import (
 
 // bulk posts one counter-resets command, with an Idempotency-Key unless it is
 // empty.
-func (h *testAPI) bulk(t *testing.T, body any, idempotencyKey string, roles []string) *testResponse {
+func (h *testAPI) bulk(t *testing.T, body any, idempotencyKey string, caller string) *testResponse {
 	t.Helper()
 
 	target := BasePath + "/domains/" + testDomain + "/counter-resets"
-	return h.callWith(t, http.MethodPost, target, roles, body, func(request *http.Request) {
+	return h.callWith(t, http.MethodPost, target, caller, body, func(request *http.Request) {
 		if idempotencyKey != "" {
 			request.Header.Set("Idempotency-Key", idempotencyKey)
 		}
@@ -35,7 +35,7 @@ func (h *testAPI) preview(t *testing.T, body map[string]any, key string) BulkRes
 	body["dryRun"] = true
 
 	var result BulkResult
-	decode(t, h.bulk(t, body, key, operatorRoles()), http.StatusOK, &result)
+	decode(t, h.bulk(t, body, key, listedCaller), http.StatusOK, &result)
 	return result
 }
 
@@ -79,7 +79,7 @@ func TestBulk_anExecutionUnderThePreviewsTokenResetsTheSelection(t *testing.T) {
 	var executed BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusOK, &executed)
+	}, "key-execute", listedCaller), http.StatusOK, &executed)
 
 	assert.False(t, executed.DryRun, "dryRun of an execution")
 	assert.Nil(t, executed.MatchedCount, "matchedCount of an execution")
@@ -97,7 +97,7 @@ func TestBulk_refusesAnExecutionWithoutAToken(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}},
-	}, "key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+	}, "key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"confirmationToken"}, body.Meta.Fields)
 }
 
@@ -111,7 +111,7 @@ func TestBulk_refusesATokenThisAPINeverMints(t *testing.T) {
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector":          map[string]any{"ruleIds": []string{"orders"}},
 		"confirmationToken": "not-a-token",
-	}, "key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+	}, "key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"confirmationToken"}, body.Meta.Fields)
 }
 
@@ -122,7 +122,7 @@ func TestBulk_reportsAnUnknownWellFormedTokenAsGone(t *testing.T) {
 	requireError(t, h.bulk(t, map[string]any{
 		"selector":          map[string]any{"ruleIds": []string{"orders"}},
 		"confirmationToken": "ct-0123456789ab",
-	}, "key-1", operatorRoles()), http.StatusGone, CodeGone)
+	}, "key-1", listedCaller), http.StatusGone, CodeGone)
 }
 
 // A second command with the same token, under a new key and so not a retry,
@@ -135,10 +135,10 @@ func TestBulk_tokenIsSingleUse(t *testing.T) {
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
 	execute := map[string]any{"selector": selector, "confirmationToken": preview.ConfirmationToken}
 
-	first := h.bulk(t, execute, "key-execute", operatorRoles())
+	first := h.bulk(t, execute, "key-execute", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code, "the first execution: %s", first.Body.String())
 
-	requireError(t, h.bulk(t, execute, "key-again", operatorRoles()), http.StatusGone, CodeGone)
+	requireError(t, h.bulk(t, execute, "key-again", listedCaller), http.StatusGone, CodeGone)
 }
 
 // The token is bound to what was looked at, not merely to the fact of looking.
@@ -152,7 +152,7 @@ func TestBulk_tokenIsBoundToItsSelection(t *testing.T) {
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector":          map[string]any{"ruleIds": []string{"cascade"}},
 		"confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusConflict, CodeConflict)
+	}, "key-execute", listedCaller), http.StatusConflict, CodeConflict)
 	assert.Equal(t, ConflictStaleConfirmation, body.Meta.ConflictType)
 }
 
@@ -165,11 +165,11 @@ func TestBulk_tokenIsBoundToItsSubject(t *testing.T) {
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
 
 	target := BasePath + "/domains/" + testDomain + "/counter-resets"
-	recorder := h.callWith(t, http.MethodPost, target, operatorRoles(), map[string]any{
+	recorder := h.callWith(t, http.MethodPost, target, listedCaller, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
 	}, func(request *http.Request) {
 		request.Header.Set("Idempotency-Key", "key-execute")
-		request.Header.Set("Authorization", "Bearer "+testToken("mallory@example.com", operatorRoles()))
+		request.Header.Set("Authorization", "Bearer "+testToken(otherCaller))
 	})
 
 	body := requireError(t, recorder, http.StatusConflict, CodeConflict)
@@ -188,13 +188,13 @@ func TestBulk_theDomainWideFormResetsEveryCounterOfTheDomain(t *testing.T) {
 	var executed BulkResult
 	decode(t, h.bulk(t, map[string]any{
 		"confirmDomain": testDomain, "confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusOK, &executed)
+	}, "key-execute", listedCaller), http.StatusOK, &executed)
 	require.NotNil(t, executed.ResetCount, "the answer of an execution carries resetCount")
 	assert.Equal(t, 2, *executed.ResetCount)
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 	assert.Empty(t, list.Items, "counters left in the domain after the domain-wide reset")
 }
 
@@ -247,19 +247,19 @@ func TestBulk_refusesTheShapesTheFormsForbid(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestAPI(t)
-			body := requireError(t, h.bulk(t, tc.body, "key-1", operatorRoles()),
+			body := requireError(t, h.bulk(t, tc.body, "key-1", listedCaller),
 				http.StatusBadRequest, CodeInvalidRequest)
 			assert.Equal(t, tc.fields, body.Meta.Fields, "POST counter-resets %v", tc.body)
 		})
 	}
 }
 
-func TestBulk_refusesAViewer(t *testing.T) {
+func TestBulk_refusesAnUnlistedCaller(t *testing.T) {
 	h := newTestAPI(t)
 
 	requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", viewerRoles()), http.StatusForbidden, CodeForbidden)
+	}, "key-1", unlistedCaller), http.StatusForbidden, CodeForbidden)
 }
 
 // A lost preview answered again returns the original token rather than
@@ -270,10 +270,10 @@ func TestBulk_retryAnswersTheRecordedOutcome(t *testing.T) {
 
 	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
 
-	first := h.bulk(t, body, "key-1", operatorRoles())
+	first := h.bulk(t, body, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
 
-	second := h.bulk(t, body, "key-1", operatorRoles())
+	second := h.bulk(t, body, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, second.Code, "body: %s", second.Body.String())
 	assert.JSONEq(t, first.Body.String(), second.Body.String())
 }
@@ -283,12 +283,12 @@ func TestBulk_refusesTheSameKeyForADifferentCommand(t *testing.T) {
 
 	first := h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", operatorRoles())
+	}, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"cascade"}}, "dryRun": true,
-	}, "key-1", operatorRoles()), http.StatusConflict, CodeConflict)
+	}, "key-1", listedCaller), http.StatusConflict, CodeConflict)
 	assert.Equal(t, ConflictCommandMismatch, body.Meta.ConflictType)
 }
 
@@ -301,7 +301,7 @@ func TestBulk_previewAndExecutionNeedDifferentKeys(t *testing.T) {
 
 	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
-	}, "key-1", operatorRoles()), http.StatusConflict, CodeConflict)
+	}, "key-1", listedCaller), http.StatusConflict, CodeConflict)
 	assert.Equal(t, ConflictCommandMismatch, body.Meta.ConflictType)
 }
 
@@ -325,7 +325,7 @@ func TestBulk_normalizesTheSelectionTheTokenIsBoundTo(t *testing.T) {
 			"period":  "60",
 		},
 		"confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusOK, &executed)
+	}, "key-execute", listedCaller), http.StatusOK, &executed)
 	require.NotNil(t, executed.ResetCount, "the answer of an execution carries resetCount")
 	assert.Equal(t, 1, *executed.ResetCount)
 }
@@ -349,7 +349,7 @@ func TestBulk_reachesCountersOfRemovedRules(t *testing.T) {
 	decode(t, h.bulk(t, map[string]any{
 		"selector":          map[string]any{"ruleIds": []string{"orders/per-client"}},
 		"confirmationToken": preview.ConfirmationToken,
-	}, "key-execute", operatorRoles()), http.StatusOK, &executed)
+	}, "key-execute", listedCaller), http.StatusOK, &executed)
 	require.NotNil(t, executed.ResetCount, "the answer of an execution carries resetCount")
 	assert.Equal(t, 1, *executed.ResetCount)
 }
@@ -358,7 +358,7 @@ func TestBulk_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 	h := newTestAPI(t)
 
 	target := BasePath + "/domains/gateway.typo/counter-resets"
-	recorder := h.callWith(t, http.MethodPost, target, operatorRoles(),
+	recorder := h.callWith(t, http.MethodPost, target, listedCaller,
 		map[string]any{"confirmDomain": "gateway.typo", "dryRun": true},
 		func(request *http.Request) { request.Header.Set("Idempotency-Key", "key-1") })
 
@@ -371,7 +371,7 @@ func TestBulk_refusesAnUnknownSelectorMember(t *testing.T) {
 	h := newTestAPI(t)
 
 	requireError(t, h.bulk(t, rawJSON(`{"selector":{"ruleIdsx":["orders"]},"dryRun":true}`), "key-1",
-		operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 }
 
 // An axis the selector cannot address is refused, and the refusal names the
@@ -386,7 +386,7 @@ func TestBulk_refusesAnAxisThatAddressesNoCounter(t *testing.T) {
 			h := newTestAPI(t)
 			body := requireError(t, h.bulk(t, map[string]any{
 				"selector": map[string]any{"axes": axes}, "dryRun": true,
-			}, "key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+			}, "key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 			assert.Equal(t, []string{"selector.axes"}, body.Meta.Fields)
 		})
 	}
@@ -403,7 +403,7 @@ func TestBulk_refusesAMutationWithoutAUsableIdempotencyKey(t *testing.T) {
 			h := newTestAPI(t)
 			body := requireError(t, h.bulk(t, map[string]any{
 				"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-			}, key, operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+			}, key, listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 			assert.Equal(t, []string{"Idempotency-Key"}, body.Meta.Fields)
 		})
 	}

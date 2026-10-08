@@ -18,7 +18,7 @@ func TestDomains_summarizesTheEnforcedDomain(t *testing.T) {
 	h := newTestAPI(t)
 
 	var list DomainList
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil), http.StatusOK, &list)
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil), http.StatusOK, &list)
 
 	require.Len(t, list.Items, 1, "GET /domains over a rule set of one domain")
 	summary := list.Items[0]
@@ -43,7 +43,7 @@ func TestRules_reportsTheCompiledSet(t *testing.T) {
 	h := newTestAPI(t)
 
 	var view ruleview.RuleSetView
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", viewerRoles(), nil),
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
 		http.StatusOK, &view)
 
 	assert.Equal(t, testDomain, view.Domain)
@@ -69,7 +69,7 @@ func TestRules_annotatesNoRuleWithoutAnIdentityScope(t *testing.T) {
 	h := newTestAPI(t)
 
 	var view ruleview.RuleSetView
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", viewerRoles(), nil),
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
 		http.StatusOK, &view)
 
 	assert.Equal(t, map[string]annotation{
@@ -87,7 +87,7 @@ func TestRules_filtersByTheEnginesOwnRouteMatcher(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders&method=GET", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders&method=GET", listedCaller, nil),
 		http.StatusOK, &view)
 
 	assert.Equal(t, []string{"orders"}, blockNames(view), "GET /rules?path=/api/orders&method=GET")
@@ -96,7 +96,7 @@ func TestRules_filtersByTheEnginesOwnRouteMatcher(t *testing.T) {
 func TestRules_refusesAMethodWithoutAPath(t *testing.T) {
 	h := newTestAPI(t)
 	recorder := h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?method=GET", viewerRoles(), nil)
+		BasePath+"/domains/"+testDomain+"/rules?method=GET", listedCaller, nil)
 
 	body := requireError(t, recorder, http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"method"}, body.Meta.Fields)
@@ -107,7 +107,7 @@ func TestRules_annotatesAScopedListing(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?axis.sub=prometheus", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?axis.sub=prometheus", listedCaller, nil),
 		http.StatusOK, &view)
 
 	annotations := annotationsByID(view)
@@ -191,7 +191,7 @@ func TestRules_judgesACaptureKeyedRuleTheWayADecisionWould(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil), http.StatusOK, &view)
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil), http.StatusOK, &view)
 			assert.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
 		})
 	}
@@ -217,7 +217,7 @@ func TestRules_refusesACaptureThatContradictsThePath(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			body := requireError(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil),
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil),
 				http.StatusBadRequest, CodeInvalidRequest)
 			assert.Equal(t, []string{tc.field}, body.Meta.Fields, "GET /rules?%s", tc.query)
 		})
@@ -269,7 +269,7 @@ func TestRules_judgesAShadowedKeyByTheRouteThatProducesIt(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, viewerRoles(), nil), http.StatusOK, &view)
+				BasePath+"/domains/"+testDomain+"/rules?"+tc.query, listedCaller, nil), http.StatusOK, &view)
 			assert.Equal(t, tc.want, annotationsByID(view), "GET /rules?%s", tc.query)
 		})
 	}
@@ -296,9 +296,9 @@ func TestRules_alwaysAgreesWithTheSimulation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var view ruleview.RuleSetView
 			decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules?path="+tc.path+
-				"&method="+tc.method+"&axis.sub=dave", viewerRoles(), nil), http.StatusOK, &view)
+				"&method="+tc.method+"&axis.sub=dave", listedCaller, nil), http.StatusOK, &view)
 			var simulation SimulationResponse
-			decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+			decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 				Domain: testDomain, Path: tc.path, Method: tc.method,
 				Keys: map[string][]string{"sub": {"dave"}},
 			}), http.StatusOK, &simulation)
@@ -334,7 +334,7 @@ func appliedRuleIDs(simulation SimulationResponse) []string {
 
 func TestRules_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules", listedCaller, nil),
 		http.StatusNotFound, CodeNotFound)
 }
 
@@ -367,7 +367,7 @@ func TestCounters_reportsWhatTheNextRequestWouldMeet(t *testing.T) {
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone", listedCaller, nil),
 		http.StatusOK, &list)
 
 	assert.ElementsMatch(t, []counterState{
@@ -392,8 +392,8 @@ func TestCounters_aListingChargesNothing(t *testing.T) {
 
 	target := BasePath + "/domains/" + testDomain + "/counters?ruleId=cascade/everyone"
 	var first, second CounterList
-	decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &first)
-	decode(t, h.call(t, http.MethodGet, target, viewerRoles(), nil), http.StatusOK, &second)
+	decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &first)
+	decode(t, h.call(t, http.MethodGet, target, listedCaller, nil), http.StatusOK, &second)
 
 	require.Len(t, first.Items, 1, "the first listing")
 	require.Len(t, second.Items, 1, "the second listing")
@@ -409,7 +409,7 @@ func TestCounters_limitedListsOnlyTheRefusingCounters(t *testing.T) {
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&limited=true",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 
 	require.Len(t, list.Items, 1, "counters listed with limited=true")
 	assert.Equal(t, map[string]string{"sub": "crawler"}, list.Items[0].Axes)
@@ -420,7 +420,7 @@ func TestCounters_limitedListsOnlyTheRefusingCounters(t *testing.T) {
 func TestCounters_refusesAFalseThatPretendsToNarrow(t *testing.T) {
 	h := newTestAPI(t)
 	body := requireError(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?limited=false", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?limited=false", listedCaller, nil),
 		http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"limited"}, body.Meta.Fields)
 }
@@ -434,7 +434,7 @@ func TestCounters_repeatedValuesOfOneAxisSelectEitherValue(t *testing.T) {
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.sub=carol",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 
 	assert.ElementsMatch(t, []string{"alice", "carol"}, subsOf(list.Items))
 }
@@ -446,12 +446,12 @@ func TestCounters_anAxisTheRuleLacksMatchesNothing(t *testing.T) {
 
 	var all, filtered CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters",
-		viewerRoles(), nil), http.StatusOK, &all)
+		listedCaller, nil), http.StatusOK, &all)
 	require.Len(t, all.Items, 1, "the unfiltered listing of a rule without axes")
 	require.Empty(t, all.Items[0].Axes, "the unfiltered listing of a rule without axes")
 
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice",
-		viewerRoles(), nil), http.StatusOK, &filtered)
+		listedCaller, nil), http.StatusOK, &filtered)
 	assert.Empty(t, filtered.Items, "the listing with axis.sub=alice")
 }
 
@@ -482,20 +482,20 @@ func TestCounters_refusesACursorPresentedUnderAnotherSelection(t *testing.T) {
 	}
 	var first CounterList
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone&pageSize=2", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=cascade/everyone&pageSize=2", listedCaller, nil),
 		http.StatusOK, &first)
 	require.NotEmpty(t, first.NextCursor, "the first page of 2 over 4 counters")
 
 	body := requireError(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?pageSize=2&cursor="+url.QueryEscape(first.NextCursor),
-		viewerRoles(), nil), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller, nil), http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"cursor"}, body.Meta.Fields)
 }
 
 func TestCounters_refusesAPageSizeOverTheCeiling(t *testing.T) {
 	h := newTestAPI(t)
 	body := requireError(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?pageSize=5000", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/counters?pageSize=5000", listedCaller, nil),
 		http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"pageSize"}, body.Meta.Fields)
 }
@@ -504,7 +504,7 @@ func TestSimulation_reportsTheDecisionOfTheMatchingRule(t *testing.T) {
 	h := newTestAPI(t)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
@@ -532,7 +532,7 @@ func TestSimulation_reportsTheDecisionOfTheMatchingRule(t *testing.T) {
 func TestSimulation_chargesNothing(t *testing.T) {
 	h := newTestAPI(t)
 
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
@@ -541,7 +541,7 @@ func TestSimulation_chargesNothing(t *testing.T) {
 
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters",
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 	assert.Empty(t, list.Items, "counters listed after the simulation")
 }
 
@@ -555,7 +555,7 @@ func TestSimulation_reportsTheEffectiveWindowOfATouchedWindow(t *testing.T) {
 	h.spend(t, "/api/invoices/1", keys, 1)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/invoices/1",
 		Method: http.MethodGet,
@@ -576,7 +576,7 @@ func TestSimulation_namesTheBindingWindowOnARefusal(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/orders",
 		Method: http.MethodGet,
@@ -604,7 +604,7 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 	h := newTestAPI(t)
 
 	var response SimulationResponse
-	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 		Domain: testDomain,
 		Path:   "/api/orders",
 		Method: http.MethodGet,
@@ -668,7 +668,7 @@ func TestSimulation_refusesTheCombinationsTheFormsForbid(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			body := requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), tc.request),
+			body := requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, tc.request),
 				http.StatusBadRequest, CodeInvalidRequest)
 			assert.Equal(t, []string{tc.field}, body.Meta.Fields)
 		})
@@ -691,7 +691,7 @@ func TestSimulation_neverEchoesTheToken(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			recorder := h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), SimulationRequest{
+			recorder := h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
 				Domain: tc.domain, Path: "/api/orders", Method: http.MethodGet,
 				IdentitySource: identityToken, Token: secret,
 			})
@@ -705,7 +705,7 @@ func TestSimulation_neverEchoesTheToken(t *testing.T) {
 func TestSimulation_refusesAnUnknownField(t *testing.T) {
 	h := newTestAPI(t)
 
-	recorder := h.call(t, http.MethodPost, BasePath+"/simulations", viewerRoles(), map[string]any{
+	recorder := h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, map[string]any{
 		"domain": testDomain, "path": "/api", "method": "GET", "identity": "alice",
 	})
 
@@ -714,7 +714,7 @@ func TestSimulation_refusesAnUnknownField(t *testing.T) {
 
 func TestAPI_reportsAnUnknownRouteAsNotFound(t *testing.T) {
 	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/nothing", viewerRoles(), nil),
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/nothing", listedCaller, nil),
 		http.StatusNotFound, CodeNotFound)
 }
 
@@ -727,7 +727,7 @@ func TestRules_aPathWithoutAMethodKeepsMethodRestrictedBlocks(t *testing.T) {
 
 	var view ruleview.RuleSetView
 	decode(t, h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders", viewerRoles(), nil),
+		BasePath+"/domains/"+testDomain+"/rules?path=/api/orders", listedCaller, nil),
 		http.StatusOK, &view)
 
 	assert.Equal(t, []string{"orders"}, blockNames(view),
@@ -742,7 +742,7 @@ func TestReset_refusesAMisspelledSafetyParameter(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice&dryrun=true",
-		"key-1", operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+		"key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"dryrun"}, body.Meta.Fields,
 		"the answer names the parameter, because the caller cannot see the whitelist")
 
@@ -760,9 +760,9 @@ func TestReset_refusesAMisspelledSafetyParameterOnARetry(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	const selector = "ruleId=orders/per-client&axis.sub=alice"
-	decode(t, h.reset(t, selector, "key-1", operatorRoles()), http.StatusOK, nil)
+	decode(t, h.reset(t, selector, "key-1", listedCaller), http.StatusOK, nil)
 
-	body := requireError(t, h.reset(t, selector+"&dryrun=true", "key-1", operatorRoles()),
+	body := requireError(t, h.reset(t, selector+"&dryrun=true", "key-1", listedCaller),
 		http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"dryrun"}, body.Meta.Fields)
 }
@@ -777,7 +777,7 @@ func TestQueryNames_areWhitelistedOnEveryReadEndpoint(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			body := requireError(t, h.call(t, http.MethodGet,
-				BasePath+"/domains/"+testDomain+tc.target, viewerRoles(), nil),
+				BasePath+"/domains/"+testDomain+tc.target, listedCaller, nil),
 				http.StatusBadRequest, CodeInvalidRequest)
 			assert.Equal(t, []string{tc.field}, body.Meta.Fields, "GET %s", tc.target)
 		})
@@ -790,6 +790,6 @@ func TestQueryNames_admitTheAxisFamily(t *testing.T) {
 	h := newTestAPI(t)
 
 	response := h.call(t, http.MethodGet,
-		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.order_id=4711", viewerRoles(), nil)
+		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.order_id=4711", listedCaller, nil)
 	assert.Equal(t, http.StatusOK, response.Code, "body: %s", response.Body.String())
 }

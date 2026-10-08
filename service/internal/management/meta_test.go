@@ -18,7 +18,7 @@ func TestStatus_reportsWhatThisReplicaServes(t *testing.T) {
 	h.api.CounterBackend = "in-process, counted per replica"
 
 	var status StatusView
-	decode(t, h.call(t, http.MethodGet, BasePath+"/status", viewerRoles(), nil), http.StatusOK, &status)
+	decode(t, h.call(t, http.MethodGet, BasePath+"/status", listedCaller, nil), http.StatusOK, &status)
 
 	assert.Equal(t, "ratelimit-6c9d-x2v", status.Replica)
 	assert.Equal(t, "in-process, counted per replica", status.CounterStore.Backend)
@@ -32,12 +32,12 @@ func TestStatus_reportsTheVersionTheRuleListingReports(t *testing.T) {
 	h := newTestAPI(t)
 
 	var status StatusView
-	decode(t, h.call(t, http.MethodGet, BasePath+"/status", viewerRoles(), nil), http.StatusOK, &status)
+	decode(t, h.call(t, http.MethodGet, BasePath+"/status", listedCaller, nil), http.StatusOK, &status)
 
 	var rules struct {
 		RuleSetVersion string `json:"ruleSetVersion"`
 	}
-	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", viewerRoles(), nil),
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
 		http.StatusOK, &rules)
 	require.NotEmpty(t, rules.RuleSetVersion, "GET /domains/%s/rules reports no version to compare", testDomain)
 
@@ -47,7 +47,7 @@ func TestStatus_reportsTheVersionTheRuleListingReports(t *testing.T) {
 func TestSpecification_isServedAsTheDocumentTheBinaryCarries(t *testing.T) {
 	h := newTestAPI(t)
 
-	recorder := h.call(t, http.MethodGet, BasePath+"/openapi.yaml", viewerRoles(), nil)
+	recorder := h.call(t, http.MethodGet, BasePath+"/openapi.yaml", listedCaller, nil)
 
 	require.Equal(t, http.StatusOK, recorder.Code)
 	assert.Equal(t, "application/yaml", recorder.Header().Get("Content-Type"))

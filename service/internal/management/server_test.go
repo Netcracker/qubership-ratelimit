@@ -23,7 +23,7 @@ import (
 func TestApp_answersWithExactlyOneRequestID(t *testing.T) {
 	h := newTestAPI(t)
 
-	recorder := h.callWith(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil, func(request *http.Request) {
+	recorder := h.callWith(t, http.MethodGet, BasePath+"/domains", listedCaller, nil, func(request *http.Request) {
 		request.Header.Set(RequestIDHeader, "trace-42")
 	})
 
@@ -33,7 +33,7 @@ func TestApp_answersWithExactlyOneRequestID(t *testing.T) {
 
 func TestApp_generatesOneRequestIDWhenTheCallerSendsNone(t *testing.T) {
 	h := newTestAPI(t)
-	recorder := h.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil)
+	recorder := h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil)
 
 	values := recorder.Header().Values(RequestIDHeader)
 	require.Len(t, values, 1)
@@ -57,7 +57,7 @@ func TestApp_answersInTheTmfEnvelope(t *testing.T) {
 	h := newTestAPI(t)
 
 	body := requireError(t, h.call(t, http.MethodGet, BasePath+"/domains/gateway.typo/rules",
-		viewerRoles(), nil), http.StatusNotFound, CodeNotFound)
+		listedCaller, nil), http.StatusNotFound, CodeNotFound)
 
 	assert.Equal(t, "NC.TMFErrorResponse.v1.0", body.Type)
 	assert.Equal(t, "404", body.Status)
@@ -73,9 +73,9 @@ func TestNewApp_isBuildableTwiceInOneProcess(t *testing.T) {
 	second := newTestAPI(t)
 
 	assert.Equal(t, http.StatusOK,
-		first.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil).Code, "the app built first")
+		first.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code, "the app built first")
 	assert.Equal(t, http.StatusOK,
-		second.call(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil).Code, "the app built second")
+		second.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code, "the app built second")
 }
 
 // fasthttp cuts an oversized body before any handler runs, so this is two
@@ -123,14 +123,14 @@ func TestDecodeJSON_refusesAnythingAfterTheValue(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestAPI(t)
-			requireError(t, h.bulk(t, rawJSON(tc.body), "key-1", operatorRoles()),
+			requireError(t, h.bulk(t, rawJSON(tc.body), "key-1", listedCaller),
 				http.StatusBadRequest, CodeInvalidRequest)
 		})
 	}
 
 	t.Run("a trailing newline is accepted", func(t *testing.T) {
 		h := newTestAPI(t)
-		response := h.bulk(t, rawJSON(valid+"\n"), "key-1", operatorRoles())
+		response := h.bulk(t, rawJSON(valid+"\n"), "key-1", listedCaller)
 		assert.Equal(t, http.StatusOK, response.Code, "body: %s", response.Body.String())
 	})
 }

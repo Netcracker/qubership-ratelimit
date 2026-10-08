@@ -25,16 +25,17 @@ NS=ratelimit-e2e             # the namespace of the installation
 DOMAIN=gateway.public        # the policy is named after its domain
 kubectl port-forward -n "$NS" svc/ratelimit 8082:8082 &
 BASE=http://127.0.0.1:8082/ratelimit/v1
-TOKEN=<platform token with the viewer role>
-OPTOKEN=<platform token with the operator role>
+CALLER=<a ServiceAccount listed in management.callers>
+TOKEN=$(kubectl create token -n "$NS" "$CALLER" --audience netcracker)   # the release's management.m2m.audience
 api() { curl -sS -H "Authorization: Bearer $TOKEN" "$@"; }
-op()  { curl -sS -H "Authorization: Bearer $OPTOKEN" "$@"; }
+op()  { api "$@"; }      # every listed caller holds operator
 ```
 
-On the platform the same API is routed through the private gateway under the same prefix, and stays reachable there
-during a store outage whatever the gateway's failure mode (section 1); the port-forward is the path for an operator
-who already holds `kubectl` access. The service never verifies the token signature, the gateway
-does, so a port-forward is a shortcut that bypasses that check: use it for diagnosis, not as a habit.
+Where the release lists the private gateway in `management.authorizationPolicy.allowedServiceAccounts`, the same API is
+also routed through that gateway under the same prefix, and stays reachable there during a store outage whatever the
+gateway's failure mode (section 1); otherwise only the listed callers' workloads reach the port. The port-forward is the
+path for an operator who already holds `kubectl` access. The service verifies the token either way, so a port-forward
+skips the mesh policy on the port and nothing else: the token still has to belong to a listed caller.
 
 The installation is two Deployments in the namespace. The operator pod reads the policies, writes their status, and
 writes the ConfigMap `ratelimit-config`; the service pods mount that ConfigMap and serve the decisions and the
@@ -233,13 +234,14 @@ ratelimit_store_errors_total{domain="gateway.public",reason="timeout"} 25
 The management API answers every call that needs the store with `RLS-0503`, and the gateway's clients see no `429` at
 all while `failClosed` is off.
 
-The API itself stays reachable through the private gateway, also with `failClosed: true` on it: the service admits
-the checks of `/ratelimit/v1` in the domains of `management.gatewayDomains` of the service chart without reading the
-store, and counts them as `verdict="exempt"`. The endpoints that read no counters, `GET /status`, `/domains`,
-`/domains/{domain}/rules`, and `/openapi.yaml`, return `200` during the outage. A `503` from the API with no `RLS-`
-code in its body is the gateway's: the gateway's domain is missing from `management.gatewayDomains`, or the check
-itself got no answer within `filter.timeout`. The port-forward of section 0 reaches the API past the gateway in both
-cases.
+Where the release routes it through the private gateway (the gateway listed in
+`management.authorizationPolicy.allowedServiceAccounts`), the API itself stays reachable there, also with
+`failClosed: true` on it: the service admits the checks of `/ratelimit/v1` in the domains of `management.gatewayDomains`
+of the service chart without reading the store, and counts them as `verdict="exempt"`. The endpoints that read no
+counters, `GET /status`, `/domains`, `/domains/{domain}/rules`, and `/openapi.yaml`, return `200` during the outage. A
+`503` from the API with no `RLS-` code in its body is the gateway's: the gateway's domain is missing from
+`management.gatewayDomains`, or the check itself got no answer within `filter.timeout`. The port-forward of section 0
+reaches the API past the gateway in both cases.
 
 **Diagnose.**
 
@@ -1114,6 +1116,53 @@ sum(rate(ratelimit_token_cache_misses_total[5m]))
 
 A store roundtrip that carries the p99 is section 1, the distance to the Redis or its load; a slow check over a fast
 store is the service pods themselves, their CPU and the extraction the cache misses count.
+
+## 11. The management API refuses every call: `RLS-0504`, `401`, or `403`
+
+Each code names the check that refused the call. `503` with `RLS-0504` means the service cannot verify tokens yet: it
+has not reached the API server's OIDC discovery since the management listener started, refuses every call, and keeps
+retrying; the data path is unaffected, and the API serves without a restart once the discovery answers. `401` with
+`RLS-0401` means the token did not verify, and the message names the check. `403` with `RLS-0403` means the token
+verified and its ServiceAccount is not a listed caller.
+
+**Read.** The discovery first, because nothing else is checked before it. The service logs each failed attempt with the
+call that failed, and the callers and the audience at start:
+
+```bash
+kubectl logs -n "$NS" deploy/ratelimit-service | grep -E 'token verifier|management API callers'
+```
+
+```text
+management API callers=[system:serviceaccount:core:ui-backend] audience=netcracker
+management API token verifier unavailable, retrying in 4s: OIDC discovery at .../.well-known/openid-configuration: ...
+management API token verifier is ready
+```
+
+The discovery runs with the pod's own ServiceAccount token, which every ServiceAccount may use for it, so the same
+call from the API server's side shows whether the endpoint answers:
+
+```bash
+kubectl get --raw /.well-known/openid-configuration | jq .issuer
+kubectl auth can-i get /.well-known/openid-configuration \
+  --as="system:serviceaccount:$NS:ratelimit-service" --as-group=system:serviceaccounts
+```
+
+**Act.** A discovery error that names a certificate (`x509: certificate signed by unknown authority`) is a base image
+without the cluster's ServiceAccount CA in its trust store: the service reaches the discovery over TLS against the
+system trust store. An error that says the token could not be acquired is a pod without the `serviceaccount` volume,
+which the chart renders only with `management.enabled`. A refused connection or a timeout is the network between the pod
+and the API server, or an API server that accepts the connection and does not answer: each request to it is given ten
+seconds. A `401` that names the signature for a token the API server just issued, while the verifier is ready, is a key
+set the service could not fetch after the discovery; the service fetches it again on the next unknown key, at most every
+five minutes. A `401` that names the audience is a caller that sends a token for another audience: the release's
+`management.m2m.audience` and the caller's token have to agree, which the platform's clients do with
+`KUBERNETES_M2M_ENABLED=true` and the default `netcracker`. A `403` is a caller missing from `management.callers`; the
+start line lists the ones the service read.
+
+**Revoke a caller.** Remove it from `management.callers` and upgrade the release: the service reads the list at start,
+and the upgrade restarts the pods. Until a pod restarts it still admits the caller, and a token already issued stays
+valid until its `exp` even after its ServiceAccount is deleted, because the service verifies tokens offline against the
+cluster's key set.
 
 ## Appendix: the metrics an operator reads
 

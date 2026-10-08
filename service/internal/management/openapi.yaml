@@ -22,7 +22,7 @@ info:
       the API server, so there is no Kubernetes Event.
     * Destructive radius is bounded by construction: DELETE only addresses
       one rule; anything wider goes through the counter-resets action, whose execution step only exists with the single-use confirmation token minted by a mandatory preview - look before you delete is enforced by construction, and the sweep's work is bounded server-side: the walk has a deadline, and a domain runs at most one sweep at a time.
-    * The base path is a security boundary: the gateway's auth extension authenticates every call against the platform identity provider, and the service itself authorizes it by the roles the token carries, per path and verb.
+    * The base path is a security boundary: the service verifies every call's bearer token as a Kubernetes ServiceAccount token and authorizes the caller against the ServiceAccounts the release lists, per path and verb.
 
     Dynamic axis parameters: counters are addressed by named identity axes
     (sub, captured path segments). Query parameters of the form
@@ -32,7 +32,7 @@ info:
     travel as a JSON body in the counter-resets action instead - a URL is
     the wrong place for a thousand client ids.
 
-    Errors: every non-2xx the SERVICE forms is NC.TMFErrorResponse.v1.0 (see the TmfErrorResponse schema); clients branch on `code`, never on prose. The perimeter answers before the service on an invalid or expired token, in its own format - never parse an arbitrary 401 as TMF, and do not expect X-Request-Id on one.
+    Errors: every non-2xx the SERVICE forms is NC.TMFErrorResponse.v1.0 (see the TmfErrorResponse schema); clients branch on `code`, never on prose. The service answers an invalid or expired token itself, as RLS-0401. A refusal the mesh or a gateway writes before a request reaches the service has its own format - never parse an arbitrary 401 or 403 as TMF, and do not expect X-Request-Id on one.
     Catalog:
     * RLS-0400 - invalid request (query, body, cursor, header patterns; a body over 1 MiB, 1048576 bytes; on
       GET /rules, GET /counters, and DELETE /counters, a query parameter the endpoint does not define)
@@ -49,6 +49,8 @@ info:
       retry once the lease expired; replays with mandatory partial disclosure
     * RLS-0500 - internal error
     * RLS-0503 - counter store unavailable
+    * RLS-0504 - token verification unavailable: the service cannot verify
+      tokens yet, so it refuses every request until it can
 
     Traceability: every response the service forms carries the X-Request-Id header - a caller-supplied value round-trips, an absent one is generated - and the same id runs through the operator log, the audit journal, and the meta.requestId of every error body. Quote it when asking what happened. The one exception is the refusal of a body over 1 MiB (1048576 bytes): the HTTP server's body limit refuses it before the request-id middleware runs, so that 400 carries no X-Request-Id header and an empty meta.requestId.
 servers:
@@ -102,6 +104,8 @@ paths:
           $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VerifierUnavailable'
       description: 'The entry point of an investigation: which domains the enforced
         rule set carries and how big each one is. Domains are few by design, so
         the listing is not paginated.'
@@ -865,6 +869,8 @@ paths:
               $ref: '#/components/headers/XRequestId'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VerifierUnavailable'
   /domains/{domain}/counters:
     get:
       tags:
@@ -1037,6 +1043,19 @@ paths:
               $ref: '#/components/headers/XRequestId'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 'Token verification unavailable (RLS-0504) before anything else, while the service cannot verify tokens yet; see the VerifierUnavailable response. Counter store unavailable (RLS-0503): the store did not answer the scan or the read of a counter, and nothing is listed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+          headers:
+            Retry-After:
+              description: Present with RLS-0504; seconds to wait before retrying.
+              schema:
+                type: integer
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
     delete:
       tags:
       - counters
@@ -1296,6 +1315,19 @@ paths:
               $ref: '#/components/headers/XRequestId'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 'Token verification unavailable (RLS-0504) before anything else, while the service cannot verify tokens yet; see the VerifierUnavailable response. Counter store unavailable (RLS-0503): the store did not answer the idempotency lookup, the read, or the reset. A retry with the SAME Idempotency-Key is safe: it finds the recorded outcome or runs the reset for the first time.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+          headers:
+            Retry-After:
+              description: Present with RLS-0504; seconds to wait before retrying.
+              schema:
+                type: integer
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
   /domains/{domain}/counter-resets:
     post:
       tags:
@@ -1536,7 +1568,9 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '503':
-          description: 'Counter store unavailable (RLS-0503) - on the idempotency
+          description: 'Token verification unavailable (RLS-0504) before anything
+            else, while the service cannot verify tokens yet; see the VerifierUnavailable
+            response. Counter store unavailable (RLS-0503) - on the idempotency
             lookup, at acceptance, or mid-walk. On the lookup nothing binds. AT
             the acceptance write the answer is ambiguous - the write may or may
             not have landed - and is resolved by retrying the SAME key: the retry
@@ -1817,6 +1851,19 @@ paths:
               $ref: '#/components/headers/XRequestId'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: 'Token verification unavailable (RLS-0504) before anything else, while the service cannot verify tokens yet; see the VerifierUnavailable response. Counter store unavailable (RLS-0503): the store did not answer the read the simulation judges against; nothing was charged.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TmfErrorResponse'
+          headers:
+            Retry-After:
+              description: Present with RLS-0504; seconds to wait before retrying.
+              schema:
+                type: integer
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
       parameters:
       - $ref: '#/components/parameters/xRequestId'
   /status:
@@ -1851,6 +1898,8 @@ paths:
           $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VerifierUnavailable'
       parameters:
       - $ref: '#/components/parameters/xRequestId'
   /openapi.yaml:
@@ -1875,6 +1924,8 @@ paths:
           $ref: '#/components/responses/Error'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VerifierUnavailable'
       description: 'The specification, embedded at build time: what you read here
         is what this binary was built against, not a copy that can drift.'
       parameters:
@@ -1886,7 +1937,7 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        A bearer JWT issued by the platform identity provider. Authentication is the perimeter's job: the gateway's auth extension validates the token (signature, expiry, issuer) before the request reaches the service, and the mesh restricts the service's ingress to that gateway. Authorization is the service's own, and its trust boundary is explicit: identity is read from EXACTLY ONE source - the bearer token in the Authorization header, whose signature the gateway has already validated; no auxiliary identity header (X-Forwarded-User and kin) is ever consulted, so none can be spoofed. The service does not verify token signatures and has no setting that turns verification on: the AuthorizationPolicy the service chart renders, which admits the private gateway alone to the management port, is the only protection of the port, and it holds only for a pod inside the mesh (see the Management API port section of the chart documentation). The service enforces the role model per path and verb - viewer holds every GET and POST /simulations; operator holds the mutations (DELETE on counters, POST on counter-resets) plus everything viewer holds. Role names and claim locations are deployment configuration; viewer and operator are the canonical defaults. The subject also feeds the audit journal, the Idempotency-Key scope, and the confirmation-token binding. A request without a bearer token is refused outright (401) - but that is hygiene, not the defense: where the policy does not hold, a forged token passes. The model's security rests on that policy alone. An invalid token is normally rejected at the gateway, in the perimeter's own error format. Roles cannot narrow to particular axis values: whoever holds viewer sees axis values (client ids), which is a documented property of the access model, not an accident.
+        A Kubernetes ServiceAccount token: a JWT the cluster's API server issued for the caller's ServiceAccount with the audience the release configures (netcracker by default), as the platform's machine-to-machine clients send it with KUBERNETES_M2M_ENABLED=true. The service verifies it itself - the signature against the keys of the API server's OIDC discovery, the issuer, the audience, the expiry, and the issue time - and refuses a token that fails any check with 401 (RLS-0401), naming the check but never quoting the token. A token without the kubernetes.io claim, such as one of the identity provider, is refused the same way. Identity is read from exactly one source, the verified token's sub claim, system:serviceaccount:<namespace>:<name>; no header that names a user (X-Forwarded-User and kin) is read. Authorization is an allowlist the release configures: a listed ServiceAccount holds operator, which covers every endpoint, and any other verified caller is refused with 403 (RLS-0403). The role model stays per path and verb - viewer for every GET and POST /simulations, operator for the mutations plus everything viewer holds - and every listed caller holds operator. The subject feeds the audit journal, the Idempotency-Key scope, and the confirmation-token binding, so a caller acting for its users keeps the record of which user asked, generates a distinct Idempotency-Key for each user's command, and binds a preview's confirmation token to the user who requested it; X-Request-Id correlates its record with this service's. Whoever is listed sees axis values (client ids), which is a documented property of the access model.
   parameters:
     domain:
       name: domain
@@ -1988,11 +2039,13 @@ components:
           $ref: '#/components/headers/XRequestId'
     Unauthorized:
       description: 'Authentication required (RLS-0401): the request arrived without
-        a bearer token. An invalid or expired one is normally rejected at the gateway,
-        in the perimeter''s own format.'
+        a bearer token, or with one the service does not accept - not well formed,
+        expired or not valid yet, issued for another audience or by another issuer,
+        with a signature that does not verify, or not a Kubernetes ServiceAccount
+        token. The message names which, and never quotes the token.'
       headers:
         WWW-Authenticate:
-          description: Always Bearer - the API expects the platform IdP bearer token.
+          description: Always Bearer - the API expects a Kubernetes ServiceAccount token as the bearer token.
           required: true
           schema:
             type: string
@@ -2007,11 +2060,40 @@ components:
             id: d82f5c30-6a19-4e47-b0d8-3c7f1e9a5b62
             code: RLS-0401
             reason: Authentication required
-            message: no bearer token on the request; call through the platform gateway
+            message: no bearer token on the request; send a Kubernetes ServiceAccount token
             status: '401'
             '@type': NC.TMFErrorResponse.v1.0
             meta:
               requestId: 5c19e8f4
+    VerifierUnavailable:
+      description: 'Token verification unavailable (RLS-0504): the service cannot
+        verify tokens yet, because the API server''s OIDC discovery has not answered
+        since the management listener started. Every request is refused this way,
+        with or without a token, until the service builds its verifier, which it
+        keeps retrying without a restart. The data path is not affected. Retry
+        after the Retry-After seconds.'
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            example: 5
+        X-Request-Id:
+          $ref: '#/components/headers/XRequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TmfErrorResponse'
+          example:
+            id: 0f6a3e91-7c25-4d48-9b13-5e8d2a4c7f06
+            code: RLS-0504
+            reason: Token verification unavailable
+            message: 'the service cannot verify tokens yet: the cluster''s OIDC discovery
+              has not answered'
+            status: '503'
+            '@type': NC.TMFErrorResponse.v1.0
+            meta:
+              requestId: 7e21a4c9
   schemas:
     TmfErrorResponse:
       type: object

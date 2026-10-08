@@ -13,14 +13,12 @@ Service ([Management API port](helm-chart.md#management-api-port)).
 kubectl port-forward -n core svc/ratelimit 8082:8082 &
 BASE=http://127.0.0.1:8082/ratelimit/v1
 
-# Tokens are issued by your IdP; the gateway's auth extension validates them, and
-# the service itself checks the roles from the claim: reading and simulating take
-# viewer, mutating takes operator (canonical names; the mapping to IdP roles is in
-# the deployment values).
-TOKEN=<idp-token-with-viewer-role>
-OPTOKEN=<idp-token-with-operator-role>
+# The API takes the token of a ServiceAccount the release lists in
+# management.callers, issued for the audience in management.m2m.audience. Every
+# listed caller holds operator, so one token reads, simulates, and mutates.
+TOKEN=$(kubectl create token -n core <caller-serviceaccount> --audience netcracker)
 api() { curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
-op()  { curl -sS -H "Authorization: Bearer $OPTOKEN" -H 'Content-Type: application/json' "$@"; }
+op()  { api "$@"; }
 ```
 
 ## 1. End-to-end configuration

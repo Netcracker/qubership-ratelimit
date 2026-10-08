@@ -12,11 +12,11 @@ import (
 )
 
 // reset runs one addressed DELETE, with an Idempotency-Key unless it is empty.
-func (h *testAPI) reset(t *testing.T, query, idempotencyKey string, roles []string) *testResponse {
+func (h *testAPI) reset(t *testing.T, query, idempotencyKey string, caller string) *testResponse {
 	t.Helper()
 
 	target := BasePath + "/domains/" + testDomain + "/counters?" + query
-	return h.callWith(t, http.MethodDelete, target, roles, nil, func(request *http.Request) {
+	return h.callWith(t, http.MethodDelete, target, caller, nil, func(request *http.Request) {
 		if idempotencyKey != "" {
 			request.Header.Set("Idempotency-Key", idempotencyKey)
 		}
@@ -31,7 +31,7 @@ func (h *testAPI) remaining(t *testing.T, client string) (int64, bool) {
 	var list CounterList
 	decode(t, h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client&axis.sub="+client,
-		viewerRoles(), nil), http.StatusOK, &list)
+		listedCaller, nil), http.StatusOK, &list)
 
 	if len(list.Items) == 0 {
 		return 0, false
@@ -47,7 +47,7 @@ func TestReset_reportsTheCommandItRan(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", operatorRoles()),
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", listedCaller),
 		http.StatusOK, &response)
 
 	assert.False(t, response.DryRun, "dryRun of an execution")
@@ -67,7 +67,7 @@ func TestReset_dropsOnlyTheAddressedCounter(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
-	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", operatorRoles()),
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler", "key-1", listedCaller),
 		http.StatusOK, nil)
 
 	_, found := h.remaining(t, "crawler")
@@ -83,7 +83,7 @@ func TestReset_aPreviewCountsTheAddressedCounter(t *testing.T) {
 
 	var preview ResetResponse
 	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler&dryRun=true", "key-1",
-		operatorRoles()), http.StatusOK, &preview)
+		listedCaller), http.StatusOK, &preview)
 
 	assert.True(t, preview.DryRun, "dryRun of a preview")
 	assert.Nil(t, preview.ResetCount, "resetCount of a preview")
@@ -96,7 +96,7 @@ func TestReset_aPreviewDeletesNothing(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 
 	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=crawler&dryRun=true", "key-1",
-		operatorRoles()), http.StatusOK, nil)
+		listedCaller), http.StatusOK, nil)
 
 	_, found := h.remaining(t, "crawler")
 	assert.True(t, found, "the previewed counter of crawler is gone")
@@ -109,7 +109,7 @@ func TestReset_resetsTheOneCounterOfARuleWithoutAxes(t *testing.T) {
 	h.spend(t, "/anything", nil, 1)
 
 	var response ResetResponse
-	decode(t, h.reset(t, "ruleId=everything/total", "key-1", operatorRoles()),
+	decode(t, h.reset(t, "ruleId=everything/total", "key-1", listedCaller),
 		http.StatusOK, &response)
 
 	assert.Empty(t, response.Axes)
@@ -125,7 +125,7 @@ func TestReset_addressesEveryWindowOfTheRuleByDefault(t *testing.T) {
 
 	var all ResetResponse
 	decode(t, h.reset(t, "ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&dryRun=true",
-		"key-1", operatorRoles()), http.StatusOK, &all)
+		"key-1", listedCaller), http.StatusOK, &all)
 
 	assert.Len(t, all.Keys, 2, "one key per window of by-order/each")
 }
@@ -137,7 +137,7 @@ func TestReset_narrowsToTheWindowOfTheGivenPeriod(t *testing.T) {
 	var narrowed ResetResponse
 	decode(t, h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=1m&dryRun=true",
-		"key-1", operatorRoles()), http.StatusOK, &narrowed)
+		"key-1", listedCaller), http.StatusOK, &narrowed)
 
 	assert.Len(t, narrowed.Keys, 1, "keys of by-order/each with period=1m")
 }
@@ -150,10 +150,10 @@ func TestReset_readsAPeriodInSecondsAsTheSameWindow(t *testing.T) {
 	var byDuration, bySeconds ResetResponse
 	decode(t, h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=1m&dryRun=true",
-		"key-1", operatorRoles()), http.StatusOK, &byDuration)
+		"key-1", listedCaller), http.StatusOK, &byDuration)
 	decode(t, h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=60&dryRun=true",
-		"key-2", operatorRoles()), http.StatusOK, &bySeconds)
+		"key-2", listedCaller), http.StatusOK, &bySeconds)
 
 	require.Len(t, byDuration.Keys, 1, "keys of by-order/each with period=1m")
 	assert.Equal(t, byDuration.Keys, bySeconds.Keys, "keys with period=60 against keys with period=1m")
@@ -165,7 +165,7 @@ func TestReset_refusesAPartialAxisSelection(t *testing.T) {
 	h := newTestAPI(t)
 
 	body := requireError(t, h.reset(t, "ruleId=by-order/each&axis.sub=alice", "key-1",
-		operatorRoles()), http.StatusBadRequest, CodeInvalidRequest)
+		listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 	assert.Equal(t, []string{"axis"}, body.Meta.Fields)
 }
 
@@ -218,7 +218,7 @@ func TestReset_refusesWhatItCannotAddress(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestAPI(t)
-			body := requireError(t, h.reset(t, tc.query, "key-1", operatorRoles()), tc.status, tc.code)
+			body := requireError(t, h.reset(t, tc.query, "key-1", listedCaller), tc.status, tc.code)
 			assert.Equal(t, tc.fields, body.Meta.Fields, "DELETE counters?%s", tc.query)
 		})
 	}
@@ -234,7 +234,7 @@ func TestReset_refusesAMutationWithoutALogSafeIdempotencyKey(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestAPI(t)
-			body := requireError(t, h.reset(t, addressAlice, tc.key, operatorRoles()),
+			body := requireError(t, h.reset(t, addressAlice, tc.key, listedCaller),
 				http.StatusBadRequest, CodeInvalidRequest)
 			assert.Equal(t, []string{"Idempotency-Key"}, body.Meta.Fields, "Idempotency-Key %q", tc.key)
 		})
@@ -247,11 +247,11 @@ func TestReset_pinsTheRuleSetVersionWhenAsked(t *testing.T) {
 	h := newTestAPI(t)
 	query := addressAlice + "&expectedRuleSetVersion="
 
-	body := requireError(t, h.reset(t, query+"000000000000", "key-1", operatorRoles()),
+	body := requireError(t, h.reset(t, query+"000000000000", "key-1", listedCaller),
 		http.StatusConflict, CodeConflict)
 	assert.Equal(t, ConflictStaleRuleSet, body.Meta.ConflictType)
 
-	decode(t, h.reset(t, query+h.version, "key-2", operatorRoles()), http.StatusOK, nil)
+	decode(t, h.reset(t, query+h.version, "key-2", listedCaller), http.StatusOK, nil)
 }
 
 // Under live traffic a re-run would delete counters that did not exist the
@@ -262,13 +262,13 @@ func TestReset_retryReplaysTheRecordedOutcome(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 3)
 	query := "ruleId=orders/per-client&axis.sub=crawler"
 
-	first := h.reset(t, query, "key-1", operatorRoles())
+	first := h.reset(t, query, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
 
 	// The client spends again between the two calls.
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"crawler"}}, 2)
 
-	second := h.reset(t, query, "key-1", operatorRoles())
+	second := h.reset(t, query, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, second.Code, "body: %s", second.Body.String())
 	assert.JSONEq(t, first.Body.String(), second.Body.String())
 
@@ -279,10 +279,10 @@ func TestReset_retryReplaysTheRecordedOutcome(t *testing.T) {
 
 func TestReset_refusesAKeyBoundToAnotherSelection(t *testing.T) {
 	h := newTestAPI(t)
-	first := h.reset(t, addressAlice, "key-1", operatorRoles())
+	first := h.reset(t, addressAlice, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
 
-	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=bob", "key-1", operatorRoles()),
+	body := requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=bob", "key-1", listedCaller),
 		http.StatusConflict, CodeConflict)
 	assert.Equal(t, ConflictCommandMismatch, body.Meta.ConflictType)
 }
@@ -291,10 +291,10 @@ func TestReset_refusesAKeyBoundToAnotherSelection(t *testing.T) {
 // execution does not answer the preview.
 func TestReset_refusesTheKeyOfAnExecutionForItsPreview(t *testing.T) {
 	h := newTestAPI(t)
-	first := h.reset(t, addressAlice, "key-1", operatorRoles())
+	first := h.reset(t, addressAlice, "key-1", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
 
-	body := requireError(t, h.reset(t, addressAlice+"&dryRun=true", "key-1", operatorRoles()),
+	body := requireError(t, h.reset(t, addressAlice+"&dryRun=true", "key-1", listedCaller),
 		http.StatusConflict, CodeConflict)
 	assert.Equal(t, ConflictCommandMismatch, body.Meta.ConflictType)
 }
@@ -304,10 +304,10 @@ func TestReset_refusesTheKeyOfAnExecutionForItsPreview(t *testing.T) {
 func TestReset_aRefusalBindsNothing(t *testing.T) {
 	h := newTestAPI(t)
 
-	requireError(t, h.reset(t, "ruleId=orders/gone&axis.sub=alice", "key-1", operatorRoles()),
+	requireError(t, h.reset(t, "ruleId=orders/gone&axis.sub=alice", "key-1", listedCaller),
 		http.StatusNotFound, CodeNotFound)
 
-	corrected := h.reset(t, addressAlice, "key-1", operatorRoles())
+	corrected := h.reset(t, addressAlice, "key-1", listedCaller)
 	assert.Equal(t, http.StatusOK, corrected.Code, "body: %s", corrected.Body.String())
 }
 
@@ -319,12 +319,12 @@ func TestReset_normalizesTheCommandBeforeComparingIt(t *testing.T) {
 
 	first := h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=1m&algorithm=GCRA",
-		"key-1", operatorRoles())
+		"key-1", listedCaller)
 	require.Equal(t, http.StatusOK, first.Code, "body: %s", first.Body.String())
 
 	second := h.reset(t,
 		"ruleId=by-order/each&axis.sub=alice&axis.order_id=4711&period=60&algorithm=gcra",
-		"key-1", operatorRoles())
+		"key-1", listedCaller)
 	require.Equal(t, http.StatusOK, second.Code, "body: %s", second.Body.String())
 	assert.JSONEq(t, first.Body.String(), second.Body.String())
 }
@@ -338,15 +338,15 @@ func TestReset_scopesTheKeyToItsSubject(t *testing.T) {
 
 	as := func(subject string) *testResponse {
 		return h.callWith(t, http.MethodDelete, BasePath+"/domains/"+testDomain+"/counters?"+addressAlice,
-			operatorRoles(), nil, func(request *http.Request) {
-				request.Header.Set("Authorization", "Bearer "+testToken(subject, operatorRoles()))
+			listedCaller, nil, func(request *http.Request) {
+				request.Header.Set("Authorization", "Bearer "+testToken(subject))
 				request.Header.Set("Idempotency-Key", "key-1")
 			})
 	}
 
 	var first, second ResetResponse
-	decode(t, as("alice@example.com"), http.StatusOK, &first)
-	decode(t, as("bob@example.com"), http.StatusOK, &second)
+	decode(t, as(listedCaller), http.StatusOK, &first)
+	decode(t, as(otherCaller), http.StatusOK, &second)
 
 	require.NotNil(t, first.ResetCount, "the answer of an execution carries resetCount")
 	require.Equal(t, 1, *first.ResetCount, "the reset of the first subject")
@@ -358,7 +358,7 @@ func TestReset_reportsAnUnknownDomainAsNotFound(t *testing.T) {
 	h := newTestAPI(t)
 
 	recorder := h.callWith(t, http.MethodDelete, BasePath+"/domains/gateway.typo/counters?"+addressAlice,
-		operatorRoles(), nil, func(request *http.Request) { request.Header.Set("Idempotency-Key", "key-1") })
+		listedCaller, nil, func(request *http.Request) { request.Header.Set("Idempotency-Key", "key-1") })
 
 	requireError(t, recorder, http.StatusNotFound, CodeNotFound)
 }
@@ -367,7 +367,7 @@ func TestReset_writesItsResponseAsJSON(t *testing.T) {
 	h := newTestAPI(t)
 
 	var response ResetResponse
-	recorder := h.reset(t, addressAlice, "key-1", operatorRoles())
+	recorder := h.reset(t, addressAlice, "key-1", listedCaller)
 	decode(t, recorder, http.StatusOK, &response)
 
 	assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
@@ -386,7 +386,7 @@ func TestReset_replaysTheBodyItRecordedAfterTheRuleSetMoved(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	var first ResetResponse
-	decode(t, h.reset(t, addressAlice, "key-1", operatorRoles()), http.StatusOK, &first)
+	decode(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusOK, &first)
 	require.NotNil(t, first.ResetCount, "the answer of an execution carries resetCount")
 	require.Equal(t, 1, *first.ResetCount, "the reset before the rollout")
 	require.NotEmpty(t, first.Keys, "the reset before the rollout")
@@ -397,7 +397,7 @@ func TestReset_replaysTheBodyItRecordedAfterTheRuleSetMoved(t *testing.T) {
 	require.NotEqual(t, first.RuleSetVersion, h.version, "the fixture did not move the rule set")
 
 	var replay ResetResponse
-	decode(t, h.reset(t, addressAlice, "key-1", operatorRoles()), http.StatusOK, &replay)
+	decode(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusOK, &replay)
 	assert.Equal(t, first, replay, "a retry gets the body the command actually produced")
 }
 
@@ -409,12 +409,12 @@ func TestReset_aPinnedRetryStillReplays(t *testing.T) {
 
 	query := addressAlice + "&expectedRuleSetVersion=" + h.version
 	var first ResetResponse
-	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &first)
+	decode(t, h.reset(t, query, "key-1", listedCaller), http.StatusOK, &first)
 
 	h.replaceRules(t, widerOrders()...)
 
 	var replay ResetResponse
-	decode(t, h.reset(t, query, "key-1", operatorRoles()), http.StatusOK, &replay)
+	decode(t, h.reset(t, query, "key-1", listedCaller), http.StatusOK, &replay)
 	assert.Equal(t, first, replay, "the pin judges a new command, never one already recorded")
 }
 
@@ -425,13 +425,13 @@ func TestReset_replaysEvenWhenTheRuleIsGone(t *testing.T) {
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
 	var first ResetResponse
-	decode(t, h.reset(t, addressAlice, "key-1", operatorRoles()), http.StatusOK, &first)
+	decode(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusOK, &first)
 
 	h.replaceRules(t, wholeDomainBlocks()...)
 
-	requireError(t, h.reset(t, addressAlice, "key-2", operatorRoles()), http.StatusNotFound, CodeNotFound)
+	requireError(t, h.reset(t, addressAlice, "key-2", listedCaller), http.StatusNotFound, CodeNotFound)
 
 	var replay ResetResponse
-	decode(t, h.reset(t, addressAlice, "key-1", operatorRoles()), http.StatusOK, &replay)
+	decode(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusOK, &replay)
 	assert.Equal(t, first, replay)
 }

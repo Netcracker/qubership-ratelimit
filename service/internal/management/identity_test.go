@@ -1,11 +1,18 @@
 package management
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/MicahParks/jwkset"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,8 +24,6 @@ func TestIdentity_refusesACallWithoutABearerToken(t *testing.T) {
 		"no header at all":    "",
 		"another scheme":      "Basic YWxpY2U6c2VjcmV0",
 		"an empty credential": "Bearer ",
-		"not a JWT at all":    "Bearer opaque-token",
-		"a token with no sub": "Bearer " + tokenWithClaims(map[string]any{"roles": []string{"viewer"}}),
 	}
 	for name, header := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -29,10 +34,93 @@ func TestIdentity_refusesACallWithoutABearerToken(t *testing.T) {
 			recorder := h.send(t, request)
 
 			requireError(t, recorder, http.StatusUnauthorized, CodeUnauthorized)
-			assert.Equal(t, "Bearer", recorder.Header().Get("WWW-Authenticate"),
+			require.Equal(t, "Bearer", recorder.Header().Get("WWW-Authenticate"),
 				"a 401 says what credential to present")
 		})
 	}
+}
+
+// refusingVerifier refuses every token with err, the way the platform's
+// verifier reports each class of a bad token.
+type refusingVerifier struct{ err error }
+
+func (v refusingVerifier) Verify(context.Context, string) (*jwt.Token, error) { return nil, v.err }
+
+// Every refusal is 401, and the detail names the class of the refusal, never
+// the token, in the body or in the log.
+func TestIdentity_answersEachRefusalOfTheVerifierWith401(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		detail string
+	}{
+		{"malformed", fmt.Errorf("%w: token contains an invalid number of segments", jwt.ErrTokenMalformed), "not a well-formed JWT"},
+		{"expired", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenExpired), "has expired"},
+		{"not valid yet", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenNotValidYet), "not valid yet"},
+		{"issued in the future", fmt.Errorf("%w: issued later", jwt.ErrTokenUsedBeforeIssued), "not valid yet"},
+		{"another audience", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenInvalidAudience), "not issued for the audience"},
+		{"another issuer", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenInvalidIssuer), "not issued by this cluster"},
+		{"a bad signature", fmt.Errorf("%w: crypto/rsa: verification error", jwt.ErrTokenSignatureInvalid), "signature of the bearer token could not be verified"},
+		{"a key the cluster does not hold", fmt.Errorf("%w: %w", jwt.ErrTokenUnverifiable, jwkset.ErrKeyNotFound), "signed with a key this cluster does not hold"},
+		{"alg none", fmt.Errorf("%w: 'none' signature type is not allowed", jwt.ErrTokenUnverifiable), "signature of the bearer token could not be verified"},
+		{"anything else", errors.New("boom"), "was not accepted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestAPI(t)
+			log := &recordingLogger{}
+			h.api.Log = log
+			var verifier Verifier = refusingVerifier{err: tc.err}
+			h.api.verifier.Store(&verifier)
+			token := testToken(listedCaller)
+
+			request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
+			request.Header.Set("Authorization", "Bearer "+token)
+			recorder := h.send(t, request)
+
+			body := requireError(t, recorder, http.StatusUnauthorized, CodeUnauthorized)
+			require.Contains(t, body.Message, tc.detail)
+			require.NotContains(t, recorder.Body.String(), token)
+			for _, line := range log.lines {
+				require.NotContains(t, line.message, token)
+			}
+		})
+	}
+}
+
+// A token the verifier accepts is still refused when it is not a ServiceAccount
+// token: the identity provider's tokens carry no kubernetes.io claim, and a
+// token without a subject names nobody to audit.
+func TestIdentity_refusesAVerifiedTokenThatIsNotAServiceAccounts(t *testing.T) {
+	h := newTestAPI(t)
+
+	for name, token := range map[string]string{
+		"an identity provider's token": tokenWithClaims(map[string]any{
+			"sub": "alice", "realm_access": map[string]any{"roles": []string{"operator"}}}),
+		"no subject": tokenWithClaims(map[string]any{
+			"kubernetes.io": map[string]any{"namespace": testNamespace}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
+			request.Header.Set("Authorization", "Bearer "+token)
+
+			requireError(t, h.send(t, request), http.StatusUnauthorized, CodeUnauthorized)
+		})
+	}
+}
+
+// A listed caller holds operator, which subsumes viewer: it reads and mutates.
+// A verified caller listed nowhere holds no role and is refused both.
+func TestAuthorization_grantsOperatorToTheListedCallersAlone(t *testing.T) {
+	h := newTestAPI(t)
+
+	require.Equal(t, http.StatusOK, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code)
+	require.Equal(t, http.StatusOK,
+		h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", listedCaller).Code)
+
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains", unlistedCaller, nil),
+		http.StatusForbidden, CodeForbidden)
+	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-2", unlistedCaller),
+		http.StatusForbidden, CodeForbidden)
 }
 
 // Identity comes from exactly one place. A header the service trusted would be
@@ -41,56 +129,63 @@ func TestIdentity_readsNoAuxiliaryIdentityHeader(t *testing.T) {
 	h := newTestAPI(t)
 
 	request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
-	request.Header.Set("X-Forwarded-User", "admin@example.com")
+	request.Header.Set("Authorization", "Bearer "+testToken(unlistedCaller))
+	request.Header.Set("X-Forwarded-User", listedCaller)
 	request.Header.Set("X-Remote-Group", "operator")
 
-	requireError(t, h.send(t, request), http.StatusUnauthorized, CodeUnauthorized)
+	requireError(t, h.send(t, request), http.StatusForbidden, CodeForbidden)
 }
 
-// A mutation needs the operator role: the same reset a viewer is refused runs
-// for an operator.
-func TestAuthorization_gatesTheResetOnTheOperatorRole(t *testing.T) {
+// Until the verifier is built every call is refused with 503 under its own
+// code, a token or not, and the API serves without a restart once the
+// construction that kept failing succeeds.
+func TestIdentity_refusesEveryCallUntilTheVerifierIsBuilt(t *testing.T) {
+	first, longest := verifierRetryFirst, verifierRetryMax
+	verifierRetryFirst, verifierRetryMax = time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { verifierRetryFirst, verifierRetryMax = first, longest })
+
 	h := newTestAPI(t)
+	log := &recordingLogger{}
+	h.api.Log = log
+	h.api.verifier.Store(nil)
+	var failures atomic.Int32
+	release := make(chan struct{})
+	h.api.NewVerifier = func(context.Context) (Verifier, error) {
+		select {
+		case <-release:
+			return readingVerifier{}, nil
+		default:
+			failures.Add(1)
+			return nil, errors.New("Get https://kubernetes.default.svc/.well-known/openid-configuration: refused, " +
+				"possible reasons are:\n1. a base image without the CA\n2. no route to the API server")
+		}
+	}
 
-	operator := h.reset(t, addressAlice, "key-operator", operatorRoles())
-	require.Equal(t, http.StatusOK, operator.Code, "the reset as an operator: %s", operator.Body.String())
+	refused := h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil)
+	requireError(t, refused, http.StatusServiceUnavailable, CodeVerifierUnavailable)
+	require.Equal(t, "5", refused.Header().Get("Retry-After"))
+	anonymous := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
+	requireError(t, h.send(t, anonymous), http.StatusServiceUnavailable, CodeVerifierUnavailable)
 
-	requireError(t, h.reset(t, addressAlice, "key-viewer", viewerRoles()), http.StatusForbidden, CodeForbidden)
-}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.api.StartBackground(ctx)
+	require.Eventually(t, func() bool { return failures.Load() >= 3 }, 5*time.Second, time.Millisecond,
+		"the construction is not retried")
+	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil),
+		http.StatusServiceUnavailable, CodeVerifierUnavailable)
 
-// An operator holds both roles: every mutation implies the right to read what
-// it mutates.
-func TestAuthorization_letsTheOperatorRoleRead(t *testing.T) {
-	h := newTestAPI(t)
+	close(release)
+	require.Eventually(t, func() bool {
+		return h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code == http.StatusOK
+	}, 5*time.Second, 5*time.Millisecond, "the API does not serve once the verifier is built")
 
-	response := h.call(t, http.MethodGet, BasePath+"/domains", operatorRoles(), nil)
-	assert.Equal(t, http.StatusOK, response.Code, "body: %s", response.Body.String())
-}
-
-func TestAuthorization_refusesATokenWithoutRoles(t *testing.T) {
-	h := newTestAPI(t)
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains", nil, nil),
-		http.StatusForbidden, CodeForbidden)
-}
-
-func TestSubjectFromToken_readsARoleClaimGivenAsOneString(t *testing.T) {
-	subject, err := subjectFromToken(tokenWithClaims(map[string]any{"sub": "alice", "roles": "operator"}),
-		DefaultClaimNames, RoleMapping{})
-
-	require.NoError(t, err)
-	assert.Equal(t, "alice", subject.Name)
-	assert.Equal(t, []string{"operator"}, subject.Roles)
-	assert.True(t, subject.Can(RoleViewer), "Can(%q) of an operator", RoleViewer)
-}
-
-func TestSubjectFromToken_readsTheConfiguredClaimNames(t *testing.T) {
-	token := tokenWithClaims(map[string]any{"preferred_username": "alice", "groups": []string{"rl-operator"}})
-
-	subject, err := subjectFromToken(token, ClaimNames{Subject: "preferred_username", Roles: "groups"}, RoleMapping{})
-
-	require.NoError(t, err)
-	assert.Equal(t, "alice", subject.Name)
-	assert.Equal(t, []string{"rl-operator"}, subject.Roles)
+	// A builder error that spans lines is logged as one record.
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	for _, line := range log.lines {
+		require.NotContains(t, line.message, "\n", "a log record spans several lines")
+	}
 }
 
 // The id lands in the log and the audit journal verbatim, so a value that
@@ -101,7 +196,7 @@ func TestSubjectFromToken_readsTheConfiguredClaimNames(t *testing.T) {
 func TestRequestID_refusesAValueThatCouldForgeALogRecord(t *testing.T) {
 	h := newTestAPI(t)
 
-	recorder := h.callWith(t, http.MethodGet, BasePath+"/domains", viewerRoles(), nil, func(request *http.Request) {
+	recorder := h.callWith(t, http.MethodGet, BasePath+"/domains", listedCaller, nil, func(request *http.Request) {
 		request.Header.Set(RequestIDHeader, "id\nlevel=error msg=\"forged\"")
 	})
 
@@ -121,102 +216,17 @@ func TestLogSafe_dropsWhatCouldForgeARecord(t *testing.T) {
 			raw:  strings.Repeat("x", 1000),
 			want: strings.Repeat("x", maxLoggedValueLength),
 		},
+		{
+			// A 63-byte namespace and a 253-byte name: the longest caller
+			// subject reaches the audit line whole.
+			name: "the longest caller subject",
+			raw:  "system:serviceaccount:" + strings.Repeat("n", 63) + ":" + strings.Repeat("s", 253),
+			want: "system:serviceaccount:" + strings.Repeat("n", 63) + ":" + strings.Repeat("s", 253),
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, logSafe(tc.raw), "logSafe(%q)", tc.raw)
-		})
-	}
-}
-
-// An IdP rarely issues "viewer" and "operator" verbatim. Without the mapping a
-// deployment whose realm calls them ratelimit-operator gets 403 on every call,
-// and nothing in the service can change that.
-func TestRoleMapping_translatesTheRolesAnIdPIssues(t *testing.T) {
-	mapping := RoleMapping{
-		Viewer:   []string{"ratelimit-viewer", "sre"},
-		Operator: []string{"ratelimit-operator"},
-	}
-
-	cases := []struct {
-		name   string
-		issued []string
-		want   []string
-	}{
-		{name: "an operator role", issued: []string{"ratelimit-operator"}, want: []string{RoleOperator}},
-		{name: "a viewer role", issued: []string{"sre"}, want: []string{RoleViewer}},
-		{name: "both roles", issued: []string{"sre", "ratelimit-operator"}, want: []string{RoleViewer, RoleOperator}},
-		// A role on neither list is dropped rather than passed through:
-		// authorizing against a name nobody configured is how a role from
-		// another system becomes a grant here. The canonical names are no
-		// exception once a mapping exists.
-		{name: "roles on neither list", issued: []string{"operator", "admin"}, want: nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.ElementsMatch(t, tc.want, mapping.canonical(tc.issued), "canonical(%q)", tc.issued)
-		})
-	}
-}
-
-// A deployment whose IdP already issues the canonical names configures nothing.
-func TestRoleMapping_withoutListsKeepsTheTokensRoles(t *testing.T) {
-	assert.Equal(t, []string{RoleOperator, "unrelated"},
-		RoleMapping{}.canonical([]string{RoleOperator, "unrelated"}))
-}
-
-// Keycloak issues realm roles under realm_access.roles. Reading only top-level
-// claims would leave that deployment with no roles at all.
-func TestSubjectFromToken_readsANestedRolesClaim(t *testing.T) {
-	token := tokenWithClaims(map[string]any{
-		"sub": "alice@example.com",
-		"realm_access": map[string]any{
-			"roles": []any{"ratelimit-operator", "offline_access"},
-		},
-	})
-
-	subject, err := subjectFromToken(token,
-		ClaimNames{Subject: "sub", Roles: "realm_access.roles"},
-		RoleMapping{Operator: []string{"ratelimit-operator"}})
-
-	require.NoError(t, err)
-	assert.Equal(t, "alice@example.com", subject.Name)
-	assert.True(t, subject.Can(RoleOperator), "Can(%q) with roles %q", RoleOperator, subject.Roles)
-}
-
-// A dotted path that walks into something that is not an object yields no
-// roles, rather than reaching for a claim of the same name one level up.
-func TestSubjectFromToken_aPathThatDoesNotResolveGrantsNothing(t *testing.T) {
-	token := tokenWithClaims(map[string]any{"sub": "alice", "roles": []any{"operator"}})
-
-	subject, err := subjectFromToken(token,
-		ClaimNames{Subject: "sub", Roles: "realm_access.roles"}, RoleMapping{})
-
-	require.NoError(t, err)
-	assert.Empty(t, subject.Roles)
-	assert.False(t, subject.Can(RoleViewer), "Can(%q) with roles %q", RoleViewer, subject.Roles)
-}
-
-// An explicit mapping maps only the roles its lists name: the deployment chose
-// to map no IdP role onto a role whose list is empty, which is not the same as
-// leaving the mapping unset.
-func TestRoleMapping_anExplicitMappingGrantsNothingThroughAnEmptyList(t *testing.T) {
-	issued := []string{RoleOperator, RoleViewer}
-	cases := []struct {
-		name    string
-		mapping RoleMapping
-		want    []string
-	}{
-		{name: "both lists empty", mapping: RoleMapping{Explicit: true}, want: nil},
-		{
-			name:    "the operator list empty",
-			mapping: RoleMapping{Viewer: []string{RoleViewer}, Explicit: true},
-			want:    []string{RoleViewer},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.ElementsMatch(t, tc.want, tc.mapping.canonical(issued), "canonical(%q)", issued)
 		})
 	}
 }

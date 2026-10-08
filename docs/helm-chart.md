@@ -55,8 +55,8 @@ helm-templates/ratelimit-service/templates/
 ├── Service.yaml                   # FIXED name ratelimit; grpc 9000 (appProtocol: grpc is mandatory), metrics (the
 │                                  #   operator's probe port), management behind management.enabled
 ├── ServiceAccount.yaml            # automountServiceAccountToken: false; no Role
-├── AuthorizationPolicy.yaml       # DENY on the management port for every source but the private gateway;
-│                                  #   behind management.enabled
+├── AuthorizationPolicy.yaml       # DENY on the management port for every source but the callers, or the
+│                                  #   listed gateway; behind management.enabled
 ├── EnvoyFilter.yaml               # one per enabled gateway (public/private roles); in all modes
 ├── PodMonitor.yaml                # behind MONITORING_ENABLED
 ├── PrometheusRule.yaml            # the alert rules over the data plane, behind MONITORING_ENABLED and
@@ -158,7 +158,7 @@ only the keys its templates read:
 | `CPU_REQUEST`, `MEMORY_REQUEST`, `CPU_LIMIT`, `MEMORY_LIMIT` | both | installation size; there are NO defaults in values, the resource profile supplies them |
 | `MONITORING_ENABLED` | both | enables the PodMonitor and the PrometheusRule of each chart and the GrafanaDashboard of the service chart; false by default, since all three need the CRDs of their operators |
 | `ISTIO_PUBLIC_GATEWAY_NAME` | the service chart | the name of the public Gateway object the filter targets; it must match the parameters of qubership-core-mesh-config, which creates the Gateways |
-| `ISTIO_PRIVATE_GATEWAY_NAME` | the service chart | the name of the private Gateway object: the filter target, and the default principal of the management AuthorizationPolicy; it must match qubership-core-mesh-config the same way |
+| `ISTIO_PRIVATE_GATEWAY_NAME` | the service chart | the name of the private Gateway object the filter targets; it must match qubership-core-mesh-config the same way |
 | `BASELINE_ORIGIN` | both | the baseline namespace, set only in a satellite; empty renders the whole stack of each chart, non-empty renders only the service chart's filters, targeting `ratelimit.<BASELINE_ORIGIN>.svc:9000`, and nothing from the operator chart; the release's own namespace fails both renders with `BASELINE_ORIGIN "<ns>" is this release's own namespace` |
 | `BASELINE_CONTROLLER` | the service chart | read for parity with `control-plane`; when set in a satellite it replaces `BASELINE_ORIGIN` as the namespace of the RLS address in the service chart; on this platform the baseline is never blue-green'd, so it stays empty |
 | `CLOUD_TOPOLOGY_KEY` | both | the node label each Deployment spreads its pods over, `kubernetes.io/hostname` by default: one topology spread constraint with `maxSkew: 1` and `whenUnsatisfiable: ScheduleAnyway`, selecting the Deployment's own pods |
@@ -292,15 +292,14 @@ management:                          # Deployment.yaml, Service.yaml, Authorizat
   enabled: false                     #   human operators (management-api.md), off by default: the port can lift a
                                      #   limit; on, it is port 8082 on the pod and the Service plus
                                      #   --management-bind-address
+  callers: []                       # the ServiceAccounts that may call the API, each holding operator: <name> in
+                                     #   NAMESPACE, <namespace>/<name> elsewhere; at least one while enabled
+  m2m:
+    audience: netcracker             # the audience a caller's token is issued for; any other gets 401
   authorizationPolicy:               # DENY on that port for every source but the listed service accounts; ztunnel
     enabled: true                    #   enforces it, so it holds only while the pod is in the mesh
-    allowedServiceAccounts: []       # empty = the private gateway alone (<ISTIO_PRIVATE_GATEWAY_NAME>-istio)
-  claims:                            # where the identity is read from in the bearer token; a dotted path for a
-    subject: sub                     #   nested claim (Keycloak issues the roles under realm_access.roles)
-    roles: roles
-  roles:                             # the IdP's role names mapped onto viewer and operator; an empty list grants
-    viewer: [viewer]                 #   its role to nobody, and the schema refuses both empty. A read-only
-    operator: [operator]             #   deployment sets operator: [] (left out, it keeps the default [operator])
+    allowedServiceAccounts: []       # empty = the callers; in their grammar, set it to the gateway's
+                                     #   (<gateway>-istio) and any direct caller when the callers come through one
   gatewayDomains: [gateway.private]  # the rate limit domains of the gateways that route to the API: its paths are
                                      #   exempt from the checks of these domains (see "Management API port")
 
@@ -523,7 +522,8 @@ name and reads `/debug/applied` on it. The `management` port is added behind `ma
 ### Role.yaml (operator chart)
 
 Everything is namespace-scoped, and there is no ClusterRole. The operator's ServiceAccount is the only one of the
-delivery that a Role is bound to; the service pod mounts no token at all:
+delivery that a Role is bound to; the service pod mounts its token only with `management.enabled`, to verify the
+management API's callers, and its ServiceAccount has no Role:
 
 | Resource | Verbs | Purpose |
 | --- | --- | --- |
@@ -571,8 +571,10 @@ delivery that a Role is bound to; the service pod mounts no token at all:
 - env: `LOGGING_LEVEL_ROOT` (not `--zap-log-level`), `CLOUD_NAMESPACE` and `POD_NAME` from fieldRefs (the Downward API;
   the namespace is the installation scope and the namespace segment in counter keys), `SERVICE_VERSION` (the image tag,
   reported as `ratelimit_build_info`; the pipeline passes no build argument to the image, so without it every scrape
-  would say `dev`), `METRICS_NEAR_LIMIT_RATIO`, `RESPONSE_HEADERS_IETF`, plus `MANAGEMENT_CLAIMS_*`,
-  `MANAGEMENT_ROLES_*`, and `MANAGEMENT_GATEWAY_DOMAINS` behind `management.enabled`;
+  would say `dev`), `METRICS_NEAR_LIMIT_RATIO`, `RESPONSE_HEADERS_IETF`, plus `MANAGEMENT_CALLERS`,
+  `MANAGEMENT_M2M_AUDIENCE`, and `MANAGEMENT_GATEWAY_DOMAINS` behind `management.enabled`; with it, also the volume
+  `serviceaccount`, the pod's projected ServiceAccount token at `/var/run/secrets/kubernetes.io/serviceaccount` (see
+  "Management API port");
 - the `maxSurge: 1 / maxUnavailable: 0` strategy unless `DEPLOYMENT_STRATEGY_TYPE` says otherwise: the gateways must
   not lose all RLS endpoints at once;
 - `lifecycle.preStop.sleep: 7s` (the native handler, needs k8s >= 1.30): on deletion the pod leaves Endpoints
@@ -837,25 +839,38 @@ threshold moved without its rationale fails CI rather than a pager.
 The [management API](management-api.md) lives in the service and its chart. It is off by default:
 `management.enabled` adds the `management` port (8082, plain HTTP) to the container and the Service and passes
 `--management-bind-address` to the process; without it the endpoints do not exist. The port is outside the gateways'
-data path: only the private gateway may reach it, and public traffic never does. Its idempotency records and
-confirmation tokens live in the counter store, so the service writes nothing to the API server.
+data path, and public traffic never reaches it. Its idempotency records and confirmation tokens live in the counter
+store, so the service writes nothing to the API server.
 
-Authentication is the gateway's: its JWT filter verifies the platform IdP's bearer token, and the service reads the
-subject and the roles out of the forwarded token without verifying the signature. That holds only while nothing but
-the gateway can reach the port, which is what `AuthorizationPolicy.yaml` is for: a `DENY` on the management port for
-every source but `management.authorizationPolicy.allowedServiceAccounts`, where an empty list means the private
-gateway's own service account, `<ISTIO_PRIVATE_GATEWAY_NAME>-istio` (Istio's automated deployment names it after the
-gateway and its class). `DENY` with `notPrincipals` rather than `ALLOW`, because an `ALLOW` policy applies to the
+The service authenticates every call itself: the bearer token is a Kubernetes ServiceAccount token issued for
+`management.m2m.audience` (default `netcracker`), verified against the API server's OIDC discovery, and a caller listed
+in `management.callers` holds `operator`; any other verified caller gets 403 (see the [management API's
+security](management-api.md#security)). An entry is `<name>` for a ServiceAccount in `NAMESPACE` or `<namespace>/<name>`
+for one elsewhere; the schema refuses an empty list while `management.enabled` is true, and the service leaves out an
+entry of another shape and logs it. To verify, the pod mounts its own ServiceAccount token in the volume
+`serviceaccount` at `/var/run/secrets/kubernetes.io/serviceaccount`: a projected `serviceAccountToken`, the cluster CA
+from the ConfigMap `kube-root-ca.crt`, and the namespace from the Downward API, the layout the API server's automount
+gives. `automountServiceAccountToken` stays `false`, and the ServiceAccount has no Role, so the token reads the OIDC
+discovery and the key set, which every ServiceAccount may read, and nothing else. The discovery runs over TLS against
+the system trust store, so the base image has to carry the cluster's ServiceAccount CA there. Until the discovery
+answers, the API refuses every call with `503` and `RLS-0504`, retries the discovery without a restart, and the data
+path is unaffected. The Deployment renders the values as `MANAGEMENT_CALLERS` and `MANAGEMENT_M2M_AUDIENCE`, read at
+start. The e2e install sets a caller and an audience of its own, so the suite proves the values reach the service, not
+only the Deployment.
+
+`AuthorizationPolicy.yaml` keeps the port to the callers: a `DENY` on the management port for every source but
+`management.authorizationPolicy.allowedServiceAccounts`, where an empty list means the callers. An entry of either list
+is `<name>` in `NAMESPACE` or `<namespace>/<name>` in its own namespace, rendered as
+`cluster.local/ns/<namespace>/sa/<name>`, and the schema refuses an entry of another shape. When the callers come
+through a gateway, the policy sees the gateway's workload rather than theirs; list its ServiceAccount there, which
+Istio's automated deployment names after the gateway and its class, `<gateway>-istio`, together with any caller that
+reaches the port directly. `DENY` with `notPrincipals` rather than `ALLOW`, because an `ALLOW` policy applies to the
 whole workload and would have to enumerate the gRPC and metrics ports as well; a port left out of that list would stop
 answering. ztunnel enforces it, so it holds only while the pod is in the mesh: a namespace without ambient redirection
-or a sidecar gets a policy that matches nothing and an open port. `management.authorizationPolicy.enabled: false` is
-for a deployment where something outside the mesh already does the same job, and belongs in a review. A satellite
-renders none of this: the service chart renders only the gateway filters there. The identity the service reads is
-configured under `management.claims` (the claim of the subject and the claim of the roles, a dotted path for a nested
-claim such as `realm_access.roles`) and `management.roles` (the IdP's role names mapped onto `viewer` and `operator`,
-lists with at least one of them non-empty); the Deployment renders them as `MANAGEMENT_CLAIMS_*` and
-`MANAGEMENT_ROLES_*`, which the configloader maps onto the service's properties. The e2e install uses a nested claim and
-IdP role names of its own, so the suite proves the values reach the service, not only the Deployment.
+or a sidecar gets a policy that matches nothing and an open port, behind which the token check still holds.
+`management.authorizationPolicy.enabled: false` is for a deployment where something outside the mesh already does the
+same job, and belongs in a review. A satellite renders none of this: the service chart renders only the gateway filters
+there.
 
 `management.gatewayDomains` (a list of rate limit domains, default `[gateway.private]`) names the domains of the
 gateways that route to the API. The gateway checks a request to the API like any other request it carries, and the
@@ -874,7 +889,8 @@ outside the list is always checked. In a composite every gateway sends the same 
 satellites' gateways of a listed domain too: a request under `/ratelimit/v1` through a satellite's private gateway is
 not rate limited either, whatever that gateway routes the path to. Change the list when the private gateway's domain is
 not the default, or when a gateway added to `management.authorizationPolicy.allowedServiceAccounts` routes to the API as
-well. An empty list exempts nothing. The Deployment renders the list as `MANAGEMENT_GATEWAY_DOMAINS`, read at start;
+well. An empty list exempts nothing, and a caller that reaches the port directly needs no entry, since its requests
+pass no gateway's check. The Deployment renders the list as `MANAGEMENT_GATEWAY_DOMAINS`, read at start;
 with `management.enabled: false` the variable is not rendered and no path is exempt.
 
 The exemption removes the dependency on the counter store, not on the check: the gateway still sends one, and under
