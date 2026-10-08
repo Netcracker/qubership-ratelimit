@@ -2,8 +2,10 @@ package rls
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +18,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	"github.com/netcracker/qubership-ratelimit/service/internal/store"
+	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
 func freeAddr(t *testing.T) string {
@@ -28,90 +30,116 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-func TestRunner_servesAndStopsGracefully(t *testing.T) {
-	log, _ := recordingLogger()
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetOf(t, "gateway.public"))
-
-	runner := &Runner{
-		Addr:         freeAddr(t),
-		Server:       NewServer(ruleStore, log),
-		DrainTimeout: 2 * time.Second,
-		Log:          logr.Discard(),
-	}
-	assert.False(t, runner.Serving(), "a runner that has not started must not report ready")
-
+// startRunner starts a Runner of server on a free loopback address and returns
+// once it reports serving. stop cancels the runner's context and returns what
+// Start returned, or an error when Start has not returned within ten seconds;
+// the test's cleanup calls it too.
+func startRunner(t *testing.T, server *Server, drainTimeout time.Duration) (runner *Runner, stop func() error) {
+	t.Helper()
+	runner = &Runner{Addr: freeAddr(t), Server: server, DrainTimeout: drainTimeout, Log: logr.Discard()}
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan error, 1)
 	go func() { stopped <- runner.Start(ctx) }()
 
-	require.Eventually(t, runner.Serving, 5*time.Second, 10*time.Millisecond)
-	require.NoError(t, runner.Healthz(nil))
-
-	conn, err := grpc.NewClient(runner.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer func() { _ = conn.Close() }()
-
-	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer callCancel()
-	resp, err := envoyratelimit.NewRateLimitServiceClient(conn).ShouldRateLimit(callCtx, request(
-		"gateway.public",
-		map[string]string{"path": "/api/v1/orders", "token": rawToken},
-	))
-	require.NoError(t, err)
-	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
-
-	cancel()
-	select {
-	case err := <-stopped:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("the runner did not stop after its context was cancelled")
+	var once sync.Once
+	var stopErr error
+	stop = func() error {
+		once.Do(func() {
+			cancel()
+			select {
+			case stopErr = <-stopped:
+			case <-time.After(10 * time.Second):
+				stopErr = errors.New("Runner.Start did not return within 10s of its context ending")
+			}
+		})
+		return stopErr
 	}
+	t.Cleanup(func() {
+		if err := stop(); err != nil {
+			t.Errorf("stopping the runner on %s: %v", runner.Addr, err)
+		}
+	})
 
-	assert.False(t, runner.Serving())
-	assert.Error(t, runner.Healthz(nil), "readiness must fail once the endpoint stops serving")
+	require.Eventually(t, runner.Serving, 5*time.Second, 10*time.Millisecond,
+		"Runner.Serving never reported true after Start on %s", runner.Addr)
+	return runner, stop
 }
 
-func TestRunner_reportsAnUnusableAddress(t *testing.T) {
-	log, _ := recordingLogger()
+// dialRunner returns a client of the rate limit service on runner's address,
+// closed when the test ends.
+func dialRunner(t *testing.T, runner *Runner) envoyratelimit.RateLimitServiceClient {
+	t.Helper()
+	conn, err := grpc.NewClient(runner.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return envoyratelimit.NewRateLimitServiceClient(conn)
+}
+
+func TestRunner_isNotServingBeforeStart(t *testing.T) {
+	server, _ := newServerOver(nil)
+	runner := &Runner{Addr: freeAddr(t), Server: server, Log: logr.Discard()}
+
+	assert.False(t, runner.Serving())
+}
+
+// A started runner reports itself ready and returns a verdict for a check over
+// gRPC.
+func TestRunner_servesChecksOnceStarted(t *testing.T) {
+	server, _ := newServerOver(ruleSetOver(t, "gateway.public", nil, memory.New()))
+	runner, _ := startRunner(t, server, 2*time.Second)
+	client := dialRunner(t, runner)
+	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer callCancel()
+
+	resp, err := client.ShouldRateLimit(callCtx, request("gateway.public",
+		map[string]string{"path": "/api/v1/orders", "token": rawToken}))
+
+	assert.NoError(t, runner.Healthz(nil), "Healthz while serving")
+	require.NoError(t, err)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
+}
+
+// Once its context ends, Start drains and returns nil, and the runner reports
+// itself not ready.
+func TestRunner_stopsServingWhenItsContextEnds(t *testing.T) {
+	server, _ := newServerOver(ruleSetOver(t, "gateway.public", nil, memory.New()))
+	runner, stop := startRunner(t, server, 2*time.Second)
+
+	err := stop()
+
+	require.NoError(t, err, "Runner.Start after its context ended")
+	assert.False(t, runner.Serving(), "Serving after Start returned")
+	assert.Error(t, runner.Healthz(nil), "Healthz after Start returned")
+}
+
+func TestRunner_startFailsOnAnAddressInUse(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer func() { _ = occupied.Close() }()
+	server, _ := newServerOver(nil)
+	runner := &Runner{Addr: occupied.Addr().String(), Server: server, Log: logr.Discard()}
 
-	runner := &Runner{
-		Addr:   occupied.Addr().String(),
-		Server: NewServer(store.New(), log),
-		Log:    logr.Discard(),
-	}
+	err = runner.Start(context.Background())
 
-	assert.Error(t, runner.Start(context.Background()))
+	var opErr *net.OpError
+	require.ErrorAs(t, err, &opErr, "Runner.Start on %s, which another listener holds", runner.Addr)
+	assert.Equal(t, "listen", opErr.Op)
 }
 
-// A check larger than maxCheckBytes is refused by the transport, so a direct
-// caller cannot hand the engine a value of megabytes.
-func TestRunner_refusesAnOversizedCheck(t *testing.T) {
-	log, _ := recordingLogger()
-	ruleStore := store.New()
-	ruleStore.Replace(ruleSetOf(t, "gateway.public"))
-	runner := &Runner{Addr: freeAddr(t), Server: NewServer(ruleStore, log), DrainTimeout: time.Second, Log: logr.Discard()}
-	ctx, cancel := context.WithCancel(context.Background())
-	stopped := make(chan error, 1)
-	go func() { stopped <- runner.Start(ctx) }()
-	t.Cleanup(func() { cancel(); <-stopped })
-	require.Eventually(t, runner.Serving, 5*time.Second, 10*time.Millisecond)
-
-	conn, err := grpc.NewClient(runner.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer func() { _ = conn.Close() }()
-	client := envoyratelimit.NewRateLimitServiceClient(conn)
-
+// A check larger than maxCheckBytes, 128 KiB (131072 bytes), is refused by the
+// transport, so a direct caller cannot hand the engine a value of megabytes. A
+// check of ordinary size on the same connection is the control.
+func TestRunner_refusesACheckOverTheMessageSizeLimit(t *testing.T) {
+	server, _ := newServerOver(ruleSetOver(t, "gateway.public", nil, memory.New()))
+	runner, _ := startRunner(t, server, time.Second)
+	client := dialRunner(t, runner)
 	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer callCancel()
-	_, err = client.ShouldRateLimit(callCtx, request("gateway.public",
-		map[string]string{"path": "/" + strings.Repeat("a", maxCheckBytes)}))
-	assert.Equal(t, codes.ResourceExhausted, status.Code(err), "an oversized check was accepted: %v", err)
+
+	_, err := client.ShouldRateLimit(callCtx, request("gateway.public",
+		map[string]string{"path": "/" + strings.Repeat("a", 131072)}))
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err), "status of a check with a path of 131073 bytes: %v", err)
 
 	_, err = client.ShouldRateLimit(callCtx, request("gateway.public", map[string]string{"path": "/api/v1/orders"}))
-	assert.NoError(t, err, "a check of ordinary size was refused")
+	assert.NoError(t, err, "a check of ordinary size")
 }
