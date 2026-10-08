@@ -326,9 +326,9 @@ func (h *testAPI) call(t *testing.T, method, target string, caller string, body 
 // not produce, such as a value followed by trailing data.
 type rawJSON string
 
-// callWith runs one request, letting the caller shape the headers, such as an
-// Idempotency-Key or another subject's token, before it goes out. A body other
-// than a rawJSON is sent as its JSON encoding.
+// callWith runs one request as caller, letting the test shape the headers, such
+// as an Idempotency-Key or a request id, before it goes out. A body other than a
+// rawJSON is sent as its JSON encoding.
 func (h *testAPI) callWith(
 	t *testing.T,
 	method, target string,

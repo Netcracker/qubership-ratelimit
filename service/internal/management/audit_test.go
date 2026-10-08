@@ -34,7 +34,9 @@ type loggedLine struct {
 	message string
 }
 
-func (l *recordingLogger) DebugC(context.Context, string, ...any) {}
+func (l *recordingLogger) DebugC(ctx context.Context, format string, args ...any) {
+	l.InfoC(ctx, format, args...)
+}
 
 func (l *recordingLogger) InfoC(ctx context.Context, format string, args ...any) {
 	l.mu.Lock()

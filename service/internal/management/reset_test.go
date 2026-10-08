@@ -336,17 +336,9 @@ func TestReset_scopesTheKeyToItsSubject(t *testing.T) {
 	h := newTestAPI(t)
 	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
 
-	as := func(subject string) *testResponse {
-		return h.callWith(t, http.MethodDelete, BasePath+"/domains/"+testDomain+"/counters?"+addressAlice,
-			listedCaller, nil, func(request *http.Request) {
-				request.Header.Set("Authorization", "Bearer "+testToken(subject))
-				request.Header.Set("Idempotency-Key", "key-1")
-			})
-	}
-
 	var first, second ResetResponse
-	decode(t, as(listedCaller), http.StatusOK, &first)
-	decode(t, as(otherCaller), http.StatusOK, &second)
+	decode(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusOK, &first)
+	decode(t, h.reset(t, addressAlice, "key-1", otherCaller), http.StatusOK, &second)
 
 	require.NotNil(t, first.ResetCount, "the answer of an execution carries resetCount")
 	require.Equal(t, 1, *first.ResetCount, "the reset of the first subject")
