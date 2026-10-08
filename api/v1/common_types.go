@@ -214,6 +214,7 @@ type ClaimMapping struct {
 	// descriptor key pattern of this API, camelCase included; path, method and
 	// token are produced by the engine and cannot be redefined, while sub
 	// is an allowed override.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -236,10 +237,12 @@ type ClaimMapping struct {
 	ClaimPath []string `json:"claimPath,omitempty"`
 
 	// type is the shape of the extracted value.
+	// +optional
 	// +kubebuilder:default=String
 	Type ClaimType `json:"type,omitempty"`
 
 	// normalization is applied to the extracted value.
+	// +optional
 	// +kubebuilder:default=None
 	Normalization NormalizeMode `json:"normalization,omitempty"`
 
@@ -257,6 +260,7 @@ type ClaimMapping struct {
 type Group struct {
 	// name is how a predicate references the group. It is unique within the
 	// policy.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -268,6 +272,7 @@ type Group struct {
 	// applies (None by default); what the mapping entry declares for a
 	// mapped key; and a path capture as the segment was sent. The members
 	// are compared as written, so their case is the author's responsibility.
+	// +required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:MaxLength=256
 	// +listType=atomic

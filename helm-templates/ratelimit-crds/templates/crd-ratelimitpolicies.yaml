@@ -1187,9 +1187,11 @@ spec:
                 format: int32
                 type: integer
             type: object
+        required:
+        - spec
         type: object
         x-kubernetes-validations:
-        - message: 'metadata.name has to equal spec.domain: the policy is the singleton
+        - message: 'metadata.name must equal spec.domain: the policy is the singleton
             of its domain'
           rule: self.metadata.name == self.spec.domain
     served: true

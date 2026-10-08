@@ -441,9 +441,12 @@ The API server writes a schema default into every object at admission. A rule th
 carry `behavior: Enforce` as a written field, and the compiler could not tell that field from an omission, so the
 preset's `behavior` would never apply. With no schema default, an absent field is an omission and the compiler
 reads it as `Enforce`, `GCRA`, or `All`, which is what the engine does with an empty value. `algorithm` leaves the
-schema with the other two so that the three defaults live in one place, the compiler; a window is taken or replaced
-with the whole `rates` list, so a stored `algorithm: GCRA` changes nothing. `kubectl get -o yaml` shows `behavior`,
-`algorithm`, and `mode` only on objects that wrote them.
+schema with the other two: a window is taken or replaced with the whole `rates` list, so a stored `algorithm: GCRA`
+changes nothing. The defaults of the three fields then live in one place, the compiler. The defaults of `type` and
+`normalization` in a `mappings` entry stay in the schema, because no preset supplies those fields. A default the
+compiler reads belongs to the operator release, not to the API version: a later change of such a default changes how
+the compiler reads a stored object, and the `apiVersion` of the object stays the same. `kubectl get -o yaml` shows
+`behavior`, `algorithm`, and `mode` only on objects that wrote them.
 
 **Objects stored before the change.** Such an object may carry `mode: All`, `behavior: Enforce`, and
 `algorithm: GCRA` as written fields where it left them out, because the API server wrote them at admission. A stored

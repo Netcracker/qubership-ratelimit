@@ -106,11 +106,13 @@ type HTTPMethod string
 // PathMatch selects request paths.
 type PathMatch struct {
 	// type selects how value is compared.
+	// +required
 	Type PathMatchType `json:"type"`
 
 	// value is the path, the prefix, or the template. It starts with a slash;
 	// the query string of a request is cut before matching, so it never appears
 	// here.
+	// +required
 	// +kubebuilder:validation:Pattern=`^/`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
@@ -121,6 +123,7 @@ type PathMatch struct {
 // with AND; the routes of a target combine with OR.
 type Route struct {
 	// path selects request paths.
+	// +required
 	Path PathMatch `json:"path"`
 
 	// methods accepts a request whose method is one of the listed values. An
@@ -133,6 +136,7 @@ type Route struct {
 // Target restricts a block to part of the traffic of its domain.
 type Target struct {
 	// routes is an OR-list. A block without a target sees the whole domain.
+	// +required
 	// +kubebuilder:validation:MinItems=1
 	// +listType=atomic
 	Routes []Route `json:"routes"`
@@ -149,12 +153,14 @@ type Target struct {
 type Predicate struct {
 	// key names the descriptor key the predicate reads: sub, a mappings
 	// key, or a capture of the block's own Template routes.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Key string `json:"key"`
 
 	// operator is the predicate applied to the value set of the key.
+	// +required
 	Operator PredicateOperator `json:"operator"`
 
 	// value is the operand of Equals, Contains, and InGroup. For InGroup it is
@@ -176,12 +182,14 @@ type Predicate struct {
 // buckets, so a rate limit and a quota live side by side.
 type Rate struct {
 	// requests is the quota of the window.
+	// +required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=2147483647
 	Requests int32 `json:"requests"`
 
 	// periodSeconds is the length of the window. A day is the ceiling: beyond
 	// it a counter stops being a rate limit and becomes an accounting record.
+	// +required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=86400
 	PeriodSeconds int32 `json:"periodSeconds"`
@@ -206,10 +214,18 @@ type Rate struct {
 // writes empty, such as counters: [] for one shared bucket over a preset's
 // axes, has to reach the API server as [] and stay a value, where omitempty
 // would drop it and the rule would take the preset's list.
+//
+// The Kubernetes API conventions prescribe a pointer to a slice, with
+// omitempty, for a list whose empty value differs from its absence. The
+// compiler, the engine, and the manifest format take plain slices, so the lists
+// stay plain slices. The omitzero tag keeps the empty list in the serialized
+// object the way a pointer would, in encoding/json and in the unstructured
+// converter of apimachinery alike.
 
 // Rule is one counter of a block.
 type Rule struct {
 	// name is unique within its block and is part of the counter key.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -288,6 +304,7 @@ type Rule struct {
 // verdict of each.
 type LimitBlock struct {
 	// name is unique within its policy and is part of the counter key.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -368,6 +385,7 @@ type RateLimitPolicySpec struct {
 	// namespace from the domain inside the tag, so none of them is allowed
 	// here. The naming convention is <kind>.<name>: gateway.public,
 	// service.billing.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -393,6 +411,7 @@ type RateLimitPolicySpec struct {
 	Presets *Presets `json:"presets,omitempty" manifest:"-"`
 
 	// limits are the blocks of the policy.
+	// +required
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map
 	// +listMapKey=name
@@ -432,6 +451,7 @@ type RuleProblem struct {
 	// DomainBudgetExceeded, ResolvedPolicyTooLarge, and
 	// CaptureShadowsMappedKey. CaptureShadowsMappedKey is informational; every
 	// other reason blocks the generation.
+	// +required
 	Reason string `json:"reason"`
 
 	// message says what the rule references and what the domain offers.
@@ -533,7 +553,7 @@ type RateLimitPolicyStatus struct {
 // +kubebuilder:printcolumn:name="Rules",type=integer,JSONPath=`.status.rules`
 // +kubebuilder:printcolumn:name="Problems",type=integer,JSONPath=`.status.problems`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.domain",message="metadata.name has to equal spec.domain: the policy is the singleton of its domain"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.domain",message="metadata.name must equal spec.domain: the policy is the singleton of its domain"
 
 // RateLimitPolicy is the whole rate limit configuration of one gateway domain.
 //
@@ -559,12 +579,14 @@ type RateLimitPolicy struct {
 
 	// spec is the rate limit configuration of the domain the policy is named
 	// after.
-	Spec RateLimitPolicySpec `json:"spec,omitempty"`
+	// +required
+	Spec RateLimitPolicySpec `json:"spec"`
 
 	// status is what the operator observed: whether the latest generation
 	// compiles, which generation the service replicas enforce, and the
 	// problems of the latest generation.
-	Status RateLimitPolicyStatus `json:"status,omitempty"`
+	// +optional
+	Status RateLimitPolicyStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true

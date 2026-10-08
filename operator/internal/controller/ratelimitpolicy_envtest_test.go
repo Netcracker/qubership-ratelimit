@@ -11,6 +11,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -107,7 +108,7 @@ var _ = Describe("RateLimitPolicy", func() {
 			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
 			policy.Name = "something-else"
 
-			Expect(create(policy)).To(MatchError(ContainSubstring("metadata.name has to equal spec.domain")))
+			Expect(create(policy)).To(MatchError(ContainSubstring("metadata.name must equal spec.domain")))
 		})
 
 		It("refuses a second policy for a domain", func() {
@@ -119,6 +120,18 @@ var _ = Describe("RateLimitPolicy", func() {
 	})
 
 	Context("the schema", func() {
+		It("requires a spec", func() {
+			// A typed client sends a spec even when it is empty, so the object
+			// without one is built as unstructured.
+			policy := &unstructured.Unstructured{}
+			policy.SetAPIVersion(ratelimitv1.GroupVersion.String())
+			policy.SetKind("RateLimitPolicy")
+			policy.SetNamespace(envtestNamespace)
+			policy.SetName("gateway.public")
+
+			Expect(k8sClient.Create(ctx, policy)).To(MatchError(ContainSubstring("spec: Required value")))
+		})
+
 		It("requires a domain", func() {
 			// The name has to equal the domain, and a name cannot be empty, so an
 			// empty domain has nowhere left to hide.
