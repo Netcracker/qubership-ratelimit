@@ -1,8 +1,9 @@
 // Ratelimit-service is the data-plane half of the split. It answers
 // ShouldRateLimit from the configuration the operator wrote and the kubelet
 // mounted, serves the management API over the same counters, and holds no
-// Kubernetes client: its pod carries no Role and no token, and what it knows
-// of the cluster is a directory and the Downward API.
+// Kubernetes client: its pod is bound to no Role and mounts its ServiceAccount
+// token only for the management API, which verifies callers' tokens with it,
+// and what it knows of the cluster is a directory and the Downward API.
 package main
 
 import (
@@ -67,9 +68,10 @@ func main() {
 	ctxmanager.Register([]ctxmanager.ContextProvider{xrequestid.XRequestIdProvider{}})
 
 	// The DBaaS client resolves the counter store from the mounted Secret and
-	// falls back to REST only on a miss. The pod holds no token, so the
-	// provider is the platform's dummy: a miss fails at DBaaS rather than
-	// authenticating as anything.
+	// falls back to REST only on a miss. The provider is the platform's dummy,
+	// so a miss fails at DBaaS rather than authenticating as anything: the
+	// pod's ServiceAccount token, mounted only for the management API, is not
+	// offered to DBaaS.
 	serviceloader.Register(2, &security.DummyToken{})
 
 	setupLog := logging.GetLogger(loggerName)

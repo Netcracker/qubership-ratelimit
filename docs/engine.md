@@ -108,8 +108,9 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   `ReplicaStale` threshold that separates a stale replica from `Propagating` is 90 s, above the kubelet sync period.
   The same port answers `/debug/snapshot` and `/debug/snapshot/{domain}`, which render what this replica enforces for a
   human with a port-forward; nothing in the delivery reads them.
-- **The service holds no Kubernetes credentials**: its pod carries no Role, sets `automountServiceAccountToken: false`,
-  and writes nothing to the API server. The repository enforces the boundary: `operator/` and `service/` each hold a
+- **The service reads no API server object**: its pod is bound to no Role, sets `automountServiceAccountToken: false`,
+  mounts its ServiceAccount token only with `management.enabled` to verify the management API's callers, and writes
+  nothing to the API server. The repository enforces the boundary: `operator/` and `service/` each hold a
   `cmd` and an `internal` tree, so Go's path rule for `internal` makes an import across the halves a compile error; a
   depguard rule forbids client-go and controller-runtime under `service/`; CI reads the build information of the service
   binary and fails when client-go is present.

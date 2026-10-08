@@ -18,8 +18,8 @@ ambient gateways (and any other consumers) over the Envoy RLS protocol (`envoy.s
    UID, and hash of each domain. The operator writes the object's status; the ConfigMap is the last-good state.
 3. Every replica of the service mounts the ConfigMap as a directory and watches it. The kubelet projects a change
    within its sync period, one minute by default. On the swap the replica decodes the manifest, compiles every domain
-   with the engine module, and swaps the in-memory rule snapshot atomically. A replica holds no Kubernetes credentials
-   and reads nothing from the API server.
+   with the engine module, and swaps the in-memory rule snapshot atomically. A replica is bound to no Role and reads no
+   object from the API server.
 4. For every request, the gateway sends the service one flat descriptor: `path`, `method`, `token` (the value of the
    `authorization` header), and `request_id`. The gateway takes the request's domain from the configuration of its
    `envoy.filters.http.ratelimit` filter (the service chart installs it).

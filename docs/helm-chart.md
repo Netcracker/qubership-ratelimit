@@ -46,7 +46,8 @@ helm-templates/ratelimit-service/templates/
 │                                  #   duplicate domain), dbaasNamespace, millicores (the autoscaler's CPU target)
 ├── Deployment.yaml                # the Deployment ratelimit-service, REPLICAS replicas; mounts ratelimit-config
 │                                  #   at /etc/ratelimit/config with optional: true and the counter store's
-│                                  #   Secret under /etc/secrets/dbaas-secrets without it; no token mounted
+│                                  #   Secret under /etc/secrets/dbaas-secrets without it; the ServiceAccount
+│                                  #   token only with management.enabled
 ├── HorizontalPodAutoscaler.yaml   # autoscaling/v2 on CPU, from the HPA_* parameters; both directions Disabled
 │                                  #   without HPA_ENABLED
 ├── InternalDatabase.yaml          # the counter store's Redis database, behind redis.dbaas.enabled
@@ -620,7 +621,7 @@ path for DBaaS Secrets, and passes `--redis-dbaas-microservice=<SERVICE_NAME>` w
 the pod's namespace. The service resolves its database through the platform's Go DBaaS client
 (`qubership-core-lib-go-dbaas-base-client`), which matches the mounted `metadata.json` to that classifier and type
 `redis`. Until dbaas-operator has written the Secret, the pod waits in `ContainerCreating`; a replica never starts
-counting on its own. The client falls back to REST only on a miss, and the pod holds no token for it, so a Secret that
+counting on its own. The client falls back to REST only on a miss and holds no credentials for it, so a Secret that
 does not match fails the start within 5 s with the classifier in the error, before the liveness probe fires. The
 service reads host and port once: an address that changes in the Secret ends the process and the container restarts
 onto the new database. It resolves the connection again every 30 s and uses the password the Secret holds from the
