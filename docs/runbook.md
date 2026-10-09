@@ -1152,12 +1152,12 @@ without the cluster's ServiceAccount CA in its trust store: the service reaches 
 system trust store. An error that says the token could not be acquired is a pod without the `serviceaccount` volume,
 which the chart renders only with `management.enabled`. A refused connection or a timeout is the network between the pod
 and the API server, or an API server that accepts the connection and does not answer: each request to it is given ten
-seconds. A `401` that names the signature for a token the API server just issued, while the verifier is ready, is a key
-set the service could not fetch after the discovery; the service fetches it again on the next unknown key, at most every
-five minutes. A `401` that names the audience is a caller that sends a token for another audience: the release's
-`management.m2m.audience` and the caller's token have to agree, which the platform's clients do with
-`KUBERNETES_M2M_ENABLED=true` and the default `netcracker`. A `403` is a caller missing from `management.callers`; the
-start line lists the ones the service read.
+seconds. A `401` with the detail `the bearer token is signed with a key this cluster does not hold`, for a token the API
+server just issued while the verifier is ready, is a key set the service could not fetch after the discovery; the
+service fetches it again on the next unknown key, at most every five minutes. A `401` that names the audience is a
+caller that sends a token for another audience: the release's `management.m2m.audience` and the caller's token have to
+agree, which the platform's clients do with `KUBERNETES_M2M_ENABLED=true` and the default `netcracker`. A `403` is a
+caller missing from `management.callers`; the start line lists the ones the service read.
 
 **Revoke a caller.** Remove it from `management.callers` and upgrade the release: the service reads the list at start,
 and the upgrade restarts the pods. Until a pod restarts it still admits the caller, and a token already issued stays

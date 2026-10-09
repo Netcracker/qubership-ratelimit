@@ -283,6 +283,45 @@ func TestNewVerifier_refusesAnUnknownKeyWithoutWaitingForTheRefresh(t *testing.T
 	}
 }
 
+// Every token under a key id the key set does not hold, signed with an
+// algorithm the verifier accepts, is refused as such, the second one in a
+// refresh window too; the management API names the unknown key in its 401
+// detail on jwkset.ErrKeyNotFound. The second token used to get the refresh
+// limiter's error instead, and its caller was told that the signature could not
+// be verified.
+func TestNewVerifier_refusesEveryUnknownKeyAsAKeyTheClusterDoesNotHold(t *testing.T) {
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+	stranger, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	_, first := verifier.Verify(ctx, c.token(t, stranger, "idp", nil))
+	_, second := verifier.Verify(ctx, c.token(t, stranger, "idp", nil))
+
+	assert.ErrorIs(t, first, jwkset.ErrKeyNotFound, "the first token under the unknown key id")
+	assert.ErrorIs(t, second, jwkset.ErrKeyNotFound, "the second token under it, inside the refresh window")
+}
+
+// A token under a key id the key set holds whose lookup fails for another
+// reason, an algorithm the key does not carry, is not refused as an unknown
+// key. This is the control of
+// TestNewVerifier_refusesEveryUnknownKeyAsAKeyTheClusterDoesNotHold.
+func TestNewVerifier_refusesAnAlgorithmTheKeyDoesNotCarryAsAKnownKey(t *testing.T) {
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+
+	_, err = verifier.Verify(ctx, c.signed(t, jwt.SigningMethodRS512, c.key, "cluster", nil))
+
+	assert.ErrorIs(t, err, jwt.ErrTokenUnverifiable)
+	assert.NotErrorIs(t, err, jwkset.ErrKeyNotFound)
+}
+
 // A pod token that is not a JWT names no issuer to read the discovery of.
 func TestNewVerifier_refusesAPodTokenThatIsNotAJWT(t *testing.T) {
 	for _, tc := range []struct {
