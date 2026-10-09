@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
     go build -ldflags "-X main.version=${VERSION}" -o ratelimit-operator ./operator/cmd/
 
-FROM ghcr.io/netcracker/qubership-core-base:alpine-2.5.6@sha256:e85e971e33cdb218bf1c23ccbad0d0ddaee7d3abfc442247d81081e3d0467467
+FROM ghcr.io/netcracker/qubership-core-base:alpine-2.5.7@sha256:f0836415633bc2a63c2a0431c4c0701d17bd7b31132176b26651b49927d9ad7e
 WORKDIR /app
 COPY --chown=10001:0 --chmod=555 --from=builder /app/ratelimit-operator /app/ratelimit-operator
 COPY --chown=10001:0 --chmod=444 --from=builder /app/operator/application.yaml /app/application.yaml
