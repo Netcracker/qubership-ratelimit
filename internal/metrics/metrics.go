@@ -50,6 +50,10 @@ const (
 // budget" reads exactly rather than interpolated.
 var durationBuckets = []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, 1}
 
+// ConfigErrorRead is the reason of a ConfigWriteErrors sample for a reconcile
+// that could not read what it writes from.
+const ConfigErrorRead = "read"
+
 var (
 	// Checks counts every ShouldRateLimit call by its final verdict. The
 	// unavailable verdict is the fail-open exposure window: traffic that
@@ -132,12 +136,14 @@ var (
 
 	// TokensSeen is the traffic half of the detector: a key whose extraction
 	// series sits at zero while this one grows has a dead claim path. It
+	// counts the requests a block targeted, the ones whose token the engine
+	// reads, as the extraction series does. It
 	// carries the domain because the detector's other half does: joined
 	// namespace-wide, one domain's traffic would judge another domain's
 	// idle keys and report a dead claim path on a mapping nobody used.
 	TokensSeen = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_tokens_seen_total",
-		Help: "Decisions on a known domain whose request carried a token, by domain.",
+		Help: "Decisions on a known domain whose request carried a token that a block targeted, by domain.",
 	}, []string{"domain"})
 
 	// StoreRoundtrip is the counter store's share of the check. It is labeled
@@ -166,14 +172,16 @@ var (
 
 	// ConfigWriteErrors counts failed writes of the configuration ConfigMap by
 	// the operator, by reason: size, the namespace's state does not fit the
-	// object even after the fit; api, the API server refused the write; other.
+	// object even after the fit; api, the API server refused the write; read,
+	// the reconcile could not read the policies or the ConfigMap it writes
+	// from, so it wrote nothing; other.
 	// Nothing degrades at once, the replicas keep the configuration they
 	// mounted, but the change is not reaching them, and the last-good
 	// fallback a restart would need is not being saved. A delayed-fuse alert,
 	// and the one the status reports 90 s later as ReplicaStale.
 	ConfigWriteErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ratelimit_config_write_errors_total",
-		Help: "Failed writes of the configuration ConfigMap by reason: size, api, other.",
+		Help: "Failed writes of the configuration ConfigMap by reason: size, api, read, other.",
 	}, []string{"reason"})
 
 	// ConfigAbsent is 1 while the mounted configuration directory holds no

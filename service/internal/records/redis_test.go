@@ -57,6 +57,7 @@ func redisClient(t *testing.T) goredis.UniversalClient {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if err := client.Ping(t.Context()).Err(); err == nil {
+			requireCluster(t, client, addr)
 			return client
 		} else if time.Now().After(deadline) {
 			t.Fatalf("Redis at %s is unreachable: %v", addr, err)
@@ -159,4 +160,21 @@ func freshKeys(t *testing.T) records.Keys {
 func counterKey(t *testing.T) string {
 	t.Helper()
 	return fmt.Sprintf("rl:v1:{records-test}:a/b/c:gcra:60:%d-%d:", time.Now().UnixNano(), keySequence.Add(1))
+}
+
+// requireCluster fails the test when REDIS_REQUIRE_CLUSTER is set and the
+// server at addr runs with cluster support disabled. A cluster run that
+// reached a standalone server passes every test it exists to fail.
+func requireCluster(t testing.TB, client goredis.UniversalClient, addr string) {
+	t.Helper()
+	if os.Getenv("REDIS_REQUIRE_CLUSTER") == "" {
+		return
+	}
+	info, err := client.Info(t.Context(), "cluster").Result()
+	if err != nil {
+		t.Fatalf("read the cluster section of INFO at %s: %v", addr, err)
+	}
+	if !strings.Contains(info, "cluster_enabled:1") {
+		t.Fatalf("REDIS_REQUIRE_CLUSTER is set, but the Redis at %s is not a cluster", addr)
+	}
 }

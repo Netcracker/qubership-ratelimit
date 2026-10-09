@@ -343,10 +343,13 @@ func TestReconcile_returnsAReadFailure(t *testing.T) {
 			return unreachable
 		}}).Build()
 	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: New(c, unitNamespace, nil, "v", logr.Discard())}
+	before := testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues(metrics.ConfigErrorRead))
 
 	_, err := r.Reconcile(t.Context(), reconcileRequest())
 
 	assert.ErrorIs(t, err, unreachable)
+	assert.Equal(t, before+1, testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues(metrics.ConfigErrorRead)),
+		`ratelimit_config_write_errors_total{reason="read"}: a reconcile that reads nothing writes nothing`)
 }
 
 // Policies that cannot be listed are not an empty namespace: Reconcile returns
@@ -457,4 +460,15 @@ func TestReconcile_writesTheNamespace(t *testing.T) {
 
 func reconcileRequest() ctrl.Request {
 	return ctrl.Request{NamespacedName: types.NamespacedName{Namespace: unitNamespace, Name: contract.ConfigMapName}}
+}
+
+// A limit that is not positive is a programmer's error, and Save refuses it
+// as policy.Fit does, so the two never read one limit differently.
+func TestSave_panicsOnALimitThatIsNotPositive(t *testing.T) {
+	c := fakeClient(t)
+	store := New(c, unitNamespace, nil, "v", logr.Discard())
+
+	for _, limit := range []int{0, -1} {
+		assert.Panics(t, func() { _ = store.Save(t.Context(), nil, limit) }, "Save with a limit of %d", limit)
+	}
 }

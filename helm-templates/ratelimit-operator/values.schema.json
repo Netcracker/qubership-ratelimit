@@ -249,6 +249,24 @@
           "default": "15m",
           "description": "The window over which any ConfigMap write error fires RatelimitConfigWriteErrors."
         },
+        "configWriteErrorsKeepFiring": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "30m",
+          "description": "How long RatelimitConfigWriteErrors keeps firing after the last failed write."
+        },
+        "notEnforcedFor": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "5m",
+          "description": "How long a policy enforces no generation before RatelimitNotEnforced fires."
+        },
+        "reconcileErrorsWindow": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
+          "default": "15m",
+          "description": "The window over which a controller failing every reconcile fires RatelimitOperatorReconcileFailing."
+        },
         "noLeaderFor": {
           "type": "string",
           "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
@@ -347,7 +365,9 @@
       "$id": "#/properties/BASELINE_ORIGIN",
       "type": "string",
       "title": "The BASELINE_ORIGIN schema",
-      "description": "Baseline Blue-Green Origin namespace name",
+      "description": "Baseline Blue-Green Origin namespace name: a namespace, written as Kubernetes writes it, or empty.",
+      "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$",
+      "maxLength": 63,
       "default": "",
       "examples": [
         "baseline-origin"

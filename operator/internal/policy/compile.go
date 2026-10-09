@@ -42,6 +42,10 @@ type Input struct {
 	// cold start: the latest specs are validated, and there is nothing to fall
 	// back to.
 	State map[string]Bundle
+
+	// OperatorVersion is what the manifest records as operatorVersion. [Fit]
+	// measures the manifest with it, as the writer of the ConfigMap writes it.
+	OperatorVersion string
 }
 
 // Outcome is what compilation has to say about one policy: which generation it

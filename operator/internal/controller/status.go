@@ -19,6 +19,10 @@ import (
 // StateReader is the part of the state store a reconciler needs.
 type StateReader interface {
 	Load(ctx context.Context, domains []string) (map[string]policy.Bundle, error)
+
+	// OperatorVersion is what the writer stamps into the manifest, which the
+	// fit has to measure as written.
+	OperatorVersion() string
 }
 
 // DefaultPropagationDeadline separates a rollout from a breakage. Under it,
@@ -55,6 +59,7 @@ func compile(
 		if input.State, err = state.Load(ctx, policy.Domains(input)); err != nil {
 			return nil, err
 		}
+		input.OperatorVersion = state.OperatorVersion()
 	}
 	result := policy.Compile(input)
 	policy.Fit(input, result, limit)

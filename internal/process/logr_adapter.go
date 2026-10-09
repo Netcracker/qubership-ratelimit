@@ -44,7 +44,7 @@ func (a *logrAdapter) Enabled(level int) bool {
 }
 
 func (a *logrAdapter) Info(level int, msg string, keysAndValues ...any) {
-	full := formatMessage(msg, append(a.kvs, keysAndValues...))
+	full := formatMessage(msg, a.pairs(keysAndValues))
 	if level > 0 {
 		a.logger.Debugf("%s", full)
 	} else {
@@ -53,12 +53,20 @@ func (a *logrAdapter) Info(level int, msg string, keysAndValues ...any) {
 }
 
 func (a *logrAdapter) Error(err error, msg string, keysAndValues ...any) {
-	full := formatMessage(msg, append(a.kvs, keysAndValues...))
+	full := formatMessage(msg, a.pairs(keysAndValues))
 	if err != nil {
 		a.logger.Errorf("%s: %v", full, err)
 	} else {
 		a.logger.Errorf("%s", full)
 	}
+}
+
+// pairs returns the sink's pairs followed by the call's, in a slice of its
+// own: the sink's slice is shared by every goroutine that logs through it.
+func (a *logrAdapter) pairs(call []any) []any {
+	out := make([]any, 0, len(a.kvs)+len(call))
+	out = append(out, a.kvs...)
+	return append(out, call...)
 }
 
 func (a *logrAdapter) WithValues(keysAndValues ...any) logr.LogSink {

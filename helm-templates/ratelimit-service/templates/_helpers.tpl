@@ -3,8 +3,8 @@ Which of the composite's namespaces this release lands in, read the same
 way as the operator chart reads it: a namespace with the platform's
 BASELINE_ORIGIN set is a satellite, and a namespace without it is the
 baseline or a standalone installation, which render the same objects. A
-BASELINE_ORIGIN naming the release's own namespace fails the render, as it
-does in the operator chart.
+BASELINE_ORIGIN naming NAMESPACE, the namespace the release installs into,
+fails the render, as it does in the operator chart.
 
 A satellite runs no service: one installed there would wait for an operator
 that never comes, stay NotReady, and fail the readiness gate of the
@@ -100,16 +100,23 @@ of both gateways would merge into the same buckets.
 
 {{/*
 The namespace of the dbaas-operator that reconciles the chart's DBaaS objects:
-the host of API_DBAAS_ADDRESS is <aggregator>.<namespace>, and the operator
-runs beside its aggregator. http://dbaas-aggregator.dbaas:8080 gives dbaas.
+redis.dbaas.operatorNamespace when set, or else the namespace in the host of
+API_DBAAS_ADDRESS, <aggregator>.<namespace> with an optional .svc or
+.svc.cluster.local, since the operator runs beside its aggregator.
+http://dbaas-aggregator.dbaas:8080 gives dbaas. A host of any other form, an
+IP address or an external name, fails the render rather than naming a
+namespace no dbaas-operator watches.
 */}}
 {{- define "ratelimit.dbaasNamespace" -}}
-{{- $host := first (splitList ":" (last (splitList "://" .Values.API_DBAAS_ADDRESS))) -}}
-{{- $parts := splitList "." $host -}}
-{{- if lt (len $parts) 2 -}}
-{{- fail (printf "API_DBAAS_ADDRESS %q names no namespace; expected http://<aggregator>.<namespace>:<port>" .Values.API_DBAAS_ADDRESS) -}}
+{{- if .Values.redis.dbaas.operatorNamespace -}}
+{{- .Values.redis.dbaas.operatorNamespace -}}
+{{- else -}}
+{{- $host := first (splitList "/" (first (splitList ":" (last (splitList "://" .Values.API_DBAAS_ADDRESS))))) -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.[a-z]([-a-z0-9]*[a-z0-9])?(\\.svc(\\.cluster\\.local)?)?$" $host) -}}
+{{- fail (printf "API_DBAAS_ADDRESS %q does not name the namespace of dbaas-operator: its host is not <aggregator>.<namespace>[.svc[.cluster.local]]. Set redis.dbaas.operatorNamespace." .Values.API_DBAAS_ADDRESS) -}}
 {{- end -}}
-{{- index $parts 1 -}}
+{{- index (splitList "." $host) 1 -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -122,4 +129,13 @@ A CPU quantity in millicores: "500m" is 500, "1" is 1000.
 {{- else -}}
 {{- mulf $value 1000 -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+ratelimit.valueOr renders .value, or .default when the value is unset or
+empty. Helm's default function also replaces a numeric zero, and zero is a
+meaningful maxSurge, maxUnavailable, or stabilization window.
+*/}}
+{{- define "ratelimit.valueOr" -}}
+{{- if or (kindIs "invalid" .value) (eq (toString .value) "") -}}{{ .default }}{{- else -}}{{ .value }}{{- end -}}
 {{- end -}}

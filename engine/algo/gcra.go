@@ -19,9 +19,10 @@ func (gcra) Name() string { return "GCRA" }
 
 func (gcra) consumes() []string { return []string{"Burst"} }
 
-// exactEmissionFloor is the emission interval, in microseconds, above which
-// rounding to a whole microsecond keeps the enforced rate within 1% of the
-// configured one. Below it the rounding is no longer a rounding — 500001/s
+// exactEmissionFloor is the emission interval, in whole microseconds as
+// EmissionMicros rounds it, from which rounding keeps the enforced rate within
+// 1% of the configured one: an interval of at least 100 is off by less than
+// one part in 100. Below it the rounding is no longer a rounding — 500001/s
 // would enforce as 500000/s — so the period must divide evenly instead.
 const exactEmissionFloor = 100
 

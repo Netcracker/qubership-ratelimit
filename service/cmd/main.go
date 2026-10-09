@@ -59,7 +59,7 @@ func main() {
 	flag.DurationVar(&options.Resync, "config-resync", config.DefaultResync,
 		"How often the configuration directory is re-read without a file event.")
 	flag.DurationVar(&options.DrainTimeout, "rls-drain-timeout", rls.DefaultDrainTimeout,
-		"How long in-flight rate limit checks may delay shutdown.")
+		"How long in-flight rate limit checks and management API calls may delay shutdown; 0 is the default.")
 	flag.Parse()
 
 	// Properties first, loggers second: LOG_LEVEL and the namespace both arrive

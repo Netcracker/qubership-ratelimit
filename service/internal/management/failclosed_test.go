@@ -294,3 +294,30 @@ func TestFailClosed_anAddressedResetTheStoreRefusedRunsOnRetry(t *testing.T) {
 	require.NotNil(t, retry.ResetCount, "the answer of an execution carries resetCount")
 	assert.Equal(t, 1, *retry.ResetCount, "counters the retried reset dropped")
 }
+
+// silentRecords answers no lookup until the caller's context ends.
+type silentRecords struct {
+	records.Store
+}
+
+func (silentRecords) Lookup(ctx context.Context, _ records.Keys) (records.Record, error) {
+	<-ctx.Done()
+	return records.Record{}, ctx.Err()
+}
+
+// A store that does not answer fails the request at requestTimeout with
+// RLS-0503. The request used to wait on the client's own timeouts, more than
+// a minute and a half against an address that does not answer.
+func TestFailClosed_aStoreThatDoesNotAnswerFailsTheRequestAtItsDeadline(t *testing.T) {
+	timeout := requestTimeout
+	requestTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { requestTimeout = timeout })
+	h := newTestAPI(t)
+	h.api.Records = silentRecords{Store: h.records}
+
+	start := time.Now()
+	requireError(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
+	assert.Less(t, time.Since(start), 5*time.Second)
+}

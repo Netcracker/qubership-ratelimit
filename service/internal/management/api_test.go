@@ -959,3 +959,37 @@ func TestSimulation_refusesAMissingIdentityOrANegativeCost(t *testing.T) {
 		})
 	}
 }
+
+// A field the body carries is a value, bounded as the specification bounds it:
+// a cost of at least 1, a token that is not empty, and keys that name at least
+// one identity key, in every form, and null for none of them. Such fields used
+// to read as absent, and the simulation answered 200 for a cost of 1 or for an
+// anonymous request.
+func TestSimulation_refusesAnExplicitFieldOutsideItsBounds(t *testing.T) {
+	h := newTestAPI(t)
+	const request = `"domain":"` + testDomain + `","path":"/api/orders","method":"GET"`
+
+	for _, tc := range []struct {
+		name, extra, field string
+	}{
+		{"a cost of zero", `"cost":0`, "cost"},
+		{"a cost of zero in the token form", `"identitySource":"token","token":"t","cost":0`, "cost"},
+		{"a cost of zero in the keys form", `"identitySource":"keys","keys":{"sub":["alice"]},"cost":0`, "cost"},
+		{"a null cost", `"cost":null`, "cost"},
+		{"an empty token", `"token":""`, "token"},
+		{"a null token", `"token":null`, "token"},
+		{"empty keys", `"keys":{}`, "keys"},
+		{"null keys", `"keys":null`, "keys"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller,
+				rawJSON("{"+request+","+tc.extra+"}")), http.StatusBadRequest, CodeInvalidRequest)
+			assert.Equal(t, []string{tc.field}, body.Meta.Fields)
+		})
+	}
+
+	for _, extra := range []string{"", `,"cost":1`} {
+		recorder := h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, rawJSON("{"+request+extra+"}"))
+		assert.Equal(t, http.StatusOK, recorder.Code, "body %q: %s", extra, recorder.Body.String())
+	}
+}

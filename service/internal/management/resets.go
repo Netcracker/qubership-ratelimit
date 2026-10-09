@@ -158,6 +158,9 @@ func (a *API) accept(
 			withRetryAfter(accepted.LeaseTTL)
 	case accepted.TokenMissing:
 		return errorf(CodeGone, "the confirmation token expired or was already used; run a new preview")
+	case !accepted.OK && accepted.Existing.Found && accepted.Existing.Fencing == fencing:
+		// The fencing token is this call's own, so the record is this call's
+		// acceptance: the client retried a write whose reply was lost.
 	case !accepted.OK:
 		return a.standing(c, keys, accepted.Existing, command)
 	}

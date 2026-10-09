@@ -28,7 +28,7 @@ no list needs `maxItems`.
 | **Window** | `periodSeconds` | 1..86400 | whole seconds per the API convention; a day is the ceiling for rate limiting, beyond that it is a quota | `minimum`/`maximum` |
 | | `requests`, `burst` | 1..2 147 483 647 | int32 with explicit bounds | `minimum`/`maximum` |
 | | GCRA: resolution | `requests ≤ periodSeconds × 10⁶` (≤ 1 million/s) | whole microseconds in Lua | the compiler, `algo.Check` |
-| | GCRA: divisibility | with an emission interval < 100 µs, the period divides evenly by `requests` | emission rounding ≤ 1 % | the compiler, `algo.Check` |
+| | GCRA: divisibility | with an emission interval < 100 µs once rounded up to a whole µs, the period divides evenly by `requests` | emission rounding < 1 % | the compiler, `algo.Check` |
 | | GCRA: depth | `burst × emission ≤ 10¹⁵ µs` | int64 protection | the compiler, `algo.Check` |
 | **Names** | domain | ≤ 63, `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` | the hash tag of every counter key of the domain, without `:`, `{`, `}`, `/` | pattern, `maxLength` |
 | | block, rule, group | ≤ 63, `^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$` | block and rule names are counter key segments; a group name enters no key | pattern, `maxLength` |
@@ -111,8 +111,10 @@ From the engine's `algo.Check`; the refusal arrives in the status as `InvalidWin
 - `periodSeconds` is an integer from 1 to 86 400 (a day), the only window bound the schema holds; in Lua the period is
   whole microseconds (`periodSeconds × 10⁶`);
 - GCRA computes in whole microseconds: no more than one request per microsecond (`requests ≤ periodSeconds × 10⁶`);
-- with an emission interval shorter than 100 µs (faster than 10 000/s per bucket) the period must divide evenly by
-  `requests`: below this bound, rounding the emission to a microsecond distorts the rate by more than 1 %;
+- with an emission interval shorter than 100 µs once rounded up to a whole microsecond (faster than 10 101/s per
+  bucket) the period must divide evenly by `requests`: an interval of at least 100 µs is off by less than 1 % after the
+  rounding, and a shorter one by more. A rate between 10 001/s and 10 101/s rounds to 100 µs and is enforced as
+  10 000/s, under 1 % stricter than written;
 - the bucket depth `burst × (period / requests)` is ≤ 10¹⁵ µs (~31 years), so the depth arithmetic and the duration
   conversions stay far from int64 overflow;
 - FixedWindow has no additional math.

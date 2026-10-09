@@ -315,6 +315,8 @@ type fakeState struct {
 	bundle policy.Bundle
 }
 
+func (fakeState) OperatorVersion() string { return "test" }
+
 func (f fakeState) Load(_ context.Context, domains []string) (map[string]policy.Bundle, error) {
 	out := make(map[string]policy.Bundle, len(domains))
 	for _, domain := range domains {

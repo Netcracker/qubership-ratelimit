@@ -3,6 +3,7 @@ package identity
 import (
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 	"strings"
 
 	"github.com/netcracker/qubership-ratelimit/engine/compile"
@@ -100,7 +101,9 @@ func Extract(plan []compile.KeyExtraction, token string) (map[string][]string, [
 // direct form of the protocol, so that a value counts the same whichever form
 // carried it. A key with more than MaxArrayItems values, or with a value
 // longer than MaxValueBytes, is absent, empty values are dropped, and the
-// values of a key the plan lowercases are lowercased. A skip is reported for a
+// values of a key the plan lowercases are lowercased. A key is a set, so a
+// value repeated, before or after lowercasing, counts once, at its first
+// position. A skip is reported for a
 // key the plan declares; the others are the caller's own names, and a skip
 // carrying them would hand the caller the cardinality of a metric.
 func Explicit(plan []compile.KeyExtraction, keys map[string][]string) (map[string][]string, []Skip) {
@@ -126,9 +129,23 @@ func Explicit(plan []compile.KeyExtraction, keys map[string][]string) (map[strin
 				kept[i] = strings.ToLower(kept[i])
 			}
 		}
-		out[key] = kept
+		out[key] = distinct(kept)
 	}
 	return out, skips
+}
+
+// distinct returns values without repeats, in the order of first occurrence.
+func distinct(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // planned finds the plan's extraction of key.

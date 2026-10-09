@@ -208,6 +208,13 @@
               "type": "boolean",
               "default": true,
               "description": "Render the InternalDatabase and the DatabaseSecretClaim. false expects the Secret <SERVICE_NAME>-redis, with connectionProperties.json in DBaaS's format, to be provided otherwise, as on a test cluster without DBaaS."
+            },
+            "operatorNamespace": {
+              "type": "string",
+              "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$",
+              "maxLength": 63,
+              "default": "",
+              "description": "Namespace of the dbaas-operator that reconciles the chart's DBaaS objects. Empty reads it from the host of API_DBAAS_ADDRESS, http://<aggregator>.<namespace>:<port>; set it when that host has another form."
             }
           },
           "additionalProperties": false
@@ -232,7 +239,17 @@
       "title": "Prometheus metrics endpoint",
       "properties": {
         "nearLimitRatio": {
-          "$ref": "#/definitions/numberOrString",
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "exclusiveMaximum": 1
+            },
+            {
+              "type": "string",
+              "pattern": "^0?\\.[0-9]*[1-9][0-9]*$"
+            }
+          ],
           "description": "Share of the capacity of a rule's window consumed before an admission counts as near-limit, the burst of a GCRA window or the requests of a fixed one; a ratio in (0, 1).",
           "default": "0.9"
         }
@@ -258,8 +275,8 @@
         "timeout": {
           "type": "string",
           "title": "Check timeout",
-          "description": "Envoy-side timeout for a rate limit check, as a protobuf duration: seconds with an optional fraction, e.g. 0.05s. Go-style values such as 50ms are rejected by Envoy.",
-          "pattern": "^[0-9]+(\\.[0-9]+)?s$",
+          "description": "Envoy-side timeout for a rate limit check, as a protobuf duration: seconds with an optional fraction, e.g. 0.05s, and above zero. Go-style values such as 50ms are rejected by Envoy.",
+          "pattern": "^([0-9]*[1-9][0-9]*(\\.[0-9]+)?|[0-9]+\\.[0-9]*[1-9][0-9]*)s$",
           "default": "0.05s"
         },
         "failClosed": {
@@ -271,9 +288,8 @@
         "rateLimitedStatus": {
           "type": "integer",
           "title": "Refusal status",
-          "description": "Status the client sees on a refused request. Envoy ignores values below 400.",
-          "minimum": 400,
-          "maximum": 599,
+          "description": "Status the client sees on a refused request. One of the 4xx and 5xx codes of Envoy's StatusCode enumeration. Envoy rejects the filter, and with it the gateway's listener update, for any other code.",
+          "enum": [400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 421, 422, 423, 424, 426, 428, 429, 431, 500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511],
           "default": 429
         },
         "grpcAsResourceExhausted": {
@@ -337,10 +353,18 @@
           "description": "Render the PrometheusRule of the data plane. Read only with MONITORING_ENABLED."
         },
         "latencyBudgetSeconds": {
-          "type": "number",
-          "exclusiveMinimum": 0,
+          "anyOf": [
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^([1-9][0-9]*(\\.[0-9]+)?|0?\\.[0-9]*[1-9][0-9]*)$"
+            }
+          ],
           "default": 0.01,
-          "description": "The p99 of a check, in seconds, above which RatelimitDecisionLatencyHigh fires. A value at or below zero would render a comparison every check satisfies."
+          "description": "The p99 of a check, in seconds, above which RatelimitDecisionLatencyHigh fires: a number above zero, or the same written as a decimal string, which is what --set makes of a fraction. A value at or below zero would render a comparison every check satisfies."
         },
         "latencyFor": {
           "type": "string",
@@ -435,8 +459,8 @@
             "timeout": {
               "type": "string",
               "title": "Check timeout override",
-              "description": "Overrides filter.timeout for this gateway. Same format: a protobuf duration such as 0.05s.",
-              "pattern": "^[0-9]+(\\.[0-9]+)?s$"
+              "description": "Overrides filter.timeout for this gateway. Same format: a protobuf duration above zero, such as 0.05s.",
+              "pattern": "^([0-9]*[1-9][0-9]*(\\.[0-9]+)?|[0-9]+\\.[0-9]*[1-9][0-9]*)s$"
             },
             "failClosed": {
               "type": "boolean",
@@ -446,9 +470,8 @@
             "rateLimitedStatus": {
               "type": "integer",
               "title": "Refusal status override",
-              "description": "Overrides filter.rateLimitedStatus for this gateway. Envoy ignores values below 400.",
-              "minimum": 400,
-              "maximum": 599
+              "description": "Overrides filter.rateLimitedStatus for this gateway. One of the 4xx and 5xx codes of Envoy's StatusCode enumeration. Envoy rejects the filter, and with it the gateway's listener update, for any other code.",
+              "enum": [400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 421, 422, 423, 424, 426, 428, 429, 431, 500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511]
             },
             "grpcAsResourceExhausted": {
               "type": "boolean",
@@ -482,8 +505,8 @@
             "timeout": {
               "type": "string",
               "title": "Check timeout override",
-              "description": "Overrides filter.timeout for this gateway. Same format: a protobuf duration such as 0.05s.",
-              "pattern": "^[0-9]+(\\.[0-9]+)?s$"
+              "description": "Overrides filter.timeout for this gateway. Same format: a protobuf duration above zero, such as 0.05s.",
+              "pattern": "^([0-9]*[1-9][0-9]*(\\.[0-9]+)?|[0-9]+\\.[0-9]*[1-9][0-9]*)s$"
             },
             "failClosed": {
               "type": "boolean",
@@ -493,9 +516,8 @@
             "rateLimitedStatus": {
               "type": "integer",
               "title": "Refusal status override",
-              "description": "Overrides filter.rateLimitedStatus for this gateway. Envoy ignores values below 400.",
-              "minimum": 400,
-              "maximum": 599
+              "description": "Overrides filter.rateLimitedStatus for this gateway. One of the 4xx and 5xx codes of Envoy's StatusCode enumeration. Envoy rejects the filter, and with it the gateway's listener update, for any other code.",
+              "enum": [400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 421, 422, 423, 424, 426, 428, 429, 431, 500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511]
             },
             "grpcAsResourceExhausted": {
               "type": "boolean",
@@ -810,7 +832,8 @@
             "audience": {
               "type": "string",
               "minLength": 1,
-              "description": "The audience a caller's token is issued for; a token for any other audience is refused with 401. The platform's machine-to-machine tokens use netcracker.",
+              "pattern": "^\\S(.*\\S)?$",
+              "description": "The audience a caller's token is issued for; a token for any other audience is refused with 401. The platform's machine-to-machine tokens use netcracker. It neither starts nor ends with a space.",
               "default": "netcracker"
             }
           },
@@ -876,7 +899,9 @@
       "$id": "#/properties/BASELINE_ORIGIN",
       "type": "string",
       "title": "The BASELINE_ORIGIN schema",
-      "description": "Baseline Blue-Green Origin namespace name",
+      "description": "Baseline Blue-Green Origin namespace name: a namespace, written as Kubernetes writes it, or empty.",
+      "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$",
+      "maxLength": 63,
       "default": "",
       "examples": [
         "baseline-origin"
@@ -886,7 +911,9 @@
       "$id": "#/properties/BASELINE_CONTROLLER",
       "type": "string",
       "title": "The BASELINE_CONTROLLER schema",
-      "description": "Baseline Blue-Green Controller namespace name",
+      "description": "Baseline Blue-Green Controller namespace name: a namespace, written as Kubernetes writes it, or empty.",
+      "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$",
+      "maxLength": 63,
       "default": "",
       "examples": [
         "baseline-controller"

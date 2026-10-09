@@ -28,11 +28,13 @@ var alertsOf = map[string][]string{
 	},
 	operatorChart: {
 		"RatelimitStalled",
+		"RatelimitNotEnforced",
 		"RatelimitNotReadyLong",
 		"RatelimitNoReplicas",
 		"RatelimitChecksStopped",
 		"RatelimitRuleProblems",
 		"RatelimitConfigWriteErrors",
+		"RatelimitOperatorReconcileFailing",
 		"RatelimitNoOperatorLeader",
 	},
 }
@@ -98,13 +100,15 @@ func TestCharts_labelEachAlertWithItsSeverity(t *testing.T) {
 			"RatelimitConfigurationAbsent":     "warning",
 		}},
 		{operatorChart, map[string]string{
-			"RatelimitStalled":           "critical",
-			"RatelimitNotReadyLong":      "warning",
-			"RatelimitNoReplicas":        "critical",
-			"RatelimitChecksStopped":     "warning",
-			"RatelimitRuleProblems":      "warning",
-			"RatelimitConfigWriteErrors": "critical",
-			"RatelimitNoOperatorLeader":  "critical",
+			"RatelimitStalled":                  "critical",
+			"RatelimitNotReadyLong":             "warning",
+			"RatelimitNoReplicas":               "critical",
+			"RatelimitChecksStopped":            "warning",
+			"RatelimitRuleProblems":             "warning",
+			"RatelimitConfigWriteErrors":        "critical",
+			"RatelimitNoOperatorLeader":         "critical",
+			"RatelimitNotEnforced":              "critical",
+			"RatelimitOperatorReconcileFailing": "critical",
 		}},
 	} {
 		t.Run(c.chart, func(t *testing.T) {
@@ -227,10 +231,19 @@ func TestCharts_renderNoAlertRulesWithTheirOwnSwitchOff(t *testing.T) {
 }
 
 // seriesName matches the name of a series the binaries publish, all of which
-// start with ratelimit_, as a whole word of a PromQL expression.
-var seriesName = regexp.MustCompile(`(?:^|[^a-z0-9_])(ratelimit_[a-z0-9_]*)`)
+// start with ratelimit_ or, for the operator's controllers, with the
+// controller_runtime_ of the library, as a whole word of a PromQL expression.
+var seriesName = regexp.MustCompile(`(?:^|[^a-z0-9_])((?:ratelimit|controller_runtime)_[a-z0-9_]*)`)
 
-// seriesReadBy lists the ratelimit_ series a PromQL expression names.
+// controllerRuntimeSeries are the series of controller-runtime the alerts
+// read. The library registers them on the operator's registry itself, from a
+// package this module cannot import, so they are named here.
+var controllerRuntimeSeries = []string{
+	"controller_runtime_reconcile_errors_total",
+	"controller_runtime_reconcile_total",
+}
+
+// seriesReadBy lists the series a PromQL expression names.
 func seriesReadBy(expr string) []string {
 	matches := seriesName.FindAllStringSubmatch(expr, -1)
 	names := make([]string, 0, len(matches))
@@ -246,7 +259,7 @@ func seriesReadBy(expr string) []string {
 // hand: a series renamed in internal/metrics fails here instead of leaving
 // a rule that matches nothing and a test that still passes.
 func TestCharts_alertExpressionsReadTheSeriesTheCodeDefines(t *testing.T) {
-	defined := registeredSeries()
+	defined := append(registeredSeries(), controllerRuntimeSeries...)
 	for chart := range alertsOf {
 		t.Run(chart, func(t *testing.T) {
 			rule := only(t, render(t, chart, "biz", "--set", "MONITORING_ENABLED=true"), "PrometheusRule")
@@ -314,6 +327,8 @@ func TestCharts_refuseAlertValuesThatBreakTheRules(t *testing.T) {
 		{serviceChart, "alerts.latencyBudgetSeconds=0", "latencyBudgetSeconds"},
 		{serviceChart, "alerts.latencyBudgetSeconds=-1", "latencyBudgetSeconds"},
 		{serviceChart, "alerts.latencyBudgetSeconds=abc", "latencyBudgetSeconds"},
+		{serviceChart, "alerts.latencyBudgetSeconds=0.0", "latencyBudgetSeconds"},
+		{serviceChart, "alerts.latencyBudgetSeconds=1e-3", "latencyBudgetSeconds"},
 		{serviceChart, "alerts.keyNotExtractedWindow=0m", "keyNotExtractedWindow"},
 		{serviceChart, "alerts.storeErrorsFor=abc", "storeErrorsFor"},
 		{serviceChart, "alerts.configAbsentFor=5", "configAbsentFor"},
@@ -343,8 +358,8 @@ func alertNamed(t *testing.T, rule object, name string) node {
 // The schema admits the values just inside the bounds that
 // TestCharts_refuseAlertValuesThatBreakTheRules refuses at, a latency budget
 // just above zero and a duration that starts with 1, and each reaches the
-// rule it sets. The budget goes in with --set-json, because --set hands a
-// decimal fraction to the schema as a string.
+// rule it sets. The budget goes in both as a number, with --set-json, and as
+// the string --set makes of a decimal fraction.
 func TestCharts_acceptAlertValuesJustInsideTheirBounds(t *testing.T) {
 	for _, c := range []struct {
 		name, chart string
@@ -354,6 +369,8 @@ func TestCharts_acceptAlertValuesJustInsideTheirBounds(t *testing.T) {
 	}{
 		{"latencyBudgetSeconds=0.001", serviceChart, []string{"--set-json", "alerts.latencyBudgetSeconds=0.001"},
 			"RatelimitDecisionLatencyHigh", "expr", "> 0.001"},
+		{"latencyBudgetSeconds=0.005 through --set", serviceChart, []string{"--set", "alerts.latencyBudgetSeconds=0.005"},
+			"RatelimitDecisionLatencyHigh", "expr", "> 0.005"},
 		{"keyNotExtractedWindow=1m", serviceChart, []string{"--set", "alerts.keyNotExtractedWindow=1m"},
 			"RatelimitKeyDeclaredNotExtracted", "expr", "[1m]"},
 		{"stalledFor=1s", operatorChart, []string{"--set", "policyAlerts.stalledFor=1s"},

@@ -205,9 +205,13 @@ type Decision struct {
 
 	Rules []RuleOutcome
 
-	// Skips are extraction anomalies for the metrics layer. Identity is
-	// resolved only when at least one block targets the request; a request
-	// outside every target reports no skips.
+	// Targeted reports that at least one block targets the request, which is
+	// when identity is resolved: a request outside every target reports no
+	// skips and no extracted keys, whatever its token carries.
+	Targeted bool
+
+	// Skips are extraction anomalies for the metrics layer, empty unless
+	// Targeted.
 	Skips []identity.Skip
 
 	// ExtractedKeys are the names — never the values — of the declared
@@ -261,7 +265,7 @@ func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decis
 
 	buckets := matched.Buckets()
 	if len(buckets) == 0 {
-		return Decision{Allowed: true, Skips: skips, ExtractedKeys: e.keyNames(keys)}, nil
+		return Decision{Allowed: true, Targeted: true, Skips: skips, ExtractedKeys: e.keyNames(keys)}, nil
 	}
 	if len(buckets) > MaxDecisionBuckets {
 		return Decision{}, fmt.Errorf("%w: the request matched %d buckets", ErrTooManyBuckets, len(buckets))
@@ -274,6 +278,7 @@ func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decis
 
 	decision := Decision{
 		Allowed:       store.Admitted(buckets, verdicts),
+		Targeted:      true,
 		Rules:         ruleOutcomes(matched, buckets, verdicts),
 		Skips:         skips,
 		ExtractedKeys: e.keyNames(keys),

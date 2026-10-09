@@ -116,6 +116,19 @@ policyAlerts:
   # fallback a restart would need is not being saved; any increase over the
   # window fires.
   configWriteErrorsWindow: 15m
+  # The alert keeps firing for configWriteErrorsKeepFiring after the last
+  # failed write: the retries back off up to 1000 seconds apart, and the
+  # window would otherwise empty between two of them.
+  configWriteErrorsKeepFiring: 30m
+
+  # RatelimitNotEnforced: a policy enforces no generation at all, so its
+  # domain passes unlimited. Held for notEnforcedFor.
+  notEnforcedFor: 5m
+
+  # RatelimitOperatorReconcileFailing: a controller of the leader failed
+  # every reconcile over reconcileErrorsWindow and completed none, such as
+  # after its Role lost a permission.
+  reconcileErrorsWindow: 15m
 
   # RatelimitNoOperatorLeader: no operator pod holds the Lease, so nothing
   # compiles policies or writes the ConfigMap; the replicas keep enforcing

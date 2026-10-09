@@ -112,9 +112,10 @@ type KeyView struct {
 }
 
 // Handler answers GET on contract.SnapshotPath and on
-// contract.SnapshotPath/{domain}, as JSON, or as YAML when the query says
-// format=yaml or the Accept header names it. Every other method is 405: the
-// endpoint reads the store and nothing else.
+// contract.SnapshotPath/{domain}, as JSON by default. The query parameter
+// format decides when present, YAML for format=yaml and JSON for any other
+// value; without it, an Accept header that names YAML asks for YAML. Every
+// other method is 405: the endpoint reads the store and nothing else.
 func Handler(rules *store.Store, replica string) http.Handler {
 	h := &handler{rules: rules, replica: replica}
 	mux := http.NewServeMux()

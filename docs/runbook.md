@@ -108,12 +108,14 @@ the chart value named, with its default:
 
 | Alert | Severity | Fires on | Held | Section |
 | --- | --- | --- | --- | --- |
-| `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1`, every reason, `NotCompiled` included | `policyAlerts.stalledFor`, 5m | 4; 3 or 5 on `NotCompiled`; `ConfigMapTooLarge` as in the status table |
+| `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1` with any reason but `NotCompiled` | `policyAlerts.stalledFor`, 5m | 4; `ConfigMapTooLarge` as in the status table |
+| `RatelimitNotEnforced` | critical | `ratelimit_policy_enforced == 0`: the policy enforces no generation | `policyAlerts.notEnforcedFor`, 5m | 3 |
 | `RatelimitNotReadyLong` | warning | `ratelimit_policy_ready == 0`, whatever the reason | `policyAlerts.notReadyFor`, 30m | the status table, by the `Ready` reason |
 | `RatelimitNoReplicas` | critical | `Ready: False` with reason `NoReplicas` | `policyAlerts.noReplicasFor`, 5m | 4 |
 | `RatelimitChecksStopped` | warning | ready replicas enforce the domain and no check of it arrived in `policyAlerts.checksStoppedWindow`, 10m | `policyAlerts.checksStoppedFor`, 15m | 10 |
 | `RatelimitRuleProblems` | warning | a blocking problem on the latest generation | `policyAlerts.ruleProblemsFor`, 5m | 3, or 5 for an unknown field |
-| `RatelimitConfigWriteErrors` | critical | a failed write of `ratelimit-config` within `policyAlerts.configWriteErrorsWindow`, 15m | none | 9 |
+| `RatelimitConfigWriteErrors` | critical | a failed write of `ratelimit-config` within `policyAlerts.configWriteErrorsWindow`, 15m, and for `policyAlerts.configWriteErrorsKeepFiring`, 30m, after the last one | none | 9 |
+| `RatelimitOperatorReconcileFailing` | critical | a controller of the operator failed every reconcile within `policyAlerts.reconcileErrorsWindow`, 15m | none | 9 |
 | `RatelimitNoOperatorLeader` | critical | no scrape of the namespace reports `ratelimit_leader 1` | `policyAlerts.noLeaderFor`, 5m | 10 |
 | `RatelimitUnknownDomain` | warning | a check for a domain no policy claims within 5m | `alerts.unknownDomainFor`, 5m | 2 |
 | `RatelimitStoreErrors` | critical | a failed store decision within 5m | `alerts.storeErrorsFor`, 5m | 1 |
@@ -258,9 +260,12 @@ kubectl logs -n "$NS" deploy/ratelimit-service --since=10m | grep -E 'store erro
 # [ERROR] ... [class=ratelimit] failed to scan counter keys domain=gateway.public error=redis: scan: EOF
 ```
 
-The `reason` label tells the class: `timeout` is latency or a partition, `server` is Redis refusing, `other` is the
-client giving up. The `ratelimit_store_roundtrip_seconds` histogram shows whether the store was slow before it failed.
-The policy status does not move during the outage: it describes rules, not counters, and `Ready` stays `True`.
+The `reason` label tells the class: `timeout` is no answer within the check's deadline, latency or a partition, and
+includes a check the gateway stopped waiting for (`context canceled` in the log above); `server` is Redis answering an
+error; `other` is connectivity, a connection refused or dropped (`EOF`) or a name that does not resolve. A decision is
+never retried, so a store that refuses connections shows as `other` at once rather than as a `timeout`. The
+`ratelimit_store_roundtrip_seconds` histogram shows whether the store was slow before it failed. The policy status does
+not move during the outage: it describes rules, not counters, and `Ready` stays `True`.
 
 A replica that does not start at all, stuck in `ContainerCreating` with `secret "ratelimit-service-redis" not found`,
 is waiting for DBaaS rather than for Redis: the Secret is written by dbaas-operator once the database exists. For a
@@ -524,7 +529,8 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 `GET /domains` showed `ruleSetVersion 5ff0f5a9e94d` with 12 rules throughout, and the manifest kept generation 1. If
 `activeGeneration` is `0`, the domain has no last-good and enforces nothing; the `Ready` message says
 `no generation is enforced: domain is unprotected`. That is the case to treat as an incident; a domain held on
-last-good is the author's to fix, and `RatelimitStalled` pages on both (section 4). A domain that lost its last-good
+last-good is the author's to fix, and `RatelimitRuleProblems` reports it as a warning; a domain that enforces nothing
+pages as `RatelimitNotEnforced`. A domain that lost its last-good
 has a `Warning` event with reason `LastGoodLost` and the same line in the operator's log, with one of two messages.
 `last-good generation N does not compile with this operator build: <problem>` follows an operator upgrade whose
 compiler refuses the saved spec. `last-good generation N was saved from a read that did not carry every field` means
@@ -597,8 +603,9 @@ ratelimit_policy_replicas{domain="gateway.public",state="total"} 3
 ```
 
 The alert is the operator chart's `RatelimitStalled`, `ratelimit_policy_stalled == 1` held for `policyAlerts.stalledFor`
-([Helm doc](helm-chart.md)). It fires on every `Stalled` reason, `NotCompiled` and `ConfigMapTooLarge` included, so a
-rejected edit (section 3) pages critical after the same hold. The generation each service pod enforces stays readable
+([Helm doc](helm-chart.md)). It fires on every `Stalled` reason but `NotCompiled`: a rejected edit (section 3) keeps
+its last-good generation and is reported by `RatelimitRuleProblems`, a warning, while `ConfigMapTooLarge` pages after
+the same hold. The generation each service pod enforces stays readable
 per pod:
 
 ```promql
@@ -982,9 +989,9 @@ stand runs no Argo CD, so this table is the mapping the check implements, not an
 A sync wave that waits on the policy closes only when every service replica enforces the rule; a Helm release closes on
 the Deployments, before a later generation reaches the replicas. A wave that stays Progressing longer than the rollout
 and the kubelet sync period take is `NoReplicas` or `ProbeFailed`. A wave that turns Degraded on `NotCompiled` or
-`ConfigMapTooLarge` is a rejected edit (section 3): the fix is the author's, not a rollback of the release, and
-`RatelimitStalled` pages on it all the same. A wave that turns Degraded on `ReplicaFormatUnsupported` is the version
-skew of section 5, a matter of the two releases.
+`ConfigMapTooLarge` is a rejected edit (section 3): the fix is the author's, not a rollback of the release.
+`RatelimitStalled` pages on `ConfigMapTooLarge` and leaves `NotCompiled` to `RatelimitRuleProblems`. A wave that turns
+Degraded on `ReplicaFormatUnsupported` is the version skew of section 5, a matter of the two releases.
 
 ## 9. The ConfigMap channel
 
@@ -1007,7 +1014,9 @@ kubectl logs -n "$NS" deploy/ratelimit-operator --since=1m | grep 'configuration
 stand: the object is also the last-good state, and a domain whose latest generation does not compile has its good spec
 nowhere else. Delete the object while such a domain is on last-good and the recreated object has no entry for it: the
 domain reads `RULES` empty, `REPLICAS 0/1`, `activeGeneration: 0`, unprotected, until its object compiles again. Fix
-the objects of section 3 before touching the ConfigMap.
+the objects of section 3 before touching the ConfigMap. The same holds for `helm uninstall` of the operator release and
+for a change of `SERVICE_NAME`: the object carries an `ownerReference` to the operator's Deployment, and the garbage
+collector deletes it with the Deployment.
 
 **A write the operator cannot make.** The Role, the API server, or the size fit refuses the write. The replicas keep
 the configuration they mounted, the status keeps reporting the previous generation as enforced, and the counter names
@@ -1188,4 +1197,4 @@ of section 7.
 | `ratelimit_policy_applied_generation{domain}` | service pods | per pod: the generation each replica enforces (section 4) |
 | `ratelimit_domain_decision_buckets{domain}` | service pods | headroom before `DomainBudgetExceeded`, against 128 |
 | `ratelimit_config_absent` | service pods | `1` while the pod's mounted directory holds no manifest: a pod that has not received one yet, or one that lost it (section 9) |
-| `ratelimit_config_write_errors_total{reason}` | operator pod | the write of `ratelimit-config` failed (`size`, `api`, `other`; section 9); the replicas keep the configuration they mounted and `ReplicaStale` follows in 90 s |
+| `ratelimit_config_write_errors_total{reason}` | operator pod | the write of `ratelimit-config` failed (`size`, `api`, `read`, `other`; section 9); the replicas keep the configuration they mounted and `ReplicaStale` follows in 90 s |

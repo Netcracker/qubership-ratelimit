@@ -48,7 +48,9 @@ var (
 )
 
 // New wraps a ready client. The caller owns the client's lifecycle and
-// timeouts; the per-decision budget arrives as the context deadline.
+// timeouts. The per-decision budget arrives as the context deadline, which a
+// call honors only when the client was built with ContextTimeoutEnabled; a
+// client without it waits for its own read timeout instead.
 func New(rdb goredis.UniversalClient) *Store {
 	return &Store{rdb: rdb}
 }

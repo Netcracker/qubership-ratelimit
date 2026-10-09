@@ -1,6 +1,8 @@
 package records_test
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +49,47 @@ func runConformance(t *testing.T, build factory) {
 		assert.Equal(t, "command-a", record.Command, "Record.Command")
 		assert.False(t, record.Terminal, "Record.Terminal")
 		assert.True(t, record.Alive(), "Alive() of %+v", record)
+	})
+
+	// Acceptance is the one write that has to be atomic under concurrent
+	// callers: whatever interleaving they meet, exactly one of them binds.
+	t.Run("concurrent acceptances of one key bind it once", func(t *testing.T) {
+		commands, _ := build(t)
+		k := freshKeys(t)
+
+		outcomes := acceptConcurrently(t, commands, func(int) records.Keys { return k })
+
+		assert.Equal(t, 1, outcomes.ok, "acceptances that bound the key: %+v", outcomes)
+		assert.Equal(t, concurrentCallers-1, outcomes.existing, "acceptances answered from the record: %+v", outcomes)
+	})
+
+	t.Run("concurrent acceptances under one token spend it once", func(t *testing.T) {
+		commands, _ := build(t)
+		token := freshKeys(t).Record + ":token"
+		require.NoError(t, commands.Put(t.Context(), token, []byte(`{"selection":"x"}`), time.Minute))
+
+		outcomes := acceptConcurrently(t, commands, func(int) records.Keys {
+			k := freshKeys(t)
+			k.Token = token
+			return k
+		})
+
+		assert.Equal(t, 1, outcomes.ok, "acceptances that spent the token: %+v", outcomes)
+		assert.Equal(t, concurrentCallers-1, outcomes.tokenMissing, "acceptances refused the spent token: %+v", outcomes)
+	})
+
+	t.Run("concurrent sweeps of one domain take the lease once", func(t *testing.T) {
+		commands, _ := build(t)
+		lease := freshKeys(t).Lease
+
+		outcomes := acceptConcurrently(t, commands, func(int) records.Keys {
+			k := freshKeys(t)
+			k.Lease = lease
+			return k
+		})
+
+		assert.Equal(t, 1, outcomes.ok, "acceptances that took the lease: %+v", outcomes)
+		assert.Equal(t, concurrentCallers-1, outcomes.busy, "acceptances refused as a sweep in flight: %+v", outcomes)
 	})
 
 	t.Run("a second sweep in the domain is refused before anything binds", func(t *testing.T) {
@@ -395,6 +438,57 @@ func runConformance(t *testing.T, build factory) {
 		require.NoError(t, err)
 		assert.False(t, found, "Get of a token never put")
 	})
+}
+
+// concurrentCallers is how many acceptances acceptConcurrently races.
+const concurrentCallers = 32
+
+// acceptances counts how a race of acceptances ended.
+type acceptances struct {
+	ok, existing, tokenMissing, busy, failed int
+}
+
+// acceptConcurrently starts concurrentCallers acceptances at once, the i-th
+// over keysOf(i) with a fencing token of its own, and counts their outcomes.
+func acceptConcurrently(t *testing.T, commands records.Store, keysOf func(i int) records.Keys) acceptances {
+	t.Helper()
+
+	keys := make([]records.Keys, concurrentCallers)
+	for i := range keys {
+		keys[i] = keysOf(i)
+	}
+	results := make([]records.Accepted, concurrentCallers)
+	errs := make([]error, concurrentCallers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range concurrentCallers {
+		wg.Go(func() {
+			<-start
+			results[i], errs[i] = commands.Accept(t.Context(), records.Acceptance{
+				Keys: keys[i], Command: "command-a", Fencing: fmt.Sprintf("fence-%d", i), LeaseTTL: time.Minute,
+			})
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	var out acceptances
+	for i, result := range results {
+		switch {
+		case errs[i] != nil:
+			out.failed++
+		case result.OK:
+			out.ok++
+		case result.TokenMissing:
+			out.tokenMissing++
+		case result.SweepBusy:
+			out.busy++
+		case result.Existing.Found:
+			out.existing++
+		}
+	}
+	require.Zero(t, out.failed, "acceptances that failed: %v", errs)
+	return out
 }
 
 // acceptWith runs one acceptance.

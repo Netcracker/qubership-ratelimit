@@ -255,8 +255,9 @@ The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and th
 the series are: the service chart alerts on the data plane (`RatelimitUnknownDomain`, `RatelimitStoreErrors`,
 `RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`,
 `RatelimitConfigurationAbsent`) and the operator chart on the policy status and the fleet (`RatelimitStalled`,
-`RatelimitNotReadyLong`, `RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`,
-`RatelimitConfigWriteErrors`, `RatelimitNoOperatorLeader`). Every expression is scoped to `NAMESPACE`. The thresholds
+`RatelimitNotEnforced`, `RatelimitNotReadyLong`, `RatelimitNoReplicas`, `RatelimitChecksStopped`,
+`RatelimitRuleProblems`, `RatelimitConfigWriteErrors`, `RatelimitOperatorReconcileFailing`,
+`RatelimitNoOperatorLeader`). Every expression is scoped to `NAMESPACE`. The thresholds
 and hold durations are under `policyAlerts.*` in the operator chart and `alerts.*` in the service chart, each with its
 rationale beside it in `values.yaml`; `enabled: false` in either block keeps the scrape and drops that chart's rules.
 `tests/charts` renders both rule sets and runs `promtool check rules` over them (`make promtool` fetches the binary from

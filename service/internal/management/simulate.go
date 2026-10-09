@@ -1,7 +1,9 @@
 package management
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -49,7 +51,42 @@ type SimulationRequest struct {
 	Keys map[string][]string `json:"keys,omitempty"`
 
 	// Cost judges every window at this cost; the simulation charges nothing.
+	// Absent is 1.
 	Cost int64 `json:"cost,omitempty"`
+
+	// carried holds the optional fields the body named, with their raw
+	// values, so that an explicit empty or null value is told from an absent
+	// one.
+	carried map[string]json.RawMessage
+}
+
+// UnmarshalJSON decodes the request with no unknown field allowed, as every
+// body of this API, and records which of cost, token, and keys it carried.
+func (s *SimulationRequest) UnmarshalJSON(data []byte) error {
+	type fields SimulationRequest
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode((*fields)(s)); err != nil {
+		return err
+	}
+	var named map[string]json.RawMessage
+	if err := json.Unmarshal(data, &named); err != nil {
+		return err
+	}
+	s.carried = map[string]json.RawMessage{}
+	for _, name := range []string{"cost", "token", "keys"} {
+		if raw, ok := named[name]; ok {
+			s.carried[name] = raw
+		}
+	}
+	return nil
+}
+
+// carriedEmpty reports whether the body named the field with null or with a
+// value that leaves it at its zero value.
+func (s *SimulationRequest) carriedEmpty(name string, zero bool) bool {
+	raw, ok := s.carried[name]
+	return ok && (zero || bytes.Equal(bytes.TrimSpace(raw), []byte("null")))
 }
 
 // SimulationResponse is the decision the gateway would have received, plus the
@@ -152,8 +189,17 @@ func (s *SimulationRequest) validate() *apiError {
 	if s.Method == "" {
 		return invalid("the simulation needs an HTTP method", "method")
 	}
-	if s.Cost < 0 {
-		return invalid("the cost must be at least 1", "cost")
+	// The schema of the specification bounds each optional field, and the
+	// runtime holds the same bounds: a field that is present is a value, never
+	// an absent one in disguise.
+	if s.Cost < 0 || s.carriedEmpty("cost", s.Cost == 0) {
+		return invalid("the cost must be at least 1; omit it for a cost of 1", "cost")
+	}
+	if s.carriedEmpty("token", s.Token == "") {
+		return invalid("the token is empty; omit the field instead", "token")
+	}
+	if s.carriedEmpty("keys", len(s.Keys) == 0) {
+		return invalid("keys names no identity key; omit the field instead", "keys")
 	}
 	if len(s.Token) > maxSimulationToken {
 		return invalid("the token is longer than the 8 KiB this endpoint accepts", "token")

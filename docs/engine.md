@@ -265,11 +265,11 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   cannot is not added.
 - **The server-side math** is integer microseconds of Unix time: exact in int64 and in Lua doubles alike (integers stay
   exact until about the year 2255), so comparisons need no epsilon guards. The GCRA emission interval rounds up to a
-  whole microsecond, so the enforced rate errs only toward the strict side; near the resolution, with intervals under
-  100 µs, the period must divide evenly by `requests`, which is a validation error instead of a silent distortion. The
-  validation bounds are at most one request per microsecond and a bucket depth `burst × emission ≤ 10¹⁵ µs`: integers
-  stay exact in Lua doubles (2⁵³ ≈ 9 × 10¹⁵), and the `time.Duration` nanoseconds (10¹⁸ ns) keep headroom below the
-  int64 ceiling. The in-memory reference and the Lua script agree on these formulas, and a differential test catches
+  whole microsecond, so the enforced rate errs only toward the strict side; near the resolution, with a rounded interval
+  under 100 µs, the period must divide evenly by `requests`, which is a validation error instead of a silent distortion.
+  The validation bounds are at most one request per microsecond and a bucket depth `burst × emission ≤ 10¹⁵ µs`:
+  integers stay exact in Lua doubles (2⁵³ ≈ 9 × 10¹⁵), and the `time.Duration` nanoseconds (10¹⁸ ns) keep headroom below
+  the int64 ceiling. The in-memory reference and the Lua script agree on these formulas, and a differential test catches
   divergence.
 
 ## Counter storage

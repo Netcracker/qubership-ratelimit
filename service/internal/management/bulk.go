@@ -283,7 +283,7 @@ func (s *SelectorBody) parse() (selector, *apiError) {
 	out := selector{}
 
 	for _, id := range s.RuleIDs {
-		if apiErr := checkRuleIDForm(id); apiErr != nil {
+		if apiErr := checkRuleIDForm(id, "selector.ruleIds"); apiErr != nil {
 			return selector{}, apiErr
 		}
 	}
@@ -293,7 +293,7 @@ func (s *SelectorBody) parse() (selector, *apiError) {
 		out.Algorithm = strings.ToLower(s.Algorithm)
 	}
 	if s.Period != "" {
-		seconds, apiErr := parsePeriod(s.Period)
+		seconds, apiErr := parsePeriod(s.Period, "selector.period")
 		if apiErr != nil {
 			return selector{}, apiErr
 		}

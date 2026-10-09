@@ -220,11 +220,17 @@ type ClaimMapping struct {
 	// +listType=atomic
 	ClaimPath []string `json:"claimPath,omitempty"`
 
-	// type is the shape of the extracted value.
+	// type is the shape of the extracted value. String extracts one value, so
+	// the key can be a counter axis. StringArray extracts a list, which In,
+	// InGroup, Contains, Exists, and DoesNotExist read as a set; Equals is
+	// rejected for it, and it cannot be a counter axis. Defaults to String.
 	// +kubebuilder:default=String
 	Type ClaimType `json:"type,omitempty"`
 
-	// normalization is applied to the extracted value.
+	// normalization is applied to the extracted value before it is compared
+	// or put into a counter key. None keeps the value as the token carries
+	// it. Lowercase lower-cases it, which makes the comparison case-insensitive
+	// for values written in lower case. Defaults to None.
 	// +kubebuilder:default=None
 	Normalization NormalizeMode `json:"normalization,omitempty"`
 

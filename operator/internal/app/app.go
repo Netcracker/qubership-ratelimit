@@ -92,7 +92,11 @@ func Build(restConfig *rest.Config, scheme *runtime.Scheme, namespace string, op
 		// controller-runtime then builds the lock itself and has no pod to
 		// take the namespace from.
 		LeaderElectionNamespace: namespace,
-		Cache:                   config.CacheOptions(namespace),
+		// The process exits once the manager returns, so the Lease is
+		// released on a graceful stop and the standby takes it over at once
+		// instead of after the lease duration.
+		LeaderElectionReleaseOnCancel: true,
+		Cache:                         config.CacheOptions(namespace),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create manager: %w", err)

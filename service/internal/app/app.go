@@ -71,6 +71,8 @@ type Options struct {
 	// zero is config.DefaultResync.
 	Resync time.Duration
 
+	// DrainTimeout is how long in-flight checks and management API calls may
+	// hold up shutdown; zero or less is rls.DefaultDrainTimeout.
 	DrainTimeout time.Duration
 
 	// Replica names this pod for the management API.
@@ -198,11 +200,11 @@ func Build(namespace string, options Options) (*Service, error) {
 		// The callers decide who may mutate counters, and an installation
 		// that lets nobody in shows nowhere else.
 		callers := settings.ManagementCallers(namespace, platform.Errorf)
-		audience := settings.ManagementAudience()
+		audience := settings.ManagementAudience(platform.Errorf)
 		platform.Infof("management API callers=%v audience=%v", callers, audience)
 		api := &management.API{
 			Rules:     rules,
-			Counters:  backend.Store,
+			Counters:  backend.Management,
 			Records:   backend.Records,
 			Namespace: namespace,
 			Callers:   callers,

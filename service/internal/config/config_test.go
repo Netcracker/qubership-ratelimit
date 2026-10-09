@@ -490,6 +490,35 @@ func TestApplier_aSpecThatDoesNotCompileHereAndWasNeverAppliedClaimsTheDomainEmp
 	assert.Equal(t, int64(5), report.Domains["gateway.private"].Generation, "the other domain is untouched")
 }
 
+// A domain applied empty stays at generation zero through the next manifest
+// that carries the same payload. The replica used to report the manifest's
+// generation over the empty engine, and the operator marked the policy Ready
+// with no rule enforced.
+func TestApplier_aDomainAppliedEmptyStaysAtGenerationZeroThroughTheNextManifest(t *testing.T) {
+	f := newFixture(t)
+	a := newApplier()
+	f.apply(a, 5, badSpec("gateway.public"), spec("gateway.private", 20))
+
+	f.apply(a, 6, badSpec("gateway.public"), spec("gateway.private", 21))
+
+	assert.Empty(t, a.Store.Load().Snapshot("gateway.public").Blocks)
+	report := a.Report()
+	assert.Equal(t, int64(0), report.Domains["gateway.public"].Generation)
+	assert.Equal(t, int64(6), report.Domains["gateway.private"].Generation)
+}
+
+// A domain applied empty takes the first payload that compiles.
+func TestApplier_aDomainAppliedEmptyTakesTheFirstPayloadThatCompiles(t *testing.T) {
+	f := newFixture(t)
+	a := newApplier()
+	f.apply(a, 5, badSpec("gateway.private"))
+
+	f.apply(a, 6, spec("gateway.private", 10))
+
+	assert.NotEmpty(t, a.Store.Load().Snapshot("gateway.private").Blocks)
+	assert.Equal(t, int64(6), a.Report().Domains["gateway.private"].Generation)
+}
+
 // The watcher: one apply per change of the manifest, through file events
 // and through the resync timer.
 

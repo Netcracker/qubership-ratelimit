@@ -112,6 +112,18 @@ func TestServiceChart_refusesAnEmptyTokenAudience(t *testing.T) {
 	assert.Contains(t, string(out), "audience", "the refusal names the key it refused")
 }
 
+// An audience with a leading or trailing space matches no token issued for the
+// audience it names, so the schema refuses it, a value of spaces alone among
+// them.
+func TestServiceChart_refusesATokenAudienceWithSurroundingSpaces(t *testing.T) {
+	for _, audience := range []string{" ", " netcracker", "netcracker "} {
+		_, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true",
+			"--set", "management.callers={ui-backend}", "--set", "management.m2m.audience="+audience)
+
+		assert.Error(t, err, "helm template with management.m2m.audience=%q", audience)
+	}
+}
+
 // The schema admits a caller whose namespace and name are as long as
 // Kubernetes allows, a 63-character DNS label and a 253-character DNS
 // subdomain, and the service gets the entry whole.

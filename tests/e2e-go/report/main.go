@@ -1,8 +1,9 @@
 // Command report renders a Ginkgo JUnit file as one self-contained HTML page,
 // the human half of the artifact CI attaches to every e2e run.
 //
-// Specs are grouped by the trailing Ginkgo label of their container - every
-// suite in tests/e2e-go carries one. Setup nodes such as [BeforeSuite] appear
+// Specs are grouped by the first label in the trailing bracket Ginkgo writes
+// into each name, the label of the outermost container - every suite in
+// tests/e2e-go carries one - and the bracket is cut from the name whole. Setup nodes such as [BeforeSuite] appear
 // only when they failed: green plumbing is noise, red plumbing is the story.
 package main
 
@@ -68,7 +69,10 @@ type report struct {
 	Groups    []group
 }
 
-var trailingLabel = regexp.MustCompile(`\s\[([A-Za-z0-9_-]+)\]$`)
+// trailingLabels matches the bracket of labels Ginkgo appends to a spec's
+// name, the labels joined by ", " from the outermost container in. A Ginkgo
+// label cannot hold a comma, so the first one ends at the first comma.
+var trailingLabels = regexp.MustCompile(`\s\[([A-Za-z0-9_-]+)(, [A-Za-z0-9_-]+)*\]$`)
 
 func main() {
 	if len(os.Args) != 3 {
@@ -133,7 +137,7 @@ func build(file junitFile) report {
 				}
 				label = "setup"
 			}
-			if m := trailingLabel.FindStringSubmatch(s.Name); m != nil {
+			if m := trailingLabels.FindStringSubmatch(s.Name); m != nil {
 				label = m[1]
 				s.Name = strings.TrimSuffix(s.Name, m[0])
 			}

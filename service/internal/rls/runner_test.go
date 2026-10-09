@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -100,6 +101,23 @@ func TestRunner_servesChecksOnceStarted(t *testing.T) {
 	assert.NoError(t, runner.Healthz(nil), "Healthz while serving")
 	require.NoError(t, err)
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode())
+}
+
+// The health service answers for the server and for the rate limit service by
+// name, serving while the runner serves.
+func TestRunner_answersHealthChecksForTheServiceByName(t *testing.T) {
+	server, _ := newServerOver(nil)
+	runner, _ := startRunner(t, server, 2*time.Second)
+	conn, err := grpc.NewClient(runner.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	client := healthpb.NewHealthClient(conn)
+
+	for _, service := range []string{"", "envoy.service.ratelimit.v3.RateLimitService"} {
+		resp, err := client.Check(t.Context(), &healthpb.HealthCheckRequest{Service: service})
+		require.NoError(t, err, "Check(%q)", service)
+		assert.Equal(t, healthpb.HealthCheckResponse_SERVING, resp.GetStatus(), "Check(%q)", service)
+	}
 }
 
 // Once its context ends, Start drains and returns nil, and the runner reports

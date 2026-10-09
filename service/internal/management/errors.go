@@ -81,9 +81,6 @@ const (
 	// ConflictSweepInFlight: the domain already runs a sweep. Wait out
 	// Retry-After.
 	ConflictSweepInFlight = "sweep_in_flight"
-
-	// ConflictStaleIfMatch: the validator is out of date. Re-read and repeat.
-	ConflictStaleIfMatch = "stale_if_match"
 )
 
 // apiError is one failure on its way to the client.
