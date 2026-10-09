@@ -128,14 +128,14 @@ type stubStore struct {
 	err error
 }
 
-func (s stubStore) Decide(context.Context, []store.Bucket, int64) ([]store.Verdict, error) {
+func (s stubStore) Decide(context.Context, []store.Bucket) ([]store.Verdict, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
 	return []store.Verdict{{Allowed: true}}, nil
 }
 
-func (s stubStore) Peek(context.Context, []store.Bucket, int64) ([]store.Verdict, error) {
+func (s stubStore) Peek(context.Context, []store.Bucket) ([]store.Verdict, error) {
 	return nil, s.err
 }
 
@@ -145,7 +145,7 @@ func TestInstrumentStore_observesTheRoundtripOfADecision(t *testing.T) {
 	instrumented := InstrumentStore("roundtrip.domain", stubStore{})
 	before := sampleCount(t, StoreRoundtrip, "roundtrip.domain")
 
-	_, err := instrumented.Decide(context.Background(), nil, 1)
+	_, err := instrumented.Decide(context.Background(), nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, before+1, sampleCount(t, StoreRoundtrip, "roundtrip.domain"),
@@ -176,7 +176,7 @@ func TestInstrumentStore_countsAFailedDecisionByReason(t *testing.T) {
 			instrumented := InstrumentStore(c.domain, stubStore{err: c.err})
 			before := testutil.ToFloat64(StoreErrors.WithLabelValues(c.domain, c.reason))
 
-			_, err := instrumented.Decide(context.Background(), nil, 1)
+			_, err := instrumented.Decide(context.Background(), nil)
 
 			require.ErrorIs(t, err, c.err)
 			assert.Equal(t, before+1, testutil.ToFloat64(StoreErrors.WithLabelValues(c.domain, c.reason)),
@@ -193,7 +193,7 @@ func TestInstrumentStore_passesAFailedPeekThroughUncounted(t *testing.T) {
 	failure := errors.New("management path")
 	instrumented := InstrumentStore("peek.domain", stubStore{err: failure})
 
-	_, err := instrumented.Peek(context.Background(), nil, 1)
+	_, err := instrumented.Peek(context.Background(), nil)
 
 	assert.ErrorIs(t, err, failure)
 	assert.Zero(t, testutil.ToFloat64(StoreErrors.WithLabelValues("peek.domain", "other")),

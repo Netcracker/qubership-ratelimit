@@ -303,8 +303,8 @@ func (s *refusingSteps) Scan(_ context.Context, _, cursor string, _ int) ([]stri
 func seedCounters(t *testing.T, s counters.Store, keys []string) {
 	t.Helper()
 	for _, k := range keys {
-		_, err := s.Decide(t.Context(), []counters.Bucket{{Key: k, Algorithm: algo.GCRAID,
-			Window: algo.Window{Requests: 3, Period: time.Hour, Burst: 3}}}, 1)
+		_, err := s.Decide(t.Context(), []counters.Bucket{{Key: k, Algorithm: algo.GCRAID, Cost: 1,
+			Window: algo.Window{Requests: 3, Period: time.Hour, Burst: 3}}})
 		require.NoError(t, err, "Decide(%q)", k)
 	}
 }

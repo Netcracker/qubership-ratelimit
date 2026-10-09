@@ -44,11 +44,14 @@ func Run(t *testing.T, newStore func(t *testing.T) store.Store) {
 	}{
 		{"ChargesAllOrNothing", chargesAllOrNothing},
 		{"PeekDoesNotCharge", peekDoesNotCharge},
+		{"PeekJudgesAtTheBucketCost", peekJudgesAtTheBucketCost},
+		{"ChargesEachBucketItsOwnCost", chargesEachBucketItsOwnCost},
 		{"RefusalSpendsNothing", refusalSpendsNothing},
 		{"ShadowCountsWithoutVeto", shadowCountsWithoutVeto},
 		{"ShadowRefusalSpendsNothing", shadowRefusalSpendsNothing},
 		{"CostThatCanNeverFit", costThatCanNeverFit},
 		{"RejectsNonPositiveCost", rejectsNonPositiveCost},
+		{"RejectsANonPositiveCostBesideAValidBucket", rejectsANonPositiveCostBesideAValidBucket},
 		{"DuplicateKeysRejected", duplicateKeysRejected},
 		{"ResetClearsState", resetClearsState},
 		{"VerdictPerBucketInOrder", verdictPerBucketInOrder},
@@ -96,6 +99,49 @@ func peekDoesNotCharge(t *testing.T, f *fixture) {
 	}
 }
 
+// Peek judges a bucket at its own Cost: on a bucket of ten with one unit
+// spent, a cost of nine still fits and a cost of ten has to wait.
+func peekJudgesAtTheBucketCost(t *testing.T, f *fixture) {
+	b := f.bucket("b", "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false)
+	if !f.decideAdmitted([]store.Bucket{b}) {
+		t.Fatal(msgFreshRefused)
+	}
+
+	for _, c := range []struct {
+		cost    int64
+		allowed bool
+	}{{9, true}, {10, false}} {
+		b.Cost = c.cost
+		v := f.peekOne(b)
+		if v.Allowed != c.allowed || v.CostExceedsCapacity {
+			t.Errorf("Peek at cost %d with 9 of 10 left = allowed %v, cost exceeds capacity %v; want allowed %v, %v",
+				c.cost, v.Allowed, v.CostExceedsCapacity, c.allowed, false)
+		}
+	}
+	b.Cost = 1
+	if got := f.peekOne(b).Remaining; got != 9 {
+		t.Errorf("Remaining = %d after the peeks, want untouched 9", got)
+	}
+}
+
+// One decision charges every bucket its own Cost, under both algorithms.
+func chargesEachBucketItsOwnCost(t *testing.T, f *fixture) {
+	waitOutWindowBoundary(hour)
+	three := f.bucket("three", "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false)
+	three.Cost = 3
+	one := f.bucket("one", "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false)
+	four := f.bucket("four", "FixedWindow", algo.Window{Requests: 10, Period: hour}, false)
+	four.Cost = 4
+
+	verdicts := f.decide([]store.Bucket{three, one, four})
+	for i, want := range []int64{7, 9, 6} {
+		if !verdicts[i].Allowed || verdicts[i].Remaining != want {
+			t.Errorf("verdicts[%d] of costs 3, 1, 4 against windows of 10 = allowed %v, remaining %d; want allowed, %d",
+				i, verdicts[i].Allowed, verdicts[i].Remaining, want)
+		}
+	}
+}
+
 // refusalSpendsNothing observes the invariant through GCRA, where a charged
 // refusal moves RetryAfter. Under FixedWindow a spurious increment is
 // invisible until the window boundary — and harmless past it — so the
@@ -127,7 +173,7 @@ func shadowCountsWithoutVeto(t *testing.T, f *fixture) {
 	if !f.decideAdmitted(both) {
 		t.Fatal(msgFreshRefused)
 	}
-	verdicts := f.decide(both, 1)
+	verdicts := f.decide(both)
 	if !store.Admitted(both, verdicts) {
 		t.Fatal("an exhausted shadow bucket vetoed the request")
 	}
@@ -144,12 +190,12 @@ func shadowRefusalSpendsNothing(t *testing.T, f *fixture) {
 	if !f.decideAdmitted(both) {
 		t.Fatal(msgFreshRefused)
 	}
-	first := f.decide(both, 1)[0]
+	first := f.decide(both)[0]
 	if first.Allowed {
 		t.Fatal("shadow verdict reports allowed on an exhausted bucket")
 	}
-	f.decide(both, 1)
-	last := f.decide(both, 1)[0]
+	f.decide(both)
+	last := f.decide(both)[0]
 	if last.RetryAfter > first.RetryAfter+tolerance {
 		t.Errorf("shadow RetryAfter grew from %s to %s: refused shadow buckets are being charged",
 			first.RetryAfter, last.RetryAfter)
@@ -158,16 +204,17 @@ func shadowRefusalSpendsNothing(t *testing.T, f *fixture) {
 
 func costThatCanNeverFit(t *testing.T, f *fixture) {
 	b := f.bucket("b", "GCRA", algo.Window{Requests: 100, Period: hour, Burst: 5}, false)
-	one := []store.Bucket{b}
+	b.Cost = 10
 
-	v := f.decide(one, 10)[0]
+	v := f.decide([]store.Bucket{b})[0]
 	if v.Allowed {
 		t.Fatal("cost 10 admitted into burst capacity 5")
 	}
 	if !v.CostExceedsCapacity {
 		t.Error("refusal of an impossible cost is not marked CostExceedsCapacity")
 	}
-	after := f.decide(one, 1)[0]
+	b.Cost = 1
+	after := f.decide([]store.Bucket{b})[0]
 	if !after.Allowed {
 		t.Fatal("normal request refused after an impossible-cost refusal")
 	}
@@ -186,7 +233,9 @@ func rejectsNonPositiveCost(t *testing.T, f *fixture) {
 		t.Fatal(msgFreshRefused)
 	}
 	for _, cost := range []int64{0, -1} {
-		if _, err := f.s.Decide(f.t.Context(), one, cost); err == nil {
+		bad := b
+		bad.Cost = cost
+		if _, err := f.s.Decide(f.t.Context(), []store.Bucket{bad}); err == nil {
 			t.Errorf("Decide accepted cost %d; a negative cost would refund counter state", cost)
 		}
 	}
@@ -195,10 +244,25 @@ func rejectsNonPositiveCost(t *testing.T, f *fixture) {
 	}
 }
 
+// A bucket of a non-positive cost refuses the whole decision, so the valid
+// bucket beside it is not charged either.
+func rejectsANonPositiveCostBesideAValidBucket(t *testing.T, f *fixture) {
+	valid := f.bucket("valid", "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false)
+	bad := f.bucket("bad", "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false)
+	bad.Cost = 0
+
+	if _, err := f.s.Decide(f.t.Context(), []store.Bucket{valid, bad}); err == nil {
+		t.Error("Decide accepted a decision with a bucket of cost 0")
+	}
+	if got := f.peekOne(valid).Remaining; got != 10 {
+		t.Errorf("Remaining of the valid bucket = %d after the rejected decision, want untouched 10", got)
+	}
+}
+
 func duplicateKeysRejected(t *testing.T, f *fixture) {
 	b := f.bucket("b", "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false)
 
-	if _, err := f.s.Decide(f.t.Context(), []store.Bucket{b, b}, 1); err == nil {
+	if _, err := f.s.Decide(f.t.Context(), []store.Bucket{b, b}); err == nil {
 		t.Error("Decide accepted duplicate bucket keys; one of the two charges would be lost")
 	}
 	if got := f.peekOne(b).Remaining; got != 10 {
@@ -234,7 +298,7 @@ func verdictPerBucketInOrder(t *testing.T, f *fixture) {
 		f.bucket("b500", "GCRA", algo.Window{Requests: 500, Period: hour, Burst: 500}, false),
 	}
 
-	verdicts := f.decide(buckets, 1)
+	verdicts := f.decide(buckets)
 	for i, want := range []int64{4, 49, 499} {
 		if got := verdicts[i].Remaining; got < want || got > want+1 {
 			t.Errorf("verdicts[%d].Remaining = %d, want %d or %d: order or count broken", i, got, want, want+1)
@@ -274,7 +338,7 @@ func scanListsEveryKeyUnderThePrefix(t *testing.T, f *fixture) {
 		buckets = append(buckets,
 			f.bucket(fmt.Sprintf("k%d", i), "GCRA", algo.Window{Requests: 10, Period: hour, Burst: 10}, false))
 	}
-	f.decide(buckets, 1)
+	f.decide(buckets)
 
 	for _, limit := range []int{3, 1} {
 		seen := scanWalk(t, insp, f.uniq, limit)
@@ -363,6 +427,7 @@ func (f *fixture) bucket(name, algoName string, w algo.Window, shadow bool) stor
 		Algorithm: a.ID(),
 		Window:    w,
 		Shadow:    shadow,
+		Cost:      1,
 	}
 }
 
@@ -377,9 +442,9 @@ func (f *fixture) inspector() store.Inspector {
 	return insp
 }
 
-func (f *fixture) decide(buckets []store.Bucket, cost int64) []store.Verdict {
+func (f *fixture) decide(buckets []store.Bucket) []store.Verdict {
 	f.t.Helper()
-	verdicts, err := f.s.Decide(f.t.Context(), buckets, cost)
+	verdicts, err := f.s.Decide(f.t.Context(), buckets)
 	if err != nil {
 		f.t.Fatalf("Decide: %v", err)
 	}
@@ -391,17 +456,17 @@ func (f *fixture) decide(buckets []store.Bucket, cost int64) []store.Verdict {
 
 func (f *fixture) decideAdmitted(buckets []store.Bucket) bool {
 	f.t.Helper()
-	return store.Admitted(buckets, f.decide(buckets, 1))
+	return store.Admitted(buckets, f.decide(buckets))
 }
 
 func (f *fixture) decideOne(buckets []store.Bucket) store.Verdict {
 	f.t.Helper()
-	return f.decide(buckets, 1)[0]
+	return f.decide(buckets)[0]
 }
 
 func (f *fixture) peekOne(b store.Bucket) store.Verdict {
 	f.t.Helper()
-	verdicts, err := f.s.Peek(f.t.Context(), []store.Bucket{b}, 1)
+	verdicts, err := f.s.Peek(f.t.Context(), []store.Bucket{b})
 	if err != nil {
 		f.t.Fatalf("Peek: %v", err)
 	}

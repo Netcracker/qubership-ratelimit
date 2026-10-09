@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
+	"github.com/netcracker/qubership-ratelimit/engine/model"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
 	"github.com/netcracker/qubership-ratelimit/service/internal/store"
 )
@@ -58,7 +59,7 @@ const (
 	// maxHitsAddend bounds a descriptor's hits_addend: the largest cost Envoy
 	// accepts in a route's hits_addend, far past any bucket's capacity, and
 	// well inside the engine's int64.
-	maxHitsAddend = 1_000_000_000
+	maxHitsAddend = model.MaxCost
 
 	// maxLoggedValueLength bounds a logged descriptor value. The value is chosen
 	// by the caller, not by us, so an unbounded copy is an unbounded log record.
@@ -328,7 +329,8 @@ func (s *Server) ShouldRateLimit(
 // one. A descriptor's own hits_addend overrides it for that descriptor, and
 // because that field can be unset, a zero there is the caller's choice: the
 // descriptor is checked without charging anything. The descriptor costs are
-// checked by costViolation first.
+// checked by costViolation first. The engine charges a block whose matched
+// route reads a cost from the query string of path that cost instead.
 func engineRequests(req *envoyratelimit.RateLimitRequest) []check {
 	cost := int64(req.GetHitsAddend())
 	descriptors := req.GetDescriptors()
@@ -519,7 +521,10 @@ func (s *Server) logStoreError(ctx context.Context, format string, args ...any) 
 }
 
 // strictestDecision picks the decision whose numbers the response carries:
-// among refusals, the longest wait; among admitted ones, the least remaining.
+// among refusals, the longest wait; among admitted ones, the fewest further
+// requests at the cost each decision's window was judged at, compared exactly
+// as remaining times the other's cost, the rule the engine applies within one
+// decision.
 // Decisions without matched counting rules carry no headers and lose every
 // comparison; when none carries headers, the response carries none either.
 func strictestDecision(decisions []engine.Decision, allowed bool) engine.Decision {
@@ -533,7 +538,7 @@ func strictestDecision(decisions []engine.Decision, allowed bool) engine.Decisio
 			continue
 		}
 		if allowed {
-			if d.Headers.Remaining < best.Headers.Remaining {
+			if d.Headers.Remaining*best.Headers.Cost < best.Headers.Remaining*d.Headers.Cost {
 				best = d
 			}
 		} else if d.Headers.RetryAfter > best.Headers.RetryAfter {

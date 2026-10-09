@@ -296,10 +296,11 @@ func (a *API) refusing(ctx context.Context, computed []string, command resetComm
 			Algorithm: rate.Algorithm.ID(),
 			Window:    rate.Window,
 			Shadow:    command.rule.Behavior == model.BehaviorShadow,
+			Cost:      1,
 		})
 	}
 
-	verdicts, err := a.Counters.Peek(ctx, buckets, 1)
+	verdicts, err := a.Counters.Peek(ctx, buckets)
 	if err != nil {
 		a.Log.ErrorC(ctx, "failed to read counters before resetting them error=%v", err)
 		return nil, storeDown("the counter store did not answer the read")

@@ -149,6 +149,19 @@ spec:
       counters: [sub, path]               # under Prefix the path axis is the raw path: mind the
       rates:                                 # cardinality; under Template the path = the template itself
       - { requests: 60, periodSeconds: 60 }
+
+  # ── Block 3: a quota in items, not in requests ─────────────────────
+  - name: catalog-items
+    target:
+      routes:
+      - path: { type: Prefix, value: /api/v1/catalog/items }
+        methods: [GET]
+        cost: { source: QueryParameter, name: limit, default: 20 }  # a page costs its size; no usable limit = 20
+    rules:
+    - name: items-per-user
+      counters: [sub]
+      rates:
+      - { requests: 50000, periodSeconds: 3600 }   # 50000 items an hour, in pages of any size
 ```
 
 ## Field reference
@@ -191,6 +204,7 @@ responsibility. The compiler adds no normalization of its own.
 | `target.routes` | list of routes, at least one when `target` is set | an OR list; no `target` = the block sees all traffic of the domain |
 | `target.routes[].path` | `{type, value}`, required with both fields | `type: Exact \| Prefix \| Template`; `value` starts with `/` |
 | `target.routes[].methods` | list of enum values: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `CONNECT`, `OPTIONS`, `TRACE` | OR over the values; absent = any method |
+| `target.routes[].cost` | `{source, name, default}` | the cost of a request matched through the route, read from a query parameter; absent = one unit; see [Request cost](#request-cost) |
 | `mode` | `All` (default) \| `FirstMatch` | how the block's rules combine |
 | `rules` | list of rules, required, at least one | the block's counters |
 
@@ -213,6 +227,14 @@ responsibility. The compiler adds no normalization of its own.
 | `periodSeconds` | int32, required | window length in seconds, 1..86400 (one day); unique within the rule |
 | `burst` | int32, 1..2 147 483 647 | only with the `GCRA` algorithm; defaults to `requests` (a full bucket) |
 | `algorithm` | `GCRA` (default) \| `FixedWindow` | a property of the window; every entry is an independent bucket |
+
+### The cost entry
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `source` | `QueryParameter`, required | where the value is read from; the only source of v1 |
+| `name` | string, required | the parameter name, compared after percent-decoding, case-sensitively; `^[A-Za-z0-9_.\-\[\]]+$`, at most 64 characters, so `page[size]` and `page.size` are valid |
+| `default` | int32, 1..1000000000 | the cost of a request without a usable value; defaults to 1. Set it to the default page size of the API |
 
 GCRA limits visible to the rule author: the service counts in whole microseconds, so the rate is capped at one
 request per microsecond; at a rate above ~10 000/s per bucket the emission interval is rounded to a microsecond, and
@@ -254,11 +276,140 @@ a `/`; `/api/v1/orders` matches `/api/v1/orders` and `/api/v1/orders/42` but not
 `prefix_match`, and the difference is deliberate: the matcher lives in the engine, and segment semantics removes the
 "accidentally caught a neighboring resource" class of mistakes.
 
+## Request cost
+
+The cost of a request is the amount a window charges for it, and a window's `requests` is a quota of cost units. By
+default every request costs one unit, so `requests` counts requests. A route with `cost` reads the cost from a query
+parameter of the request, and the rules of the block charge that amount: with `cost` on `limit`, a window of
+`requests: 50000` per hour admits 50000 items per hour, whether they come in 50 pages of 1000 or in 2500 pages of 20.
+The fields are in [The cost entry](#the-cost-entry).
+
+```yaml
+limits:
+- name: catalog-items                  # one counter in items over two APIs
+  target:
+    routes:
+    - path: { type: Prefix, value: /api/v1/items }
+      methods: [GET]
+      cost: { source: QueryParameter, name: limit, default: 20 }
+    - path: { type: Prefix, value: /api/v1/search }
+      methods: [GET]
+      cost: { source: QueryParameter, name: page_size, default: 10 }
+  rules:
+  - name: items-per-user
+    counters: [sub]
+    rates:
+    - { requests: 50000, periodSeconds: 3600 }
+- name: catalog-calls                  # the same API counted in requests: a block of its own
+  target:
+    routes:
+    - path: { type: Prefix, value: /api/v1/items }
+  rules:
+  - name: calls-per-user
+    counters: [sub]
+    rates:
+    - { requests: 100, periodSeconds: 60 }
+```
+
+### How the value becomes a cost
+
+The route that matched the request reads the parameter from the query string of the request, and the amount it reads
+is charged to every bucket of the block for that request:
+
+1. The value is a positive decimal integer (`^[0-9]+$` after percent-decoding, not zero; leading zeros are allowed):
+   the cost is the value. A value above 1000000000, the largest cost a request can carry, costs 1000000000.
+2. Anything else costs `default`: the parameter is absent, the request carries no query string, the value is empty
+   (`limit=`), zero, or not digits (`abc`, `-5`, `1e3`).
+3. The parameter repeats: the largest cost among its occurrences, each decided by the rules above.
+
+The value is percent-decoded before it is parsed, as the name is before it is compared, and `+` decodes to a space,
+which makes a value malformed. Nothing else of the query string takes part: the other parameters do not change the
+cost, and the query string is still cut before matching and before `path` serves as an axis.
+
+A positive integer charges what the client asks for. The policy does not know the page cap of the API, so a value
+above the cap is charged in full, and a value above a window's capacity is refused (see
+[What the rules of the block see](#what-the-rules-of-the-block-see)). The default charges what an API serves when it
+falls back to its default page on a value it cannot use; an API that answers such a request with 400 serves nothing,
+and the request costs `default` all the same. An API that parses leniently, reading `100abc` or ` 100` as 100, serves
+more than the request paid for. The largest of several occurrences covers an API that takes the first one and an API
+that takes the last.
+
+A request that carries the parameter to an endpoint that ignores it is charged anyway. Where that matters, the route
+list separates the endpoints, as [Routes decide the cost](#routes-decide-the-cost) shows.
+
+### Routes decide the cost
+
+The first route of the target that matches the request, in list order, decides its cost, the way it already decides
+the `path` axis and the captures. A route without `cost` charges the request's own cost, one unit through the gateway
+(see [The protocol's hits_addend](#the-protocols-hits_addend)). Under a `Prefix` or a `Template` that covers
+paginated and single-object endpoints alike, the specific routes go first and the broad one last:
+
+```yaml
+target:
+  routes:
+  - path: { type: Template, value: /api/v1/{resource} }        # collections: the API's default page is 20
+    methods: [GET]
+    cost: { source: QueryParameter, name: limit, default: 20 }
+  - path: { type: Template, value: /api/v1/{resource}/{id} }   # single objects: one unit, no cost needed
+    methods: [GET]
+  - path: { type: Prefix, value: /api/v1 }                     # everything else: one unit
+```
+
+A `Template` matches as many segments as it names, so a collection and a single object separate by segment count
+without listing the resources. Where the list cannot separate them, a `cost` with `default` left at 1 is the
+alternative: a request without the parameter costs one unit, and only a request that names a page size pays for it.
+
+A block without a target has no routes and charges the request's own cost.
+
+### What the rules of the block see
+
+- Every window of every matched rule of the block is charged the same cost. A `Bypass` rule goes to no store and
+  charges nothing; a `Shadow` rule is charged per its own verdict, at that cost.
+- A request that falls into several blocks pays each block's cost in that block: the blocks stay additive, and the
+  buckets of one decision carry different costs.
+- A cost larger than a window's capacity (`burst` under GCRA, `requests` under `FixedWindow`) is the refusal that no
+  waiting cures: `OVER_LIMIT` without retry headers, `capacity_exceeded` in a simulation. A refused request charges
+  nothing, in every window of the decision. This refusal is the only bound on what a client asks for: with a window of
+  50000 items, `limit=100000` is refused, not lowered to the page cap of the API. A route whose `default` is above a
+  window's capacity is reported as `CostExceedsCapacity` in the [status](#status).
+- The response headers are in units. `x-ratelimit-limit` and `x-ratelimit-remaining`, and `q` and `r` of the
+  `ratelimit-policy` and `ratelimit` fields, count what the window counts, so a `remaining` of 500 under `limit` is
+  500 items. The strictest rule on an admission is the one with the fewest further requests at this request's cost,
+  the window's remaining divided by the cost charged to it: a window with 500 items left at a cost of 100 binds
+  before a window with 30 requests left at a cost of one, and at a cost of one the choice is the smallest remaining.
+  On a refusal the choice is the longest wait. `retry-after` accounts for the whole cost; `t` is the seconds until the
+  window admits one unit more than `r`.
+- The `qu` parameter of `ratelimit-policy` is not sent. The draft of the headers binds it to a registry of three
+  values (`requests`, `content-bytes`, `concurrent-requests`), and a client reads the unit from the policy, not from
+  the header.
+
+### The protocol's hits_addend
+
+A route's `cost` replaces the request's `hits_addend` for the buckets of its block. The rules of a block whose route
+has no `cost` keep charging `hits_addend`, with the descriptor's own value taking precedence. A descriptor whose
+`hits_addend` is an explicit zero is still checked without charging anything: that zero is a mode of the check, not a
+cost. A direct gRPC consumer that sends `path` with a query string gets the same treatment as a gateway, and a check
+without `path` matches no block that has a target, so no route's `cost` applies to it.
+
+### Why the route carries the cost
+
+The counter key is `<block>/<rule>` plus the axes, so one quota over several APIs is one rule of one block with one
+route per API. The parameter name differs per API (`limit`, `page_size`, `page[size]`), and a name on the rule would
+force a block per name, which is a counter per name. The route is also where the content of a request already enters
+the decision: the captures and the `path` axis come from the matched route, and the rule consumes them. A counter in
+items beside a counter in requests is a second block with the same target, as `catalog-calls` is beside
+`catalog-items` in the example of [Request cost](#request-cost).
+
+Envoy computes a route's `hits_addend` from a substitution format string, but only in a rate limit action attached to
+a route through `typed_per_filter_config`: a configuration per API in the gateway, outside the policy. The gateway of
+this design sends one flat descriptor for every request, and the matching lives in the engine, so the cost is read
+where the matching is.
+
 ## Descriptor keys
 
 | Key | Source | Note |
 | --- | --- | --- |
-| `path` | the request's `:path` | the query string is stripped before matching and axes; as an axis: the template string under `Template`, the raw path under `Prefix`/`Exact` |
+| `path` | the request's `:path` | the query string is stripped before matching and axes; as an axis: the template string under `Template`, the raw path under `Prefix`/`Exact`; the `cost` of the matched route reads one parameter of the query string |
 | `method` | the request's `:method` | |
 | `sub` | built-in: the `sub` claim, lowercased | works with an empty `mappings`; overridden by a `key: sub` entry |
 | mapping keys | `spec.mappings` (`roles`, `tenant`, ...) | types and normalization per the entry |
@@ -288,9 +439,10 @@ component, enforces that a token is required.
 5. **The verdict**: `OVER_LIMIT` if at least one applied rule (of any block) is exceeded; the `x-ratelimit-*` headers
    come from the strictest matched rule, and `ratelimit-policy` and `ratelimit` carry its limit and remaining under
    that rule's name, `<block>/<rule>`, with the time until one more request is admitted ([engine](engine.md)).
-6. **Request cost**: the protocol field `hits_addend` (default 1), a descriptor's own `hits_addend` taking precedence
-   for that descriptor, where an explicit zero checks without charging; a cost above the burst capacity produces a
-   deterministic refusal, not a wait.
+6. **Request cost**: the `cost` of the matched route where the route has one ([Request cost](#request-cost)), else
+   the protocol field `hits_addend` (default 1), a descriptor's own `hits_addend` taking precedence for that
+   descriptor; an explicit zero checks without charging; a cost above the capacity of a window (`burst` under GCRA,
+   `requests` under `FixedWindow`) produces a deterministic refusal, not a wait.
 7. **A refusal does not spend quota**, a guarantee of every algorithm: a refused request does not advance the counter
    state. Shadow follows the same logic: a Shadow bucket is charged only when its own verdict is "allow", mirroring
    what enforcement would do; unconditional charging would accumulate unbounded debt and inflate the "would have
@@ -325,26 +477,27 @@ client ──HTTP──> gateway ──jwt_authn──> (token signature verifie
 
 1. **The gateway sends a flat descriptor**: `domain`, `path` (with the query), `method`, `token`, `request_id`.
 2. **Preparation**: the query is stripped from `path` (otherwise `?page=2` would split one endpoint across different
-   buckets); the token payload is decoded without signature verification, since the gateway has already done it; the
-   identity keys are extracted per the mapping. No token means no identity keys, and this is not an error. A request
-   to the management API ends here with `OK`: for a path under `/ratelimit/v1` in a domain listed in the service
-   chart's `management.gatewayDomains`, no block is matched, whatever its `target`
-   ([chart](helm-chart.md), "Management API port").
+   buckets), and a matched route with a `cost` reads its parameter from it; the token payload is decoded without
+   signature verification, since the gateway has already done it; the identity keys are extracted per the mapping. No
+   token means no identity keys, and this is not an error. A request to the management API ends here with `OK`: for a
+   path under `/ratelimit/v1` in a domain listed in the service chart's `management.gatewayDomains`, no block is
+   matched, whatever its `target` ([chart](helm-chart.md), "Management API port").
 3. **Matching**: the blocks whose `target` matched are selected; inside a block, `mode` decides between all matched
    rules and the first one. A rule without its axis (`sub` for an anonymous caller) does not match. A `Bypass` rule
    ends its cascade with an allow and does not go to the store.
 4. **Expansion**: every window of every matched rule is a separate bucket; a single builder constructs the keys.
-5. **One trip to the store, two passes inside**: first, all buckets are only evaluated; if no enforcing bucket refused,
-   the second pass writes the new states and TTLs. If at least one refused, there is no second pass and no bucket is
-   charged: the daily quota is not spent on requests refused by the minute limit. A shadow bucket has no veto and is
-   charged only per its own verdict.
+5. **One trip to the store, two passes inside**: first, all buckets are only evaluated, each at the cost of its
+   block; if no enforcing bucket refused, the second pass writes the new states and TTLs. If at least one refused,
+   there is no second pass and no bucket is charged: the daily quota is not spent on requests refused by the minute
+   limit. A shadow bucket has no veto and is charged only per its own verdict.
 6. **Response**: the verdict is an AND over the enforcing buckets; the `x-ratelimit-*` headers, and `ratelimit-policy`
-   and `ratelimit` with the name of the bucket's rule, come from the strictest matched bucket (the minimal remaining
-   when the request is allowed, the maximal retry-after on a refusal; on a tie, a deterministic tie-break by bucket
-   key). A refusal is `OVER_LIMIT` with `retry-after`; a cost that can never fit gets no retry headers. If the store
-   does not answer within the budget, the service answers `UNAVAILABLE` and the gateway's failure mode decides: with
-   `failClosed: false`, the default, the request passes unlimited, and with `true` the gateway answers 503. The error
-   metric grows either way. A check some rule already refused answers `OVER_LIMIT` regardless.
+   and `ratelimit` with the name of the bucket's rule, come from the strictest matched bucket (the fewest further
+   requests at the bucket's cost, its remaining divided by that cost, when the request is allowed, the maximal
+   retry-after on a refusal; on a tie, a deterministic tie-break by bucket key). A refusal is `OVER_LIMIT` with
+   `retry-after`; a cost that can never fit gets no retry headers. If the store does not answer within the budget, the
+   service answers `UNAVAILABLE` and the gateway's failure mode decides: with `failClosed: false`, the default, the
+   request passes unlimited, and with `true` the gateway answers 503. The error metric grows either way. A check some
+   rule already refused answers `OVER_LIMIT` regardless.
 
 ## Compilation model
 
@@ -369,8 +522,9 @@ Properties of the model:
   builds from it.
 - **Replicas are equal.** Each compiles on its own from the same ConfigMap; there is no shared state between them, and
   the operator alone writes the status and the ConfigMap.
-- **Response headers are deterministic**: the "strictest" rule is chosen by the minimal remaining when the request is
-  allowed and by the maximal retry-after on a refusal (after the longest pause every window is open); on a tie,
+- **Response headers are deterministic**: the "strictest" rule is chosen by the fewest further requests at the cost of
+  its block when the request is allowed, which at a cost of one is the minimal remaining, and by the maximal
+  retry-after on a refusal (after the longest pause every window is open); on a tie,
   lexicographically by bucket key rather than by traversal order (otherwise the headers would jitter between replicas).
 
 Consequences for operations on names:
@@ -616,6 +770,7 @@ in them) and contain only root causes:
 | `InvalidWindow`: a window the math cannot enforce | blocking |
 | `DomainBudgetExceeded`: the worst case of a decision above 128 buckets | blocking |
 | `CaptureShadowsMappedKey`: shadowing; inside the block the capture is in effect | informational |
+| `CostExceedsCapacity`: a route's `cost.default` above the capacity of a window of a rule of its block, so that window refuses every request without a usable value, without a retry hint | informational |
 
 At least one blocking entry makes the whole generation invalid. Printer columns: `READY`, `REPLICAS` (`applied/total`),
 `RULES`, `PROBLEMS`, `AGE`; the domain is not duplicated, since it is the object's name. A zero in `RULES` or
@@ -641,8 +796,9 @@ Schema (OpenAPI):
 - uniqueness through list types: `limits`, `rules`, and `groups` are a `map` by `name`, `mappings` a `map` by `key`,
   `rates` a `map` by `periodSeconds`, `methods` a `set`; `conditions` a `map` by `type`; the remaining lists are
   atomic;
-- enums for `mode`, `behavior`, `algorithm`, `type`, `normalization`, `operator`, `methods`; `periodSeconds` is
-  1..86400; `requests` and `burst` are 1..2 147 483 647; `ruleProblems[].message` ≤ 1024 characters and
+- enums for `mode`, `behavior`, `algorithm`, `type`, `normalization`, `operator`, `methods`, `cost.source`;
+  `periodSeconds` is 1..86400; `requests` and `burst` are 1..2 147 483 647; `cost.default` is 1..1000000000, and
+  `cost.name` takes `^[A-Za-z0-9_.\-\[\]]+$`, at most 64 characters; `ruleProblems[].message` ≤ 1024 characters and
   `ruleProblems` ≤ 64 entries, both cut by the operator before the write; `status.problems` counts every problem,
   past 64 too, so a `PROBLEMS` column of 70 beside 64 entries is expected; required fields are marked in the field
   reference;
@@ -671,7 +827,9 @@ last-good:
 - windows (`InvalidWindow`, the engine's window check): `burst` only with GCRA; `requests ≤ periodSeconds × 10⁶`;
   with an emission < 100 µs `periodSeconds × 10⁶` is divisible by `requests` without remainder;
   `burst × emission ≤ 10¹⁵ µs`;
-- domain budget (`DomainBudgetExceeded`): the worst case of a decision ≤ 128 buckets.
+- domain budget (`DomainBudgetExceeded`): the worst case of a decision ≤ 128 buckets;
+- cost (`CostExceedsCapacity`, informational): a route's `cost.default` ≤ the capacity of every window of every rule
+  of its block.
 
 Why not CEL: the cost of a CEL rule grows with list cardinality, since the estimator multiplies it by the product of
 `maxItems` along the path to the rule, and holding references and budgets at admission would mean bounding lists for

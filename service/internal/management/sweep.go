@@ -235,10 +235,11 @@ func (s *sweeper) refusing(ctx context.Context, batch []counterCandidate) ([]cou
 			Algorithm: candidate.ref.rate.Algorithm.ID(),
 			Window:    candidate.ref.rate.Window,
 			Shadow:    candidate.ref.shadow(),
+			Cost:      1,
 		})
 	}
 
-	verdicts, err := s.api.Counters.Peek(ctx, buckets, 1)
+	verdicts, err := s.api.Counters.Peek(ctx, buckets)
 	if err != nil {
 		return nil, err
 	}

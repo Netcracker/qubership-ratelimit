@@ -169,11 +169,11 @@ func TestRedisAndMemoryReturnTheSameVerdicts(t *testing.T) {
 
 	uniq := fmt.Sprintf("diff:{%d}", time.Now().UnixNano())
 	buckets := []store.Bucket{
-		{Key: uniq + ":g", Algorithm: algo.GCRAID,
+		{Key: uniq + ":g", Algorithm: algo.GCRAID, Cost: 1,
 			Window: algo.Window{Requests: 10, Period: time.Hour, Burst: 5}},
-		{Key: uniq + ":f", Algorithm: algo.FixedWindowID,
+		{Key: uniq + ":f", Algorithm: algo.FixedWindowID, Cost: 1,
 			Window: algo.Window{Requests: 3, Period: time.Hour}},
-		{Key: uniq + ":s", Algorithm: algo.GCRAID, Shadow: true,
+		{Key: uniq + ":s", Algorithm: algo.GCRAID, Shadow: true, Cost: 1,
 			Window: algo.Window{Requests: 2, Period: time.Hour, Burst: 2}},
 	}
 
@@ -181,15 +181,27 @@ func TestRedisAndMemoryReturnTheSameVerdicts(t *testing.T) {
 	// holds both stores in the refused shape, shadow exhaustion included.
 	for step := 1; step <= 6; step++ {
 		compareBoth(t, fmt.Sprintf("decide step %d", step), buckets, func(s store.Store) ([]store.Verdict, error) {
-			return s.Decide(t.Context(), buckets, 1)
+			return s.Decide(t.Context(), buckets)
 		}, r, m)
 	}
 	compareBoth(t, "peek after the run", buckets, func(s store.Store) ([]store.Verdict, error) {
-		return s.Peek(t.Context(), buckets, 1)
+		return s.Peek(t.Context(), buckets)
+	}, r, m)
+	compareBoth(t, "peek at a different cost per bucket", buckets, func(s store.Store) ([]store.Verdict, error) {
+		return s.Peek(t.Context(), withCosts(buckets, 4, 1, 2))
 	}, r, m)
 	compareBoth(t, "impossible cost", buckets, func(s store.Store) ([]store.Verdict, error) {
-		return s.Decide(t.Context(), buckets, 100)
+		return s.Decide(t.Context(), withCosts(buckets, 100, 100, 100))
 	}, r, m)
+}
+
+// withCosts returns copies of buckets, each charging the cost at its index.
+func withCosts(buckets []store.Bucket, costs ...int64) []store.Bucket {
+	out := slices.Clone(buckets)
+	for i := range out {
+		out[i].Cost = costs[i]
+	}
+	return out
 }
 
 // compareBoth runs op on both stores and compares the verdicts bucket by
@@ -232,12 +244,12 @@ func TestTheGCRAScriptAdmitsAsRedisRateDoes(t *testing.T) {
 	oracle := redis_rate.NewLimiter(c)
 
 	uniq := fmt.Sprintf("oracle:{%d}", time.Now().UnixNano())
-	b := store.Bucket{Key: uniq + ":g", Algorithm: algo.GCRAID,
+	b := store.Bucket{Key: uniq + ":g", Algorithm: algo.GCRAID, Cost: 1,
 		Window: algo.Window{Requests: 10, Period: time.Hour, Burst: 5}}
 	limit := redis_rate.Limit{Rate: 10, Period: time.Hour, Burst: 5}
 
 	for step := 1; step <= 8; step++ {
-		ours, err := r.Decide(t.Context(), []store.Bucket{b}, 1)
+		ours, err := r.Decide(t.Context(), []store.Bucket{b})
 		if err != nil {
 			t.Fatalf("step %d: Decide: %v", step, err)
 		}
@@ -266,9 +278,9 @@ func TestAHighFrequencyBucketStoresItsStateAsExactIntegers(t *testing.T) {
 	r := redisstore.New(c)
 
 	uniq := fmt.Sprintf("hf:{%d}", time.Now().UnixNano())
-	gcra := store.Bucket{Key: uniq + ":g", Algorithm: algo.GCRAID,
+	gcra := store.Bucket{Key: uniq + ":g", Algorithm: algo.GCRAID, Cost: 9000,
 		Window: algo.Window{Requests: 100_000, Period: time.Second, Burst: 10_000}}
-	fixed := store.Bucket{Key: uniq + ":f", Algorithm: algo.FixedWindowID,
+	fixed := store.Bucket{Key: uniq + ":f", Algorithm: algo.FixedWindowID, Cost: 9000,
 		Window: algo.Window{Requests: 100_000, Period: time.Second}}
 
 	// The fixed-window state expires at the second boundary, and the GET
@@ -276,7 +288,7 @@ func TestAHighFrequencyBucketStoresItsStateAsExactIntegers(t *testing.T) {
 	waitOutBoundary(time.Second, 200*time.Millisecond)
 
 	// Charged in-script at one instant: the verdict is exact, no clock races.
-	v, err := r.Decide(t.Context(), []store.Bucket{gcra, fixed}, 9000)
+	v, err := r.Decide(t.Context(), []store.Bucket{gcra, fixed})
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -297,7 +309,8 @@ func TestAHighFrequencyBucketStoresItsStateAsExactIntegers(t *testing.T) {
 	// between the two calls and refills the bucket, so the verdict cannot
 	// show whether a rounding forgave part of the debt; the format check
 	// above covers that.
-	if v, err = r.Decide(t.Context(), []store.Bucket{gcra}, 1); err != nil || !v[0].Allowed {
+	gcra.Cost = 1
+	if v, err = r.Decide(t.Context(), []store.Bucket{gcra}); err != nil || !v[0].Allowed {
 		t.Fatalf("Decide(cost 1) after the stored state = %+v, %v; want allowed", v, err)
 	}
 }
@@ -332,12 +345,12 @@ func TestStateIsGoneOnceItsWindowDrains(t *testing.T) {
 
 	uniq := fmt.Sprintf("ttl:{%d}", time.Now().UnixNano())
 	buckets := []store.Bucket{
-		{Key: uniq + ":g", Algorithm: algo.GCRAID,
+		{Key: uniq + ":g", Algorithm: algo.GCRAID, Cost: 1,
 			Window: algo.Window{Requests: 1, Period: time.Second, Burst: 1}},
-		{Key: uniq + ":f", Algorithm: algo.FixedWindowID,
+		{Key: uniq + ":f", Algorithm: algo.FixedWindowID, Cost: 1,
 			Window: algo.Window{Requests: 1, Period: time.Second}},
 	}
-	if _, err := r.Decide(t.Context(), buckets, 1); err != nil {
+	if _, err := r.Decide(t.Context(), buckets); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	for _, b := range buckets {
@@ -410,11 +423,11 @@ func TestScan_anUntaggedPrefixReachesEveryMaster(t *testing.T) {
 
 	want := make([]string, 0, 12)
 	for i := range 12 {
-		b := store.Bucket{Key: fmt.Sprintf("%s%02d", prefix, i), Algorithm: algo.GCRAID,
+		b := store.Bucket{Key: fmt.Sprintf("%s%02d", prefix, i), Algorithm: algo.GCRAID, Cost: 1,
 			Window: algo.Window{Requests: 10, Period: time.Hour, Burst: 10}}
 		// One bucket per decision: the keys are on different slots on purpose,
 		// and a decision spanning two slots is refused with CROSSSLOT.
-		if _, err := r.Decide(t.Context(), []store.Bucket{b}, 1); err != nil {
+		if _, err := r.Decide(t.Context(), []store.Bucket{b}); err != nil {
 			t.Fatalf("Decide(%q): %v", b.Key, err)
 		}
 		want = append(want, b.Key)

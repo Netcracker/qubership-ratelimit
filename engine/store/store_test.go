@@ -24,16 +24,17 @@ func TestAdmittedPanicsWhenTheVerdictCountDiffersFromTheBucketCount(t *testing.T
 // exactly one microsecond.
 func TestGuardBuckets_refusesAPeriodUnderOneMicrosecond(t *testing.T) {
 	withPeriod := func(period time.Duration) []Bucket {
-		return []Bucket{{Key: "k", Algorithm: algo.GCRAID, Window: algo.Window{Requests: 1, Period: period, Burst: 1}}}
+		return []Bucket{{Key: "k", Algorithm: algo.GCRAID, Cost: 1,
+			Window: algo.Window{Requests: 1, Period: period, Burst: 1}}}
 	}
 
 	t.Run("a period of one microsecond", func(t *testing.T) {
-		if err := GuardBuckets(withPeriod(time.Microsecond), 1); err != nil {
+		if err := GuardBuckets(withPeriod(time.Microsecond)); err != nil {
 			t.Errorf("GuardBuckets(a window of period %v) = %v, want nil", time.Microsecond, err)
 		}
 	})
 	t.Run("a period of 999 nanoseconds", func(t *testing.T) {
-		if err := GuardBuckets(withPeriod(999*time.Nanosecond), 1); err == nil {
+		if err := GuardBuckets(withPeriod(999 * time.Nanosecond)); err == nil {
 			t.Errorf("GuardBuckets(a window of period %v) = nil, want an error", 999*time.Nanosecond)
 		}
 	})

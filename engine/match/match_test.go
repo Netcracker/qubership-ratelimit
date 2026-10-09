@@ -34,10 +34,17 @@ type request struct {
 	Path   string
 	Method string
 	Keys   map[string][]string
+
+	// Cost is the request's own cost; zero reads as one.
+	Cost int64
 }
 
 func evaluate(snap *compile.Snapshot, r request) Result {
-	return Match(snap, r.Path, r.Method).Evaluate(r.Keys)
+	cost := r.Cost
+	if cost == 0 {
+		cost = 1
+	}
+	return Match(snap, r.Path, r.Method).Evaluate(r.Keys, cost)
 }
 
 func ruleNames(r Result) []string {
@@ -773,5 +780,147 @@ func TestTargets_carryTheCapturesOfTheMatchedRoute(t *testing.T) {
 				t.Errorf("Match(%q, %s).Targets()[0].Captures = %v, want %v", tc.path, tc.method, got, tc.captures)
 			}
 		})
+	}
+}
+
+// bucketCosts lists the cost of every bucket of the result, in bucket order.
+func bucketCosts(r Result) []int64 {
+	buckets := r.Buckets()
+	out := make([]int64, len(buckets))
+	for i, b := range buckets {
+		out[i] = b.Cost
+	}
+	return out
+}
+
+// costSnapshot compiles one block on the prefix /api/items whose route reads
+// the cost from parameter, with a default of 20, and whose one rule carries
+// two windows.
+func costSnapshot(t *testing.T, parameter string) *compile.Snapshot {
+	t.Helper()
+	return mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "items",
+		Target: model.Target{Routes: []model.Route{{
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"},
+			Cost: &model.RouteCost{Source: model.CostQueryParameter, Name: parameter, Default: 20},
+		}}},
+		Rules: []model.Rule{{Name: "r", Rates: []model.Rate{
+			{Requests: model.MaxCost, Period: time.Hour, Algorithm: "FixedWindow"},
+			{Requests: model.MaxCost, Period: 24 * time.Hour, Algorithm: "FixedWindow"},
+		}}},
+	}}})
+}
+
+// A route with a cost charges every window of the block the value of its
+// parameter: a positive decimal integer as it stands, lowered to the
+// ceiling, and the default of 20 for anything else. The request's own cost
+// of 7 never applies.
+func TestARouteChargesTheCostItsParameterCarries(t *testing.T) {
+	cases := []struct {
+		name      string
+		parameter string
+		query     string
+		want      int64
+	}{
+		{"no query string", "limit", "", 20},
+		{"a query without the parameter", "limit", "?offset=40", 20},
+		{"a value", "limit", "?offset=40&limit=100", 100},
+		{"leading zeros", "limit", "?limit=007", 7},
+		{"zero", "limit", "?limit=0", 20},
+		{"an empty value", "limit", "?limit=", 20},
+		{"the name without =", "limit", "?limit", 20},
+		{"letters", "limit", "?limit=abc", 20},
+		{"a negative value", "limit", "?limit=-5", 20},
+		{"an exponent", "limit", "?limit=1e3", 20},
+		{"a plus sign, which decodes to a space", "limit", "?limit=+100", 20},
+		{"the ceiling", "limit", "?limit=1000000000", model.MaxCost},
+		{"one above the ceiling", "limit", "?limit=1000000001", model.MaxCost},
+		{"twenty digits", "limit", "?limit=99999999999999999999", model.MaxCost},
+		{"a repeat, the larger last", "limit", "?limit=5&limit=50", 50},
+		{"a repeat, the larger first", "limit", "?limit=50&limit=5", 50},
+		{"a repeat whose malformed occurrence costs the default", "limit", "?limit=5&limit=abc", 20},
+		{"a name in another case", "limit", "?LIMIT=100", 20},
+		{"a percent-encoded value", "limit", "?limit=%31%30", 10},
+		{"a malformed escape", "limit", "?limit=%zz", 20},
+		{"brackets in the name", "page[size]", "?page[size]=30", 30},
+		{"percent-encoded brackets in the name", "page[size]", "?page%5Bsize%5D=30", 30},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := costSnapshot(t, tc.parameter)
+			path := "/api/items" + tc.query
+
+			result := evaluate(snap, request{Path: path, Method: "GET", Cost: 7})
+
+			if got, want := bucketCosts(result), []int64{tc.want, tc.want}; !slices.Equal(got, want) {
+				t.Errorf("GET %s with cost on %s: bucket costs = %v, want %v", path, tc.parameter, got, want)
+			}
+			if len(result.Rules) != 1 || result.Rules[0].Cost != tc.want {
+				t.Errorf("GET %s with cost on %s: rules = %+v, want one at cost %d",
+					path, tc.parameter, result.Rules, tc.want)
+			}
+		})
+	}
+}
+
+// The first route that matches decides the cost, the way it decides the path
+// axis: the collection route charges its parameter, and the single-object
+// route and the prefix behind them, which read no cost, leave the request's
+// own cost of 3.
+func TestTheFirstMatchingRouteDecidesTheCost(t *testing.T) {
+	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "api",
+		Target: model.Target{Routes: []model.Route{
+			{Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/v1/{resource}"}, Methods: []string{"GET"},
+				Cost: &model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 20}},
+			{Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/v1/{resource}/{id}"}, Methods: []string{"GET"}},
+			{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/v1"}},
+		}},
+		Rules: []model.Rule{{Name: "r", Rates: minuteRate()}},
+	}}})
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		want   int64
+	}{
+		{"a collection", "GET", "/api/v1/items?limit=100", 100},
+		{"a single object", "GET", "/api/v1/items/42?limit=100", 3},
+		{"a collection under a method the cost route does not name", "POST", "/api/v1/items?limit=100", 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := evaluate(snap, request{Path: tc.path, Method: tc.method, Cost: 3})
+
+			if got := bucketCosts(result); !slices.Equal(got, []int64{tc.want}) {
+				t.Errorf("%s %s: bucket costs = %v, want [%d]", tc.method, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// One request charges each block the cost of that block: the block whose
+// route reads limit charges its value, and a block whose route reads no cost
+// and a block without a target charge the request's own cost of 3.
+func TestEachBlockOfARequestChargesItsOwnCost(t *testing.T) {
+	snap := mustCompile(t, model.Policy{Domain: domain, Blocks: []model.Block{
+		{Name: "items", Target: model.Target{Routes: []model.Route{{
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"},
+			Cost: &model.RouteCost{Source: model.CostQueryParameter, Name: "limit"},
+		}}}, Rules: []model.Rule{{Name: "r", Rates: minuteRate()}}},
+		{Name: "calls", Target: model.Target{Routes: []model.Route{{
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"},
+		}}}, Rules: []model.Rule{{Name: "r", Rates: minuteRate()}}},
+		{Name: "domain", Rules: []model.Rule{{Name: "r", Rates: minuteRate()}}},
+	}})
+
+	result := evaluate(snap, request{Path: "/api/items?limit=50", Method: "GET", Cost: 3})
+
+	if got := matchedBlocks(result); !slices.Equal(got, []string{"items", "calls", "domain"}) {
+		t.Fatalf("GET /api/items?limit=50 matched blocks %v, want [items calls domain]", got)
+	}
+	if got, want := bucketCosts(result), []int64{50, 3, 3}; !slices.Equal(got, want) {
+		t.Errorf("GET /api/items?limit=50: bucket costs of items, calls, domain = %v, want %v", got, want)
 	}
 }

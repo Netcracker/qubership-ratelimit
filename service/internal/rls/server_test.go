@@ -452,6 +452,92 @@ func TestShouldRateLimit_chargesTheCostTheHitsAddendSets(t *testing.T) {
 	}
 }
 
+// itemsPolicy counts items over /api/items: the route reads the cost from
+// limit, 20 when the request carries none, and items/all holds 1000 a minute.
+func itemsPolicy() model.Policy {
+	return model.Policy{Blocks: []model.Block{{
+		Name: "items",
+		Target: model.Target{Routes: []model.Route{{
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"},
+			Cost: &model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 20},
+		}}},
+		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 1000, Period: time.Minute}}}},
+	}}}
+}
+
+// The cost a route reads from the query string of the path entry replaces the
+// hits_addend of the request and of the descriptor alike.
+func TestShouldRateLimit_chargesTheCostARouteReadsFromThePath(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		path       string
+		request    uint32
+		descriptor *wrapperspb.UInt64Value
+		remaining  string
+	}{
+		{"the value of limit", "/api/items?limit=100", 0, nil, "900"},
+		{"the value of limit over the request's cost", "/api/items?limit=100", 7, nil, "900"},
+		{"the value of limit over the descriptor's cost", "/api/items?limit=100", 0, wrapperspb.UInt64(5), "900"},
+		{"the default without limit", "/api/items", 7, nil, "980"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := newServerOver(ruleSetWith(t, itemsPolicy()))
+			req := request("gateway.public", map[string]string{"path": tc.path, "method": "GET"})
+			req.HitsAddend = tc.request
+			req.Descriptors[0].HitsAddend = tc.descriptor
+
+			resp := shouldRateLimit(t, server, req)
+
+			assert.Equal(t, tc.remaining, headerMap(resp)["x-ratelimit-remaining"],
+				"x-ratelimit-remaining of 1000 items a minute after %s at a request cost of %d and a descriptor cost of %v",
+				tc.path, tc.request, tc.descriptor)
+		})
+	}
+}
+
+// Across the descriptors of one check the headers come from the window with
+// the fewest further requests at its cost, as within one decision: after
+// limit=100 the items window has 900 left, nine more such pages, and binds
+// before the 29 a calls window of 30 has left.
+func TestShouldRateLimit_takesTheHeadersOfTheDescriptorWithTheFewestRequestsLeftAtItsCost(t *testing.T) {
+	policy := itemsPolicy()
+	policy.Blocks = append(policy.Blocks, model.Block{
+		Name:   "calls",
+		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/calls"}}}},
+		Rules:  []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 30, Period: time.Minute}}}},
+	})
+	server, _ := newServerOver(ruleSetWith(t, policy))
+
+	resp := shouldRateLimit(t, server, request("gateway.public",
+		map[string]string{"path": "/api/calls", "method": "GET"},
+		map[string]string{"path": "/api/items?limit=100", "method": "GET"}))
+
+	assert.Equal(t, map[string]string{"x-ratelimit-limit": "1000", "x-ratelimit-remaining": "900"},
+		map[string]string{
+			"x-ratelimit-limit":     headerMap(resp)["x-ratelimit-limit"],
+			"x-ratelimit-remaining": headerMap(resp)["x-ratelimit-remaining"],
+		}, "the headers of a check of /api/calls and /api/items?limit=100")
+}
+
+// A descriptor whose hits_addend is an explicit zero is checked without
+// charging under a route that reads a cost too: after three such checks of
+// limit=100, the first charged check of limit=100 leaves 900 of 1000.
+func TestShouldRateLimit_anExplicitZeroDescriptorCostChargesNothingUnderARouteCost(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, itemsPolicy()))
+	for i := range 3 {
+		req := request("gateway.public", map[string]string{"path": "/api/items?limit=100", "method": "GET"})
+		req.Descriptors[0].HitsAddend = wrapperspb.UInt64(0)
+		resp := shouldRateLimit(t, server, req)
+		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "zero-cost check %d", i+1)
+	}
+
+	resp := shouldRateLimit(t, server,
+		request("gateway.public", map[string]string{"path": "/api/items?limit=100", "method": "GET"}))
+
+	assert.Equal(t, "900", headerMap(resp)["x-ratelimit-remaining"],
+		"x-ratelimit-remaining of 1000 items a minute after three zero-cost checks and one of limit=100")
+}
+
 // zeroCostCheck builds a check of gateway.public whose request cost is 7 and
 // whose one descriptor sets an explicit hits_addend of zero.
 func zeroCostCheck() *envoyratelimit.RateLimitRequest {
@@ -687,11 +773,11 @@ func TestShouldRateLimit_refusesADecisionOverTheBucketBudget(t *testing.T) {
 // unreachable Redis.
 type failingCounters struct{}
 
-func (failingCounters) Decide(context.Context, []counters.Bucket, int64) ([]counters.Verdict, error) {
+func (failingCounters) Decide(context.Context, []counters.Bucket) ([]counters.Verdict, error) {
 	return nil, errors.New("store is down")
 }
 
-func (failingCounters) Peek(context.Context, []counters.Bucket, int64) ([]counters.Verdict, error) {
+func (failingCounters) Peek(context.Context, []counters.Bucket) ([]counters.Verdict, error) {
 	return nil, errors.New("store is down")
 }
 
@@ -846,16 +932,16 @@ type failAfterStore struct {
 	calls int
 }
 
-func (f *failAfterStore) Decide(ctx context.Context, buckets []counters.Bucket, cost int64) ([]counters.Verdict, error) {
+func (f *failAfterStore) Decide(ctx context.Context, buckets []counters.Bucket) ([]counters.Verdict, error) {
 	f.calls++
 	if f.calls > f.limit {
 		return nil, errors.New("store is down")
 	}
-	return f.inner.Decide(ctx, buckets, cost)
+	return f.inner.Decide(ctx, buckets)
 }
 
-func (f *failAfterStore) Peek(ctx context.Context, buckets []counters.Bucket, cost int64) ([]counters.Verdict, error) {
-	return f.inner.Peek(ctx, buckets, cost)
+func (f *failAfterStore) Peek(ctx context.Context, buckets []counters.Bucket) ([]counters.Verdict, error) {
+	return f.inner.Peek(ctx, buckets)
 }
 
 func (f *failAfterStore) Reset(ctx context.Context, keys []string) error {

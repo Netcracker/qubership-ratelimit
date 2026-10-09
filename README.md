@@ -69,6 +69,11 @@ counts per wall-clock window and resets at the boundary. A rule whose axis the r
 all — there is nothing to key the bucket by, which is what excludes an anonymous caller from a rule counting by
 `sub`.
 
+A request costs one unit of every window it meets, unless the route of its block reads the cost from a query
+parameter: with `cost` on `limit`, a page of 100 items costs 100, and a window of `requests: 50000` an hour holds 50000
+items whatever the page sizes. The parameter is named per route, so each API brings its own
+([request cost](docs/ratelimitpolicy-cr-spec.md#request-cost)).
+
 `spec.mappings` declares how identity is read out of the JWT and `spec.groups` holds the named value lists `InGroup`
 resolves against. Both live in the same object as the rules that reference them, which is the point of the singleton:
 they change in one edit and apply as one generation, so a request never sees new rules over old extraction. The
@@ -94,6 +99,7 @@ The schema rejects what it can see; the compiler reports what needs the domain t
 | `InvalidWindow`            | blocking      | a window the counting math cannot honor                                     |
 | `DomainBudgetExceeded`     | blocking      | the worst-case decision is over 128 buckets                                 |
 | `CaptureShadowsMappedKey`  | informational | inside this block a route capture wins over the mapped key                  |
+| `CostExceedsCapacity`      | informational | a route's default cost is above the capacity of a window of its block       |
 
 One blocking entry invalidates the whole generation: not one of its rules enters the snapshot. Applying the healthy
 rules of a broken generation would be worse than applying none — a `FirstMatch` cascade missing a rule silently hands

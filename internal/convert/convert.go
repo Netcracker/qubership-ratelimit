@@ -64,6 +64,14 @@ func modelRoutes(routes []v1.Route) []model.Route {
 		for _, method := range route.Methods {
 			converted.Methods = append(converted.Methods, string(method))
 		}
+		if route.Cost != nil {
+			converted.Cost = &model.RouteCost{Source: model.CostSource(route.Cost.Source), Name: route.Cost.Name}
+			// A nil default stays zero, which the engine reads as one, as it
+			// reads a nil burst.
+			if route.Cost.Default != nil {
+				converted.Cost.Default = int64(*route.Cost.Default)
+			}
+		}
 		out = append(out, converted)
 	}
 	return out

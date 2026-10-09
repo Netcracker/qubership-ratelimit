@@ -52,6 +52,8 @@ func TestEnumValues_areSpelledTheSameInTheAPIAndTheModel(t *testing.T) {
 		{"KeyMethod", v1.KeyMethod, model.KeyMethod},
 		{"KeySub", v1.KeySub, model.KeySub},
 		{"KeyToken", v1.KeyToken, model.KeyToken},
+
+		{"CostSourceQueryParameter", string(v1.CostSourceQueryParameter), string(model.CostQueryParameter)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -81,6 +83,7 @@ func TestProblemReasons_areSpelledTheSameInTheAPIAndTheCompiler(t *testing.T) {
 		{"UnresolvedReplacedRules",
 			v1.ProblemUnresolvedReplacedRules, string(enginecompile.ReasonUnresolvedReplacedRules)},
 		{"DomainBudgetExceeded", v1.ProblemDomainBudgetExceeded, string(enginecompile.ReasonDomainBudgetExceeded)},
+		{"CostExceedsCapacity", v1.ProblemCostExceedsCapacity, string(enginecompile.ReasonCostExceedsCapacity)},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -89,8 +92,49 @@ func TestProblemReasons_areSpelledTheSameInTheAPIAndTheCompiler(t *testing.T) {
 	}
 }
 
+// The status derives the severity of a problem from its reason alone, and the
+// compiler sets it on every problem it raises; the two agree on both
+// informational reasons and on a blocking one.
+func TestBlockingProblem_agreesWithTheCompiler(t *testing.T) {
+	route := func(cost *model.RouteCost, value string) model.Route {
+		return model.Route{Path: model.PathMatch{Type: model.PathTemplate, Value: value}, Cost: cost}
+	}
+	policy := func(mappings []model.KeyMapping, r model.Route, counters ...string) model.Policy {
+		return model.Policy{Domain: testDomain, Mappings: mappings, Blocks: []model.Block{{
+			Name:   "api",
+			Target: model.Target{Routes: []model.Route{r}},
+			Rules: []model.Rule{{Name: "r", Counters: counters,
+				Rates: []model.Rate{{Requests: 10, Period: time.Minute}}}},
+		}}}
+	}
+	cases := []struct {
+		name   string
+		policy model.Policy
+		reason string
+	}{
+		{"a default cost above a window's capacity", policy(nil, route(
+			&model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 11}, "/api/{id}")),
+			v1.ProblemCostExceedsCapacity},
+		{"a capture that shadows a mapped key", policy(
+			[]model.KeyMapping{{Key: "id", Claim: "id"}}, route(nil, "/api/{id}")),
+			v1.ProblemCaptureShadowsMappedKey},
+		{"a counter axis nothing produces", policy(nil, route(nil, "/api/{id}"), "tenant"),
+			v1.ProblemUnresolvedKeyReference},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, problems := enginecompile.Compile("core-1-core", testDomain, &c.policy)
+
+			require.Len(t, problems, 1, "the problems of %s", c.name)
+			assert.Equal(t, c.reason, string(problems[0].Reason))
+			assert.Equal(t, problems[0].Blocking, v1.BlockingProblem(c.reason), "BlockingProblem(%s)", c.reason)
+		})
+	}
+}
+
 func TestPolicy_convertsEveryFieldOfTheSpec(t *testing.T) {
 	burst := int32(10)
+	defaultCost := int32(20)
 	spec := &v1.RateLimitPolicySpec{
 		Domain: testDomain,
 		Mappings: []v1.ClaimMapping{{
@@ -111,6 +155,7 @@ func TestPolicy_convertsEveryFieldOfTheSpec(t *testing.T) {
 			Target: &v1.Target{Routes: []v1.Route{{
 				Path:    v1.PathMatch{Type: v1.PathMatchTemplate, Value: "/api/{id}"},
 				Methods: []v1.HTTPMethod{"GET", "POST"},
+				Cost:    &v1.RouteCost{Source: v1.CostSourceQueryParameter, Name: "limit", Default: &defaultCost},
 			}}},
 			Rules: []v1.Rule{{
 				Name: "per-user",
@@ -150,6 +195,7 @@ func TestPolicy_convertsEveryFieldOfTheSpec(t *testing.T) {
 			Target: model.Target{Routes: []model.Route{{
 				Path:    model.PathMatch{Type: model.PathTemplate, Value: "/api/{id}"},
 				Methods: []string{"GET", "POST"},
+				Cost:    &model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 20},
 			}}},
 			Rules: []model.Rule{{
 				Name: "per-user",
@@ -187,6 +233,25 @@ func TestPolicy_leavesAnUnsetBurstAtZero(t *testing.T) {
 	rate := convertedRate(t, v1.Rate{Requests: 100, PeriodSeconds: 60})
 
 	assert.Equal(t, int64(0), rate.Burst)
+}
+
+// An unset default cost stays zero, which the engine reads as one, as it reads
+// an unset burst. A set default is converted as it is, in
+// TestPolicy_convertsEveryFieldOfTheSpec.
+func TestPolicy_leavesAnUnsetDefaultCostAtZero(t *testing.T) {
+	policy := Policy(&v1.RateLimitPolicySpec{Domain: testDomain, Limits: []v1.LimitBlock{{
+		Name: "api",
+		Target: &v1.Target{Routes: []v1.Route{{
+			Path: v1.PathMatch{Type: v1.PathMatchPrefix, Value: "/api"},
+			Cost: &v1.RouteCost{Source: v1.CostSourceQueryParameter, Name: "limit"},
+		}}},
+		Rules: []v1.Rule{{Name: "r", Rates: []v1.Rate{{Requests: 100, PeriodSeconds: 60}}}},
+	}}})
+
+	require.Len(t, policy.Blocks, 1)
+	require.Len(t, policy.Blocks[0].Target.Routes, 1)
+	assert.Equal(t, &model.RouteCost{Source: model.CostQueryParameter, Name: "limit"},
+		policy.Blocks[0].Target.Routes[0].Cost)
 }
 
 // A nil spec, which is how "no policy" arrives, converts to a nil policy

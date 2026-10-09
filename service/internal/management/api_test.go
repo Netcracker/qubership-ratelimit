@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,6 +64,20 @@ func TestRules_reportsTheCompiledSet(t *testing.T) {
 	require.Len(t, everyone.Rates, 1, "rates of %s", everyone.ID)
 	assert.Equal(t, int64(60), everyone.Rates[0].PeriodSeconds, "the rate of %s", everyone.ID)
 	assert.Equal(t, "1m0s", everyone.Rates[0].Period, "the rate of %s", everyone.ID)
+}
+
+// A route that reads a cost shows its entry within the routes of its block.
+func TestRules_showsTheCostEntryOfARoute(t *testing.T) {
+	h := newTestAPI(t, itemBlocks()...)
+
+	var view ruleview.RuleSetView
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
+		http.StatusOK, &view)
+
+	require.Len(t, view.Blocks, 1, "the blocks of the item policy")
+	require.Len(t, view.Blocks[0].Routes, 1, "the routes of items")
+	assert.Equal(t, &ruleview.CostView{Source: "QueryParameter", Name: "limit", Default: 20},
+		view.Blocks[0].Routes[0].Cost, "the cost entry of the route over /api/items")
 }
 
 // Unscoped, no rule is annotated: an annotation without a question would be an
@@ -625,6 +640,39 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 	assert.Equal(t, "orders/per-client", response.Rules[0].ID)
 	assert.Equal(t, ReasonCapacityExceeded, response.Rules[0].RefusalReason)
 	assert.Nil(t, response.Rules[0].RetryAfterSeconds, "retryAfterSeconds of orders/per-client")
+}
+
+// A simulation path with a query string judges a block whose route reads a
+// cost at the value the route reads, in place of the cost the body names, and
+// the outcome reports that cost beside the remaining it counts in. The block
+// calls over the same path reads no cost and is judged at the body's 5.
+func TestSimulation_judgesTheCostTheMatchedRouteReads(t *testing.T) {
+	calls := model.Block{
+		Name:   "calls",
+		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"}}}},
+		Rules: []model.Rule{{Name: "per-client", Counters: []string{model.KeySub},
+			Rates: []model.Rate{{Requests: 100, Period: time.Hour}}}},
+	}
+	h := newTestAPI(t, append(itemBlocks(), calls)...)
+	keys := map[string][]string{model.KeySub: {"alice"}}
+	h.spend(t, "/api/items?limit=100", keys, 1)
+
+	var response SimulationResponse
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
+		Domain: testDomain,
+		Path:   "/api/items?limit=950",
+		Method: http.MethodGet,
+		Keys:   keys,
+		Cost:   5,
+	}), http.StatusOK, &response)
+
+	assert.False(t, response.Allowed, "allowed of 950 items with 900 left")
+	require.Len(t, response.Rules, 2, "the rules the simulation applies")
+	assert.Equal(t, "items/per-client", response.Rules[0].ID)
+	assert.Equal(t, int64(950), response.Rules[0].Cost, "the cost of items/per-client")
+	assert.Equal(t, int64(900), response.Rules[0].Remaining, "the remaining of items/per-client")
+	assert.Equal(t, "calls/per-client", response.Rules[1].ID)
+	assert.Equal(t, int64(5), response.Rules[1].Cost, "the cost of calls/per-client")
 }
 
 func TestSimulation_refusesTheCombinationsTheFormsForbid(t *testing.T) {

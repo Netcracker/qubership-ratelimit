@@ -54,17 +54,17 @@ func New(rdb goredis.UniversalClient) *Store {
 }
 
 // Decide judges every bucket and commits atomically inside one script.
-func (s *Store) Decide(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
-	return s.run(ctx, "decide", buckets, cost)
+func (s *Store) Decide(ctx context.Context, buckets []store.Bucket) ([]store.Verdict, error) {
+	return s.run(ctx, "decide", buckets)
 }
 
 // Peek runs the same script with the commit pass switched off.
-func (s *Store) Peek(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
-	return s.run(ctx, "peek", buckets, cost)
+func (s *Store) Peek(ctx context.Context, buckets []store.Bucket) ([]store.Verdict, error) {
+	return s.run(ctx, "peek", buckets)
 }
 
-func (s *Store) run(ctx context.Context, mode string, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
-	if err := store.GuardBuckets(buckets, cost); err != nil {
+func (s *Store) run(ctx context.Context, mode string, buckets []store.Bucket) ([]store.Verdict, error) {
+	if err := store.GuardBuckets(buckets); err != nil {
 		return nil, err
 	}
 	if len(buckets) == 0 {
@@ -72,16 +72,16 @@ func (s *Store) run(ctx context.Context, mode string, buckets []store.Bucket, co
 	}
 
 	keys := make([]string, len(buckets))
-	argv := make([]any, 0, 2+len(buckets)*5)
-	argv = append(argv, mode, cost)
+	argv := make([]any, 0, 1+len(buckets)*6)
+	argv = append(argv, mode)
 	for i, b := range buckets {
 		keys[i] = b.Key
 		switch b.Algorithm {
 		case algo.GCRAID:
-			argv = append(argv, int64(algo.GCRAID),
+			argv = append(argv, b.Cost, int64(algo.GCRAID),
 				algo.EmissionMicros(b.Window), algo.TauMicros(b.Window), b.Window.Burst, boolArg(b.Shadow))
 		case algo.FixedWindowID:
-			argv = append(argv, int64(algo.FixedWindowID),
+			argv = append(argv, b.Cost, int64(algo.FixedWindowID),
 				algo.PeriodMicros(b.Window), b.Window.Requests, int64(0), boolArg(b.Shadow))
 		default:
 			return nil, fmt.Errorf("redis: unknown algorithm id %d", b.Algorithm)

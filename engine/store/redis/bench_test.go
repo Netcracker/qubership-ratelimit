@@ -21,7 +21,7 @@ import (
 func benchBuckets(tag string, n int) []store.Bucket {
 	out := make([]store.Bucket, n)
 	for i := range out {
-		b := store.Bucket{Key: fmt.Sprintf("bench:{%s}:%d:", tag, i), Algorithm: algo.GCRAID,
+		b := store.Bucket{Key: fmt.Sprintf("bench:{%s}:%d:", tag, i), Algorithm: algo.GCRAID, Cost: 1,
 			Window: algo.Window{Requests: 1_000_000, Period: time.Minute, Burst: 1_000_000}}
 		if i%2 == 1 {
 			b.Algorithm = algo.FixedWindowID
@@ -36,7 +36,7 @@ func BenchmarkRedisDecide(b *testing.B) {
 	s := redisstore.New(client(b))
 	buckets := benchBuckets(fmt.Sprintf("serial-%d", time.Now().UnixNano()), 3)
 	for b.Loop() {
-		if _, err := s.Decide(b.Context(), buckets, 1); err != nil {
+		if _, err := s.Decide(b.Context(), buckets); err != nil {
 			b.Fatalf("Decide(%d buckets): %v", len(buckets), err)
 		}
 	}
@@ -49,7 +49,7 @@ func BenchmarkRedisDecideParallel(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		buckets := benchBuckets(tag, 3)
 		for pb.Next() {
-			if _, err := s.Decide(b.Context(), buckets, 1); err != nil {
+			if _, err := s.Decide(b.Context(), buckets); err != nil {
 				b.Errorf("Decide(%d buckets): %v", len(buckets), err)
 				return
 			}
@@ -65,7 +65,7 @@ func BenchmarkRedisDecideBuckets(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {
 				buckets := benchBuckets(tag, n)
 				for pb.Next() {
-					if _, err := s.Decide(b.Context(), buckets, 1); err != nil {
+					if _, err := s.Decide(b.Context(), buckets); err != nil {
 						b.Errorf("Decide(%d buckets): %v", len(buckets), err)
 						return
 					}

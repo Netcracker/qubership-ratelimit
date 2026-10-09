@@ -146,6 +146,35 @@ type Route struct {
 
 	// Methods is OR over values; empty means any method.
 	Methods []string
+
+	// Cost reads the cost of a request matched through this route from the
+	// request. Nil leaves the request at the cost it arrived with.
+	Cost *RouteCost
+}
+
+// CostSource names where a route reads the cost of a request from.
+type CostSource string
+
+// CostQueryParameter reads the cost from one parameter of the query string.
+const CostQueryParameter CostSource = "QueryParameter"
+
+// MaxCost is the largest cost one request can carry: the ceiling Envoy puts on
+// a route's hits_addend. A route that reads a larger value charges MaxCost.
+const MaxCost = 1_000_000_000
+
+// RouteCost is the cost entry of a route: the request costs the positive
+// decimal integer in the parameter Name, and Default when the parameter is
+// absent or holds anything else.
+type RouteCost struct {
+	Source CostSource
+
+	// Name is the parameter name, compared with the percent-decoded name in
+	// the query string, case-sensitively.
+	Name string
+
+	// Default is the cost of a request without a usable value; zero reads as
+	// one.
+	Default int64
 }
 
 // PathMatch matches the request path, query string already stripped.
