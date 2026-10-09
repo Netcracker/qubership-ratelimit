@@ -214,7 +214,7 @@ jobs:
       - name: Test the store against a Redis Cluster
         working-directory: engine
         run: |
-          REDIS_ADDR="$(../hack/redis-cluster.sh up)" \
+          REDIS_ADDR="$(../.github/scripts/redis-cluster.sh up)" \
             go test -race ./store/redis/ -count=1 -coverpkg=./... -coverprofile engine.cluster.coverage.out
 
       # The command store keeps its records, sweep lease, and confirmation
@@ -225,7 +225,7 @@ jobs:
       # empty string turns into slot 0.
       - name: Test the command store against a Redis Cluster
         run: |
-          REDIS_ADDR="$(hack/redis-cluster.sh up)" \
+          REDIS_ADDR="$(.github/scripts/redis-cluster.sh up)" \
             go test -race ./service/internal/records/ -count=1
 
       - name: Upload coverage artifact
