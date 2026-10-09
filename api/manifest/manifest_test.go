@@ -413,6 +413,17 @@ func TestDecode_refusesAManifestWithoutDomains(t *testing.T) {
 	assert.ErrorIs(t, err, ErrMalformed)
 }
 
+// The format says "no domains" with an empty object, and Encode never writes
+// null, so a null domains is refused as absent domains are. The empty object
+// of TestDecode_readsAnEmptyDomainsObjectAsAnEmptyNamespace is the control.
+func TestDecode_refusesNullDomains(t *testing.T) {
+	data := fmt.Sprintf(`{"formatVersion": %d, "operatorVersion": "x", "domains": null}`, FormatVersion)
+
+	_, err := Decode([]byte(data))
+
+	assert.ErrorIs(t, err, ErrMalformed)
+}
+
 // No policy is a configuration, not an absence: a replica applying an empty
 // domains object is Ready and passes every request as an unknown domain. The
 // absent domains of TestDecode_refusesAManifestWithoutDomains are refused.
@@ -509,6 +520,29 @@ func TestPayload_refusesWhatIsNotGzip(t *testing.T) {
 	var out payload
 	_, err := DecodePayload([]byte(`{"domain":"d"}`), &out)
 	assert.ErrorIs(t, err, ErrMalformed)
+}
+
+// A stream with a valid header whose content fails the gzip checksum is
+// refused, though the bytes it inflates to are a payload the decoder accepts:
+// a payload is not read in part. The first four bytes of the gzip trailer are
+// the CRC-32 of the content.
+func TestPayload_refusesAStreamThatFailsItsChecksum(t *testing.T) {
+	corrupt := gzipped(t, []byte(`{"domain":"gateway.public","rules":["a"]}`))
+	corrupt[len(corrupt)-8] ^= 0xff
+
+	var out payload
+	_, err := DecodePayload(corrupt, &out)
+
+	assert.ErrorIs(t, err, ErrMalformed)
+}
+
+// A value with no JSON form has no payload: EncodePayload returns the
+// encoder's error.
+func TestEncodePayload_refusesAValueJSONCannotEncode(t *testing.T) {
+	_, _, err := EncodePayload(make(chan int))
+
+	var unsupported *json.UnsupportedTypeError
+	assert.ErrorAs(t, err, &unsupported)
 }
 
 // A stream one byte past MaxPayloadSize is refused for its size, before the

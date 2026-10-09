@@ -427,3 +427,40 @@ func TestReset_replaysEvenWhenTheRuleIsGone(t *testing.T) {
 	decode(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusOK, &replay)
 	assert.Equal(t, first, replay)
 }
+
+// An algorithm alone narrows the addressed reset to that algorithm's windows.
+// The wider per-client rule counts in a GCRA window of an hour and a fixed
+// window of a day; the reset under algorithm=FixedWindow drops the day's
+// counter and leaves the hour's.
+func TestReset_narrowsToTheWindowsOfTheGivenAlgorithm(t *testing.T) {
+	h := newTestAPI(t, widerOrders()...)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+
+	var response ResetResponse
+	decode(t, h.reset(t, addressAlice+"&algorithm=FixedWindow", "key-1", listedCaller), http.StatusOK, &response)
+	var left CounterList
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/counters?"+addressAlice,
+		listedCaller, nil), http.StatusOK, &left)
+
+	require.NotNil(t, response.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 1, *response.ResetCount, "counters the reset under algorithm=FixedWindow dropped")
+	require.Len(t, left.Items, 1, "counters of alice left after the reset")
+	assert.Equal(t, "gcra", left.Items[0].Algorithm, "the algorithm of the counter left")
+	assert.Equal(t, int64(3600), left.Items[0].PeriodSeconds, "the period of the counter left")
+}
+
+// An Idempotency-Key is scoped to its subject, so another subject's different
+// command under the same key runs instead of meeting a key bound to another
+// command. TestReset_refusesAKeyBoundToAnotherSelection holds the conflict
+// within one subject.
+func TestReset_runsAnotherSubjectsCommandUnderTheSameKey(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"bob"}}, 1)
+	decode(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusOK, nil)
+
+	var second ResetResponse
+	decode(t, h.reset(t, "ruleId=orders/per-client&axis.sub=bob", "key-1", otherCaller), http.StatusOK, &second)
+
+	require.NotNil(t, second.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 1, *second.ResetCount, "the reset of bob's counter by the second subject")
+}

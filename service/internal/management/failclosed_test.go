@@ -236,3 +236,61 @@ func TestBackgroundContext_isTheOneTheRunnerGave(t *testing.T) {
 	h.api.StartBackground(ctx)
 	assert.Equal(t, ctx, h.api.backgroundContext(), "after StartBackground")
 }
+
+// A bulk command whose record cannot be read is refused before anything binds,
+// so its retry under the same key, once the store answers, runs the command
+// instead of finding it in flight.
+func TestFailClosed_aCommandRefusedForAnUnreadableRecordRunsOnRetry(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	body := map[string]any{"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true}
+	broken := &brokenRecords{failLookup: true}
+	h.breakRecords(broken)
+	requireError(t, h.bulk(t, body, "key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
+
+	broken.failLookup = false
+	var retry BulkResult
+	decode(t, h.bulk(t, body, "key-1", listedCaller), http.StatusOK, &retry)
+
+	require.NotNil(t, retry.MatchedCount, "the answer of a preview carries matchedCount")
+	assert.Equal(t, 1, *retry.MatchedCount, "counters the retried preview matched")
+}
+
+// An execution whose confirmation token cannot be read is refused before
+// acceptance, so it spends neither its key nor its token: its retry under the
+// same key, once the store answers, runs it.
+func TestFailClosed_anExecutionRefusedForAnUnreadableTokenRunsOnRetry(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	selector := map[string]any{"ruleIds": []string{"orders"}}
+	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
+	execute := map[string]any{"selector": selector, "confirmationToken": preview.ConfirmationToken}
+	broken := &brokenRecords{failToken: true}
+	h.breakRecords(broken)
+	requireError(t, h.bulk(t, execute, "key-execute", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
+
+	broken.failToken = false
+	var retry BulkResult
+	decode(t, h.bulk(t, execute, "key-execute", listedCaller), http.StatusOK, &retry)
+
+	require.NotNil(t, retry.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 1, *retry.ResetCount, "counters the retried execution reset")
+}
+
+// The addressed reset is one step in the store, so a store that refuses the
+// step binds nothing, as the message of the 503 states: the retry under the
+// same key, once the store answers, runs the reset.
+func TestFailClosed_anAddressedResetTheStoreRefusedRunsOnRetry(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	broken := &brokenRecords{failReset: true}
+	h.breakRecords(broken)
+	requireError(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
+
+	broken.failReset = false
+	var retry ResetResponse
+	decode(t, h.reset(t, addressAlice, "key-1", listedCaller), http.StatusOK, &retry)
+
+	require.NotNil(t, retry.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 1, *retry.ResetCount, "counters the retried reset dropped")
+}

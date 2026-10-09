@@ -17,6 +17,7 @@ import (
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/store"
+	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
 // sampleCount reads how many observations the series of labels holds in a
@@ -162,6 +163,7 @@ func TestInstrumentStore_countsAFailedDecisionByReason(t *testing.T) {
 		reason string
 	}{
 		{"a deadline is a timeout", "errors.deadline", context.DeadlineExceeded, "timeout"},
+		{"a canceled context is a timeout", "errors.canceled", context.Canceled, "timeout"},
 		{"a network timeout is a timeout", "errors.net-timeout",
 			fmt.Errorf("dial: %w", &net.DNSError{IsTimeout: true}), "timeout"},
 		{"a redis error is a server answer", "errors.redis", goredis.ErrNoScript, "server"},
@@ -217,6 +219,33 @@ func TestCacheStatsCollectors_startAtZero(t *testing.T) {
 	for _, c := range collectors {
 		assert.Zero(t, testutil.ToFloat64(c), "%v", c.(prometheus.Metric).Desc())
 	}
+}
+
+// RegisterCacheStats registers the token cache's counters, and they read the
+// counts of the stats the engines share. The cache keys a token by its bytes,
+// whatever they decode to, so one token decided twice and another decided
+// once are one hit and two misses.
+func TestRegisterCacheStats_exposesTheCountsOfTheSharedStats(t *testing.T) {
+	stats := &engine.CacheStats{}
+	decider := engine.New(compiledSnapshots(t)["gateway.public"], memory.New(), engine.WithCacheStats(stats))
+	for _, token := range []string{"token-of-acme", "token-of-acme", "token-of-globex"} {
+		_, err := decider.Decide(t.Context(), engine.Request{Path: "/api", Method: "GET", Token: token})
+		require.NoError(t, err, "Decide with the token %s", token)
+	}
+	registry := prometheus.NewRegistry()
+
+	RegisterCacheStats(registry, stats)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	got := map[string]float64{}
+	for _, family := range families {
+		got[family.GetName()] = family.GetMetric()[0].GetCounter().GetValue()
+	}
+	assert.Equal(t, map[string]float64{
+		"ratelimit_token_cache_hits_total":   1,
+		"ratelimit_token_cache_misses_total": 2,
+	}, got)
 }
 
 // A dead claim path never increments, so an unseeded key has no series to

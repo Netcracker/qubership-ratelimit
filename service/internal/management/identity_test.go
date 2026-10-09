@@ -301,3 +301,158 @@ func TestLogSafe_dropsWhatCouldForgeARecord(t *testing.T) {
 		})
 	}
 }
+
+// A verified token whose sub claim is not a string names no caller, even with
+// the kubernetes.io claim of a ServiceAccount token, and is refused with 401
+// like a token without a subject.
+func TestIdentity_refusesATokenWhoseSubjectIsNotAString(t *testing.T) {
+	h := newTestAPI(t)
+	request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
+	request.Header.Set("Authorization", "Bearer "+tokenWithClaims(map[string]any{
+		"sub": 42, "kubernetes.io": map[string]any{"namespace": testNamespace}}))
+
+	requireError(t, h.send(t, request), http.StatusUnauthorized, CodeUnauthorized)
+}
+
+// retryWaits returns the wait each failed construction of the verifier logged,
+// in the order of the failures.
+func retryWaits(log *recordingLogger) []string {
+	const prefix = "management API token verifier unavailable, retrying in "
+
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	var out []string
+	for _, line := range log.lines {
+		if rest, found := strings.CutPrefix(line.message, prefix); found {
+			wait, _, _ := strings.Cut(rest, ":")
+			out = append(out, wait)
+		}
+	}
+	return out
+}
+
+// A failed construction of the verifier is retried after a wait that doubles
+// with each failure up to verifierRetryMax. The log line of each failure names
+// its wait, and the runbook quotes those lines. With a first wait of 1ms and a
+// cap of 4ms, five failures wait 1ms, 2ms, 4ms, 4ms, and 4ms.
+func TestIdentity_doublesTheWaitBetweenConstructionsUpToTheCap(t *testing.T) {
+	first, longest := verifierRetryFirst, verifierRetryMax
+	verifierRetryFirst, verifierRetryMax = time.Millisecond, 4*time.Millisecond
+	t.Cleanup(func() { verifierRetryFirst, verifierRetryMax = first, longest })
+
+	h := newTestAPI(t)
+	log := &recordingLogger{}
+	h.api.Log = log
+	h.api.verifier.Store(nil)
+	var constructions atomic.Int32
+	h.api.NewVerifier = func(context.Context) (Verifier, error) {
+		if constructions.Add(1) <= 5 {
+			return nil, errors.New("OIDC discovery refused the connection")
+		}
+		return readingVerifier{}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	h.api.StartBackground(ctx)
+	require.Eventually(t, func() bool { return h.api.verifier.Load() != nil }, 5*time.Second, time.Millisecond,
+		"waiting for StartBackground to build the verifier on the sixth construction")
+
+	assert.Equal(t, []string{"1ms", "2ms", "4ms", "4ms", "4ms"}, retryWaits(log),
+		"the waits the five failed constructions logged")
+}
+
+// The constructions of the verifier stop when their context ends during the
+// wait between two of them: the runner's context ends when the process shuts
+// down, and a wait can last verifierRetryMax. The first wait here is an hour,
+// and the context ends while it runs, so only a wait that watches the context
+// returns in time.
+func TestIdentity_stopsConstructingTheVerifierWhenItsContextEndsDuringAWait(t *testing.T) {
+	first := verifierRetryFirst
+	verifierRetryFirst = time.Hour
+	t.Cleanup(func() { verifierRetryFirst = first })
+
+	h := newTestAPI(t)
+	log := &recordingLogger{}
+	h.api.Log = log
+	h.api.verifier.Store(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var constructions atomic.Int32
+	h.api.NewVerifier = func(context.Context) (Verifier, error) {
+		constructions.Add(1)
+		return nil, errors.New("OIDC discovery refused the connection")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		h.api.buildVerifier(ctx)
+		close(done)
+	}()
+	require.Eventually(t, func() bool { return len(retryWaits(log)) == 1 }, 5*time.Second, time.Millisecond,
+		"waiting for the failure line of the first construction")
+	// buildVerifier writes the failure line right before its wait starts; the
+	// pause puts the end of the context inside the wait.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("buildVerifier was still in its hour-long wait 5s after its context ended")
+	}
+	assert.Equal(t, int32(1), constructions.Load(), "constructions of the verifier")
+}
+
+// A caller's request id of 128 characters, the longest the pattern admits,
+// runs through to the response unchanged.
+func TestRequestID_roundTripsAnIDOfTheLongestLength(t *testing.T) {
+	h := newTestAPI(t)
+	id := strings.Repeat("a", 128)
+
+	recorder := h.callWith(t, http.MethodGet, BasePath+"/domains", listedCaller, nil, func(request *http.Request) {
+		request.Header.Set(RequestIDHeader, id)
+	})
+
+	require.Equal(t, http.StatusOK, recorder.Code, "body: %s", recorder.Body.String())
+	assert.Equal(t, []string{id}, recorder.Header().Values(RequestIDHeader))
+}
+
+// A request id of 129 characters is one over the longest the pattern admits,
+// and is refused under the name of the header.
+func TestRequestID_refusesAnIDOneCharacterOverTheLongestLength(t *testing.T) {
+	h := newTestAPI(t)
+
+	recorder := h.callWith(t, http.MethodGet, BasePath+"/domains", listedCaller, nil, func(request *http.Request) {
+		request.Header.Set(RequestIDHeader, strings.Repeat("a", 129))
+	})
+
+	body := requireError(t, recorder, http.StatusBadRequest, CodeInvalidRequest)
+	assert.Equal(t, []string{RequestIDHeader}, body.Meta.Fields)
+}
+
+// A recorded value is cut at maxLoggedValueLength bytes: a value of exactly the
+// bound is kept whole, and a value one byte longer is cut to the bound.
+// TestLogSafe_dropsWhatCouldForgeARecord holds a value far over it.
+func TestLogSafe_cutsAValueAtTheLengthBound(t *testing.T) {
+	cases := []struct {
+		name, raw, want string
+	}{
+		{
+			name: "a value of exactly the bound",
+			raw:  strings.Repeat("x", maxLoggedValueLength),
+			want: strings.Repeat("x", maxLoggedValueLength),
+		},
+		{
+			name: "a value one byte over the bound",
+			raw:  strings.Repeat("x", maxLoggedValueLength+1),
+			want: strings.Repeat("x", maxLoggedValueLength),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := logSafe(tc.raw)
+			assert.Equal(t, tc.want, got, "logSafe of a value of %d bytes returned %d bytes", len(tc.raw), len(got))
+		})
+	}
+}

@@ -235,3 +235,79 @@ func TestIETFHeaders_isOnUnlessSetToFalse(t *testing.T) {
 		})
 	}
 }
+
+// RESPONSE_HEADERS_IETF is read by strconv.ParseBool: each of the spellings
+// it accepts turns the fields off or on without a warning. The spellings
+// false and true are in TestIETFHeaders_isOnUnlessSetToFalse, and the rows
+// here are the other ten.
+func TestIETFHeaders_readsTheOtherSpellingsOfABoolean(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"0 is off", "0", false},
+		{"f is off", "f", false},
+		{"F is off", "F", false},
+		{"FALSE is off", "FALSE", false},
+		{"False is off", "False", false},
+		{"1 is on", "1", true},
+		{"t is on", "t", true},
+		{"T is on", "T", true},
+		{"TRUE is on", "TRUE", true},
+		{"True is on", "True", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var warned warnings
+			t.Setenv("RESPONSE_HEADERS_IETF", c.value)
+			readEnvironment()
+
+			assert.Equal(t, c.want, IETFHeaders(warned.warn), "RESPONSE_HEADERS_IETF=%q", c.value)
+			assert.Empty(t, warned, "warnings about RESPONSE_HEADERS_IETF=%q", c.value)
+		})
+	}
+}
+
+// A namespace is a DNS label of at most 63 bytes: an entry in a namespace of
+// 63 bytes names a caller, and one in a namespace of 64 is reported and left
+// out.
+func TestManagementCallers_boundsTheNamespaceAtTheLengthOfADNSLabel(t *testing.T) {
+	var warned warnings
+	longest, over := strings.Repeat("n", 63), strings.Repeat("n", 64)
+	callers := longest + "/ops-backend, " + over + "/ops-backend"
+	t.Setenv("MANAGEMENT_CALLERS", callers)
+	readEnvironment()
+
+	assert.Equal(t, []string{"system:serviceaccount:" + longest + ":ops-backend"},
+		ManagementCallers("biz", warned.warn), "ManagementCallers with a 63-byte and a 64-byte namespace")
+	assert.Len(t, warned, 1, "warnings for a 63-byte and a 64-byte namespace")
+}
+
+// A ServiceAccount name is a DNS subdomain of at most 253 bytes: an entry
+// naming 253 bytes names a caller, and one naming 254 is reported and left
+// out.
+func TestManagementCallers_boundsTheNameAtTheLengthOfADNSSubdomain(t *testing.T) {
+	var warned warnings
+	longest, over := strings.Repeat("s", 253), strings.Repeat("s", 254)
+	t.Setenv("MANAGEMENT_CALLERS", "platform/"+longest+", platform/"+over)
+	readEnvironment()
+
+	assert.Equal(t, []string{"system:serviceaccount:platform:" + longest},
+		ManagementCallers("biz", warned.warn), "ManagementCallers with a 253-byte and a 254-byte name")
+	assert.Len(t, warned, 1, "warnings for a 253-byte and a 254-byte name")
+}
+
+// A ServiceAccount name is a DNS subdomain, so it may carry dots; an
+// underscore is in neither a label nor a subdomain, so the same name with one
+// is reported and left out.
+func TestManagementCallers_acceptsADottedName(t *testing.T) {
+	var warned warnings
+	callers := "platform/ops.backend, platform/ops_backend"
+	t.Setenv("MANAGEMENT_CALLERS", callers)
+	readEnvironment()
+
+	assert.Equal(t, []string{"system:serviceaccount:platform:ops.backend"},
+		ManagementCallers("biz", warned.warn), "ManagementCallers with MANAGEMENT_CALLERS=%q", callers)
+	assert.Len(t, warned, 1, "warnings for MANAGEMENT_CALLERS=%q", callers)
+}
