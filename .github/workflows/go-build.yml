@@ -205,17 +205,27 @@ jobs:
       # The standalone service above cannot refuse a cross-slot script, so it
       # never exercises the slot mechanics the key contract exists for: the
       # {domain} hash tag that lets one Lua script decide a whole domain
-      # atomically. A real six-node cluster closes that - a lost hash tag
+      # atomically. A real three-master cluster closes that - a lost hash tag
       # fails here with CROSSSLOT instead of in production.
+      # The address is assigned on its own line: a command substitution inside
+      # a prefix assignment does not fail the step under bash -e, and a test
+      # run with an empty REDIS_ADDR falls back to a standalone Redis.
+      - name: Start a Redis Cluster
+        run: |
+          addr="$(.github/scripts/redis-cluster.sh up)"
+          echo "REDIS_CLUSTER_ADDR=${addr}" >> "$GITHUB_ENV"
+
       # The cluster run has code of its own, the per-master walk of Scan and
       # the cursor that names a master, so its coverage ships to Sonar beside
       # the standalone run's: the Sonar job collects every *.coverage.out of
-      # the coverage-* artifacts and merges them.
+      # the coverage-* artifacts and merges them. REDIS_REQUIRE_CLUSTER fails
+      # the run when the address does not name a cluster.
       - name: Test the store against a Redis Cluster
         working-directory: engine
-        run: |
-          REDIS_ADDR="$(../.github/scripts/redis-cluster.sh up)" \
-            go test -race ./store/redis/ -count=1 -coverpkg=./... -coverprofile engine.cluster.coverage.out
+        env:
+          REDIS_ADDR: ${{ env.REDIS_CLUSTER_ADDR }}
+          REDIS_REQUIRE_CLUSTER: "1"
+        run: go test -race ./store/redis/ -count=1 -coverpkg=./... -coverprofile engine.cluster.coverage.out
 
       # The command store keeps its records, sweep lease, and confirmation
       # tokens beside the counters they act on, and its scripts touch both in
@@ -224,9 +234,14 @@ jobs:
       # domain's tag - or a script declaring a key it does not use, which an
       # empty string turns into slot 0.
       - name: Test the command store against a Redis Cluster
-        run: |
-          REDIS_ADDR="$(.github/scripts/redis-cluster.sh up)" \
-            go test -race ./service/internal/records/ -count=1
+        env:
+          REDIS_ADDR: ${{ env.REDIS_CLUSTER_ADDR }}
+          REDIS_REQUIRE_CLUSTER: "1"
+        run: go test -race ./service/internal/records/ -count=1
+
+      - name: Stop the Redis Cluster
+        if: always()
+        run: .github/scripts/redis-cluster.sh down
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

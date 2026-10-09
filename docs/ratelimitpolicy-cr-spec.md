@@ -236,10 +236,10 @@ responsibility. The compiler adds no normalization of its own.
 | `name` | string, required | the parameter name, compared after percent-decoding, case-sensitively; `^[A-Za-z0-9_.\-\[\]]+$`, at most 64 characters, so `page[size]` and `page.size` are valid |
 | `default` | int32, 1..1000000000 | the cost of a request without a usable value; defaults to 1. Set it to the default page size of the API |
 
-GCRA limits visible to the rule author: the service counts in whole microseconds, so the rate is capped at one
-request per microsecond; at a rate above ~10 000/s per bucket the emission interval is rounded to a microsecond, and
-the period must be divisible by `requests` without remainder (`500000/s` is valid, `500001/s` is `InvalidWindow` in
-the status); the bucket depth `burst × (period/requests)` is bounded from above. Below these values the limits do not
+GCRA limits visible to the rule author: the service counts in whole microseconds, so the rate is capped at one request
+per microsecond; at a rate above 10 101/s per bucket, where the emission interval rounded up to a microsecond is under
+100 µs, the period must be divisible by `requests` without remainder (`500000/s` is valid, `500001/s` is `InvalidWindow`
+in the status); the bucket depth `burst × (period/requests)` is bounded from above. Below these values the limits do not
 manifest.
 
 ### The matches operators
@@ -614,7 +614,7 @@ ConfigMap ratelimit-config             owner: the operator Deployment; the opera
   group of UUIDs about 1.8 times ([limits](limits.md)). The operator checks the size before it writes. A
   generation that does not fit is `Ready: False`, `Stalled: True` with reason `ConfigMapTooLarge`, distinct from
   `NotCompiled`, and last-good stays enforced. A write error counts in `ratelimit_config_write_errors_total` by
-  reason (`size`, `api`, `other`) and leaves a log line; the write is retried with the workqueue's backoff. The
+  reason (`size`, `api`, `read`, `other`) and leaves a log line; the write is retried with the workqueue's backoff. The
   operator writes only `Warning` events: on `NotCompiled`, one event per generation change rather than per probe;
   it never writes `Normal` events.
 
@@ -825,7 +825,8 @@ last-good:
   newer schema: the object is decoded strictly (`sigs.k8s.io/json.UnmarshalStrict`), and the field path goes into
   the message;
 - windows (`InvalidWindow`, the engine's window check): `burst` only with GCRA; `requests ≤ periodSeconds × 10⁶`;
-  with an emission < 100 µs `periodSeconds × 10⁶` is divisible by `requests` without remainder;
+  with an emission rounded up to a whole µs < 100 µs, `periodSeconds × 10⁶` is divisible by `requests` without
+  remainder;
   `burst × emission ≤ 10¹⁵ µs`;
 - domain budget (`DomainBudgetExceeded`): the worst case of a decision ≤ 128 buckets;
 - cost (`CostExceedsCapacity`, informational): a route's `cost.default` ≤ the capacity of every window of every rule

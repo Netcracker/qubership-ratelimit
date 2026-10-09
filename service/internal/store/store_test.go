@@ -97,19 +97,18 @@ func TestSwappedAt_isZeroBeforeTheFirstSwap(t *testing.T) {
 // included.
 func TestReplace_stampsTheSwapTimeOnTheSetItSwapsIn(t *testing.T) {
 	s := New()
-	set := ruleSetOf(t, policySpec("gateway.private"))
 	before := time.Now()
 
-	s.Replace(set)
+	s.Replace(ruleSetOf(t, policySpec("gateway.private")))
 
-	assert.WithinRange(t, set.SwappedAt(), before, time.Now(), "the swap time on the set")
-	assert.Equal(t, set.SwappedAt(), s.SwappedAt(), "the swap time the store reports")
+	assert.WithinRange(t, s.Load().SwappedAt(), before, time.Now(), "the swap time on the set")
+	assert.Equal(t, s.Load().SwappedAt(), s.SwappedAt(), "the swap time the store reports")
 }
 
 func TestReplace_leavesTheSwapTimeOfTheSetItRetires(t *testing.T) {
 	s := New()
-	retired := ruleSetOf(t, policySpec("gateway.private"))
-	s.Replace(retired)
+	s.Replace(ruleSetOf(t, policySpec("gateway.private")))
+	retired := s.Load()
 	swapped := retired.SwappedAt()
 
 	s.Replace(ruleSetOf(t, policySpec("gateway.public")))
@@ -117,6 +116,25 @@ func TestReplace_leavesTheSwapTimeOfTheSetItRetires(t *testing.T) {
 	assert.Equal(t, swapped, retired.SwappedAt(), "the swap time of the retired set")
 	assert.False(t, s.SwappedAt().Before(swapped), "the swap time %v of the current set precedes %v of the retired one",
 		s.SwappedAt(), swapped)
+}
+
+// Replace publishes a set of its own and leaves its argument untouched, so a
+// set that readers already hold can be published again. It used to stamp the
+// swap time and clear the refusal on the argument, which readers of that set
+// read without a lock.
+func TestReplace_leavesTheSetItWasGivenUntouched(t *testing.T) {
+	s := New()
+	s.Replace(ruleSetOf(t, policySpec("gateway.private")))
+	s.Refuse(&applied.Refusal{FormatVersion: 9, Reason: "unsupported"})
+	held := s.Load()
+	swapped, refusal := held.SwappedAt(), held.Refusal()
+
+	s.Replace(held)
+
+	assert.Equal(t, swapped, held.SwappedAt(), "the swap time of the set readers hold")
+	assert.Same(t, refusal, held.Refusal(), "the refusal of the set readers hold")
+	assert.Nil(t, s.Load().Refusal(), "the refusal of the set swapped in")
+	assert.True(t, s.Load().Has("gateway.private"))
 }
 
 // Every accessor of the set reads the domain that was bound.

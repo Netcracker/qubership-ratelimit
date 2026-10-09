@@ -49,8 +49,10 @@ const (
 	// a tighter limit is tried out over a live one.
 	RuleBehaviorShadow RuleBehavior = "Shadow"
 
-	// RuleBehaviorBypass ends the cascade of its own block with a pass and never
-	// touches the counter store. Other blocks still apply.
+	// RuleBehaviorBypass never touches the counter store. In a FirstMatch block
+	// it ends the cascade with a pass; in an All block it frees the request
+	// from the rules it names in replacedRules, at least one. Other blocks
+	// still apply.
 	RuleBehaviorBypass RuleBehavior = "Bypass"
 )
 
@@ -105,7 +107,14 @@ type HTTPMethod string
 
 // PathMatch selects request paths.
 type PathMatch struct {
-	// type selects how value is compared.
+	// type selects how value is compared with the request path. Exact compares
+	// the whole path, byte for byte, with the query already stripped and no
+	// normalization, so /orders and /orders/ differ. Prefix compares leading
+	// segments and stops at a slash or at the end of the path: /api/v1/orders
+	// covers /api/v1/orders/42 but not /api/v1/orders-archive, unlike the
+	// character prefix match of an Envoy route. Template compares segment by
+	// segment, where {name} matches exactly one non-empty segment and becomes
+	// a descriptor key of the block.
 	Type PathMatchType `json:"type"`
 
 	// value is the path, the prefix, or the template. It starts with a slash;
@@ -194,7 +203,15 @@ type Predicate struct {
 	// +kubebuilder:validation:MaxLength=63
 	Key string `json:"key"`
 
-	// operator is the predicate applied to the value set of the key.
+	// operator is the predicate applied to the value set of the key: one
+	// value for a scalar key, the elements for an array key, and none for a
+	// key the request does not carry. Equals holds when the set is exactly
+	// value, and is rejected for an array key. In holds when the set shares a
+	// member with values. InGroup holds when the set shares a member with the
+	// group that value names. Contains holds when value is a member of the
+	// set; it never means substring. Exists holds when the set is not empty.
+	// DoesNotExist holds when it is empty, which is how anonymous traffic is
+	// selected.
 	Operator PredicateOperator `json:"operator"`
 
 	// value is the operand of Equals, Contains, and InGroup. For InGroup it is
@@ -234,7 +251,12 @@ type Rate struct {
 	// +kubebuilder:validation:Maximum=2147483647
 	Burst *int32 `json:"burst,omitempty"`
 
-	// algorithm is a property of the window rather than of the rule.
+	// algorithm selects how the window counts, and is a property of the
+	// window rather than of the rule. GCRA meters requests at a steady rate
+	// with burst as the allowance, so a refused caller can retry once a
+	// fraction of the period has passed. FixedWindow counts requests per
+	// wall-clock window and resets at its boundary, which suits a quota.
+	// Defaults to GCRA.
 	// +kubebuilder:default=GCRA
 	Algorithm Algorithm `json:"algorithm,omitempty"`
 }
@@ -270,7 +292,14 @@ type Rule struct {
 	// +listMapKey=periodSeconds
 	Rates []Rate `json:"rates,omitempty"`
 
-	// behavior selects what the rule does with the verdict.
+	// behavior selects what the rule does with the verdict. Enforce counts the
+	// request and can refuse it. Shadow counts the request and records its
+	// metrics but never refuses, and in a FirstMatch block it does not end
+	// the cascade; it is how a tighter limit is tried out over a live one.
+	// Bypass counts nothing. In a FirstMatch block it ends the cascade with
+	// a pass. In an All block it frees the request from the rules it names in
+	// replacedRules, and it has to name at least one. The other blocks of the
+	// policy still apply. Defaults to Enforce.
 	// +kubebuilder:default=Enforce
 	Behavior RuleBehavior `json:"behavior,omitempty"`
 
@@ -300,8 +329,10 @@ type LimitBlock struct {
 	// +optional
 	Target *Target `json:"target,omitempty"`
 
-	// mode selects how the rules of the block combine. It has no effect across
-	// blocks.
+	// mode selects how the rules of the block combine; it has no effect across
+	// blocks. All applies every rule that matches. FirstMatch applies the
+	// first rule that matches, in the order of the rules list, so the order is
+	// part of the meaning. Defaults to All.
 	// +kubebuilder:default=All
 	Mode BlockMode `json:"mode,omitempty"`
 

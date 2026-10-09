@@ -56,6 +56,8 @@ func Run(t *testing.T, newStore func(t *testing.T) store.Store) {
 		{"ResetClearsState", resetClearsState},
 		{"VerdictPerBucketInOrder", verdictPerBucketInOrder},
 		{"FixedWindowCounts", fixedWindowCounts},
+		{"FixedWindowCostAtTheLimitWaitsForTheNextWindow", fixedWindowCostAtTheLimitWaitsForTheNextWindow},
+		{"FixedWindowUntouchedHasNothingToReset", fixedWindowUntouchedHasNothingToReset},
 		{"ScanListsEveryKeyUnderThePrefix", scanListsEveryKeyUnderThePrefix},
 		{"ScanOfAnEmptyPrefixEndsWithNoKeys", scanOfAnEmptyPrefixEndsWithNoKeys},
 		{"ScanRejectsANonPositiveLimit", scanRejectsANonPositiveLimit},
@@ -318,6 +320,46 @@ func fixedWindowCounts(t *testing.T, f *fixture) {
 	}
 	if f.decideAdmitted(one) {
 		t.Error("fourth request admitted under a limit of 3")
+	}
+}
+
+// A cost equal to the window's requests fits an empty window, so a window
+// partly spent refuses it with a retry hint, the next window's boundary,
+// rather than as a cost no waiting can cure.
+func fixedWindowCostAtTheLimitWaitsForTheNextWindow(t *testing.T, f *fixture) {
+	waitOutWindowBoundary(hour)
+	b := f.bucket("b", "FixedWindow", algo.Window{Requests: 3, Period: hour}, false)
+	one := []store.Bucket{b}
+	if !f.decideAdmitted(one) {
+		t.Fatal("first request refused under a limit of 3")
+	}
+
+	b.Cost = 3
+	v := f.decide([]store.Bucket{b})[0]
+
+	if v.Allowed {
+		t.Fatal("cost 3 admitted with 2 of 3 left")
+	}
+	if v.CostExceedsCapacity {
+		t.Error("cost 3 under a limit of 3 is marked as a cost no window can hold")
+	}
+	if v.RetryAfter <= 0 || v.RetryAfter > hour {
+		t.Errorf("RetryAfter = %v, want the time to the window's boundary, within %v", v.RetryAfter, hour)
+	}
+}
+
+// A window nobody charged is already in its empty state: it has nothing to
+// reset, and its whole budget is left.
+func fixedWindowUntouchedHasNothingToReset(t *testing.T, f *fixture) {
+	b := f.bucket("b", "FixedWindow", algo.Window{Requests: 3, Period: hour}, false)
+
+	v := f.peekOne(b)
+
+	if v.ResetAfter != 0 {
+		t.Errorf("ResetAfter = %v of an untouched window, want 0", v.ResetAfter)
+	}
+	if v.Remaining != 3 {
+		t.Errorf("Remaining = %d of an untouched window, want 3", v.Remaining)
 	}
 }
 

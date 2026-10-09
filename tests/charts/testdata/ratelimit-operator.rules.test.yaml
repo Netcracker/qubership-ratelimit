@@ -103,31 +103,122 @@ tests:
                 enforced; the previous generation keeps running. The problems are listed in the policy's
                 status.
 
-  # A failed write of the configuration ConfigMap fires at once: the replicas
-  # are already running on the previous configuration.
+  # A write that fails once and succeeds on its retry is not an outage: the
+  # gauge returns to 0 before the hold ends, and nothing pages.
   - interval: 1m
-    name: a failed write of the configuration
+    name: a write that fails once and succeeds on its retry
     input_series:
-      - series: 'ratelimit_config_write_errors_total{namespace="biz", pod="ratelimit-operator-0", reason="api"}'
-        values: "0 0 1 2 2 2 2 2 2 2"
+      - series: 'ratelimit_config_write_failing{namespace="biz", pod="ratelimit-operator-0", reason="api"}'
+        values: "0 1 0x20"
     alert_rule_test:
-      - eval_time: 1m
+      - eval_time: 3m
         alertname: RatelimitConfigWriteErrors
         exp_alerts: []
-      - eval_time: 5m
+      - eval_time: 20m
+        alertname: RatelimitConfigWriteErrors
+        exp_alerts: []
+
+  # Writes that keep failing on the controller's backoff, minutes apart, hold
+  # the gauge at 1 between two attempts, and the alert stays up.
+  - interval: 1m
+    name: writes that keep failing on the backoff
+    input_series:
+      - series: 'ratelimit_config_write_failing{namespace="biz", pod="ratelimit-operator-0", reason="read"}'
+        values: "0 1x39"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RatelimitConfigWriteErrors
+        exp_alerts: []
+      - eval_time: 30m
         alertname: RatelimitConfigWriteErrors
         exp_alerts:
           - exp_labels:
               namespace: biz
-              reason: api
+              reason: read
               severity: critical
             exp_annotations:
               summary: The operator cannot save the namespace's configuration
               description: >-
-                The operator in biz failed 2 writes of the ratelimit-config ConfigMap in 15m with reason api.
-                The replicas keep the previous configuration and the last-good fallback a restart would need
-                is not being saved. size is a state the object cannot hold, api an answer of the API server,
-                other the rest; the operator log has the error.
+                The operator in biz has failed to write the ratelimit-config ConfigMap for 5m, the last
+                attempt with reason read. The replicas keep the previous configuration and the last-good
+                fallback a restart would need is not being saved, and a replica behind follows as
+                ReplicaStale. size is a state the object cannot hold, api an answer of the API server, read
+                a reconcile that could not read the policies or the ConfigMap and wrote nothing, other the
+                rest; the operator log has the error.
+
+  # A domain whose latest edit does not compile keeps its last-good
+  # generation, and RatelimitRuleProblems reports it; it is not a stall that
+  # pages. A domain that enforces nothing at all pages on its own.
+  - interval: 1m
+    name: a generation that does not compile, with and without last-good
+    input_series:
+      - series: 'ratelimit_policy_stalled{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public", reason="NotCompiled"}'
+        values: "1x10"
+      - series: 'ratelimit_policy_enforced{namespace="biz", pod="ratelimit-operator-0", domain="gateway.public"}'
+        values: "1x10"
+      - series: 'ratelimit_policy_enforced{namespace="biz", pod="ratelimit-operator-0", domain="gateway.private"}'
+        values: "0x10"
+      # A second operator pod that last judged gateway.public before its
+      # generation took over: the domain is enforced while any pod says so.
+      - series: 'ratelimit_policy_enforced{namespace="biz", pod="ratelimit-operator-1", domain="gateway.public"}'
+        values: "0x10"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: RatelimitStalled
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RatelimitNotEnforced
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              domain: gateway.private
+              severity: critical
+            exp_annotations:
+              summary: A policy enforces no generation at all; its domain is not limited
+              description: >-
+                Domain gateway.private in biz enforces no generation: the latest does not compile or does
+                not fit the ConfigMap, and no last-good generation is saved. Every check of the domain
+                passes unlimited. The policy's Accepted and Ready conditions name the reason; the service
+                reads the domain as unknown, so RatelimitUnknownDomain may fire beside this one for the
+                same cause.
+
+  # The writer that fails every reconcile fires. The policy controller, whose
+  # every pass ends in a requeue delay, completes its reconciles with
+  # result="requeue_after", and a lone conflict among them is quiet; so is a
+  # controller of another operator scraped in the same namespace, whose pod
+  # publishes no ratelimit_leader.
+  - interval: 1m
+    name: a writer that fails every reconcile beside a policy controller and another operator
+    input_series:
+      - series: 'ratelimit_leader{namespace="biz", pod="ratelimit-operator-0"}'
+        values: "1x40"
+      - series: 'controller_runtime_reconcile_errors_total{namespace="biz", pod="ratelimit-operator-0", controller="ratelimit-config"}'
+        values: "0+3x40"
+      - series: 'controller_runtime_reconcile_total{namespace="biz", pod="ratelimit-operator-0", controller="ratelimit-config", result="success"}'
+        values: "0x40"
+      - series: 'controller_runtime_reconcile_errors_total{namespace="biz", pod="ratelimit-operator-0", controller="ratelimitpolicy"}'
+        values: "0x5 1x35"
+      - series: 'controller_runtime_reconcile_total{namespace="biz", pod="ratelimit-operator-0", controller="ratelimitpolicy", result="requeue_after"}'
+        values: "0+4x40"
+      - series: 'controller_runtime_reconcile_total{namespace="biz", pod="ratelimit-operator-0", controller="ratelimitpolicy", result="success"}'
+        values: "0x40"
+      - series: 'controller_runtime_reconcile_errors_total{namespace="biz", pod="core-operator-7f9", controller="deployment"}'
+        values: "0+2x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RatelimitOperatorReconcileFailing
+        exp_alerts:
+          - exp_labels:
+              namespace: biz
+              controller: ratelimit-config
+              severity: critical
+            exp_annotations:
+              summary: An operator controller fails every reconcile
+              description: >-
+                Controller ratelimit-config of the ratelimit operator in biz failed every reconcile for 30m
+                and completed none. The leader holds the Lease, so no other alert names it: policy edits do
+                not reach the replicas, and the policy status stays as it was. The operator log names the
+                error, often a permission the operator's Role lacks.
 
   # The Lease changing hands is a rollout, not an outage: the replacement
   # takes it inside the hold and nothing pages.
@@ -182,6 +273,14 @@ tests:
         values: "0x10"
       - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.internal", state="total"}'
         values: "0x10"
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.broken", reason="NotCompiled"}'
+        values: "0x10"
+      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.broken", state="total"}'
+        values: "0x10"
+      - series: 'ratelimit_policy_ready{namespace="biz", pod="ratelimit-operator-0", domain="gateway.edited", reason="NotCompiled"}'
+        values: "0x10"
+      - series: 'ratelimit_policy_replicas{namespace="biz", pod="ratelimit-operator-0", domain="gateway.edited", state="total"}'
+        values: "2x10"
     alert_rule_test:
       - eval_time: 4m
         alertname: RatelimitNoReplicas
@@ -197,6 +296,18 @@ tests:
               summary: No ready rate limit service replica; the domain is not limited
               description: >-
                 Domain gateway.private in biz has no ready service replica, so every check of it is decided by
+                the gateway's failure mode: unlimited under fail-open, refused under fail-closed. Read the
+                ratelimit-service Deployment and its pods.
+          # A rejected edit is judged before the fleet, and the fleet the last
+          # probe saw still pages; a rejected edit with ready replicas does not.
+          - exp_labels:
+              namespace: biz
+              domain: gateway.broken
+              severity: critical
+            exp_annotations:
+              summary: No ready rate limit service replica; the domain is not limited
+              description: >-
+                Domain gateway.broken in biz has no ready service replica, so every check of it is decided by
                 the gateway's failure mode: unlimited under fail-open, refused under fail-closed. Read the
                 ratelimit-service Deployment and its pods.
 

@@ -49,6 +49,7 @@ func client(t testing.TB) goredis.UniversalClient {
 	for {
 		err := c.Ping(t.Context()).Err()
 		if err == nil {
+			requireCluster(t, c, addr)
 			return c
 		}
 		if time.Now().After(deadline) {
@@ -453,5 +454,22 @@ func TestScan_anUntaggedPrefixReachesEveryMaster(t *testing.T) {
 		if !slices.Contains(seen, k) {
 			t.Errorf("Scan(%q) walk = %v, missing %q", prefix, seen, k)
 		}
+	}
+}
+
+// requireCluster fails the test when REDIS_REQUIRE_CLUSTER is set and the
+// server at addr runs with cluster support disabled. A cluster run that
+// reached a standalone server passes every test it exists to fail.
+func requireCluster(t testing.TB, c goredis.UniversalClient, addr string) {
+	t.Helper()
+	if os.Getenv("REDIS_REQUIRE_CLUSTER") == "" {
+		return
+	}
+	info, err := c.Info(t.Context(), "cluster").Result()
+	if err != nil {
+		t.Fatalf("read the cluster section of INFO at %s: %v", addr, err)
+	}
+	if !strings.Contains(info, "cluster_enabled:1") {
+		t.Fatalf("REDIS_REQUIRE_CLUSTER is set, but the Redis at %s is not a cluster", addr)
 	}
 }

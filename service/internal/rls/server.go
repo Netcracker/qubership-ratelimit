@@ -234,9 +234,6 @@ func (s *Server) ShouldRateLimit(
 	allowed := true
 	for _, c := range requests {
 		er := c.Request
-		if er.Token != "" {
-			metrics.TokensSeen.WithLabelValues(domain).Inc()
-		}
 		decide := eng.Decide
 		if c.free {
 			decide = eng.Peek
@@ -275,6 +272,12 @@ func (s *Server) ShouldRateLimit(
 			metrics.Checks.WithLabelValues(domain, metrics.VerdictUnavailable).Inc()
 			s.logStoreError(ctx, "rate limit store error domain=%v path=%v error=%v", domain, path, err)
 			return nil, status.Error(codes.Unavailable, "rate limit store unavailable")
+		}
+		// A token counts as seen only where the engine read it, so the
+		// declared-but-not-extracted detector compares tokens with the
+		// extractions of the same requests.
+		if er.Token != "" && decision.Targeted {
+			metrics.TokensSeen.WithLabelValues(domain).Inc()
 		}
 		allowed = allowed && decision.Allowed
 		decisions = append(decisions, decision)

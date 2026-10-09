@@ -1,0 +1,36 @@
+{{- if ne (include "ratelimit.mode" .) "satellite" }}
+{{- $replicas := int .Values.REPLICAS }}
+{{- if .Values.HPA_ENABLED }}
+{{- $replicas = int (coalesce .Values.HPA_MIN_REPLICAS .Values.REPLICAS) }}
+{{- end }}
+{{- if gt $replicas 1 }}
+{{- /*
+The gateways must never lose every RLS endpoint at once, and the rollout
+strategy guards that only for a rollout. The budget guards it for an
+eviction too: a node drain, a cluster-autoscaler consolidation, or a
+descheduler evicts one replica at a time, and the next waits until the
+replacement is Ready. It is rendered only when the service runs more than one
+replica: with one, any budget either blocks every drain or allows the gap it
+exists to prevent, and a single-replica profile makes no promise of
+availability. A pod that runs and is not Ready serves no check, so the budget
+lets it go: under the default policy a fleet of such pods, one that has not
+received a configuration yet, would block every drain.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: '{{ .Values.SERVICE_NAME }}'
+  namespace: '{{ .Values.NAMESPACE }}'
+  labels:
+    app.kubernetes.io/name: '{{ .Values.SERVICE_NAME }}'
+    app.kubernetes.io/part-of: '{{ .Values.APPLICATION_NAME }}'
+    app.kubernetes.io/managed-by: '{{ .Values.MANAGED_BY }}'
+    deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID }}'
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      name: '{{ .Values.SERVICE_NAME }}'
+{{- end }}
+{{- end }}

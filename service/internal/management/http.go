@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/netcracker/qubership-core-lib-go/v3/context-propagation/baseproviders/xrequestid"
@@ -64,12 +67,43 @@ func withRequestID(c *fiber.Ctx) error {
 	return c.Next()
 }
 
+// requestTimeout bounds the store calls a request makes under its own
+// context. An accepted sweep runs under the runner's context instead, and
+// records its outcome under its own bound. Tests shorten it.
+var requestTimeout = 10 * time.Second
+
+// withDeadline gives the request's context a deadline of requestTimeout, so a
+// store that does not answer fails the call with RLS-0503 at that bound.
+func withDeadline(c *fiber.Ctx) error {
+	ctx, cancel := context.WithTimeout(c.UserContext(), requestTimeout)
+	defer cancel()
+	c.SetUserContext(ctx)
+	return c.Next()
+}
+
 // replaceRequestID swaps a refused id for a fresh one, in the context the
 // platform logger reads and in the response header it already wrote.
 func replaceRequestID(c *fiber.Ctx) {
 	provider := xrequestid.XRequestIdProvider{}
 	// An empty value asks the platform to generate one.
 	ctx, err := provider.Set(c.UserContext(), xrequestid.NewXRequestIdContextObject(""))
+	if err == nil {
+		c.SetUserContext(ctx)
+	}
+	c.Set(RequestIDHeader, requestIDOf(c))
+}
+
+// adoptRequestID gives a request the middleware never saw its id: the one the
+// caller sent when it matches requestIDPattern, a fresh one otherwise, in the
+// context the platform logger reads and in the response header.
+func adoptRequestID(c *fiber.Ctx) {
+	id := c.Get(RequestIDHeader)
+	if !requestIDPattern.MatchString(id) {
+		// An empty value asks the platform to generate one.
+		id = ""
+	}
+	provider := xrequestid.XRequestIdProvider{}
+	ctx, err := provider.Set(c.UserContext(), xrequestid.NewXRequestIdContextObject(id))
 	if err == nil {
 		c.SetUserContext(ctx)
 	}
@@ -193,7 +227,10 @@ func logSafe(v string) string {
 		if r < 0x20 || r == 0x7f {
 			continue
 		}
-		if b.Len() >= maxLoggedValueLength {
+		// A rune is written whole or not at all, so the result stays valid
+		// UTF-8 within the bound; an invalid byte is written as U+FFFD, three
+		// bytes long.
+		if b.Len()+utf8.RuneLen(r) > maxLoggedValueLength {
 			break
 		}
 		b.WriteRune(r)

@@ -143,8 +143,10 @@ spec:
                     mode:
                       default: All
                       description: |-
-                        mode selects how the rules of the block combine. It has no effect across
-                        blocks.
+                        mode selects how the rules of the block combine; it has no effect across
+                        blocks. All applies every rule that matches. FirstMatch applies the
+                        first rule that matches, in the order of the rules list, so the order is
+                        part of the meaning. Defaults to All.
                       enum:
                       - All
                       - FirstMatch
@@ -163,8 +165,15 @@ spec:
                         properties:
                           behavior:
                             default: Enforce
-                            description: behavior selects what the rule does with
-                              the verdict.
+                            description: |-
+                              behavior selects what the rule does with the verdict. Enforce counts the
+                              request and can refuse it. Shadow counts the request and records its
+                              metrics but never refuses, and in a FirstMatch block it does not end
+                              the cascade; it is how a tighter limit is tried out over a live one.
+                              Bypass counts nothing. In a FirstMatch block it ends the cascade with
+                              a pass. In an All block it frees the request from the rules it names in
+                              replacedRules, and it has to name at least one. The other blocks of the
+                              policy still apply. Defaults to Enforce.
                             enum:
                             - Enforce
                             - Shadow
@@ -206,8 +215,16 @@ spec:
                                   pattern: ^[a-z][a-zA-Z0-9_]*$
                                   type: string
                                 operator:
-                                  description: operator is the predicate applied to
-                                    the value set of the key.
+                                  description: |-
+                                    operator is the predicate applied to the value set of the key: one
+                                    value for a scalar key, the elements for an array key, and none for a
+                                    key the request does not carry. Equals holds when the set is exactly
+                                    value, and is rejected for an array key. In holds when the set shares a
+                                    member with values. InGroup holds when the set shares a member with the
+                                    group that value names. Contains holds when value is a member of the
+                                    set; it never means substring. Exists holds when the set is not empty.
+                                    DoesNotExist holds when it is empty, which is how anonymous traffic is
+                                    selected.
                                   enum:
                                   - Equals
                                   - In
@@ -255,8 +272,13 @@ spec:
                               properties:
                                 algorithm:
                                   default: GCRA
-                                  description: algorithm is a property of the window
-                                    rather than of the rule.
+                                  description: |-
+                                    algorithm selects how the window counts, and is a property of the
+                                    window rather than of the rule. GCRA meters requests at a steady rate
+                                    with burst as the allowance, so a refused caller can retry once a
+                                    fraction of the period has passed. FixedWindow counts requests per
+                                    wall-clock window and resets at its boundary, which suits a quota.
+                                    Defaults to GCRA.
                                   enum:
                                   - GCRA
                                   - FixedWindow
@@ -386,7 +408,15 @@ spec:
                                 description: path selects request paths.
                                 properties:
                                   type:
-                                    description: type selects how value is compared.
+                                    description: |-
+                                      type selects how value is compared with the request path. Exact compares
+                                      the whole path, byte for byte, with the query already stripped and no
+                                      normalization, so /orders and /orders/ differ. Prefix compares leading
+                                      segments and stops at a slash or at the end of the path: /api/v1/orders
+                                      covers /api/v1/orders/42 but not /api/v1/orders-archive, unlike the
+                                      character prefix match of an Envoy route. Template compares segment by
+                                      segment, where {name} matches exactly one non-empty segment and becomes
+                                      a descriptor key of the block.
                                     enum:
                                     - Exact
                                     - Prefix
@@ -471,14 +501,22 @@ spec:
                       type: string
                     normalization:
                       default: None
-                      description: normalization is applied to the extracted value.
+                      description: |-
+                        normalization is applied to the extracted value before it is compared
+                        or put into a counter key. None keeps the value as the token carries
+                        it. Lowercase lower-cases it, which makes the comparison case-insensitive
+                        for values written in lower case. Defaults to None.
                       enum:
                       - None
                       - Lowercase
                       type: string
                     type:
                       default: String
-                      description: type is the shape of the extracted value.
+                      description: |-
+                        type is the shape of the extracted value. String extracts one value, so
+                        the key can be a counter axis. StringArray extracts a list, which In,
+                        InGroup, Contains, Exists, and DoesNotExist read as a set; Equals is
+                        rejected for it, and it cannot be a counter axis. Defaults to String.
                       enum:
                       - String
                       - StringArray

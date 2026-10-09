@@ -140,6 +140,28 @@ func TestBuildGroupsSpecsByTrailingLabelInFirstAppearanceOrder(t *testing.T) {
 	assert.Equal(t, []string{"setup", "policy", "redis"}, labels, "the group labels of build(redRun)")
 }
 
+// A spec with several labels groups under the first, the label of its
+// outermost container, and loses the whole bracket from its name, as a spec
+// with one label does; a label on the spec itself keeps it in its suite's
+// group. Such specs used to fall into a group named other, the bracket left
+// in their names.
+func TestBuildGroupsASpecOfSeveralLabelsByTheFirst(t *testing.T) {
+	rep := buildRun(t, suiteOf(`
+    <testcase name="[It] the operator applies the configuration [operator, leader]" time="1"/>
+    <testcase name="[It] the operator signs the lease [operator, leader]" time="1"/>
+    <testcase name="[It] the operator hands the lease over [operator, leader, slow]" time="1"/>`))
+
+	require.Len(t, rep.Groups, 1, "the groups of a run of one suite")
+	operator := groupLabeled(t, rep, "operator")
+	assert.Equal(t, "the operator", operator.Title, "the title of the operator group")
+	names := make([]string, 0, len(operator.Specs))
+	for _, s := range operator.Specs {
+		names = append(names, s.Name)
+	}
+	assert.Equal(t, []string{"applies the configuration", "signs the lease", "hands the lease over"}, names,
+		"the spec names of the operator group, with the bracket cut whole")
+}
+
 func TestBuildLiftsTheSharedPrefixOfAGroupIntoItsTitle(t *testing.T) {
 	rep := buildRedRun(t)
 

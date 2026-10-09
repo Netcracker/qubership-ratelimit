@@ -261,8 +261,9 @@ The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and th
 the series are: the service chart alerts on the data plane (`RatelimitUnknownDomain`, `RatelimitStoreErrors`,
 `RatelimitDecisionLatencyHigh`, `RatelimitKeyDeclaredNotExtracted`, `RatelimitDomainBudgetNearLimit`,
 `RatelimitConfigurationAbsent`) and the operator chart on the policy status and the fleet (`RatelimitStalled`,
-`RatelimitNotReadyLong`, `RatelimitNoReplicas`, `RatelimitChecksStopped`, `RatelimitRuleProblems`,
-`RatelimitConfigWriteErrors`, `RatelimitNoOperatorLeader`). Every expression is scoped to `NAMESPACE`. The thresholds
+`RatelimitNotEnforced`, `RatelimitNotReadyLong`, `RatelimitNoReplicas`, `RatelimitChecksStopped`,
+`RatelimitRuleProblems`, `RatelimitConfigWriteErrors`, `RatelimitOperatorReconcileFailing`,
+`RatelimitNoOperatorLeader`). Every expression is scoped to `NAMESPACE`. The thresholds
 and hold durations are under `policyAlerts.*` in the operator chart and `alerts.*` in the service chart, each with its
 rationale beside it in `values.yaml`; `enabled: false` in either block keeps the scrape and drops that chart's rules.
 `tests/charts` renders both rule sets and runs `promtool check rules` over them (`make promtool` fetches the binary from
@@ -447,13 +448,15 @@ CLOUD_NAMESPACE=<ns> make run-service
 ```
 
 The operator is told its Deployment's name as the chart tells it (`OPERATOR_DEPLOYMENT`, `ratelimit-operator` by
-default); off cluster it warns that there is no Deployment to adopt and writes the ConfigMap without an owner. It
-probes the service replicas at their pod IPs, so from a host that cannot reach the pod network, kind included, every
-policy reads `Ready: Unknown` with `ProbeFailed`; the status is right, the host is not a peer of the pods. The service
-reads `SERVICE_CONFIG_DIR` (`bin/config` by default) the way it reads the mounted volume in a pod, and any directory
-holding a manifest and its payloads works. In the pair the service keeps the defaults, metrics on `:8080` and probes
-on `:8081`, and the operator moves to `:8090` and `:8091` (`OPERATOR_METRICS_ADDR`, `OPERATOR_PROBE_ADDR`), since
-both binaries default to the same two ports and whichever binds second would die. `make docker-build` builds both
+default); off cluster it warns that there is no Deployment to adopt and writes the ConfigMap without an owner. It probes
+the service replicas at their pod IPs, so from a host that cannot reach the pod network, kind included, every policy
+reads `Ready: Unknown` with `ProbeFailed`; the status is right, the host is not a peer of the pods. The service reads
+`SERVICE_CONFIG_DIR` (`bin/config` by default) the way it reads the mounted volume in a pod, and any directory holding a
+manifest and its payloads works. The service counts in Redis alone, never in its own memory: the targets that start it
+pass `--redis-addr` with `LOCAL_REDIS_ADDR`, `127.0.0.1:6379` by default, where `make local-redis` keeps a disposable
+`redis:8-alpine` container running, so they need Docker. In the pair the service keeps the defaults, metrics on `:8080`
+and probes on `:8081`, and the operator moves to `:8090` and `:8091` (`OPERATOR_METRICS_ADDR`, `OPERATOR_PROBE_ADDR`),
+since both binaries default to the same two ports and whichever binds second would die. `make docker-build` builds both
 images, `OPERATOR_IMG` and `SERVICE_IMG`, from the two Dockerfiles.
 
 `CLOUD_NAMESPACE` has no default. An unset value is a startup error for either process, not a fallback to watching

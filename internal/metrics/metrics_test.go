@@ -166,6 +166,8 @@ func TestInstrumentStore_countsAFailedDecisionByReason(t *testing.T) {
 		{"a canceled context is a timeout", "errors.canceled", context.Canceled, "timeout"},
 		{"a network timeout is a timeout", "errors.net-timeout",
 			fmt.Errorf("dial: %w", &net.DNSError{IsTimeout: true}), "timeout"},
+		{"a wait for a pooled connection is a timeout", "errors.pool-timeout",
+			fmt.Errorf("decide: %w", goredis.ErrPoolTimeout), "timeout"},
 		{"a redis error is a server answer", "errors.redis", goredis.ErrNoScript, "server"},
 		{"a wrapped redis error is a server answer", "errors.wrapped-redis",
 			fmt.Errorf("decide: %w", goredis.ErrNoScript), "server"},

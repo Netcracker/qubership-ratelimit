@@ -29,13 +29,21 @@ const maxCheckBytes = 128 << 10
 // Runner serves the RLS gRPC endpoint on its own listener until its context
 // ends.
 type Runner struct {
-	Addr         string
-	Server       *Server
+	Addr   string
+	Server *Server
+
+	// DrainTimeout is how long in-flight checks may hold up shutdown; zero or
+	// less is DefaultDrainTimeout.
 	DrainTimeout time.Duration
-	Log          logr.Logger
+
+	Log logr.Logger
 
 	serving atomic.Bool
 }
+
+// healthNames are the names the gRPC health service answers for: the whole
+// server and the rate limit service.
+var healthNames = []string{"", envoyratelimit.RateLimitService_ServiceDesc.ServiceName}
 
 // Serving reports whether the gRPC server is accepting checks: true from the
 // moment it serves until it stops.
@@ -66,7 +74,10 @@ func (r *Runner) Start(ctx context.Context) error {
 
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
-	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	// A probe may name the server, the empty name, or the service it checks.
+	for _, service := range healthNames {
+		healthServer.SetServingStatus(service, healthpb.HealthCheckResponse_SERVING)
+	}
 
 	served := make(chan error, 1)
 	go func() { served <- grpcServer.Serve(listener) }()
@@ -85,7 +96,9 @@ func (r *Runner) Start(ctx context.Context) error {
 	}
 
 	r.serving.Store(false)
-	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	for _, service := range healthNames {
+		healthServer.SetServingStatus(service, healthpb.HealthCheckResponse_NOT_SERVING)
+	}
 
 	drainTimeout := r.DrainTimeout
 	if drainTimeout <= 0 {

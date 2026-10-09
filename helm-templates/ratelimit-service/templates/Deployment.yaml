@@ -41,9 +41,14 @@ spec:
       maxUnavailable: 80%
     {{- else if eq (default "" .Values.DEPLOYMENT_STRATEGY_TYPE) "custom_rollout" }}
     type: RollingUpdate
+    {{- $surge := include "ratelimit.valueOr" (dict "value" .Values.DEPLOYMENT_STRATEGY_MAXSURGE "default" "25%") }}
+    {{- $unavailable := include "ratelimit.valueOr" (dict "value" .Values.DEPLOYMENT_STRATEGY_MAXUNAVAILABLE "default" "25%") }}
+    {{- if and (has $surge (list "0" "0%")) (has $unavailable (list "0" "0%")) }}
+    {{- fail "DEPLOYMENT_STRATEGY_MAXSURGE and DEPLOYMENT_STRATEGY_MAXUNAVAILABLE are both zero, which no rollout can make progress with; set one of them above zero" }}
+    {{- end }}
     rollingUpdate:
-      maxSurge: {{ .Values.DEPLOYMENT_STRATEGY_MAXSURGE | default "25%" }}
-      maxUnavailable: {{ .Values.DEPLOYMENT_STRATEGY_MAXUNAVAILABLE | default "25%" }}
+      maxSurge: {{ $surge }}
+      maxUnavailable: {{ $unavailable }}
     {{- else }}
     type: RollingUpdate
     rollingUpdate:

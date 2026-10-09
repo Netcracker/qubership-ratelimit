@@ -53,9 +53,9 @@ type Domain struct {
 type RuleSet struct {
 	domains map[string]Domain
 
-	// swappedAt is when this set became the current one. It is set by
-	// Replace, on the set itself, so that a reader of the set gets the time
-	// of the swap it observed rather than the time of a later one.
+	// swappedAt is when this set became the current one. Replace stamps it
+	// on the set it publishes, so that a reader of the set gets the time of
+	// the swap it observed rather than the time of a later one.
 	swappedAt time.Time
 
 	// refusal is the reading this replica would not apply while this set
@@ -156,14 +156,14 @@ func (s *Store) Load() *RuleSet {
 
 // Replace swaps in a new snapshot, stamped with the time of the swap and
 // carrying no refusal: a set that was applied is the answer to the reading
-// before it.
+// before it. rs itself is left as it is, so a set readers already hold can be
+// published again.
 func (s *Store) Replace(rs *RuleSet) {
-	if rs == nil {
-		rs = NewRuleSet(nil)
+	domains := map[string]Domain{}
+	if rs != nil {
+		domains = rs.domains
 	}
-	rs.swappedAt = time.Now()
-	rs.refusal = nil
-	s.current.Store(rs)
+	s.current.Store(&RuleSet{domains: domains, swappedAt: time.Now()})
 }
 
 // Refuse publishes a refusal on the current set: the same domains and the

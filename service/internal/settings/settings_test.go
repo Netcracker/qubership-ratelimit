@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/model/rest"
@@ -30,21 +32,6 @@ type warnings []string
 
 func (w *warnings) warn(format string, args ...any) { *w = append(*w, fmt.Sprintf(format, args...)) }
 
-// Without a DBaaS connection the process counts in its own memory, the
-// developer loop's store: management.enabled does not require Redis. The
-// records have to follow the counters there. Leaving them nil starts the
-// management API with a nil store, and every mutation panics into an RLS-0500
-// while the reads keep working, so nothing short of a reset reveals it.
-func TestCounterStore_theInProcessBackendCarriesARecordsStore(t *testing.T) {
-	backend := CounterStore(nil)
-
-	assert.NotNil(t, backend.Store, "the in-process branch must still count somewhere")
-	assert.NotNil(t, backend.Records, "a nil records store panics on the first DELETE /counters")
-	assert.False(t, backend.Shared, "an in-process store counts per replica")
-	assert.Nil(t, backend.Closer, "nothing was dialed, so there is nothing to close")
-	assert.Nil(t, backend.CheckEviction, "the in-process store never evicts")
-}
-
 // With a DBaaS connection the store is Redis at the address the Secret
 // names, shared by every replica, with a client the caller closes.
 func TestCounterStore_countsInTheDatabaseTheSecretNames(t *testing.T) {
@@ -57,7 +44,6 @@ func TestCounterStore_countsInTheDatabaseTheSecretNames(t *testing.T) {
 
 	require.NotNil(t, backend.Closer, "the client the caller closes")
 	t.Cleanup(func() { _ = backend.Closer.Close() })
-	assert.True(t, backend.Shared)
 	assert.NotNil(t, backend.Records)
 	assert.Contains(t, backend.Description, "ratelimit-redis.core:6379")
 	assert.NotNil(t, backend.CheckEviction)
@@ -197,16 +183,42 @@ func TestManagementCallers_unsetIsNoCaller(t *testing.T) {
 
 // The audience defaults to the platform's machine-to-machine convention.
 func TestManagementAudience_unsetIsThePlatformConvention(t *testing.T) {
+	var warned warnings
 	readEnvironment()
 
-	assert.Equal(t, "netcracker", ManagementAudience())
+	assert.Equal(t, "netcracker", ManagementAudience(warned.warn))
+	assert.Empty(t, warned)
 }
 
 func TestManagementAudience_readsTheConfiguredAudience(t *testing.T) {
-	t.Setenv("MANAGEMENT_M2M_AUDIENCE", "ratelimit-e2e")
+	var warned warnings
+	t.Setenv("MANAGEMENT_M2M_AUDIENCE", " ratelimit-e2e ")
 	readEnvironment()
 
-	assert.Equal(t, "ratelimit-e2e", ManagementAudience())
+	assert.Equal(t, "ratelimit-e2e", ManagementAudience(warned.warn), "the audience with its spaces trimmed")
+	assert.Empty(t, warned)
+}
+
+// An empty audience is unset, as it is for the other properties here, and
+// reads as the default without a warning.
+func TestManagementAudience_readsAnEmptyValueAsTheDefault(t *testing.T) {
+	var warned warnings
+	t.Setenv("MANAGEMENT_M2M_AUDIENCE", "")
+	readEnvironment()
+
+	assert.Equal(t, "netcracker", ManagementAudience(warned.warn))
+	assert.Empty(t, warned)
+}
+
+// An audience of spaces alone matches no token. It is reported and replaced by
+// the default; it used to be verified as given, and every caller got 401.
+func TestManagementAudience_replacesAnAudienceOfSpacesByTheDefault(t *testing.T) {
+	var warned warnings
+	t.Setenv("MANAGEMENT_M2M_AUDIENCE", "   ")
+	readEnvironment()
+
+	assert.Equal(t, "netcracker", ManagementAudience(warned.warn))
+	assert.Len(t, warned, 1, "warnings about an audience of spaces")
 }
 
 // RESPONSE_HEADERS_IETF turns the ratelimit-policy and ratelimit fields off
@@ -310,4 +322,113 @@ func TestManagementCallers_acceptsADottedName(t *testing.T) {
 	assert.Equal(t, []string{"system:serviceaccount:platform:ops.backend"},
 		ManagementCallers("biz", warned.warn), "ManagementCallers with MANAGEMENT_CALLERS=%q", callers)
 	assert.Len(t, warned, 1, "warnings for MANAGEMENT_CALLERS=%q", callers)
+}
+
+// closedAddr is a loopback address nothing listens on.
+func closedAddr(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	return addr
+}
+
+// A store that refuses the connection fails a decision within the check's
+// deadline, with the dial error. The library defaults used to retry the dial
+// and the command until the deadline passed, and the failure was counted as a
+// timeout.
+func TestDecisionOptions_failAtOnceOnARefusedConnection(t *testing.T) {
+	client := goredis.NewUniversalClient(DecisionOptions(closedAddr(t), nil))
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.Ping(ctx).Err()
+
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, context.DeadlineExceeded)
+	var opErr *net.OpError
+	assert.ErrorAs(t, err, &opErr, "the dial error")
+	assert.Less(t, time.Since(start), 50*time.Millisecond)
+}
+
+// A decision without a deadline of its own is bounded by the client.
+func TestDecisionOptions_boundADecisionWithoutADeadline(t *testing.T) {
+	client := goredis.NewUniversalClient(DecisionOptions(silentServer(t), nil))
+	t.Cleanup(func() { _ = client.Close() })
+
+	start := time.Now()
+	err := client.Ping(context.Background()).Err()
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 2*decisionTimeout)
+}
+
+// A decision ends at the check's own deadline, well inside the client's
+// timeouts: the gateway gives up at the filter timeout, and a check it no
+// longer waits for must not hold the store. Without ContextTimeoutEnabled the
+// call ran to the 250 ms read timeout.
+func TestDecisionOptions_endADecisionAtTheChecksDeadline(t *testing.T) {
+	client := goredis.NewUniversalClient(DecisionOptions(silentServer(t), nil))
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.Ping(ctx).Err()
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 150*time.Millisecond)
+}
+
+// A management call ends at its request's deadline, inside the client's 3 s
+// timeouts.
+func TestManagementOptions_endACallAtItsDeadline(t *testing.T) {
+	client := goredis.NewUniversalClient(ManagementOptions(silentServer(t), nil))
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.Ping(ctx).Err()
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+}
+
+// silentServer is the address of a server that accepts connections and never
+// answers; closing its listener when the test ends stops it, and the
+// connections it accepted close with the test.
+func silentServer(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	accepted := make(chan net.Conn, 16)
+	t.Cleanup(func() {
+		for {
+			select {
+			case conn := <-accepted:
+				_ = conn.Close()
+			default:
+				return
+			}
+		}
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case accepted <- conn:
+			default:
+				_ = conn.Close()
+			}
+		}
+	}()
+	return listener.Addr().String()
 }

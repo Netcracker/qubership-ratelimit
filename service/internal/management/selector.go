@@ -75,7 +75,7 @@ func parseSelector(query url.Values) (selector, *apiError) {
 	out := selector{}
 
 	for _, id := range query["ruleId"] {
-		if err := checkRuleIDForm(id); err != nil {
+		if err := checkRuleIDForm(id, "ruleId"); err != nil {
 			return selector{}, err
 		}
 		out.RuleIDs = append(out.RuleIDs, id)
@@ -86,7 +86,7 @@ func parseSelector(query url.Values) (selector, *apiError) {
 		out.Algorithm = strings.ToLower(raw)
 	}
 	if raw := query.Get("period"); raw != "" {
-		seconds, err := parsePeriod(raw)
+		seconds, err := parsePeriod(raw, "period")
 		if err != nil {
 			return selector{}, err
 		}
@@ -134,37 +134,38 @@ func selectorParams(extra ...string) []string {
 }
 
 // checkRuleIDForm accepts a whole block/rule id or the block that heads it.
-func checkRuleIDForm(id string) *apiError {
+func checkRuleIDForm(id, field string) *apiError {
 	parts := strings.Split(id, "/")
 	if len(parts) > 2 {
-		return invalid("the ruleId "+logSafe(id)+
+		return invalid("the rule id "+logSafe(id)+
 			" has more than the two block/rule segments; the policy segment the layout "+
-			"used to carry is gone, because a domain has exactly one policy", "ruleId")
+			"used to carry is gone, because a domain has exactly one policy", field)
 	}
 	if slices.Contains(parts, "") {
-		return invalid("the ruleId "+logSafe(id)+
-			" carries an empty segment; use block or block/rule", "ruleId")
+		return invalid("the rule id "+logSafe(id)+
+			" carries an empty segment; use block or block/rule", field)
 	}
 	return nil
 }
 
 // parsePeriod normalizes a window filter into seconds. An integer is already
 // seconds; a duration string is accepted and normalized, so 1m and 60s select
-// the same window.
-func parsePeriod(raw string) (int64, *apiError) {
+// the same window. field names the period in the refusal: the query
+// parameter by its name, a body field by its path from the root of the body.
+func parsePeriod(raw, field string) (int64, *apiError) {
 	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil {
 		if seconds <= 0 {
-			return 0, invalid("the period must be a positive number of seconds", "period")
+			return 0, invalid("the period must be a positive number of seconds", field)
 		}
 		return seconds, nil
 	}
 	period, err := time.ParseDuration(raw)
 	if err != nil {
 		return 0, invalid("the period "+logSafe(raw)+
-			" is neither a number of seconds nor a duration such as 1m or 24h", "period")
+			" is neither a number of seconds nor a duration such as 1m or 24h", field)
 	}
 	if period <= 0 || period%time.Second != 0 {
-		return 0, invalid("the period must be a positive whole number of seconds", "period")
+		return 0, invalid("the period must be a positive whole number of seconds", field)
 	}
 	return int64(period / time.Second), nil
 }
@@ -238,9 +239,11 @@ func (s selector) matchesAxes(axes map[string]string) bool {
 	return true
 }
 
-// cursorTTL bounds how long a continuation stays valid. A listing is a live
-// scan, not a snapshot, so a cursor presented long after its page describes a
-// collection that has moved on.
+// cursorTTL is how long a continuation stays valid at least: the expiry is
+// kept in whole seconds and a cursor is refused only past it, so one lives
+// between cursorTTL and a second more. A listing is a live scan, not a
+// snapshot, so a cursor presented long after its page describes a collection
+// that has moved on.
 const cursorTTL = 10 * time.Minute
 
 // cursor is an opaque continuation. It carries the selection it was minted for

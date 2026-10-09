@@ -177,6 +177,17 @@ func TestDomain_servesYAMLOnRequest(t *testing.T) {
 	}
 }
 
+// The format parameter decides over the Accept header: format=json answers
+// JSON whatever Accept names.
+func TestDomain_servesJSONOnFormatJSONWhateverAcceptNames(t *testing.T) {
+	h, _, _ := fixture(t)
+
+	rec := get(t, h, contract.SnapshotPath+"/"+domain+"?format=json", "application/yaml")
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+}
+
 // history is what a store held over a refusal: the set applied at generation
 // 7, the same rules with a refusal of format version 9, and the set applied at
 // generation 8 after it, compiled from currentSnapshot.
@@ -189,8 +200,9 @@ func refusedThenApplied(t *testing.T) history {
 	t.Helper()
 	var h history
 	rules := store.New()
-	h.older, _ = ruleSet(t, 7)
-	rules.Replace(h.older)
+	older, _ := ruleSet(t, 7)
+	rules.Replace(older)
+	h.older = rules.Load()
 	rules.Refuse(&applied.Refusal{FormatVersion: 9, Reason: "unsupported"})
 	h.refused = rules.Load()
 	var newer *store.RuleSet

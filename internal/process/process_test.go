@@ -2,6 +2,9 @@ package process
 
 import (
 	"errors"
+	"regexp"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
@@ -95,6 +98,52 @@ func TestLogrAdapter_leavesTheParentWithoutTheChildsValues(t *testing.T) {
 	parent.Info("rebuilt")
 
 	assert.Equal(t, []line{{Logger: "process-test-parent", Level: logging.LvlInfo, Message: "rebuilt"}}, *lines)
+}
+
+// Goroutines that log through one logger with values of their own do not
+// write into each other's lines. The calls used to append to the slice the
+// logger shares, and two calls overwrote each other's pairs.
+func TestLogrAdapter_keepsTheValuesOfConcurrentCallsApart(t *testing.T) {
+	var mu sync.Mutex
+	var messages []string
+	logger := logging.GetLogger("process-test-concurrent")
+	logger.SetLogFormat(func(r *logging.Record) []byte {
+		mu.Lock()
+		messages = append(messages, r.Message)
+		mu.Unlock()
+		return nil
+	})
+	t.Cleanup(func() { logger.SetLogFormat(nil) })
+	// Nine pairs added in two calls leave the logger's slice at 18 entries
+	// with room for 32, so a call that appends to it writes into the array
+	// every call shares.
+	shared := NewLogrLogger("process-test-concurrent").
+		WithValues("k0", 0, "k1", 1, "k2", 2, "k3", 3, "k4", 4, "k5", 5, "k6", 6, "k7", 7).
+		WithValues("k8", 8)
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			for range 200 {
+				shared.Info("call", "i", i)
+			}
+		})
+	}
+	wg.Wait()
+
+	// Each goroutine logs its own i 200 times, so a line that carries the pairs
+	// of another call shows as one count too many and one too few.
+	line := regexp.MustCompile(`^call k0=0 k1=1 k2=2 k3=3 k4=4 k5=5 k6=6 k7=7 k8=8 i=([0-7])$`)
+	counts := map[string]int{}
+	for _, message := range messages {
+		m := line.FindStringSubmatch(message)
+		if assert.NotNil(t, m, "a line of the shared logger: %q", message) {
+			counts[m[1]]++
+		}
+	}
+	for i := range 8 {
+		assert.Equal(t, 200, counts[strconv.Itoa(i)], "the lines that carry i=%d", i)
+	}
 }
 
 // The platform logger takes a format string rather than structured fields, so

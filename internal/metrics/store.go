@@ -43,14 +43,13 @@ func (s instrumentedStore) Reset(ctx context.Context, keys []string) error {
 }
 
 // storeErrorReason folds a store error into the fixed reason set. Timeout is
-// load or distance; server means the store answered an error — a script or
+// load or distance, a wait for a free pooled connection included; server means the store answered an error — a script or
 // command problem, which no retry cures; other is connectivity.
 func storeErrorReason(err error) string {
 	var netErr net.Error
 	switch {
-	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
-		return "timeout"
-	case errors.As(err, &netErr) && netErr.Timeout():
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled),
+		errors.As(err, &netErr) && netErr.Timeout(), errors.Is(err, goredis.ErrPoolTimeout):
 		return "timeout"
 	default:
 	}

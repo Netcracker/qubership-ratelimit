@@ -10,15 +10,13 @@ import (
 	counters "github.com/netcracker/qubership-ratelimit/engine/store"
 )
 
-// Memory keeps records in this process, beside the in-process counters.
+// Memory keeps records in this process, beside an in-process counter store,
+// for tests: the service counts in Redis alone.
 //
-// It is the counterpart of the in-process counter store and shares its one
-// limitation: with several replicas each holds its own records, so a retry that
-// lands elsewhere executes again. That is why the in-process counter store is a
-// single-replica and test configuration, for the same reason limits themselves
-// need a shared store. At one replica it satisfies the same contract the shared
-// store does, this package's atomicity included: one mutex stands in for the
-// one script.
+// With several replicas each would hold its own records, so a retry that
+// lands elsewhere would execute again. In one process it satisfies the same
+// contract the shared store does, this package's atomicity included: one
+// mutex stands in for the one script.
 type Memory struct {
 	// Now is the clock, injectable for tests; nil means time.Now.
 	Now func() time.Time

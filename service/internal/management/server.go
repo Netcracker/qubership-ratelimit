@@ -97,6 +97,8 @@ type Runner struct {
 
 	Log Logger
 
+	// DrainTimeout is how long in-flight calls may hold up shutdown; zero or
+	// less is DefaultDrainTimeout.
 	DrainTimeout time.Duration
 
 	// bound is the address the listener actually took. The port is the kernel's
@@ -162,6 +164,12 @@ func (r *Runner) Start(ctx context.Context) error {
 func managementErrorHandler() fiber.ErrorHandler {
 	fallback := fibererrors.DefaultErrorHandler(CodeInternal)
 	return func(c *fiber.Ctx, err error) error {
+		// An error raised before any middleware ran, an oversized body that
+		// fasthttp cuts while reading it among them, finds the request
+		// without the id every answer of this API carries.
+		if requestIDOf(c) == "" {
+			adoptRequestID(c)
+		}
 		if errors.Is(err, fiber.ErrRequestEntityTooLarge) {
 			return invalid(fmt.Sprintf(
 				"the request body is larger than the %d bytes this API accepts", maxRequestBody)).Handle(c)

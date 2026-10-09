@@ -83,6 +83,11 @@ redis:
     # <SERVICE_NAME>-redis with the key connectionProperties.json in DBaaS's
     # format: a test cluster without DBaaS, as the e2e workflow's is.
     enabled: true
+    # The namespace of the dbaas-operator that reconciles those objects.
+    # Empty reads it from the host of API_DBAAS_ADDRESS,
+    # http://<aggregator>.<namespace>:<port>; set it when that host has
+    # another form, such as an IP address or an external name.
+    operatorNamespace: ""
 
 # The address of dbaas-aggregator, a platform parameter shared by every chart
 # that talks to DBaaS. The chart reads the namespace out of its host and

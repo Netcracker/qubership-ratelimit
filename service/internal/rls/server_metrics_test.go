@@ -458,6 +458,31 @@ func TestShouldRateLimit_countsATokenSeenOnlyForACheckThatCarriesOne(t *testing.
 	assert.Equal(t, map[string]float64{"tokens seen": 0}, withoutToken, "a check without a token")
 }
 
+// A token on a request that no block targets is not counted: the engine does
+// not read it, so the extraction series cannot count it either. Counting it
+// used to fire RatelimitKeyDeclaredNotExtracted on a domain whose blocks
+// target part of its routes, for a quiet night on the routes they do target.
+func TestShouldRateLimit_countsATokenSeenOnlyWhereABlockTargetsTheRequest(t *testing.T) {
+	const domain = "gateway.public"
+	orders := model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name:   "orders",
+		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/orders"}}}},
+		Rules:  []model.Rule{{Name: "total", Rates: []model.Rate{{Requests: 100, Period: time.Hour}}}},
+	}}}
+	server, _ := newServerOver(ruleSetWith(t, orders))
+	tokensSeen := map[string]func() float64{"tokens seen": valueOf(metrics.TokensSeen.WithLabelValues(domain))}
+
+	targeted := deltas(tokensSeen, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/orders", "token": tokenWithSub("alice")}))
+	})
+	untargeted := deltas(tokensSeen, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/other", "token": tokenWithSub("alice")}))
+	})
+
+	assert.Equal(t, map[string]float64{"tokens seen": 1}, targeted, "a check a block targets")
+	assert.Equal(t, map[string]float64{"tokens seen": 0}, untargeted, "a check no block targets")
+}
+
 // The bucket budget binds one decision, and a check is one decision per
 // descriptor: two descriptors that each fill the budget are two atomic store
 // scripts of 128 buckets, not one of 256, and the check is admitted. The rules

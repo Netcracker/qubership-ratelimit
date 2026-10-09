@@ -55,11 +55,14 @@ func main() {
 	flag.StringVar(&options.RedisMicroservice, "redis-dbaas-microservice", "",
 		"The microserviceName of the counter store's DBaaS classifier; the database is resolved through the "+
 			"platform DBaaS client from the Secret mounted under /etc/secrets/dbaas-secrets. "+
-			"Empty counts in process, per replica: for the developer loop and tests, never a pod.")
+			"This or --redis-addr is required.")
+	flag.StringVar(&options.RedisAddr, "redis-addr", "",
+		"The host:port of a Redis without a password to count in instead of a DBaaS database: "+
+			"for the developer loop, never a pod. This or --redis-dbaas-microservice is required.")
 	flag.DurationVar(&options.Resync, "config-resync", config.DefaultResync,
 		"How often the configuration directory is re-read without a file event.")
 	flag.DurationVar(&options.DrainTimeout, "rls-drain-timeout", rls.DefaultDrainTimeout,
-		"How long in-flight rate limit checks may delay shutdown.")
+		"How long in-flight rate limit checks and management API calls may delay shutdown; 0 is the default.")
 	flag.Parse()
 
 	// Properties first, loggers second: LOG_LEVEL and the namespace both arrive

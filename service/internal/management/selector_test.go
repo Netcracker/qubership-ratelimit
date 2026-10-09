@@ -59,7 +59,7 @@ func TestParsePeriod_readsSecondsOrADurationAsWholeSeconds(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.raw, func(t *testing.T) {
-			seconds, apiErr := parsePeriod(tc.raw)
+			seconds, apiErr := parsePeriod(tc.raw, "period")
 			require.Nil(t, apiErr, "parsePeriod(%q)", tc.raw)
 			assert.Equal(t, tc.want, seconds, "parsePeriod(%q)", tc.raw)
 		})
@@ -78,7 +78,7 @@ func TestParsePeriod_refusesAPeriodThatIsNotAPositiveWholeNumberOfSeconds(t *tes
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, apiErr := parsePeriod(tc.raw)
+			_, apiErr := parsePeriod(tc.raw, "period")
 			require.NotNil(t, apiErr, "parsePeriod(%q)", tc.raw)
 			assert.Equal(t, CodeInvalidRequest, apiErr.GetErrorCode(), "parsePeriod(%q)", tc.raw)
 			assert.Equal(t, []string{"period"}, apiErr.fields, "parsePeriod(%q)", tc.raw)
@@ -121,6 +121,18 @@ func TestDecodeCursor_refusesACursorItCannotResume(t *testing.T) {
 			assert.Equal(t, []string{"cursor"}, apiErr.fields, "decodeCursor(%q)", tc.raw)
 		})
 	}
+}
+
+// A cursor lives at least cursorTTL: presented exactly that long after it was
+// minted, it still resumes the listing.
+func TestDecodeCursor_resumesExactlyAtTheEndOfItsTTL(t *testing.T) {
+	alice := mustSelector(t, "axis.sub=alice")
+	now := time.Now()
+	minted := encodeCursor("127.0.0.1:6379@42", alice, now)
+
+	_, apiErr := decodeCursor(minted, alice, now.Add(cursorTTL))
+
+	assert.Nil(t, apiErr, "decodeCursor exactly cursorTTL after minting")
 }
 
 // One segment names a block and selects its rules; two are the whole id. A

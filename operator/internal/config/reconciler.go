@@ -77,24 +77,33 @@ func (r *Reconciler) limit() int {
 func (r *Reconciler) Reconcile(ctx context.Context, _ ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	// A reconcile that cannot read what it compiles writes nothing either, and
+	// is recorded as a failed write: the replicas stop receiving changes the
+	// same way, and the alert on the write is the one that names it.
 	input, err := policy.Load(ctx, r.Client, r.Namespace)
 	if err != nil {
+		metrics.RecordConfigWrite(metrics.ConfigErrorRead)
+		log.Error(err, "failed to read the policies; the configuration was not written")
 		return ctrl.Result{}, err
 	}
 	// The last-good state of every domain, because the fit is a question
 	// about the namespace's total and the status reconciler runs the same
 	// fit over the same bundles.
 	if input.State, err = r.Store.Load(ctx, policy.Domains(input)); err != nil {
+		metrics.RecordConfigWrite(metrics.ConfigErrorRead)
+		log.Error(err, "failed to read the configuration; it was not written")
 		return ctrl.Result{}, err
 	}
+	input.OperatorVersion = r.Store.OperatorVersion()
 	result := policy.Compile(input)
 	policy.Fit(input, result, r.limit())
 
 	if err := r.Store.Save(ctx, result.State, r.limit()); err != nil {
-		metrics.ConfigWriteErrors.WithLabelValues(writeErrorReason(err)).Inc()
+		metrics.RecordConfigWrite(writeErrorReason(err))
 		log.Error(err, "failed to write the configuration")
 		return ctrl.Result{}, err
 	}
+	metrics.RecordConfigWrite("")
 	r.reportLostLastGood(ctx, input, result)
 	return ctrl.Result{}, nil
 }
@@ -128,11 +137,11 @@ func writeErrorReason(err error) string {
 	var status *apierrors.StatusError
 	switch {
 	case errors.Is(err, ErrTooLarge):
-		return "size"
+		return metrics.ConfigErrorSize
 	case errors.As(err, &status):
-		return "api"
+		return metrics.ConfigErrorAPI
 	}
-	return "other"
+	return metrics.ConfigErrorOther
 }
 
 // SetupWithManager registers the reconciler: it owns the ConfigMap, follows

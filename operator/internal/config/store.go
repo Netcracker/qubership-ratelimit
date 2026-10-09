@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"sort"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -131,8 +130,13 @@ func (s *Store) Load(ctx context.Context, domains []string) (map[string]policy.B
 // Save writes the whole object from the state: every domain with a bundle
 // gets its payload and its manifest entry, a domain without one gets neither,
 // and the manifest is written even when there is nothing to index. It creates
-// the object when it is missing and replaces it whole when it exists.
+// the object when it is missing and replaces it whole when it exists. limit
+// has to be positive, as it has to be for [policy.Fit], and Save panics on any
+// other.
 func (s *Store) Save(ctx context.Context, state map[string]policy.Bundle, limit int) error {
+	if limit <= 0 {
+		panic(fmt.Sprintf("config: Save with a limit of %d bytes; the limit has to be positive", limit))
+	}
 	data, binaryData, err := s.render(state, limit)
 	if err != nil {
 		return err
@@ -207,36 +211,23 @@ var ErrTooLarge = errors.New(contract.ConfigMapName + " would exceed the ConfigM
 
 // render turns the state into the two halves of the object.
 func (s *Store) render(state map[string]policy.Bundle, limit int) (map[string]string, map[string][]byte, error) {
-	m := manifest.Manifest{OperatorVersion: s.version, Domains: map[string]manifest.Domain{}}
-	binaryData := map[string][]byte{}
-	total := 0
-	domains := make([]string, 0, len(state))
-	for domain := range state {
-		domains = append(domains, domain)
-	}
-	sort.Strings(domains)
-	for _, domain := range domains {
-		bundle := state[domain]
-		if bundle.UID == "" {
-			continue
-		}
-		compressed, hash, err := manifest.EncodePayload(bundle.GoodSpec)
-		if err != nil {
-			return nil, nil, fmt.Errorf("encode the payload of %s: %w", domain, err)
-		}
-		binaryData[manifest.PayloadKey(domain)] = compressed
-		total += len(compressed)
-		m.Domains[domain] = manifest.Domain{Generation: bundle.GoodGeneration, UID: bundle.UID, Hash: hash}
-	}
-	encoded, err := manifest.Encode(m)
+	rendered, err := policy.Render(state, s.version)
 	if err != nil {
 		return nil, nil, err
 	}
-	if total+len(encoded) > limit {
-		return nil, nil, fmt.Errorf("%w: %d bytes compressed, the limit is %d",
-			ErrTooLarge, total+len(encoded), limit)
+	if rendered.Size > limit {
+		return nil, nil, fmt.Errorf("%w: %d bytes compressed, the limit is %d", ErrTooLarge, rendered.Size, limit)
 	}
-	return map[string]string{contract.ManifestKey: string(encoded)}, binaryData, nil
+	binaryData := make(map[string][]byte, len(rendered.Payloads))
+	for domain, compressed := range rendered.Payloads {
+		binaryData[manifest.PayloadKey(domain)] = compressed
+	}
+	return map[string]string{contract.ManifestKey: string(rendered.Manifest)}, binaryData, nil
+}
+
+// OperatorVersion is what the manifest records as operatorVersion.
+func (s *Store) OperatorVersion() string {
+	return s.version
 }
 
 func (s *Store) key() client.ObjectKey {

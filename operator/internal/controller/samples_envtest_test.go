@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 
@@ -110,4 +111,50 @@ var _ = Describe("the samples in config/samples", func() {
 		Entry("the tiered sample", "ratelimit_v1_ratelimitpolicy_tiered.yaml"),
 		Entry("the private sample", "ratelimit_v1_ratelimitpolicy_private.yaml"),
 	)
+})
+
+// docsExample is the policy example the documentation index, the CR spec, the
+// runbook, and the rollout procedure point at: two policies in one file.
+var docsExample = filepath.Join("..", "..", "..", "docs", "ratelimitpolicy-example.yaml")
+
+// The documented example is held to the samples' rule: each of its policies is
+// accepted by the API server and compiles without a problem. A schema change
+// that breaks the example fails here rather than in the hands of whoever
+// copies it.
+var _ = Describe("the policies of docs/ratelimitpolicy-example.yaml", func() {
+	const namespace = "ratelimit-docs-example"
+
+	It("are accepted and compile without a single problem", func() {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}
+		Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, ns))).To(Succeed())
+		raw, err := os.ReadFile(docsExample)
+		Expect(err).NotTo(HaveOccurred())
+
+		var policies int
+		for document := range bytes.SplitSeq(raw, []byte("\n---")) {
+			object := &unstructured.Unstructured{}
+			Expect(yaml.Unmarshal(document, object)).To(Succeed(), "decoding a document of %s", docsExample)
+			if object.Object == nil {
+				continue
+			}
+			Expect(object.GetKind()).To(Equal("RateLimitPolicy"), "the kind of %s", object.GetName())
+			policies++
+			object.SetNamespace(namespace)
+			Expect(k8sClient.Create(ctx, object)).To(Succeed(), "creating %s", object.GetName())
+			DeferCleanup(func() {
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, object))).To(Succeed())
+			})
+
+			key := client.ObjectKeyFromObject(object)
+			reconciler := &RateLimitPolicyReconciler{
+				Client: k8sClient, Scheme: k8sClient.Scheme(), Namespace: namespace,
+			}
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred(), "Reconcile of %s", key.Name)
+			reconciled := &ratelimitv1.RateLimitPolicy{}
+			Expect(k8sClient.Get(ctx, key, reconciled)).To(Succeed())
+			Expect(reconciled.Status.RuleProblems).To(BeEmpty(), "status.ruleProblems of %s", key.Name)
+		}
+		Expect(policies).To(Equal(2), "the policies of %s", docsExample)
+	})
 })

@@ -32,7 +32,10 @@ import (
 	"github.com/netcracker/qubership-ratelimit/api/contract"
 	"github.com/netcracker/qubership-ratelimit/api/manifest"
 	v1 "github.com/netcracker/qubership-ratelimit/api/v1"
+	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	"github.com/netcracker/qubership-ratelimit/internal/metrics"
+	"github.com/netcracker/qubership-ratelimit/service/internal/records"
+	"github.com/netcracker/qubership-ratelimit/service/internal/settings"
 )
 
 func freeAddr(t *testing.T) string {
@@ -108,6 +111,19 @@ func listeningOptions(t *testing.T, dir string) Options {
 		Version:        "test-build",
 		Log:            logr.Discard(),
 		Platform:       logging.GetLogger("test"),
+		counters:       inProcess(),
+	}
+}
+
+// inProcess is a counter store in this process, for the tests whose subject is
+// not the Redis the service counts in.
+func inProcess() *settings.CounterBackend {
+	counters := memory.New()
+	return &settings.CounterBackend{
+		Store:       counters,
+		Management:  counters,
+		Records:     records.NewMemory(counters),
+		Description: "in process, for a test",
 	}
 }
 
@@ -380,6 +396,7 @@ func optionsOverRedisAt(t *testing.T, url string) (Options, *warningLog) {
 	writeConfiguration(t, dir)
 	options := listeningOptions(t, dir)
 	options.ProbeAddr, options.MetricsAddr, options.ManagementAddr = "0", "0", "0"
+	options.counters = nil
 	options.RedisMicroservice = "ratelimit-service"
 	options.RedisResolver = fixedResolver{url: url}
 	platform := &warningLog{Logger: logging.GetLogger("test")}
@@ -459,7 +476,7 @@ func TestService_isNotReadyBeforeRun(t *testing.T) {
 	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
 	service, err := Build("biz", Options{
 		ProbeAddr: "0", MetricsAddr: "0", ManagementAddr: "0", RLSAddr: freeAddr(t),
-		ConfigDir: t.TempDir(), Log: logr.Discard(), Platform: logging.GetLogger("test"),
+		ConfigDir: t.TempDir(), Log: logr.Discard(), Platform: logging.GetLogger("test"), counters: inProcess(),
 	})
 	require.NoError(t, err)
 
@@ -473,7 +490,7 @@ func TestService_reportsAListenerItCannotTake(t *testing.T) {
 	defer func() { _ = taken.Close() }()
 	service, err := Build("biz", Options{
 		ProbeAddr: taken.Addr().String(), MetricsAddr: "0", ManagementAddr: "0", RLSAddr: freeAddr(t),
-		ConfigDir: t.TempDir(), Log: logr.Discard(), Platform: logging.GetLogger("test"),
+		ConfigDir: t.TempDir(), Log: logr.Discard(), Platform: logging.GetLogger("test"), counters: inProcess(),
 	})
 	require.NoError(t, err)
 	// The deadline bounds a run that takes the listener after all, so the
@@ -536,4 +553,37 @@ func TestService_exemptsNothingWithTheManagementAPIOff(t *testing.T) {
 	const path = "/ratelimit/v1/status"
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OK, check("gateway.private", path), "the first check")
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, check("gateway.private", path), "the second check")
+}
+
+// A service needs one Redis to count in, so a build that names none, or names
+// two, is refused before anything listens. A service without one used to
+// count in its own memory, a limit of N admitting N per replica.
+func TestBuild_refusesAnythingButOneCounterStore(t *testing.T) {
+	configloader.InitWithSourcesArray([]*configloader.PropertySource{configloader.EnvPropertySource()})
+	for name, options := range map[string]Options{
+		"none": {},
+		"two":  {RedisMicroservice: "ratelimit-service", RedisAddr: "127.0.0.1:6379"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			options.ProbeAddr, options.MetricsAddr, options.ManagementAddr = "0", "0", "0"
+			options.RLSAddr, options.ConfigDir = freeAddr(t), t.TempDir()
+			options.Log, options.Platform = logr.Discard(), logging.GetLogger("test")
+
+			_, err := Build("biz", options)
+
+			assert.ErrorContains(t, err, "--redis-")
+		})
+	}
+}
+
+// --redis-addr counts in the Redis at that address, without DBaaS, for the
+// developer loop.
+func TestCounterStore_countsInTheRedisAtRedisAddr(t *testing.T) {
+	backend, connection, err := counterStore("biz", Options{RedisAddr: "127.0.0.1:6380", Log: logr.Discard()})
+
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Closer.Close() })
+	require.NotNil(t, connection, "the connection that keeps the credentials current")
+	assert.Equal(t, "127.0.0.1:6380", connection.Connection().Addr())
+	assert.Equal(t, "redis at 127.0.0.1:6380", backend.Description)
 }

@@ -138,7 +138,9 @@ func (a *Applier) Apply(cfg Configuration) {
 				built = a.build(domain, snapshot)
 				break
 			}
-			if kept {
+			// An empty hash marks an engine that enforces nothing: there is
+			// no last-good to keep.
+			if kept && a.hashes[domain] != "" {
 				generation, uid = built.Generation, built.UID
 				a.Log.Error(nil, "the validated spec of a domain does not compile in this build; keeping the last-good engine",
 					"domain", domain, "generation", entry.Generation, "enforcing", generation, "problems", len(problems))
@@ -152,6 +154,10 @@ func (a *Applier) Apply(cfg Configuration) {
 			snapshot, _ = enginecompile.Compile(a.Namespace, domain, convert.Policy(&v1.RateLimitPolicySpec{Domain: domain}))
 			built = a.build(domain, snapshot)
 			generation = 0
+			// No hash is recorded, so the next manifest compiles the payload
+			// again rather than reporting its generation over this empty
+			// engine.
+			entry.Hash = ""
 		}
 		built.Generation, built.UID, built.AppliedAt = generation, uid, now
 		domains[domain] = built

@@ -448,6 +448,26 @@ func TestLogSafe_cutsAValueAtTheLengthBound(t *testing.T) {
 			raw:  strings.Repeat("x", maxLoggedValueLength+1),
 			want: strings.Repeat("x", maxLoggedValueLength),
 		},
+		{
+			name: "a two-byte rune that would cross the bound",
+			raw:  strings.Repeat("x", maxLoggedValueLength-1) + "é",
+			want: strings.Repeat("x", maxLoggedValueLength-1),
+		},
+		{
+			name: "a two-byte rune that ends on the bound",
+			raw:  strings.Repeat("x", maxLoggedValueLength-2) + "é",
+			want: strings.Repeat("x", maxLoggedValueLength-2) + "é",
+		},
+		{
+			name: "a four-byte rune that would cross the bound",
+			raw:  strings.Repeat("x", maxLoggedValueLength-1) + "\U0001F600",
+			want: strings.Repeat("x", maxLoggedValueLength-1),
+		},
+		{
+			name: "an invalid byte that would cross the bound as U+FFFD",
+			raw:  strings.Repeat("x", maxLoggedValueLength-1) + "\xff",
+			want: strings.Repeat("x", maxLoggedValueLength-1),
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

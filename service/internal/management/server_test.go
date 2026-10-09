@@ -1,10 +1,13 @@
 package management
 
 import (
+	"bufio"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -104,6 +107,57 @@ func TestErrorHandler_answersAnOversizedBodyAsABadRequest(t *testing.T) {
 	var body errorBody
 	require.NoError(t, json.Unmarshal(raw, &body), "body: %s", raw)
 	assert.Equal(t, CodeInvalidRequest.Code, body.Code, "body: %s", raw)
+}
+
+// The refusal of an oversized body carries a request id like every other
+// answer, in the header and in meta.requestId: the caller's own when it sent
+// one, a fresh one otherwise. fasthttp refuses such a body while it reads it,
+// before the middleware that sets the id runs, and the refusal used to carry
+// none. The app serves a real listener here, since app.Test fails on such a
+// request in the client half.
+func TestApp_answersAnOversizedBodyWithARequestID(t *testing.T) {
+	h := newTestAPI(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = h.app.Listener(listener) }()
+	t.Cleanup(func() { _ = h.app.Shutdown() })
+	path := BasePath + "/domains/" + testDomain + "/counter-resets"
+
+	for name, sent := range map[string]string{"without an id": "", "with an id": "e2e-oversized-1"} {
+		t.Run(name, func(t *testing.T) {
+			// The headers alone: fasthttp refuses on the declared length, and
+			// a client still writing the body would see the connection close
+			// under it instead of the answer.
+			conn, err := net.Dial("tcp", listener.Addr().String())
+			require.NoError(t, err)
+			defer func() { _ = conn.Close() }()
+			head := "POST " + path + " HTTP/1.1\r\nHost: management\r\n" +
+				"Content-Type: application/json\r\n" +
+				"Authorization: Bearer " + testToken(listedCaller) + "\r\n" +
+				"Content-Length: " + strconv.Itoa(maxRequestBody+1) + "\r\n"
+			if sent != "" {
+				head += RequestIDHeader + ": " + sent + "\r\n"
+			}
+			_, err = conn.Write([]byte(head + "\r\n"))
+			require.NoError(t, err)
+
+			response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			require.NoError(t, err)
+			defer func() { _ = response.Body.Close() }()
+			raw, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
+
+			require.Equal(t, http.StatusBadRequest, response.StatusCode, "body: %s", raw)
+			var body errorBody
+			require.NoError(t, json.Unmarshal(raw, &body), "body: %s", raw)
+			id := response.Header.Get(RequestIDHeader)
+			assert.NotEmpty(t, id, "the %s header", RequestIDHeader)
+			assert.Equal(t, id, body.Meta.RequestID, "meta.requestId")
+			if sent != "" {
+				assert.Equal(t, sent, id, "the id the caller sent")
+			}
+		})
+	}
 }
 
 // The only acceptable end of a body is the end of the stream. Checking for a

@@ -15,13 +15,13 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/netcracker/qubership-core-lib-go/v3/configloader"
 	"github.com/netcracker/qubership-core-lib-go/v3/security/token"
 	goredis "github.com/redis/go-redis/v9"
 
 	enginestore "github.com/netcracker/qubership-ratelimit/engine/store"
-	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
 	"github.com/netcracker/qubership-ratelimit/service/internal/records"
 	"github.com/netcracker/qubership-ratelimit/service/internal/redisconn"
@@ -33,21 +33,24 @@ import (
 type Warn func(format string, args ...any)
 
 // CounterBackend is the chosen counter store and what the rest of the process
-// needs to know about it: the client whose lifecycle the caller owns, a
+// needs to know about it: the clients whose lifecycle the caller owns, a
 // description for the startup line.
 type CounterBackend struct {
-	Store       enginestore.Store
-	Records     records.Store
+	// Store decides the traffic's checks.
+	Store enginestore.Store
+
+	// Management reads and resets the same counters for the management API,
+	// and Records keeps that API's commands. Over Redis both go through a
+	// client of their own, which waits and retries longer than the decision
+	// path may.
+	Management enginestore.Store
+	Records    records.Store
+
 	Closer      io.Closer
 	Description string
 
-	// Shared marks a store every replica counts in. Without one a limit of N
-	// admits N per replica, and the management API's records are per replica
-	// too.
-	Shared bool
-
-	// CheckEviction reads whether the store may evict keys; nil for the
-	// in-process store, which never does.
+	// CheckEviction reads whether the store may evict keys; nil when the
+	// store cannot.
 	CheckEviction func(ctx context.Context) error
 }
 
@@ -83,51 +86,99 @@ func CheckEviction(ctx context.Context, client configReader) error {
 	return nil
 }
 
-// CounterStore picks where the counters live, and returns the client whose
-// lifecycle the caller owns; the store never closes it.
+// CounterStore builds the counter store over the Redis that source resolves,
+// and returns the clients whose lifecycle the caller owns; the store never
+// closes them.
 //
 // Redis is what makes a limit a limit of the domain rather than of each
 // replica: with N replicas counting in their own memory, a limit of 100
-// admits 100*N. In a pod the database is the one DBaaS provisioned for the
-// release, resolved through the platform's DBaaS client from the mounted
-// Secret of its DatabaseSecretClaim; the chart always sets it up, so a
-// replica never falls back to counting on its own. A nil source is the
-// in-process store, correct at one replica and for tests and the local
-// developer loop, and nothing a chart renders.
+// admits 100*N, so the service counts in Redis alone and source is required.
+// In a pod the database is the one DBaaS provisioned for the release,
+// resolved through the platform's DBaaS client from the mounted Secret of its
+// DatabaseSecretClaim.
 //
-// The client is a UniversalClient because that is what the engine takes; the
-// DBaaS Redis adapter provisions a standalone server, one address. The
-// password is asked of the source on every new connection, so a changed
-// password the source picks up reaches the pool without a restart.
+// Over Redis the decisions and the management API have a client each,
+// configured by [DecisionOptions] and [ManagementOptions]. The clients are
+// UniversalClients because that is what the engine takes; the DBaaS Redis
+// adapter provisions a standalone server, one address. The password is asked
+// of the source on every new connection, so a changed password the source
+// picks up reaches the pool without a restart.
 func CounterStore(source *redisconn.Source) CounterBackend {
-	if source == nil {
-		// The records live where the counters do. Leaving them nil would start
-		// the management API with a nil store, and every mutation would panic
-		// into an RLS-0500 while the reads kept working. In-process counting is
-		// correct at one replica, and so are in-process records.
-		counters := memory.New()
-		return CounterBackend{
-			Store:       counters,
-			Records:     records.NewMemory(counters),
-			Description: "in-process, counted per replica",
-		}
-	}
-
 	addr := source.Connection().Addr()
-	shared := goredis.NewUniversalClient(&goredis.UniversalOptions{
-		Addrs:               []string{addr},
-		CredentialsProvider: source.Credentials,
-	})
+	decisions := goredis.NewUniversalClient(DecisionOptions(addr, source.Credentials))
+	management := goredis.NewUniversalClient(ManagementOptions(addr, source.Credentials))
 	return CounterBackend{
-		Store:       redisstore.New(shared),
-		Records:     records.NewRedis(shared),
-		Closer:      shared,
-		Description: "redis at " + addr + ", provisioned by DBaaS",
-		Shared:      true,
+		Store:       redisstore.New(decisions),
+		Management:  redisstore.New(management),
+		Records:     records.NewRedis(management),
+		Closer:      closers{decisions, management},
+		Description: "redis at " + addr,
 		CheckEviction: func(ctx context.Context) error {
-			return CheckEviction(ctx, shared)
+			return CheckEviction(ctx, management)
 		},
 	}
+}
+
+// decisionTimeout bounds each step of a decision that arrives without a
+// deadline of its own: the dial, the wait for a pooled connection, the write,
+// and the read. A check from a gateway carries the filter's deadline, which
+// the client honors before this bound.
+const decisionTimeout = 250 * time.Millisecond
+
+// DecisionOptions configures the client that decides the traffic's checks.
+//
+// A decision is never retried and its dial is attempted once: the gateway
+// waits on the check for the filter's timeout, tens of milliseconds, and a
+// replayed script would charge the same request twice. A store that refuses
+// the connection fails the check at once, with the dial error, rather than
+// after the deadline as a timeout. A pooled connection that the store closed,
+// on a restart for example, fails one check the same way; the gateway's
+// failure mode decides that check.
+func DecisionOptions(addr string, credentials func() (string, string)) *goredis.UniversalOptions {
+	return &goredis.UniversalOptions{
+		Addrs:                 []string{addr},
+		CredentialsProvider:   credentials,
+		ContextTimeoutEnabled: true,
+		DialTimeout:           decisionTimeout,
+		DialerRetries:         1,
+		PoolTimeout:           decisionTimeout,
+		ReadTimeout:           decisionTimeout,
+		WriteTimeout:          decisionTimeout,
+		MaxRetries:            -1,
+	}
+}
+
+// managementTimeout bounds each step of a management API call to the store:
+// the dial, the wait for a pooled connection, the write, and the read.
+const managementTimeout = 3 * time.Second
+
+// ManagementOptions configures the client of the management API and its
+// command records. It keeps the client's retries: a replayed acceptance finds
+// the record the same call wrote, and the API reads that as its own.
+func ManagementOptions(addr string, credentials func() (string, string)) *goredis.UniversalOptions {
+	return &goredis.UniversalOptions{
+		Addrs:                 []string{addr},
+		CredentialsProvider:   credentials,
+		ContextTimeoutEnabled: true,
+		DialTimeout:           managementTimeout,
+		PoolTimeout:           managementTimeout,
+		ReadTimeout:           managementTimeout,
+		WriteTimeout:          managementTimeout,
+	}
+}
+
+// closers closes every client it holds and returns the first error.
+type closers []io.Closer
+
+// Close implements [io.Closer].
+func (c closers) Close() error {
+	var first error
+	for _, closer := range c {
+		if err := closer.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // NearLimitRatio reads the near-limit margin for the metrics. Unset or empty,
@@ -174,9 +225,19 @@ func IETFHeaders(warn Warn) bool {
 const DefaultManagementAudience = "netcracker"
 
 // ManagementAudience reads the audience the management API verifies a token
-// against, from MANAGEMENT_M2M_AUDIENCE.
-func ManagementAudience() string {
-	return configloader.GetOrDefaultString("management.m2m.audience", DefaultManagementAudience)
+// against, from MANAGEMENT_M2M_AUDIENCE, with the surrounding spaces trimmed.
+// Unset or empty, it is DefaultManagementAudience. A value of spaces alone
+// would match no token and refuse every caller, so it is reported through
+// warn and replaced by DefaultManagementAudience.
+func ManagementAudience(warn Warn) string {
+	raw := configloader.GetOrDefaultString("management.m2m.audience", DefaultManagementAudience)
+	audience := strings.TrimSpace(raw)
+	if audience == "" {
+		warn("MANAGEMENT_M2M_AUDIENCE %q holds spaces alone, which match no token; using %s",
+			raw, DefaultManagementAudience)
+		return DefaultManagementAudience
+	}
+	return audience
 }
 
 // ManagementCallers reads the ServiceAccounts that may call the management API

@@ -12,7 +12,7 @@ and the groups ([specification](ratelimitpolicy-cr-spec.md)).
 
 Business applications are installed in one of two schemes. The platform marks the role with one variable:
 `BASELINE_ORIGIN` is set, and non-empty, only in a satellite; a baseline and a single namespace do not receive it.
-Both charts refuse to render a `BASELINE_ORIGIN` that names the release's own namespace.
+Both charts refuse to render a `BASELINE_ORIGIN` that names `NAMESPACE`, the namespace the release installs into.
 
 1. **Single namespace.** Everything in one place: both components, the gateway filters, and the policy.
 2. **Composite.** A set of related namespaces: one **baseline** and one or more **satellites**. Every namespace has a
@@ -136,7 +136,9 @@ plane:
   domains this replica enforces, each with the generation it was applied from, its `ruleSetVersion`, its block, rule,
   and worst-case bucket counts, and its effective keys; `/debug/snapshot/{domain}` renders the compiled domain in full,
   the identity keys with the claim paths behind them and every group resolved into the values the engine tests.
-  Both answer JSON, or YAML on `?format=yaml` or an Accept header that asks for it, and every method but GET is 405.
+  The two snapshot paths answer JSON by default and YAML on `?format=yaml`; without a `format` parameter, an Accept
+  header that names YAML asks for it too, and any other `format` value is JSON. Every method but GET is 405 on them.
+  `/debug/applied` answers JSON alone, to any method.
   Every document is built from one load of the rule set, so a request that lands inside an apply describes one state
   whole. No mutations, no authentication; this is not the management API (a separate port with its own authentication,
   see [helm](helm-chart.md)) and it is outside the compatibility promises. The binary's version is the
@@ -194,8 +196,10 @@ generation that does not compile, with the message `generation <N> does not comp
 recorded once, when the operator drops the saved last-good generation, with the reason, `last-good generation <N> does
 not compile with this operator build: <error>` or `last-good generation <N> was saved from a read that did not carry
 every field`, followed by `; the domain enforces nothing until a generation compiles`. A ConfigMap write error raises
-no event: it counts in `ratelimit_config_write_errors_total` by reason, and the operator logs
-`failed to write the configuration`.
+no event: it counts in `ratelimit_config_write_errors_total` by reason, sets `ratelimit_config_write_failing` to 1
+until a write succeeds, and the operator logs `failed to write the configuration`. A reconcile that cannot read what it
+compiles counts the same way with reason `read` and logs `failed to read the policies; the configuration was not
+written` or `failed to read the configuration; it was not written`.
 
 ## Status
 

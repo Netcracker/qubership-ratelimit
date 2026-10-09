@@ -24,6 +24,8 @@ ports() {
 }
 
 up() {
+  # A cluster left by an earlier run holds the container names and ports.
+  down
   local publish=()
   for port in $(ports); do
     publish+=("-p" "127.0.0.1:${port}:${port}")

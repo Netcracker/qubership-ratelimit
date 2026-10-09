@@ -123,6 +123,7 @@ func (a *API) Register(router fiber.Router) {
 	group.Use(withRequestID)
 	group.Use(recover.New())
 	group.Use(a.withIdentity())
+	group.Use(withDeadline)
 
 	group.Get("/domains", requireRole(RoleViewer, a.handleDomains))
 	group.Get("/domains/:domain/rules", requireRole(RoleViewer, a.handleRules))

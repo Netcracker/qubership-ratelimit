@@ -113,9 +113,21 @@ policyAlerts:
 
   # RatelimitConfigWriteErrors: the operator could not save the namespace's
   # configuration. The replicas keep the previous one and the last-good
-  # fallback a restart would need is not being saved; any increase over the
-  # window fires.
-  configWriteErrorsWindow: 15m
+  # fallback a restart would need is not being saved. It fires once the last
+  # attempt has failed for configWriteFailingFor; a write that fails once and
+  # succeeds on its retry does not page.
+  configWriteFailingFor: 5m
+
+  # RatelimitNotEnforced: a policy enforces no generation at all, so its
+  # domain passes unlimited. Held for notEnforcedFor.
+  notEnforcedFor: 5m
+
+  # RatelimitOperatorReconcileFailing: a controller of the leader failed
+  # every reconcile over reconcileErrorsWindow and completed none, such as
+  # after its Role lost a permission. The window is longer than the
+  # controller's longest retry backoff, 1000 seconds, so a controller that
+  # keeps failing always has a failure inside it.
+  reconcileErrorsWindow: 30m
 
   # RatelimitNoOperatorLeader: no operator pod holds the Lease, so nothing
   # compiles policies or writes the ConfigMap; the replicas keep enforcing

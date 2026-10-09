@@ -1,13 +1,17 @@
 package management
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/netcracker/qubership-ratelimit/engine/model"
+	"github.com/netcracker/qubership-ratelimit/service/internal/records"
 )
 
 // The bulk action is the destructive one: it scans instead of computing, so
@@ -429,7 +433,83 @@ func TestBulk_refusesAnExecutionOnceTheRuleSetMoved(t *testing.T) {
 func TestBulk_refusesASelectorPeriodTheGrammarCannotRead(t *testing.T) {
 	h := newTestAPI(t)
 
-	requireError(t, h.bulk(t, map[string]any{
+	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}, "period": "soon"}, "dryRun": true,
 	}, "key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
+	assert.Equal(t, []string{"selector.period"}, body.Meta.Fields, "the body field at fault, by its path")
+}
+
+// A rule id the grammar cannot read is refused in a body under the path of
+// the body's own field.
+func TestBulk_namesARuleIDItCannotReadByTheFieldOfTheBody(t *testing.T) {
+	h := newTestAPI(t)
+
+	body := requireError(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"a/b/c"}}, "dryRun": true,
+	}, "key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
+	assert.Equal(t, []string{"selector.ruleIds"}, body.Meta.Fields, "the body field at fault, by its path")
+}
+
+// Executions racing under one confirmation token reset once: one is accepted,
+// and every other is refused because the token is spent or the domain's
+// sweep is taken.
+func TestBulk_executionsRacingUnderOneTokenResetOnce(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	selector := map[string]any{"ruleIds": []string{"orders"}}
+	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
+
+	const callers = 16
+	statuses := make([]int, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Go(func() {
+			statuses[i] = h.bulk(t, map[string]any{
+				"selector": selector, "confirmationToken": preview.ConfirmationToken,
+			}, fmt.Sprintf("key-execute-%d", i), listedCaller).Code
+		})
+	}
+	wg.Wait()
+
+	counts := map[int]int{}
+	for _, status := range statuses {
+		counts[status]++
+	}
+	assert.Equal(t, 1, counts[http.StatusOK], "executions that ran: %v", counts)
+	assert.Equal(t, callers-1, counts[http.StatusGone]+counts[http.StatusConflict],
+		"executions refused for a spent token or a sweep in flight: %v", counts)
+}
+
+// replayedAccept runs every acceptance twice and answers the second, as a
+// client does when it retries a write whose reply was lost.
+type replayedAccept struct {
+	records.Store
+}
+
+func (r replayedAccept) Accept(ctx context.Context, acceptance records.Acceptance) (records.Accepted, error) {
+	if _, err := r.Store.Accept(ctx, acceptance); err != nil {
+		return records.Accepted{}, err
+	}
+	return r.Store.Accept(ctx, acceptance)
+}
+
+// A retried acceptance that finds the record this call wrote runs the sweep.
+// It used to read the record as another sweep in flight: the client got a 202,
+// nothing was reset, and the domain's lease stayed taken until it expired.
+func TestBulk_aRetriedAcceptanceOfTheSameCallRunsTheSweep(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	selector := map[string]any{"ruleIds": []string{"orders"}}
+	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
+	h.api.Records = replayedAccept{Store: h.records}
+
+	var executed BulkResult
+	decode(t, h.bulk(t, map[string]any{
+		"selector": selector, "confirmationToken": preview.ConfirmationToken,
+	}, "key-execute", listedCaller), http.StatusOK, &executed)
+
+	require.NotNil(t, executed.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 1, *executed.ResetCount)
+	_, found := h.remaining(t, "alice")
+	assert.False(t, found, "the counter of alice is still listed")
 }

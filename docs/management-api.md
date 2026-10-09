@@ -70,13 +70,13 @@ BEFORE acceptance); a client disconnect does NOT stop the sweep: an accepted com
 verify the fencing token, delete the batch, and advance the progress in the record; there is no gap between the check
 and the deletion, a walker that lost its lease deletes nothing further, and the terminal outcome commits only under its
 own live token. Real wide selections fit in seconds; size the client timeout for that. A cursor is bound to its
-selection: it carries the fingerprint of the canonical selector and a TTL; a foreign selection or expiry is 0400, not
-silently a different listing. Pages are not a snapshot: a live SCAN can skip, duplicate, or show newer numbers. /domains
-is not paginated at all. A page reads the store in whole steps, each of at most the room left on the page and in the
-budget, and at most 128 steps; its cursor is the store's own cursor of the next step, so the walk stays on the chain
-of cursors the store returns, which is what the store's completeness is conditioned on
-(the [store contract](store-contract.md)). pageSize is the size a page asks for: exact on the in-process store, and on
-Redis, whose step is a hint, a few items over at most; items are unsorted.
+selection: it carries the fingerprint of the canonical selector and a TTL of at least 10 minutes; a foreign selection or
+expiry is 0400, not silently a different listing. Pages are not a snapshot: a live SCAN can skip, duplicate, or show
+newer numbers. /domains is not paginated at all. A page reads the store in whole steps, each of at most the room left on
+the page and in the budget, and at most 128 steps; its cursor is the store's own cursor of the next step, so the walk
+stays on the chain of cursors the store returns, which is what the store's completeness is conditioned on (the [store
+contract](store-contract.md)). pageSize is the size a page asks for: exact on the in-process store, and on Redis, whose
+step is a hint, a few items over at most; items are unsorted.
 
 Semantics under live traffic: a reset is NOT a snapshot. resetCount is the keys actually deleted; traffic during the
 sweep creates counters independently. Fence/generation mechanics are deliberately not introduced: the price is not
@@ -223,7 +223,8 @@ The code catalog:
   unavailability is never read as "no record"; a store that fails in the middle of the sweep leaves no way to record the
   outcome: the record stays accepted, and recovery runs on the lease: the retry sees 202 while the lease is live and
   finalizes 0501 after it expires; a 0503 AT THE ACCEPTANCE WRITE is ambiguous, since the write may have landed: it is
-  resolved by a retry with the SAME key, never a new one)
+  resolved by a retry with the SAME key, never a new one). A store that does not answer fails the request with 0503
+  10 s after it arrived; an accepted sweep runs on under its own bound
 - RLS-0504 token verification unavailable: the service has not yet reached the API server's OIDC discovery, which it
   needs to verify tokens, so it refuses every request, with or without a token, with 503 and `Retry-After: 5`; it keeps
   retrying the discovery and serves without a restart once it succeeds. The data path is not affected
@@ -372,11 +373,9 @@ the backend's ServiceAccount, never the user. The caller therefore:
 - **Sharding by domain.** The record scope (subject, domain, endpoint) contains the domain, and there are no
   cross-domain commands, so records and tokens carry the same `{ns/domain}` hash tag as the counters: one slot,
   single-slot Lua legal on a cluster, and the independence of records between domains is the physical layout.
-- **The in-memory store is single-replica by definition** (tests and the developer loop, a service started without
-  `--redis-dbaas-microservice`): the chart never renders it, since every replica it installs reads its DBaaS database,
-  and the service warns when it serves the management API over it, so the "the store is shared" assumption is never
-  silent.
-  Bulk still works fully there, since preview and execution are one pod.
+- **The in-memory record store is single-process by definition** and serves tests only. The service always keeps its
+  records in Redis, the same store its counters live in, so the "the store is shared" assumption holds on every
+  replica.
 - **The applicability evaluator** statically evaluates a rule against a partial identity: conditions over the supplied
   values (groups are resolved by compilation), availability of the counting axes (a capture every route of the block
   produces is present; one only some routes produce is decided by `path`), FirstMatch preemption (shadow does not

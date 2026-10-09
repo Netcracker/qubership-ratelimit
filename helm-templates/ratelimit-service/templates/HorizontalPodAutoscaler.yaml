@@ -54,7 +54,7 @@ spec:
           periodSeconds: {{ .Values.HPA_SCALING_UP_PODS_PERIOD_SECONDS }}
         {{- end }}
     scaleDown:
-      stabilizationWindowSeconds: {{ default 300 .Values.HPA_SCALING_DOWN_STABILIZATION_WINDOW_SECONDS }}
+      stabilizationWindowSeconds: {{ include "ratelimit.valueOr" (dict "value" .Values.HPA_SCALING_DOWN_STABILIZATION_WINDOW_SECONDS "default" 300) }}
       selectPolicy: {{ if .Values.HPA_ENABLED }}{{ default "Max" .Values.HPA_SCALING_DOWN_SELECT_POLICY }}{{ else }}Disabled{{ end }}
       policies:
         {{- if and .Values.HPA_SCALING_DOWN_PERCENT_VALUE (ge (int .Values.HPA_SCALING_DOWN_PERCENT_PERIOD_SECONDS) 0) }}

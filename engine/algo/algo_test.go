@@ -53,6 +53,11 @@ func TestCheckAcceptsAnExpressibleWindow(t *testing.T) {
 		{"a GCRA rate that divides the period at microsecond resolution", "GCRA",
 			Window{Requests: 500_000, Period: time.Second, Burst: 500_000}},
 		{"a single request a minute", "GCRA", Window{Requests: 1, Period: time.Minute, Burst: 1}},
+		// 10101 a second is an exact interval of 99.0001 microseconds, which
+		// rounds up to the floor of 100; the enforced 10000 a second is under
+		// 1% stricter, so the period need not divide.
+		{"a GCRA rate whose interval rounds up to the emission floor", "GCRA",
+			Window{Requests: 10_101, Period: time.Second, Burst: 10_101}},
 		{"a GCRA rate of exactly one request per microsecond", "GCRA",
 			Window{Requests: 1_000_000, Period: time.Second, Burst: 1_000_000}},
 		// One request a day is an emission interval of 86400000000 microseconds,

@@ -40,7 +40,9 @@ spec:
               The rate limit service in {{ "{{" }} $labels.namespace {{ "}}" }} answered
               {{ "{{" }} $value | printf "%.0f" {{ "}}" }} checks in 5m for domains no RateLimitPolicy claims;
               that traffic passes unlimited. The domain name is in the service log
-              (unknown rate limit domain): a typo in a gateway filter's domain, or a deleted policy.
+              (unknown rate limit domain): a typo in a gateway filter's domain, a deleted policy, or a
+              policy that enforces no generation, which the operator leaves out of the configuration and
+              which RatelimitNotEnforced reports beside this one.
 
         - alert: RatelimitStoreErrors
           expr: sum by (namespace, reason) (increase(ratelimit_store_errors_total{ {{- $sel -}} }[5m])) > 0
@@ -53,8 +55,10 @@ spec:
               The rate limit service in {{ "{{" }} $labels.namespace {{ "}}" }} failed
               {{ "{{" }} $value | printf "%.0f" {{ "}}" }} store decisions in 5m with reason
               {{ "{{" }} $labels.reason {{ "}}" }}. Every failed check is decided by the gateway's failure
-              mode, unlimited under fail-open. timeout is load or distance to the store, server is the
-              store answering an error, other is connectivity.
+              mode, unlimited under fail-open. timeout is no answer within the check's deadline: load,
+              distance, or a store that stopped answering; server is the store answering an error; other is
+              a connection that failed outright, a store that refuses connections or a name that does not
+              resolve.
 
         - alert: RatelimitDecisionLatencyHigh
           expr: >-
@@ -112,6 +116,7 @@ spec:
               no manifest in its mounted configuration. It keeps enforcing what it last applied, or stays
               NotReady if it never applied anything, and no policy change reaches it. The ConfigMap
               ratelimit-config is written by the operator: check that the operator release is installed
-              and holds the Lease.
+              and holds the Lease, and that its reconciles succeed (RatelimitOperatorReconcileFailing, or
+              a Reconciler error in the operator log).
 {{- end }}
 {{- end }}

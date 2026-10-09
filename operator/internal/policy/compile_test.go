@@ -654,6 +654,32 @@ func TestFit_setsAGenerationThatDoesNotFitBackToLastGood(t *testing.T) {
 	assert.Len(t, blocksOf(t, result, testDomain), 1, "Snapshots[%q].Blocks", testDomain)
 }
 
+// The fit measures the manifest with the operator version the writer stamps
+// into it. It used to measure it without, and at the limit it kept a
+// generation the writer then refused to write, for the whole namespace.
+func TestFit_measuresTheManifestWithTheOperatorVersion(t *testing.T) {
+	good := policyObject(v1.LimitBlock{Name: "a", Rules: []v1.Rule{simpleRule("total")}})
+	grown := *good.DeepCopy()
+	grown.Generation = 2
+	grown.Spec.Limits = wideBlocks("wide", 100)
+	in := Input{
+		Namespace:       testNamespace,
+		Policies:        []v1.RateLimitPolicy{grown},
+		State:           map[string]Bundle{testDomain: {UID: "uid-1", GoodGeneration: 1, GoodSpec: good.Spec}},
+		OperatorVersion: strings.Repeat("v", 64),
+	}
+	result := Compile(in)
+	unversioned, err := Render(result.State, "")
+	require.NoError(t, err)
+
+	Fit(in, result, unversioned.Size)
+
+	assert.True(t, result.Policies[key()].TooLarge, "Outcome.TooLarge at a limit only the unversioned manifest fits")
+	written, err := Render(result.State, in.OperatorVersion)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, written.Size, unversioned.Size, "the size of what the writer writes")
+}
+
 func TestFit_withoutLastGoodTheDomainIsClaimedAndEmpty(t *testing.T) {
 	object := policyObject(wideBlocks("wide", 100)...)
 	in := Input{Namespace: testNamespace, Policies: []v1.RateLimitPolicy{object}}
@@ -747,5 +773,17 @@ func TestFit_setsBackOnlyAGenerationThatMoved(t *testing.T) {
 				"Outcome.TooLarge of generation %d over a persisted generation 1, both over the limit of 1024",
 				tt.generation)
 		})
+	}
+}
+
+// A limit that is not positive is a programmer's error, and Fit refuses it
+// rather than reading it as no limit, which the writer's Save would read as
+// nothing fitting.
+func TestFit_panicsOnALimitThatIsNotPositive(t *testing.T) {
+	object := policyObject(v1.LimitBlock{Name: "a", Rules: []v1.Rule{simpleRule("total")}})
+	in := Input{Namespace: testNamespace, Policies: []v1.RateLimitPolicy{object}}
+
+	for _, limit := range []int{0, -1} {
+		assert.Panics(t, func() { Fit(in, Compile(in), limit) }, "Fit with a limit of %d", limit)
 	}
 }

@@ -34,12 +34,16 @@ const ConfigMapLimit = 1 << 20
 // A total that was already over the limit before this compilation moved
 // anything is left as it is: nothing here can shrink what was persisted, and
 // the writer's failure to write is the signal in that case.
+//
+// limit has to be positive, as it has to be for the writer's Save, and Fit
+// panics on any other: the two would read it differently, one as no limit
+// and the other as nothing fitting.
 func Fit(in Input, result *Result, limit int) {
 	if limit <= 0 {
-		return
+		panic(fmt.Sprintf("policy: Fit with a limit of %d bytes; the limit has to be positive", limit))
 	}
-	total, sizes, err := sizeOf(result.State)
-	if err != nil || total <= limit {
+	rendered, err := Render(result.State, in.OperatorVersion)
+	if err != nil || rendered.Size <= limit {
 		return
 	}
 
@@ -59,8 +63,8 @@ func Fit(in Input, result *Result, limit int) {
 	// Largest first, so the fewest generations are kept out; by name after,
 	// so two runs over the same input keep the same ones.
 	sort.Slice(moved, func(a, b int) bool {
-		if sizes[moved[a]] != sizes[moved[b]] {
-			return sizes[moved[a]] > sizes[moved[b]]
+		if sizeA, sizeB := len(rendered.Payloads[moved[a]]), len(rendered.Payloads[moved[b]]); sizeA != sizeB {
+			return sizeA > sizeB
 		}
 		return moved[a] < moved[b]
 	})
@@ -76,40 +80,57 @@ func Fit(in Input, result *Result, limit int) {
 		}
 		object := &in.Policies[i]
 		reason := fmt.Sprintf("the namespace's configuration would be %d bytes compressed, over the limit of %d",
-			total, limit)
+			rendered.Size, limit)
 		outcome, snapshot, bundle := compileDomainFitting(
 			in.Namespace, object, in.State[domain], in.Skew[client.ObjectKeyFromObject(object)], reason)
 		result.Policies[client.ObjectKeyFromObject(object)] = outcome
 		result.Snapshots[domain] = snapshot
 		result.State[domain] = bundle
 
-		total, sizes, err = sizeOf(result.State)
-		if err != nil || total <= limit {
+		rendered, err = Render(result.State, in.OperatorVersion)
+		if err != nil || rendered.Size <= limit {
 			return
 		}
 	}
 }
 
-// sizeOf is the size the ConfigMap would have: every payload compressed,
-// plus the manifest that indexes them.
-func sizeOf(state map[string]Bundle) (total int, sizes map[string]int, err error) {
-	sizes = make(map[string]int, len(state))
-	m := manifest.Manifest{Domains: map[string]manifest.Domain{}}
+// Rendered is the content of the configuration ConfigMap.
+type Rendered struct {
+	// Manifest is the encoded manifest, stamped with the operator version.
+	Manifest []byte
+
+	// Payloads holds the compressed payload of every domain with a bundle,
+	// keyed by domain.
+	Payloads map[string][]byte
+
+	// Size is what the ConfigMap limit bounds: the manifest and every
+	// payload, in bytes.
+	Size int
+}
+
+// Render builds the ConfigMap's content from state. A bundle without a UID
+// has nothing to enforce and is left out. The writer of the ConfigMap and
+// [Fit] both measure through it, so the two agree on the size to the byte.
+func Render(state map[string]Bundle, operatorVersion string) (Rendered, error) {
+	m := manifest.Manifest{OperatorVersion: operatorVersion, Domains: map[string]manifest.Domain{}}
+	out := Rendered{Payloads: make(map[string][]byte, len(state))}
 	for domain, bundle := range state {
 		if bundle.UID == "" {
 			continue
 		}
 		compressed, hash, err := manifest.EncodePayload(bundle.GoodSpec)
 		if err != nil {
-			return 0, nil, err
+			return Rendered{}, fmt.Errorf("encode the payload of %s: %w", domain, err)
 		}
-		sizes[domain] = len(compressed)
-		total += len(compressed)
+		out.Payloads[domain] = compressed
+		out.Size += len(compressed)
 		m.Domains[domain] = manifest.Domain{Generation: bundle.GoodGeneration, UID: bundle.UID, Hash: hash}
 	}
 	encoded, err := manifest.Encode(m)
 	if err != nil {
-		return 0, nil, err
+		return Rendered{}, err
 	}
-	return total + len(encoded), sizes, nil
+	out.Manifest = encoded
+	out.Size += len(encoded)
+	return out, nil
 }
