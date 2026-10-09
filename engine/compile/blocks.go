@@ -134,20 +134,29 @@ func (c *blockCompiler) checkCostCapacity(b Block) {
 			continue
 		}
 		for _, rule := range b.Rules {
-			for _, rate := range rule.Rates {
-				capacity := rate.Window.Burst
-				if capacity == 0 {
-					capacity = rate.Window.Requests
-				}
-				if route.Cost.Default > capacity {
-					c.fail(b.Name, rule.Name, ReasonCostExceedsCapacity,
-						"route %q reads a default cost of %d, above the capacity %d of the %s window of %s",
-						route.Value, route.Cost.Default, capacity, rate.Algorithm.Name(), rate.Window.Period)
-					break
-				}
+			if rate, capacity, ok := windowBelow(rule, route.Cost.Default); ok {
+				c.fail(b.Name, rule.Name, ReasonCostExceedsCapacity,
+					"route %q reads a default cost of %d, above the capacity %d of the %s window of %s",
+					route.Value, route.Cost.Default, capacity, rate.Algorithm.Name(), rate.Window.Period)
 			}
 		}
 	}
+}
+
+// windowBelow returns the first window of the rule whose capacity, the burst
+// of a GCRA window and the requests of a fixed one, is below cost, with that
+// capacity.
+func windowBelow(rule Rule, cost int64) (Rate, int64, bool) {
+	for _, rate := range rule.Rates {
+		capacity := rate.Window.Burst
+		if capacity == 0 {
+			capacity = rate.Window.Requests
+		}
+		if cost > capacity {
+			return rate, capacity, true
+		}
+	}
+	return Rate{}, 0, false
 }
 
 func (c *blockCompiler) checkReplacedRules(b model.Block, mode model.Mode, names map[string]struct{}) {
