@@ -285,9 +285,12 @@ func TestServiceChart_podServesTheContractsPortAndMountsItsConfigMap(t *testing.
 		"the pod starts before the operator has written")
 }
 
-// The data plane holds no credentials: no Role, no RoleBinding, and no
-// token mounted in the pod or offered by its ServiceAccount.
-func TestServiceChart_holdsNoCredentials(t *testing.T) {
+// The data plane reaches no API server object: no Role, no RoleBinding, and
+// no token automounted in the pod or offered by its ServiceAccount. The one
+// token the pod holds is the one the chart mounts for the management API,
+// which TestServiceChart_mountsTheServiceAccountTokenForTheManagementAPIAlone
+// covers.
+func TestServiceChart_reachesNoAPIServerObject(t *testing.T) {
 	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
 		"--set", "management.callers={ui-backend}")
 
@@ -553,8 +556,10 @@ func TestCharts_refuseAnUnknownWhenUnsatisfiable(t *testing.T) {
 
 // The management port's AuthorizationPolicy is worth something only in the
 // exact shape it has: DENY on the management port for every principal except
-// the callers. The check reads the structure, so a policy that keeps the same
-// principals under principals, or turns into an ALLOW, fails here.
+// the callers. A <name> caller is the ServiceAccount of that name in
+// NAMESPACE, and a <namespace>/<name> caller the one in its own namespace.
+// The check reads the structure, so a policy that keeps the same principals
+// under principals, or turns into an ALLOW, fails here.
 func TestServiceChart_managementPolicyDeniesAllButTheCallers(t *testing.T) {
 	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
 		"--set", "management.callers={ui-backend,platform/ops-backend}")
@@ -572,33 +577,58 @@ func TestServiceChart_managementPolicyDeniesAllButTheCallers(t *testing.T) {
 	require.Len(t, ports, 1, "spec.rules[0].to[0].operation.ports")
 	assert.Contains(t, argsOf(containerOf(t, objects)), "--management-bind-address=:"+ports[0],
 		"the policy covers a port other than the one the management listener binds")
+	source := policySource(t, policy)
+	assert.ElementsMatch(t, []string{"cluster.local/ns/biz/sa/ui-backend", "cluster.local/ns/platform/sa/ops-backend"},
+		strs(source.at("notPrincipals")), "spec.rules[0].from[0].source.notPrincipals")
+	assert.Nil(t, source.at("principals").v, "a principals list turns the exception into the target")
+}
+
+// policySource returns the one source of the one rule of an
+// AuthorizationPolicy, and stops the test where the policy holds another
+// number of rules or of sources.
+func policySource(t *testing.T, policy object) node {
+	t.Helper()
+	rules := policy.at("spec", "rules").list()
+	require.Len(t, rules, 1, "spec.rules")
 	from := rules[0].at("from").list()
 	require.Len(t, from, 1, "spec.rules[0].from")
-	assert.Equal(t, []string{"cluster.local/ns/biz/sa/ui-backend", "cluster.local/ns/platform/sa/ops-backend"},
-		strs(from[0].at("source", "notPrincipals")),
-		"a <name> caller is not in NAMESPACE, or a <namespace>/<name> caller not in its own namespace")
-	assert.Nil(t, from[0].at("source", "principals").v, "a principals list turns the exception into the target")
+	return from[0].at("source")
 }
 
 // An explicit allowedServiceAccounts list replaces the callers as the
-// principals, in the callers' grammar: the callers come through a gateway,
-// whose workload the policy then sees, and a caller in another namespace that
-// reaches the port directly is listed beside it. An entry of another shape is
-// refused rather than rendered as a principal nothing holds.
+// principals, in the callers' grammar. A release sets it when the callers
+// come through a gateway, whose workload the policy then sees, and lists a
+// caller in another namespace that reaches the port directly beside it.
 func TestServiceChart_managementPolicyTakesAnExplicitListOverTheCallers(t *testing.T) {
 	policy := only(t, render(t, serviceChart, "biz", "--set", "management.enabled=true",
 		"--set", "management.callers={ui-backend}",
 		"--set", "management.authorizationPolicy.allowedServiceAccounts={private-gateway-istio,platform/ops-backend}"),
 		"AuthorizationPolicy")
 
-	from := policy.at("spec", "rules").list()[0].at("from").list()
-	assert.Equal(t, []string{"cluster.local/ns/biz/sa/private-gateway-istio", "cluster.local/ns/platform/sa/ops-backend"},
-		strs(from[0].at("source", "notPrincipals")))
+	assert.ElementsMatch(t,
+		[]string{"cluster.local/ns/biz/sa/private-gateway-istio", "cluster.local/ns/platform/sa/ops-backend"},
+		strs(policySource(t, policy).at("notPrincipals")), "spec.rules[0].from[0].source.notPrincipals")
+}
 
-	_, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true",
-		"--set", "management.callers={ui-backend}",
-		"--set", "management.authorizationPolicy.allowedServiceAccounts={a/b/c}")
-	assert.Error(t, err, "the schema accepts an entry that is no ServiceAccount")
+// The schema refuses an entry of management.callers or of
+// management.authorizationPolicy.allowedServiceAccounts that is neither <name>
+// nor <namespace>/<name>, rather than rendering a principal no workload holds.
+func TestServiceChart_refusesAServiceAccountEntryOfAnotherShape(t *testing.T) {
+	for _, c := range []struct {
+		key  string
+		args []string
+	}{
+		{"callers", []string{"--set", "management.callers={a/b/c}"}},
+		{"allowedServiceAccounts", []string{"--set", "management.callers={ui-backend}",
+			"--set", "management.authorizationPolicy.allowedServiceAccounts={a/b/c}"}},
+	} {
+		t.Run(c.key, func(t *testing.T) {
+			out, err := renderErr(serviceChart, "biz", append([]string{"--set", "management.enabled=true"}, c.args...)...)
+
+			require.Error(t, err, "helm template %s", strings.Join(c.args, " "))
+			assert.Contains(t, string(out), c.key, "the refusal names the key it refused")
+		})
+	}
 }
 
 // The dashboard opens on its own release's namespace. Domain names repeat

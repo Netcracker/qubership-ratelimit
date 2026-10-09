@@ -28,8 +28,8 @@ func (h *testAPI) bulk(t *testing.T, body any, idempotencyKey string, caller str
 	})
 }
 
-// preview runs step one over body, which it marks as a preview, and returns
-// its answer.
+// preview runs step one as listedCaller over body, which it marks as a preview,
+// and returns its answer.
 func (h *testAPI) preview(t *testing.T, body map[string]any, key string) BulkResult {
 	t.Helper()
 	body["dryRun"] = true
@@ -164,15 +164,9 @@ func TestBulk_tokenIsBoundToItsSubject(t *testing.T) {
 	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
 
-	target := BasePath + "/domains/" + testDomain + "/counter-resets"
-	recorder := h.callWith(t, http.MethodPost, target, listedCaller, map[string]any{
+	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
-	}, func(request *http.Request) {
-		request.Header.Set("Idempotency-Key", "key-execute")
-		request.Header.Set("Authorization", "Bearer "+testToken(otherCaller))
-	})
-
-	body := requireError(t, recorder, http.StatusConflict, CodeConflict)
+	}, "key-execute", otherCaller), http.StatusConflict, CodeConflict)
 	assert.Equal(t, ConflictStaleConfirmation, body.Meta.ConflictType)
 }
 

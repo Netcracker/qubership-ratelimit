@@ -54,15 +54,21 @@ func TestIdentity_answersEachRefusalOfTheVerifierWith401(t *testing.T) {
 		err    error
 		detail string
 	}{
-		{"malformed", fmt.Errorf("%w: token contains an invalid number of segments", jwt.ErrTokenMalformed), "not a well-formed JWT"},
+		{"malformed", fmt.Errorf("%w: token contains an invalid number of segments", jwt.ErrTokenMalformed),
+			"not a well-formed JWT"},
 		{"expired", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenExpired), "has expired"},
 		{"not valid yet", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenNotValidYet), "not valid yet"},
 		{"issued in the future", fmt.Errorf("%w: issued later", jwt.ErrTokenUsedBeforeIssued), "not valid yet"},
-		{"another audience", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenInvalidAudience), "not issued for the audience"},
-		{"another issuer", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenInvalidIssuer), "not issued by this cluster"},
-		{"a bad signature", fmt.Errorf("%w: crypto/rsa: verification error", jwt.ErrTokenSignatureInvalid), "signature of the bearer token could not be verified"},
-		{"a key the cluster does not hold", fmt.Errorf("%w: %w", jwt.ErrTokenUnverifiable, jwkset.ErrKeyNotFound), "signed with a key this cluster does not hold"},
-		{"alg none", fmt.Errorf("%w: 'none' signature type is not allowed", jwt.ErrTokenUnverifiable), "signature of the bearer token could not be verified"},
+		{"another audience", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenInvalidAudience),
+			"not issued for the audience"},
+		{"another issuer", fmt.Errorf("token has invalid claims: %w", jwt.ErrTokenInvalidIssuer),
+			"not issued by this cluster"},
+		{"a bad signature", fmt.Errorf("%w: crypto/rsa: verification error", jwt.ErrTokenSignatureInvalid),
+			"signature of the bearer token could not be verified"},
+		{"a key the cluster does not hold", fmt.Errorf("%w: %w", jwt.ErrTokenUnverifiable, jwkset.ErrKeyNotFound),
+			"signed with a key this cluster does not hold"},
+		{"alg none", fmt.Errorf("%w: 'none' signature type is not allowed", jwt.ErrTokenUnverifiable),
+			"signature of the bearer token could not be verified"},
 		{"anything else", errors.New("boom"), "was not accepted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,10 +84,15 @@ func TestIdentity_answersEachRefusalOfTheVerifierWith401(t *testing.T) {
 			recorder := h.send(t, request)
 
 			body := requireError(t, recorder, http.StatusUnauthorized, CodeUnauthorized)
-			require.Contains(t, body.Message, tc.detail)
-			require.NotContains(t, recorder.Body.String(), token)
+			assert.Contains(t, body.Message, tc.detail, "the 401 detail for the verifier error %q", tc.err)
+			assert.NotContains(t, recorder.Body.String(), token, "the 401 body")
+			assert.NotContains(t, log.find(t, "management API refused a bearer token").message, token,
+				"the log record of the refusal")
+			log.mu.Lock()
+			defer log.mu.Unlock()
+			require.NotEmpty(t, log.lines, "log records of the refused call")
 			for _, line := range log.lines {
-				require.NotContains(t, line.message, token)
+				assert.NotContains(t, line.message, token, "a log record of the refused call")
 			}
 		})
 	}
@@ -89,7 +100,7 @@ func TestIdentity_answersEachRefusalOfTheVerifierWith401(t *testing.T) {
 
 // A token the verifier accepts is still refused when it is not a ServiceAccount
 // token: the identity provider's tokens carry no kubernetes.io claim, and a
-// token without a subject names nobody to audit.
+// token without a subject, or with an empty one, names nobody to audit.
 func TestIdentity_refusesAVerifiedTokenThatIsNotAServiceAccounts(t *testing.T) {
 	h := newTestAPI(t)
 
@@ -98,6 +109,8 @@ func TestIdentity_refusesAVerifiedTokenThatIsNotAServiceAccounts(t *testing.T) {
 			"sub": "alice", "realm_access": map[string]any{"roles": []string{"operator"}}}),
 		"no subject": tokenWithClaims(map[string]any{
 			"kubernetes.io": map[string]any{"namespace": testNamespace}}),
+		"an empty subject": tokenWithClaims(map[string]any{
+			"sub": "", "kubernetes.io": map[string]any{"namespace": testNamespace}}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
@@ -109,18 +122,27 @@ func TestIdentity_refusesAVerifiedTokenThatIsNotAServiceAccounts(t *testing.T) {
 }
 
 // A listed caller holds operator, which subsumes viewer: it reads and mutates.
-// A verified caller listed nowhere holds no role and is refused both.
+// A verified caller listed nowhere holds no role, so the read and the reset a
+// listed caller runs are refused to it.
 func TestAuthorization_grantsOperatorToTheListedCallersAlone(t *testing.T) {
-	h := newTestAPI(t)
+	t.Run("a read", func(t *testing.T) {
+		h := newTestAPI(t)
 
-	require.Equal(t, http.StatusOK, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code)
-	require.Equal(t, http.StatusOK,
-		h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-1", listedCaller).Code)
+		listed := h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil)
+		require.Equal(t, http.StatusOK, listed.Code, "GET /domains as %s: %s", listedCaller, listed.Body.String())
 
-	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains", unlistedCaller, nil),
-		http.StatusForbidden, CodeForbidden)
-	requireError(t, h.reset(t, "ruleId=orders/per-client&axis.sub=alice", "key-2", unlistedCaller),
-		http.StatusForbidden, CodeForbidden)
+		requireError(t, h.call(t, http.MethodGet, BasePath+"/domains", unlistedCaller, nil),
+			http.StatusForbidden, CodeForbidden)
+	})
+
+	t.Run("a reset", func(t *testing.T) {
+		h := newTestAPI(t)
+
+		listed := h.reset(t, addressAlice, "key-1", listedCaller)
+		require.Equal(t, http.StatusOK, listed.Code, "the reset as %s: %s", listedCaller, listed.Body.String())
+
+		requireError(t, h.reset(t, addressAlice, "key-2", unlistedCaller), http.StatusForbidden, CodeForbidden)
+	})
 }
 
 // Identity comes from exactly one place. A header the service trusted would be
@@ -137,16 +159,44 @@ func TestIdentity_readsNoAuxiliaryIdentityHeader(t *testing.T) {
 }
 
 // Until the verifier is built every call is refused with 503 under its own
-// code, a token or not, and the API serves without a restart once the
-// construction that kept failing succeeds.
-func TestIdentity_refusesEveryCallUntilTheVerifierIsBuilt(t *testing.T) {
+// code and with a Retry-After, before the token is looked at: a call without
+// one is refused the same way, not with 401.
+func TestIdentity_refusesEveryCallWith503UntilTheVerifierIsBuilt(t *testing.T) {
+	for name, header := range map[string]string{
+		"a listed caller's token": "Bearer " + testToken(listedCaller),
+		"no bearer token":         "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestAPI(t)
+			h.api.verifier.Store(nil)
+
+			request := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
+			if header != "" {
+				request.Header.Set("Authorization", header)
+			}
+			recorder := h.send(t, request)
+
+			requireError(t, recorder, http.StatusServiceUnavailable, CodeVerifierUnavailable)
+			assert.Equal(t, "5", recorder.Header().Get("Retry-After"), "Retry-After of the 503")
+		})
+	}
+}
+
+// shortenVerifierRetry makes buildVerifier retry a failed construction within
+// milliseconds for the rest of the test.
+func shortenVerifierRetry(t *testing.T) {
+	t.Helper()
 	first, longest := verifierRetryFirst, verifierRetryMax
 	verifierRetryFirst, verifierRetryMax = time.Millisecond, 5*time.Millisecond
 	t.Cleanup(func() { verifierRetryFirst, verifierRetryMax = first, longest })
+}
 
+// A construction of the verifier that keeps failing is retried, the calls in
+// between are refused with 503, and the API serves without a restart once the
+// construction succeeds.
+func TestIdentity_servesOnceAFailingConstructionOfTheVerifierSucceeds(t *testing.T) {
+	shortenVerifierRetry(t)
 	h := newTestAPI(t)
-	log := &recordingLogger{}
-	h.api.Log = log
 	h.api.verifier.Store(nil)
 	var failures atomic.Int32
 	release := make(chan struct{})
@@ -156,36 +206,57 @@ func TestIdentity_refusesEveryCallUntilTheVerifierIsBuilt(t *testing.T) {
 			return readingVerifier{}, nil
 		default:
 			failures.Add(1)
-			return nil, errors.New("Get https://kubernetes.default.svc/.well-known/openid-configuration: refused, " +
-				"possible reasons are:\n1. a base image without the CA\n2. no route to the API server")
+			return nil, errors.New("Get https://kubernetes.default.svc/.well-known/openid-configuration: refused")
 		}
 	}
-
-	refused := h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil)
-	requireError(t, refused, http.StatusServiceUnavailable, CodeVerifierUnavailable)
-	require.Equal(t, "5", refused.Header().Get("Retry-After"))
-	anonymous := httptest.NewRequest(http.MethodGet, BasePath+"/domains", strings.NewReader(""))
-	requireError(t, h.send(t, anonymous), http.StatusServiceUnavailable, CodeVerifierUnavailable)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+
 	h.api.StartBackground(ctx)
-	require.Eventually(t, func() bool { return failures.Load() >= 3 }, 5*time.Second, time.Millisecond,
-		"the construction is not retried")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.GreaterOrEqual(c, failures.Load(), int32(3), "failed constructions of the verifier")
+	}, 5*time.Second, time.Millisecond, "waiting for StartBackground to retry a failing construction")
 	requireError(t, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil),
 		http.StatusServiceUnavailable, CodeVerifierUnavailable)
 
 	close(release)
-	require.Eventually(t, func() bool {
-		return h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code == http.StatusOK
-	}, 5*time.Second, 5*time.Millisecond, "the API does not serve once the verifier is built")
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, http.StatusOK, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code,
+			"GET /domains as %s", listedCaller)
+	}, 5*time.Second, 5*time.Millisecond, "waiting for the API to serve once the construction succeeds")
+}
 
-	// A builder error that spans lines is logged as one record.
-	log.mu.Lock()
-	defer log.mu.Unlock()
-	for _, line := range log.lines {
-		require.NotContains(t, line.message, "\n", "a log record spans several lines")
+// A failed construction of the verifier is logged as one record however many
+// lines the builder's error spans, since every line after the first would
+// reach the log without a timestamp.
+func TestIdentity_logsAFailedConstructionOfTheVerifierOnOneLine(t *testing.T) {
+	shortenVerifierRetry(t)
+	h := newTestAPI(t)
+	log := &recordingLogger{}
+	h.api.Log = log
+	h.api.verifier.Store(nil)
+	var attempts atomic.Int32
+	h.api.NewVerifier = func(context.Context) (Verifier, error) {
+		if attempts.Add(1) == 1 {
+			return nil, errors.New("Get https://kubernetes.default.svc/.well-known/openid-configuration: refused, " +
+				"possible reasons are:\n1. a base image without the CA\n2. no route to the API server")
+		}
+		return readingVerifier{}, nil
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	h.api.StartBackground(ctx)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, http.StatusOK, h.call(t, http.MethodGet, BasePath+"/domains", listedCaller, nil).Code,
+			"GET /domains as %s", listedCaller)
+	}, 5*time.Second, 5*time.Millisecond, "waiting for the second construction of the verifier")
+
+	line := log.find(t, "management API token verifier unavailable")
+	assert.NotContains(t, line.message, "\n", "the log record of the failed construction")
+	assert.Contains(t, line.message,
+		"possible reasons are: 1. a base image without the CA 2. no route to the API server",
+		"the log record of the failed construction")
 }
 
 // The id lands in the log and the audit journal verbatim, so a value that

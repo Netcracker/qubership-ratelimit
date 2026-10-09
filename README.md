@@ -35,10 +35,10 @@ identity read out of the token, and on the path and method through the routes of
 The delivery is two components in one namespace, joined by one ConfigMap. The operator, one active replica, watches the
 policies of its namespace, compiles them, and writes `ratelimit-config`: a manifest with the generation, UID, and
 content hash of every domain, and one compressed payload per domain. The service replicas mount that ConfigMap as a
-volume, hold no Kubernetes credentials at all, apply what the kubelet projects, and answer checks from it. The operator
-also reads `/debug/applied` on every ready replica through the Service and writes the policy status from what it finds.
-The operator's Lease covers the overlap of two pods during its own rollout; it signs the lease with its pod name, which
-the chart passes as `POD_NAME` through the Downward API.
+volume, are bound to no Role and read no API server object, apply what the kubelet projects, and answer checks from it.
+The operator also reads `/debug/applied` on every ready replica through the Service and writes the policy status from
+what it finds. The operator's Lease covers the overlap of two pods during its own rollout; it signs the lease with its
+pod name, which the chart passes as `POD_NAME` through the Downward API.
 
 | Component            | Runs in               | Does                                                             |
 |----------------------|-----------------------|------------------------------------------------------------------|
@@ -240,14 +240,15 @@ RBAC cannot narrow by name), and reaches nothing else in the namespace beyond th
 the EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
-`/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
-`grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`,
-a `PrometheusRule`, the dashboard, and one `EnvoyFilter` per enabled gateway. Its values are `redis.*`,
-`metrics.*`, `management.*`, `alerts.*`, the filter's (`filter.*`; the port the filters send checks to is the contract's
-9000 and not a value), `runtime.*`, `gateways.*`, `responseHeaders.*` (the IETF `RateLimit` fields, on by default), the
-gateway names, and the five resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read
-`BASELINE_ORIGIN` the same way: a satellite gets the filters from the service chart and nothing from the operator chart,
-so the platform installs the same pair in every namespace.
+`/etc/ratelimit/config` with `optional: true`, are bound to no `Role` and mount their ServiceAccount token only with
+`management.enabled`, the `Service` `ratelimit` with the ports `grpc`, `metrics`, and `management`, the management
+`AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`, a `PrometheusRule`, the dashboard, and one
+`EnvoyFilter` per enabled gateway. Its values are `redis.*`, `metrics.*`, `management.*`, `alerts.*`, the filter's
+(`filter.*`; the port the filters send checks to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`,
+`responseHeaders.*` (the IETF `RateLimit` fields, on by default), the gateway names, and the five resource keys. Neither
+chart renders the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way: a satellite gets the
+filters from the service chart and nothing from the operator chart, so the platform installs the same pair in every
+namespace.
 
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
 `MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the way

@@ -105,68 +105,109 @@ func httpFilterDomainFor(t *testing.T, objects []object, gateway string) string 
 	return domains[0]
 }
 
+// tokenVolume is the volume the service chart projects the pod's
+// ServiceAccount token into for the management API.
+const tokenVolume = "serviceaccount"
+
 // The management API verifies callers' tokens with the pod's own
-// ServiceAccount token, so the chart mounts it, in the layout the API server's
-// automount gives, only while the API is on. Automounting stays off and the
-// chart binds the ServiceAccount to no Role, so the token reads nothing but the
-// cluster's OIDC discovery.
+// ServiceAccount token, so the chart mounts it only while the API is on, in
+// the layout the API server's automount gives: the token, the cluster's CA,
+// and the namespace, at the automount's path. The ServiceAccount has no Role,
+// so the token reads nothing but the cluster's OIDC discovery;
+// TestServiceChart_reachesNoAPIServerObject covers that.
 func TestServiceChart_mountsTheServiceAccountTokenForTheManagementAPIAlone(t *testing.T) {
-	const path = "/var/run/secrets/kubernetes.io/serviceaccount"
-	mounted := func(objects []object) ([]string, string) {
-		spec := only(t, objects, "Deployment").at("spec", "template", "spec")
-		return projectedSources(spec, "serviceaccount"), mountPathOf(spec, "serviceaccount")
-	}
+	t.Run("the token, the CA, and the namespace are mounted with the API on", func(t *testing.T) {
+		objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
+			"--set", "management.callers={ui-backend}")
 
-	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
-		"--set", "management.callers={ui-backend}")
-	sources, at := mounted(objects)
-	assert.Equal(t, []string{"serviceAccountToken", "configMap", "downwardAPI"}, sources)
-	assert.Equal(t, path, at)
-	assert.Equal(t, false, only(t, objects, "Deployment").
-		at("spec", "template", "spec", "automountServiceAccountToken").v)
-	assert.NotContains(t, kinds(objects), "Role")
-	assert.NotContains(t, kinds(objects), "RoleBinding")
+		mounts := keyed(containerOf(t, objects).at("volumeMounts"), "name")
+		require.Contains(t, mounts, tokenVolume, "volume mounts of the container")
+		assert.Equal(t, "/var/run/secrets/kubernetes.io/serviceaccount", mounts[tokenVolume].at("mountPath").str2(),
+			"mountPath of the %s volume", tokenVolume)
+		assert.Equal(t, map[string]string{
+			"token":     "serviceAccountToken",
+			"ca.crt":    "configMap kube-root-ca.crt key ca.crt",
+			"namespace": "downwardAPI metadata.namespace",
+		}, projectedFiles(only(t, objects, "Deployment").at("spec", "template", "spec"), tokenVolume),
+			"files of the %s volume", tokenVolume)
+	})
+	t.Run("the token is not mounted with the API off", func(t *testing.T) {
+		objects := render(t, serviceChart, "biz")
 
-	sources, at = mounted(render(t, serviceChart, "biz"))
-	assert.Empty(t, sources, "the token is mounted with the management API off")
-	assert.Empty(t, at)
+		assert.NotContains(t, keyed(containerOf(t, objects).at("volumeMounts"), "name"), tokenVolume,
+			"volume mounts of the container")
+		assert.Empty(t, projectedFiles(only(t, objects, "Deployment").at("spec", "template", "spec"), tokenVolume),
+			"files of the %s volume", tokenVolume)
+	})
 }
 
-// The identity values of the unverified-token model are gone, and the schema
-// refuses them rather than ignoring them: an install that still sets them
-// expects a model the service no longer has.
+// The schema refuses management.claims and management.roles rather than
+// ignoring them: an installation that sets them expects roles read out of the
+// token, and the service grants operator to management.callers instead. The
+// service read the subject and the roles out of an unverified token, from the
+// claims management.claims named and under the names management.roles mapped,
+// until it verified tokens itself.
 func TestServiceChart_refusesTheRemovedIdentityValues(t *testing.T) {
-	for _, value := range []string{"management.claims.roles=realm_access.roles", "management.roles.operator={admin}"} {
-		_, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true",
-			"--set", "management.callers={ui-backend}", "--set", value)
-		assert.Error(t, err, "the schema accepts %s", value)
+	for _, c := range []struct{ key, set string }{
+		{"claims", "management.claims.roles=realm_access.roles"},
+		{"roles", "management.roles.operator={admin}"},
+	} {
+		t.Run(c.key, func(t *testing.T) {
+			out, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true",
+				"--set", "management.callers={ui-backend}", "--set", c.set)
+
+			require.Error(t, err, "helm template --set %s", c.set)
+			assert.Contains(t, string(out), c.key, "the refusal names the key it refused")
+		})
 	}
 }
 
-// projectedSources lists the kinds of the sources of the projected volume name
-// in a pod spec, in order; none when the spec has no such volume.
-func projectedSources(spec node, name string) []string {
-	var sources []string
+// The schema requires at least one entry in management.callers while
+// management.enabled is true, and refuses the empty list at install time.
+func TestServiceChart_refusesTheManagementAPIWithoutACaller(t *testing.T) {
+	out, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true")
+
+	require.Error(t, err, "helm template with management.enabled=true and no management.callers")
+	assert.Contains(t, string(out), "callers", "the refusal names the key it refused")
+}
+
+// projectedFiles maps each file of the projected volume name in a pod spec to
+// its source: serviceAccountToken, configMap <name> key <key>, or downwardAPI
+// <field path>. A source of any other kind is recorded as one entry,
+// <kind> mapped to "unread source", so it fails a comparison with the
+// expected files. The map is empty when the spec has no such volume.
+func projectedFiles(spec node, name string) map[string]string {
+	files := map[string]string{}
 	for _, volume := range spec.at("volumes").list() {
 		if volume.at("name").str2() != name {
 			continue
 		}
 		for _, source := range volume.at("projected", "sources").list() {
-			for kind := range source.v.(map[string]any) {
-				sources = append(sources, kind)
-			}
+			addSourceFiles(files, source)
 		}
 	}
-	return sources
+	return files
 }
 
-// mountPathOf is where the first container mounts the volume name, empty when
-// it does not.
-func mountPathOf(spec node, name string) string {
-	for _, mount := range spec.at("containers").list()[0].at("volumeMounts").list() {
-		if mount.at("name").str2() == name {
-			return mount.at("mountPath").str2()
+// addSourceFiles adds the files of one projected source to files, in the form
+// projectedFiles describes.
+func addSourceFiles(files map[string]string, source node) {
+	kinds, _ := source.v.(map[string]any)
+	for kind := range kinds {
+		switch kind {
+		case "serviceAccountToken":
+			files[source.at(kind, "path").str2()] = "serviceAccountToken"
+		case "configMap":
+			for _, item := range source.at(kind, "items").list() {
+				files[item.at("path").str2()] = "configMap " + source.at(kind, "name").str2() + " key " +
+					item.at("key").str2()
+			}
+		case "downwardAPI":
+			for _, item := range source.at(kind, "items").list() {
+				files[item.at("path").str2()] = "downwardAPI " + item.at("fieldRef", "fieldPath").str2()
+			}
+		default:
+			files["<"+kind+">"] = "unread source"
 		}
 	}
-	return ""
 }

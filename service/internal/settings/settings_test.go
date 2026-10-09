@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -170,25 +171,28 @@ func TestManagementGatewayDomains_unsetIsNoDomain(t *testing.T) {
 
 // MANAGEMENT_CALLERS names ServiceAccounts as <name> in the release's
 // namespace or <namespace>/<name> elsewhere, and each comes back as the sub
-// claim of its tokens. An entry of another shape is reported and left out
-// rather than granting operator to a name nobody can hold.
+// claim of its tokens. An entry of another shape, such as a namespace longer
+// than the 63 bytes of a DNS label, is reported and left out rather than
+// granting operator to a name nobody can hold.
 func TestManagementCallers_readsBothFormsAsTokenSubjects(t *testing.T) {
-	var warned []string
-	warn := func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
-	t.Setenv("MANAGEMENT_CALLERS", "ui-backend, platform/ops-backend,, Bad/Name, a/b/c")
+	var warned warnings
+	callers := "ui-backend, platform/ops-backend,, Bad/Name, a/b/c, " + strings.Repeat("n", 64) + "/ops-backend"
+	t.Setenv("MANAGEMENT_CALLERS", callers)
 	readEnvironment()
 
 	assert.Equal(t, []string{
 		"system:serviceaccount:biz:ui-backend",
 		"system:serviceaccount:platform:ops-backend",
-	}, ManagementCallers("biz", warn))
-	assert.Len(t, warned, 2, "the entries of another shape are not both reported")
+	}, ManagementCallers("biz", warned.warn), "ManagementCallers with MANAGEMENT_CALLERS=%q", callers)
+	assert.Len(t, warned, 3, "warnings for MANAGEMENT_CALLERS=%q", callers)
 }
 
 func TestManagementCallers_unsetIsNoCaller(t *testing.T) {
+	var warned warnings
 	readEnvironment()
 
-	assert.Empty(t, ManagementCallers("biz", func(string, ...any) {}))
+	assert.Empty(t, ManagementCallers("biz", warned.warn))
+	assert.Empty(t, warned, "warnings with MANAGEMENT_CALLERS unset")
 }
 
 // The audience defaults to the platform's machine-to-machine convention.
