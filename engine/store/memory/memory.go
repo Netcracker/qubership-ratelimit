@@ -73,15 +73,15 @@ type outcome struct {
 // Decide implements the two-pass contract: evaluate everything, then commit
 // only when no enforcing bucket refused; a shadow bucket commits only when its
 // own verdict allowed.
-func (s *Store) Decide(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
-	if err := store.GuardBuckets(buckets, cost); err != nil {
+func (s *Store) Decide(ctx context.Context, buckets []store.Bucket) ([]store.Verdict, error) {
+	if err := store.GuardBuckets(buckets); err != nil {
 		return nil, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	outs, err := s.evalAll(buckets, cost)
+	outs, err := s.evalAll(buckets)
 	if err != nil {
 		return nil, err
 	}
@@ -105,17 +105,16 @@ func (s *Store) Decide(ctx context.Context, buckets []store.Bucket, cost int64) 
 	return verdicts, nil
 }
 
-// Peek runs the same evaluation as Decide at the given cost with the commit
-// pass switched off.
-func (s *Store) Peek(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
-	if err := store.GuardBuckets(buckets, cost); err != nil {
+// Peek runs the same evaluation as Decide with the commit pass switched off.
+func (s *Store) Peek(ctx context.Context, buckets []store.Bucket) ([]store.Verdict, error) {
+	if err := store.GuardBuckets(buckets); err != nil {
 		return nil, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	outs, err := s.evalAll(buckets, cost)
+	outs, err := s.evalAll(buckets)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +169,7 @@ func (s *Store) Scan(_ context.Context, prefix, cursor string, limit int) ([]str
 	return keys, keys[limit-1], nil
 }
 
-func (s *Store) evalAll(buckets []store.Bucket, cost int64) ([]outcome, error) {
+func (s *Store) evalAll(buckets []store.Bucket) ([]outcome, error) {
 	nowUS := s.now().UnixMicro()
 
 	outs := make([]outcome, len(buckets))
@@ -183,9 +182,9 @@ func (s *Store) evalAll(buckets []store.Bucket, cost int64) ([]outcome, error) {
 		}
 		switch b.Algorithm {
 		case algo.GCRAID:
-			outs[i] = evalGCRA(e, ok, nowUS, b.Window, cost)
+			outs[i] = evalGCRA(e, ok, nowUS, b.Window, b.Cost)
 		case algo.FixedWindowID:
-			outs[i] = evalFixed(e, ok, nowUS, b.Window, cost)
+			outs[i] = evalFixed(e, ok, nowUS, b.Window, b.Cost)
 		default:
 			return nil, fmt.Errorf("memory: unknown algorithm id %d", b.Algorithm)
 		}

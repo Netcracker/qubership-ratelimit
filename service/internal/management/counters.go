@@ -333,10 +333,11 @@ func (a *API) judge(ctx context.Context, candidates []counterCandidate, limitedO
 			Algorithm: candidate.ref.rate.Algorithm.ID(),
 			Window:    candidate.ref.rate.Window,
 			Shadow:    candidate.ref.shadow(),
+			Cost:      1,
 		})
 	}
 
-	verdicts, err := a.Counters.Peek(ctx, buckets, 1)
+	verdicts, err := a.Counters.Peek(ctx, buckets)
 	if err != nil {
 		a.Log.ErrorC(ctx, "failed to read counters error=%v", err)
 		return nil, storeDown("the counter store did not answer the read")

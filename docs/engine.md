@@ -26,8 +26,10 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
   enumerate axis combinations as separate descriptors. The policy is the only source of limits: the `limit` override
   the protocol allows on a descriptor is ignored.
 - `hits_addend` is the request cost, defaulting to 1; a descriptor's own `hits_addend` overrides the request's for that
-  descriptor, and an explicit zero there checks the descriptor without charging it. A cost that can never be admitted,
-  greater than the rule's burst capacity, produces a deterministic `OVER_LIMIT`, never a wait or a loop. A descriptor
+  descriptor, and an explicit zero there checks the descriptor without charging it. A route whose `cost` reads a query
+  parameter of `path` replaces that cost for the buckets of its block, so the buckets of one decision can carry
+  different costs ([request cost](ratelimitpolicy-cr-spec.md#request-cost)). A cost that can never be admitted,
+  greater than a window's capacity, produces a deterministic `OVER_LIMIT`, never a wait or a loop. A descriptor
   with `is_negative_hits`, or a check whose descriptors' costs add up to more than 1 000 000 000, is refused as
   `invalid_cost` and charges nothing: the engine gives no budget back. The other bounds of one check are in
   [limits](limits.md).
@@ -51,10 +53,12 @@ authored as the `RateLimitPolicy` of the namespace, one object per domain, and r
   waiting cures, and the window a check at an explicit zero cost finds untouched or drained. Each field
   carries one item, from the strictest bucket of this response, so the name in
   `ratelimit-policy` changes when a different rule binds: it is not the stable list of every rule that applies. Neither
-  field carries `pk`, which would hand the client the identity its counter is keyed on, or `qu`, whose default,
-  requests, is the unit. A request that matched no counting rule carries none of the six headers. The service chart's
-  `responseHeaders.ietf: false` leaves the two fields out and keeps the other four, for clients that misread them or
-  that must not learn the rule names. "Strictest" is deterministic: minimal remaining on an admission; longest
+  field carries `pk`, which would hand the client the identity its counter is keyed on, or `qu`, whose registry of
+  three units has none for the items a route's `cost` counts, so a client reads the unit from the policy. A request
+  that matched no counting rule carries none of the six headers. The service chart's `responseHeaders.ietf: false`
+  leaves the two fields out and keeps the other four, for clients that misread them or that must not learn the rule
+  names. "Strictest" is deterministic: on an admission, the fewest further requests at
+  the bucket's cost, its remaining divided by that cost, which at a cost of one is the minimal remaining; longest
   retry-after on a refusal (every refusing bucket has about zero remaining, and a short hint would steer the client's
   retry into the next refusal, whereas after the longest wait every window is open); ties break lexicographically by the
   bucket key. Key order differs from pair order for names carrying `-` or `.`; that only decides whose name the headers
@@ -224,7 +228,8 @@ operator are in the [resource specification](ratelimitpolicy-cr-spec.md).
   `InvalidCounterAxis`, `InvalidSpec`, `InvalidWindow`, `DomainBudgetExceeded`) is invalid as a whole: none of its rules
   enters the snapshot, `Ready: False`, `Accepted: False`, and last-good stays in force. Partially enforced generations
   do not exist; otherwise a `FirstMatch` cascade with a dead rule would silently hand traffic to neighboring rules.
-  `CaptureShadowsMappedKey` is informational and does not block validity.
+  `CaptureShadowsMappedKey` and `CostExceedsCapacity`, a route's `cost.default` above the capacity of a window of its
+  block, are informational and do not block validity.
 - **Claim mappings and groups are part of the policy object** (`spec.mappings`, `spec.groups`), not a separate resource:
   editing them is the same generation as editing rules, applied atomically with it, and the compiler checks the
   references from rules to keys and groups inside the one object. There are no cross-object transactions or gates.

@@ -14,8 +14,8 @@ import (
 var domainName = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`)
 
 // Reason names the kind of problem the compiler found. Every reason but
-// [ReasonCaptureShadowsMappedKey] is blocking, and one blocking entry
-// invalidates the generation whole.
+// [ReasonCaptureShadowsMappedKey] and [ReasonCostExceedsCapacity] is blocking,
+// and one blocking entry invalidates the generation whole.
 type Reason string
 
 const (
@@ -43,7 +43,18 @@ const (
 	// ReasonCaptureShadowsMappedKey is informational: within its block the
 	// capture wins, and the author is told which key it displaced.
 	ReasonCaptureShadowsMappedKey Reason = "CaptureShadowsMappedKey"
+
+	// ReasonCostExceedsCapacity is informational: a route's default cost is
+	// above the capacity of a window of a rule of its block, so that window
+	// refuses every request through the route that carries no usable value.
+	ReasonCostExceedsCapacity Reason = "CostExceedsCapacity"
 )
+
+// informational reports whether a problem of the reason leaves the generation
+// valid.
+func informational(reason Reason) bool {
+	return reason == ReasonCaptureShadowsMappedKey || reason == ReasonCostExceedsCapacity
+}
 
 // Problem is one finding. A generation with at least one blocking problem is
 // invalid as a whole: none of its rules enters the snapshot, because partial
@@ -104,6 +115,16 @@ type Route struct {
 
 	// Methods is empty for "any method".
 	Methods map[string]struct{}
+
+	// Cost is nil for a route that reads no cost from the request.
+	Cost *Cost
+}
+
+// Cost is a compiled cost entry: the query parameter that carries the cost of
+// a request, and the cost of a request without a usable value in it.
+type Cost struct {
+	Parameter string
+	Default   int64
 }
 
 // Segment is one path segment of a template: a literal, or a capture name.

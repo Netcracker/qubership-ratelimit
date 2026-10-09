@@ -328,6 +328,43 @@ spec:
                               Route selects request traffic for a block. The fields of one route combine
                               with AND; the routes of a target combine with OR.
                             properties:
+                              cost:
+                                description: |-
+                                  cost reads the cost of a request matched through this route from the
+                                  request, and every window of the block charges that many units instead
+                                  of one. The first route of the target that matches a request decides its
+                                  cost. Without it a request through the gateway costs one unit.
+                                properties:
+                                  default:
+                                    description: |-
+                                      default is the cost of a request without a usable value: the parameter
+                                      absent, empty, zero, or anything but decimal digits. It defaults to 1;
+                                      the default page size of the API is the usual value.
+                                    format: int32
+                                    maximum: 1000000000
+                                    minimum: 1
+                                    type: integer
+                                  name:
+                                    description: |-
+                                      name is the parameter name, compared with the percent-decoded name in
+                                      the query string, case-sensitively. A value that is a positive decimal
+                                      integer is the cost, and a value above 1000000000 costs 1000000000. The
+                                      largest of several occurrences is the cost.
+                                    maxLength: 64
+                                    minLength: 1
+                                    pattern: ^[A-Za-z0-9_.\-\[\]]+$
+                                    type: string
+                                  source:
+                                    description: |-
+                                      source is where the value is read from. QueryParameter is the only
+                                      source.
+                                    enum:
+                                    - QueryParameter
+                                    type: string
+                                required:
+                                - name
+                                - source
+                                type: object
                               methods:
                                 description: |-
                                   methods accepts a request whose method is one of the listed values. An
@@ -618,8 +655,9 @@ spec:
                       description: |-
                         reason is one of UnresolvedKeyReference, UnresolvedGroupReference,
                         UnresolvedReplacedRules, IncompatibleOperator, InvalidCounterAxis,
-                        InvalidSpec, InvalidWindow, DomainBudgetExceeded, and
-                        CaptureShadowsMappedKey. CaptureShadowsMappedKey is informational; every
+                        InvalidSpec, InvalidWindow, DomainBudgetExceeded,
+                        CaptureShadowsMappedKey, and CostExceedsCapacity.
+                        CaptureShadowsMappedKey and CostExceedsCapacity are informational; every
                         other reason blocks the generation.
                       type: string
                     rule:

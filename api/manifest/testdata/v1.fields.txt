@@ -15,6 +15,9 @@ limits[].rules[].rates[].burst
 limits[].rules[].rates[].periodSeconds
 limits[].rules[].rates[].requests
 limits[].rules[].replacedRules[]
+limits[].target.routes[].cost.default
+limits[].target.routes[].cost.name
+limits[].target.routes[].cost.source
 limits[].target.routes[].methods[]
 limits[].target.routes[].path.type
 limits[].target.routes[].path.value

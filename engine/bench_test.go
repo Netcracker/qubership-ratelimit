@@ -171,7 +171,7 @@ func BenchmarkMatchEvaluate(b *testing.B) {
 	keys := map[string][]string{model.KeySub: {"alice"}, "roles": {"basic", "reporting"}}
 	b.ReportAllocs()
 	for b.Loop() {
-		match.Match(snap, "/api/widgets/1", "GET").Evaluate(keys)
+		match.Match(snap, "/api/widgets/1", "GET").Evaluate(keys, 1)
 	}
 }
 
@@ -230,10 +230,10 @@ func BenchmarkMemoryStoreDecide(b *testing.B) {
 	s := memory.New()
 	snap := benchSnapshot(b)
 	keys := map[string][]string{model.KeySub: {"alice"}}
-	buckets := match.Match(snap, "/api/widgets/1", "GET").Evaluate(keys).Buckets()
+	buckets := match.Match(snap, "/api/widgets/1", "GET").Evaluate(keys, 1).Buckets()
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := s.Decide(b.Context(), buckets, 1); err != nil {
+		if _, err := s.Decide(b.Context(), buckets); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -254,12 +254,12 @@ func BenchmarkMemoryStoreBuckets(b *testing.B) {
 					w = algo.Window{Requests: 1_000_000_000, Period: time.Hour}
 					id = algo.FixedWindowID
 				}
-				buckets[i] = store.Bucket{Key: fmt.Sprintf("bench:{sweep}:%d:", i), Algorithm: id, Window: w}
+				buckets[i] = store.Bucket{Key: fmt.Sprintf("bench:{sweep}:%d:", i), Algorithm: id, Window: w, Cost: 1}
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				if _, err := s.Decide(b.Context(), buckets, 1); err != nil {
+				if _, err := s.Decide(b.Context(), buckets); err != nil {
 					b.Fatal(err)
 				}
 			}

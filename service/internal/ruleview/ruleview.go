@@ -98,6 +98,17 @@ type RouteView struct {
 
 	// Methods is absent when the route accepts any method.
 	Methods []string `json:"methods,omitempty"`
+
+	// Cost is absent when the route reads no cost from the request.
+	Cost *CostView `json:"cost,omitempty"`
+}
+
+// CostView is the cost entry of a route, spelled as the custom resource
+// spells it, with the default resolved.
+type CostView struct {
+	Source  string `json:"source"`
+	Name    string `json:"name"`
+	Default int64  `json:"default"`
 }
 
 // RuleView is one compiled rule with its mode, axes, conditions, and windows.
@@ -237,6 +248,9 @@ func route(r *compile.Route) RouteView {
 	view := RouteView{Type: string(r.Type), Value: r.Value}
 	if len(r.Methods) > 0 {
 		view.Methods = sortedKeys(r.Methods)
+	}
+	if r.Cost != nil {
+		view.Cost = &CostView{Source: string(model.CostQueryParameter), Name: r.Cost.Parameter, Default: r.Cost.Default}
 	}
 	return view
 }

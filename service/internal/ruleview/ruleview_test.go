@@ -221,6 +221,31 @@ func TestRender_rendersABlockWithItsRoutesAndCaptures(t *testing.T) {
 	assert.Equal(t, []string{"invoiceId"}, block.Captures, "the captures")
 }
 
+// A route that reads a cost renders its entry spelled as the custom resource
+// spells it, with an absent default resolved to one; a route that reads none
+// renders no entry.
+func TestRender_rendersTheCostEntryOfARoute(t *testing.T) {
+	p := policy(1000)
+	p.Blocks[0].Target.Routes = []model.Route{
+		{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/invoices"},
+			Cost: &model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 20}},
+		{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/orders"},
+			Cost: &model.RouteCost{Source: model.CostQueryParameter, Name: "page_size"}},
+		{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/"}},
+	}
+
+	view := ruleview.Render(snapshotOf(t, p))
+
+	require.Len(t, view.Blocks, 1)
+	assert.Equal(t, []ruleview.RouteView{
+		{Type: "Prefix", Value: "/api/invoices",
+			Cost: &ruleview.CostView{Source: "QueryParameter", Name: "limit", Default: 20}},
+		{Type: "Prefix", Value: "/api/orders",
+			Cost: &ruleview.CostView{Source: "QueryParameter", Name: "page_size", Default: 1}},
+		{Type: "Prefix", Value: "/api/"},
+	}, view.Blocks[0].Routes, "the routes")
+}
+
 // A route's methods are a set in the compiled form, and they render sorted, so
 // that two replicas hash the same rendering into the same version.
 func TestRender_sortsTheMethodsOfARoute(t *testing.T) {

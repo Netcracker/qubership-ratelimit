@@ -41,7 +41,12 @@
             "methods": [
               "GET",
               "POST"
-            ]
+            ],
+            "cost": {
+              "source": "QueryParameter",
+              "name": "limit",
+              "default": 20
+            }
           }
         ]
       },

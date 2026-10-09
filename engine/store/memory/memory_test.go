@@ -29,17 +29,17 @@ func TestDecideRefusesABucketThatSkippedValidation(t *testing.T) {
 		name   string
 		bucket store.Bucket
 	}{
-		{"unknown algorithm", store.Bucket{Key: "g:{d}:a", Algorithm: 99, Window: valid}},
-		{"requests below one", store.Bucket{Key: "g:{d}:b", Algorithm: algo.GCRAID,
+		{"unknown algorithm", store.Bucket{Key: "g:{d}:a", Algorithm: 99, Window: valid, Cost: 1}},
+		{"requests below one", store.Bucket{Key: "g:{d}:b", Algorithm: algo.GCRAID, Cost: 1,
 			Window: algo.Window{Requests: 0, Period: time.Hour}}},
-		{"period below a microsecond", store.Bucket{Key: "g:{d}:c", Algorithm: algo.GCRAID,
+		{"period below a microsecond", store.Bucket{Key: "g:{d}:c", Algorithm: algo.GCRAID, Cost: 1,
 			Window: algo.Window{Requests: 1, Period: 0}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := memory.New()
 
-			if _, err := s.Decide(t.Context(), []store.Bucket{c.bucket}, 1); err == nil {
+			if _, err := s.Decide(t.Context(), []store.Bucket{c.bucket}); err == nil {
 				t.Errorf("Decide(%+v) = no error, want one", c.bucket)
 			}
 		})
@@ -63,8 +63,9 @@ func TestPeekRefusesACostBelowOne(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := memory.New()
+			b.Cost = c.cost
 
-			if _, err := s.Peek(t.Context(), []store.Bucket{b}, c.cost); err == nil {
+			if _, err := s.Peek(t.Context(), []store.Bucket{b}); err == nil {
 				t.Errorf("Peek(%q, cost %d) = no error, want one", b.Key, c.cost)
 			}
 		})
@@ -81,14 +82,16 @@ func TestStateIsGoneOnceItsWindowDrains(t *testing.T) {
 			Key:       "exp:{d}:gcra",
 			Algorithm: algo.GCRAID,
 			Window:    algo.Window{Requests: 1, Period: time.Second, Burst: 1},
+			Cost:      1,
 		},
 		{
 			Key:       "exp:{d}:fixed",
 			Algorithm: algo.FixedWindowID,
 			Window:    algo.Window{Requests: 1, Period: time.Second},
+			Cost:      1,
 		},
 	}
-	if _, err := s.Decide(t.Context(), buckets, 1); err != nil {
+	if _, err := s.Decide(t.Context(), buckets); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	keys, _, err := s.Scan(t.Context(), "exp:", "", 10)
@@ -118,9 +121,9 @@ func storeWithKeys(t *testing.T, keys ...string) *memory.Store {
 	t.Helper()
 	s := memory.New()
 	for _, k := range keys {
-		bucket := store.Bucket{Key: k, Algorithm: algo.GCRAID,
+		bucket := store.Bucket{Key: k, Algorithm: algo.GCRAID, Cost: 1,
 			Window: algo.Window{Requests: 10, Period: time.Hour, Burst: 10}}
-		if _, err := s.Decide(t.Context(), []store.Bucket{bucket}, 1); err != nil {
+		if _, err := s.Decide(t.Context(), []store.Bucket{bucket}); err != nil {
 			t.Fatalf("Decide(%q): %v", k, err)
 		}
 	}

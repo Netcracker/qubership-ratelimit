@@ -507,7 +507,7 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 ```
 
 `block` and `rule` are the address; a problem with an empty address is about the policy as a whole, such as
-`DomainBudgetExceeded`. Every reason except `CaptureShadowsMappedKey` is blocking:
+`DomainBudgetExceeded`. Every reason except `CaptureShadowsMappedKey` and `CostExceedsCapacity` is blocking:
 
 | Reason | What it means |
 | --- | --- |
@@ -519,6 +519,7 @@ kubectl get cm -n "$NS" ratelimit-config -o jsonpath='{.data.manifest}' | jq '.d
 | `InvalidWindow` | a window the algorithm cannot enforce |
 | `DomainBudgetExceeded` | the worst case of one decision exceeds 128 buckets |
 | `CaptureShadowsMappedKey` | informational: inside the block the capture wins over the mapped key of the same name |
+| `CostExceedsCapacity` | informational: a route's `cost.default` is above the capacity of a window of a rule of its block, so that window refuses every request through the route without a usable value in the parameter |
 
 **What traffic sees meanwhile.** `activeGeneration` is enforced, and the management API keeps reporting its rule set:
 `GET /domains` showed `ruleSetVersion 5ff0f5a9e94d` with 12 rules throughout, and the manifest kept generation 1. If
