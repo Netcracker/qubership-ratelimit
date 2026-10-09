@@ -126,7 +126,9 @@ type Request struct {
 	// identity.Explicit.
 	Keys map[string][]string
 
-	// Cost is the protocol's hits_addend; zero means the default of one.
+	// Cost is the protocol's hits_addend; zero means the default of one. A
+	// block whose matched route reads a cost from the query string of Path
+	// charges that cost instead.
 	Cost int64
 }
 
@@ -142,6 +144,10 @@ type Headers struct {
 	Remaining  int64
 	RetryAfter time.Duration // negative when no retry hint applies
 	ResetAfter time.Duration
+
+	// Cost is the amount the window was judged at, in the units Limit and
+	// Remaining count.
+	Cost int64
 
 	// EffectiveWindow is how long until the window admits one request more
 	// than Remaining: the t parameter of the ratelimit field, which
@@ -167,6 +173,10 @@ type RuleOutcome struct {
 	Rule    string
 	Shadow  bool
 	Allowed bool
+
+	// Cost is the amount the rule's windows were judged at, and charged when
+	// the decision admitted the request.
+	Cost int64
 
 	// CostExceedsCapacity marks a refusal by this rule that no waiting cures:
 	// the cost is larger than its bucket can ever hold. It separates the two
@@ -247,7 +257,7 @@ func (e *Engine) Peek(ctx context.Context, req Request) (Decision, error) {
 }
 
 // commit is the store call a pass makes: Decide charges, Peek does not.
-type commit func(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error)
+type commit func(ctx context.Context, buckets []store.Bucket) ([]store.Verdict, error)
 
 func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decision, error) {
 	cost := req.Cost
@@ -261,7 +271,7 @@ func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decis
 	}
 
 	keys, skips := e.extractKeys(req)
-	matched := cands.Evaluate(keys)
+	matched := cands.Evaluate(keys, cost)
 
 	buckets := matched.Buckets()
 	if len(buckets) == 0 {
@@ -271,7 +281,7 @@ func (e *Engine) evaluate(ctx context.Context, req Request, judge commit) (Decis
 		return Decision{}, fmt.Errorf("%w: the request matched %d buckets", ErrTooManyBuckets, len(buckets))
 	}
 
-	verdicts, err := judge(ctx, buckets, cost)
+	verdicts, err := judge(ctx, buckets)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -346,7 +356,7 @@ func ruleOutcomes(matched match.Result, buckets []store.Bucket, verdicts []store
 		from, to := i, i+len(m.Buckets)
 		i = to
 
-		outcome := RuleOutcome{Block: m.Block, Rule: m.Rule, Shadow: m.Shadow, Allowed: true}
+		outcome := RuleOutcome{Block: m.Block, Rule: m.Rule, Shadow: m.Shadow, Cost: m.Cost, Allowed: true}
 		for j := from; j < to; j++ {
 			if !verdicts[j].Allowed {
 				outcome.Allowed = false
@@ -382,12 +392,12 @@ func bucketCapacity(w algo.Window) int64 {
 
 // aggregate picks the strictest enforcing bucket for the response headers.
 //
-// On allow it is the minimum remaining; on refusal, the refusing bucket with
-// the longest wait — the constraint that actually binds the client. Ties
-// break lexicographically by bucket key, which is ordering by the block/rule
-// pair: deterministic across replicas, so headers do not jitter between them.
-// A refusal that no waiting cures surfaces as CostExceedsCapacity with no
-// retry hint.
+// On allow it is the bucket with the fewest further requests at its cost; on
+// refusal, the refusing bucket with the longest wait — the constraint that
+// actually binds the client. Ties break lexicographically by bucket key,
+// which is ordering by the block/rule pair: deterministic across replicas, so
+// headers do not jitter between them. A refusal that no waiting cures
+// surfaces as CostExceedsCapacity with no retry hint.
 func aggregate(matched match.Result, buckets []store.Bucket, verdicts []store.Verdict, allowed bool) (*Headers, bool) {
 	costExceeds := false
 	if !allowed {
@@ -411,6 +421,7 @@ func aggregate(matched match.Result, buckets []store.Bucket, verdicts []store.Ve
 		Remaining:  verdicts[best].Remaining,
 		RetryAfter: verdicts[best].RetryAfter,
 		ResetAfter: verdicts[best].ResetAfter,
+		Cost:       buckets[best].Cost,
 		Algorithm:  algorithmName(buckets[best].Algorithm),
 
 		EffectiveWindow: effectiveWindow(buckets[best], verdicts[best]),
@@ -453,9 +464,10 @@ func ruleOf(matched match.Result, i int) match.MatchedRule {
 	return match.MatchedRule{}
 }
 
-// strictestIndex picks the strictest bucket of a range: on allow, the minimum
-// remaining; on refusal, the refusing bucket with the longest wait. Ties break
-// lexicographically by bucket key — deterministic across replicas.
+// strictestIndex picks the strictest bucket of a range: on allow, the fewest
+// further requests at the bucket's cost; on refusal, the refusing bucket with
+// the longest wait. Ties break lexicographically by bucket key — deterministic
+// across replicas.
 func strictestIndex(buckets []store.Bucket, verdicts []store.Verdict, from, to int, allowed, skipShadow bool) int {
 	best := -1
 	for i := from; i < to; i++ {
@@ -472,12 +484,22 @@ func strictestIndex(buckets []store.Bucket, verdicts []store.Verdict, from, to i
 	return best
 }
 
-// stricter reports whether bucket i binds harder than the current best: less
-// remaining on allow, a longer wait on refusal, the smaller key on a tie.
+// stricter reports whether bucket i binds harder than the current best: a
+// smaller remaining over cost on allow, a longer wait on refusal, the smaller
+// key on a tie.
+//
+// On allow the ratios are compared exactly, as remaining times the other
+// bucket's cost: a remaining of 500 at a cost of 100 binds before a remaining
+// of 30 at a cost of one, and at equal costs the smaller remaining binds.
+// Every bucket compared on allow admitted its cost, so its cost, like its
+// remaining, is at most a window's capacity, below 2^31, and neither product
+// overflows.
 func stricter(buckets []store.Bucket, verdicts []store.Verdict, i, best int, allowed bool) bool {
 	if allowed {
-		if verdicts[i].Remaining != verdicts[best].Remaining {
-			return verdicts[i].Remaining < verdicts[best].Remaining
+		left := verdicts[i].Remaining * buckets[best].Cost
+		right := verdicts[best].Remaining * buckets[i].Cost
+		if left != right {
+			return left < right
 		}
 		return buckets[i].Key < buckets[best].Key
 	}

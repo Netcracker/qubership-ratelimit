@@ -188,7 +188,7 @@ type heldCounters struct {
 	entered chan struct{}
 }
 
-func (h heldCounters) Decide(ctx context.Context, _ []counters.Bucket, _ int64) ([]counters.Verdict, error) {
+func (h heldCounters) Decide(ctx context.Context, _ []counters.Bucket) ([]counters.Verdict, error) {
 	select {
 	case h.entered <- struct{}{}:
 	default:
@@ -197,7 +197,7 @@ func (h heldCounters) Decide(ctx context.Context, _ []counters.Bucket, _ int64) 
 	return nil, ctx.Err()
 }
 
-func (heldCounters) Peek(context.Context, []counters.Bucket, int64) ([]counters.Verdict, error) {
+func (heldCounters) Peek(context.Context, []counters.Bucket) ([]counters.Verdict, error) {
 	return nil, errors.New("heldCounters serves Decide alone")
 }
 

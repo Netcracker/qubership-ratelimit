@@ -7,8 +7,7 @@
 --
 -- KEYS: bucket keys, all in one slot (the domain hash tag guarantees it)
 -- ARGV[1]: "decide" | "peek"
--- ARGV[2]: cost
--- then 5 values per bucket: algorithm id, p1, p2, p3, shadow(0|1)
+-- then 6 values per bucket: cost, algorithm id, p1, p2, p3, shadow(0|1)
 --   gcra  (id 1): p1 = emission_us, p2 = tau_us,   p3 = burst
 --   fixed (id 2): p1 = period_us,   p2 = requests, p3 = unused
 --
@@ -28,7 +27,6 @@ local t = call('TIME')
 local now = t[1] * 1000000 + t[2]
 
 local decide = ARGV[1] == 'decide'
-local cost = tonum(ARGV[2])
 local n = #KEYS
 
 local states = n > 0 and call('MGET', unpack(KEYS)) or {}
@@ -45,12 +43,13 @@ local rc, sc, sa, sb = {}, {}, {}, {}
 local admitted = 1
 
 for i = 1, n do
-  local base = 2 + (i - 1) * 5
-  local alg = tonum(ARGV[base + 1])
-  local p1 = tonum(ARGV[base + 2])
-  local p2 = tonum(ARGV[base + 3])
-  local p3 = tonum(ARGV[base + 4])
-  local shadow = ARGV[base + 5] == '1'
+  local base = 1 + (i - 1) * 6
+  local cost = tonum(ARGV[base + 1])
+  local alg = tonum(ARGV[base + 2])
+  local p1 = tonum(ARGV[base + 3])
+  local p2 = tonum(ARGV[base + 4])
+  local p3 = tonum(ARGV[base + 5])
+  local shadow = ARGV[base + 6] == '1'
   local state = states[i]
   local o = 1 + (i - 1) * 5
 

@@ -423,6 +423,27 @@ func TestCompileRejectsAStructuralDefectAsInvalidSpec(t *testing.T) {
 		{"unknown normalization", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: "plan", Claim: "a", Normalization: "Uppercase"}}
 		}},
+		{"unknown cost source", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{Source: "Header", Name: "limit"}
+		}},
+		{"empty cost parameter", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{Source: model.CostQueryParameter}
+		}},
+		{"cost parameter with a space", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{Source: model.CostQueryParameter, Name: "page size"}
+		}},
+		{"cost parameter of 65 characters", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{
+				Source: model.CostQueryParameter, Name: strings.Repeat("l", 65)}
+		}},
+		{"negative default cost", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{
+				Source: model.CostQueryParameter, Name: "limit", Default: -1}
+		}},
+		{"default cost above the ceiling", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{
+				Source: model.CostQueryParameter, Name: "limit", Default: model.MaxCost + 1}
+		}},
 	}
 
 	for _, tc := range cases {
@@ -1021,4 +1042,92 @@ func TestCompileEnforcesTheDecisionBucketBudget(t *testing.T) {
 
 		assertRejectedWhole(t, snap, problems, ReasonDomainBudgetExceeded)
 	})
+}
+
+// policyWithCost returns validPolicy with the cost entry on its one route and
+// the window of its one rule a fixed window as large as the ceiling of a
+// cost, so that no default is above the window's capacity.
+func policyWithCost(cost model.RouteCost) model.Policy {
+	p := validPolicy()
+	p.Blocks[0].Target.Routes[0].Cost = &cost
+	p.Blocks[0].Rules[0].Rates = []model.Rate{{Requests: model.MaxCost, Period: time.Hour, Algorithm: "FixedWindow"}}
+	return p
+}
+
+// A cost entry at the edge of what the schema admits compiles into the route,
+// with an absent default resolved to one.
+func TestCompileCarriesTheCostEntryOfARoute(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry model.RouteCost
+		want  Cost
+	}{
+		{"no default", model.RouteCost{Source: model.CostQueryParameter, Name: "limit"},
+			Cost{Parameter: "limit", Default: 1}},
+		{"brackets in the name", model.RouteCost{Source: model.CostQueryParameter, Name: "page[size]", Default: 20},
+			Cost{Parameter: "page[size]", Default: 20}},
+		{"a name of 64 characters", model.RouteCost{Source: model.CostQueryParameter, Name: strings.Repeat("l", 64)},
+			Cost{Parameter: strings.Repeat("l", 64), Default: 1}},
+		{"the ceiling as the default", model.RouteCost{
+			Source: model.CostQueryParameter, Name: "page.size", Default: model.MaxCost},
+			Cost{Parameter: "page.size", Default: model.MaxCost}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap, problems := compileOne(policyWithCost(tc.entry))
+
+			if len(problems) != 0 {
+				t.Fatalf("Compile(cost %+v) problems = %v, want none", tc.entry, problems)
+			}
+			if got := snap.Blocks[0].Routes[0].Cost; got == nil || *got != tc.want {
+				t.Errorf("Compile(cost %+v): route cost = %+v, want %+v", tc.entry, got, tc.want)
+			}
+		})
+	}
+}
+
+// A route whose default cost is above the capacity of a window of its block
+// is reported under CostExceedsCapacity, at the block and the rule of the
+// window, and the generation stays valid. The capacity is the burst of a GCRA
+// window and the requests of a fixed one; a default equal to it is no
+// problem.
+func TestADefaultCostAboveAWindowCapacityIsReportedWithoutBlocking(t *testing.T) {
+	cases := []struct {
+		name         string
+		defaultCost  int64
+		rate         model.Rate
+		wantProblems []Reason
+	}{
+		{"a default equal to the burst", 5,
+			model.Rate{Requests: 100, Period: time.Minute, Burst: 5}, []Reason{}},
+		{"a default one above the burst", 6,
+			model.Rate{Requests: 100, Period: time.Minute, Burst: 5}, []Reason{ReasonCostExceedsCapacity}},
+		{"a default equal to the requests of a fixed window", 100,
+			model.Rate{Requests: 100, Period: time.Minute, Algorithm: "FixedWindow"}, []Reason{}},
+		{"a default one above the requests of a fixed window", 101,
+			model.Rate{Requests: 100, Period: time.Minute, Algorithm: "FixedWindow"},
+			[]Reason{ReasonCostExceedsCapacity}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPolicy()
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{
+				Source: model.CostQueryParameter, Name: "limit", Default: tc.defaultCost}
+			p.Blocks[0].Rules[0].Rates = []model.Rate{tc.rate}
+
+			snap, problems := compileOne(p)
+
+			if got := reasonsOf(problems); !slices.Equal(got, tc.wantProblems) {
+				t.Errorf("Compile reasons = %v, want %v; problems: %v", got, tc.wantProblems, problems)
+			}
+			for _, problem := range problems {
+				if problem.Blocking || problem.Block != "api" || problem.Rule != "per-user" {
+					t.Errorf("Compile problem %+v, want an informational one at api/per-user", problem)
+				}
+			}
+			if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"api"}) {
+				t.Errorf("Compile blocks = %v, want [api]", got)
+			}
+		})
+	}
 }

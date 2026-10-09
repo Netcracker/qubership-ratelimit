@@ -522,6 +522,73 @@ func TestDecide_refusesACostThatNeverFitsWithoutARetryHint(t *testing.T) {
 	}
 }
 
+// itemsAndCalls is a domain of two blocks over /api/items: items reads the
+// cost from limit and counts 1000 items an hour, and calls reads no cost and
+// counts calls requests an hour.
+func itemsAndCalls(calls int64) model.Policy {
+	route := model.Route{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"}}
+	costRoute := route
+	costRoute.Cost = &model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 20}
+	return model.Policy{Domain: domain, Blocks: []model.Block{
+		{Name: "items", Target: model.Target{Routes: []model.Route{costRoute}},
+			Rules: []model.Rule{{Name: "per-hour", Rates: []model.Rate{{Requests: 1000, Period: time.Hour}}}}},
+		{Name: "calls", Target: model.Target{Routes: []model.Route{route}},
+			Rules: []model.Rule{{Name: "per-hour", Rates: []model.Rate{{Requests: calls, Period: time.Hour}}}}},
+	}}
+}
+
+// The cost a route reads replaces the request's own cost in its block: a
+// request of cost 5 with limit=100 charges items 100 and calls 5, and each
+// outcome reports the cost its windows were charged.
+func TestDecide_chargesTheCostARouteReads(t *testing.T) {
+	d := decide(t, engineFor(t, itemsAndCalls(30)),
+		engine.Request{Path: "/api/items?limit=100", Method: "GET", Cost: 5})
+
+	items := outcomeOf(t, d, "items", "per-hour")
+	if items.Cost != 100 || items.Remaining != 900 {
+		t.Errorf("items after limit=100 at request cost 5: cost %d, remaining %d; want 100, 900",
+			items.Cost, items.Remaining)
+	}
+	calls := outcomeOf(t, d, "calls", "per-hour")
+	if calls.Cost != 5 || calls.Remaining != 25 {
+		t.Errorf("calls after limit=100 at request cost 5: cost %d, remaining %d; want 5, 25",
+			calls.Cost, calls.Remaining)
+	}
+}
+
+// On an admission the headers come from the window with the fewest further
+// requests at the cost it was charged, compared exactly. After limit=100,
+// items has 900 left, nine more such requests, and binds before the 29 of
+// calls; after limit=10, items has 990 left, 99 more, and calls binds. With
+// calls at 31 an hour and a request cost of 3, calls has 28 left, 9.33 more,
+// and items binds with its 9: both round down to nine, where the tie would
+// go to calls, the smaller key.
+func TestHeaders_comeFromTheWindowWithTheFewestRequestsLeftAtItsCost(t *testing.T) {
+	cases := []struct {
+		name  string
+		calls int64
+		cost  int64
+		query string
+		want  window
+	}{
+		{"limit=100", 30, 1, "limit=100", window{Block: "items", Rule: "per-hour", Limit: 1000, PeriodSeconds: 3600}},
+		{"limit=10", 30, 1, "limit=10", window{Block: "calls", Rule: "per-hour", Limit: 30, PeriodSeconds: 3600}},
+		{"ratios that round down alike", 31, 3, "limit=100",
+			window{Block: "items", Rule: "per-hour", Limit: 1000, PeriodSeconds: 3600}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := decide(t, engineFor(t, itemsAndCalls(tc.calls)),
+				engine.Request{Path: "/api/items?" + tc.query, Method: "GET", Cost: tc.cost})
+
+			if got := windowOf(headersOf(t, d)); got != tc.want {
+				t.Errorf("Decide(/api/items?%s at cost %d, calls %d an hour) headers report %+v, want %+v",
+					tc.query, tc.cost, tc.calls, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExplicitKeysOverrideTheToken(t *testing.T) {
 	req := orderRequest(t, "alice")
 	req.Keys = map[string][]string{model.KeySub: {"t1"}}

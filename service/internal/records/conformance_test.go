@@ -568,7 +568,8 @@ func spend(t *testing.T, counters store.Store, k string) string {
 		Key:       k,
 		Algorithm: algo.GCRAID,
 		Window:    algo.Window{Requests: 10, Period: time.Minute, Burst: 10},
-	}}, 1)
+		Cost:      1,
+	}})
 	require.NoError(t, err)
 	return k
 }

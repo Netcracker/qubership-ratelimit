@@ -1,6 +1,7 @@
 package compile
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
@@ -56,7 +57,47 @@ func (c *blockCompiler) compileRoute(b model.Block, r model.Route, captures map[
 			out.Methods[m] = struct{}{}
 		}
 	}
+	out.Cost = c.compileCost(b, r.Cost)
 	return out
+}
+
+// costParameter mirrors the schema's pattern for the name of a cost
+// parameter: the characters a query parameter name takes in the APIs it
+// serves, brackets and dots included, so page[size] and page.size are valid.
+var costParameter = regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]+$`)
+
+// maxCostParameterLength caps the name of a cost parameter, mirroring the
+// schema.
+const maxCostParameterLength = 64
+
+// compileCost validates a route's cost entry and resolves its default. A nil
+// entry stays nil.
+func (c *blockCompiler) compileCost(b model.Block, cost *model.RouteCost) *Cost {
+	if cost == nil {
+		return nil
+	}
+	ok := true
+	if cost.Source != model.CostQueryParameter {
+		c.fail(b.Name, "", ReasonInvalidSpec, "unknown cost source %q", cost.Source)
+		ok = false
+	}
+	if !costParameter.MatchString(cost.Name) || len(cost.Name) > maxCostParameterLength {
+		c.fail(b.Name, "", ReasonInvalidSpec, "cost parameter %q does not match %s or exceeds %d characters",
+			cost.Name, costParameter, maxCostParameterLength)
+		ok = false
+	}
+	def := cost.Default
+	if def == 0 {
+		def = 1
+	}
+	if def < 1 || def > model.MaxCost {
+		c.fail(b.Name, "", ReasonInvalidSpec, "default cost %d is outside 1..%d", cost.Default, model.MaxCost)
+		ok = false
+	}
+	if !ok {
+		return nil
+	}
+	return &Cost{Parameter: cost.Name, Default: def}
 }
 
 // compileTemplate splits a template into segments. A segment is a literal or

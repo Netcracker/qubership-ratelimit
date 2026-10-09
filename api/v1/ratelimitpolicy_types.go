@@ -135,6 +135,46 @@ type Route struct {
 	// +optional
 	// +listType=set
 	Methods []HTTPMethod `json:"methods,omitempty"`
+
+	// cost reads the cost of a request matched through this route from the
+	// request, and every window of the block charges that many units instead
+	// of one. The first route of the target that matches a request decides its
+	// cost. Without it a request through the gateway costs one unit.
+	// +optional
+	Cost *RouteCost `json:"cost,omitempty"`
+}
+
+// CostSource names where a route reads the cost of a request from.
+// +kubebuilder:validation:Enum=QueryParameter
+type CostSource string
+
+// CostSourceQueryParameter reads the cost from one parameter of the query
+// string.
+const CostSourceQueryParameter CostSource = "QueryParameter"
+
+// RouteCost reads the cost of a request from one of its query parameters, so
+// that a paginated API is counted in the items a page returns.
+type RouteCost struct {
+	// source is where the value is read from. QueryParameter is the only
+	// source.
+	Source CostSource `json:"source"`
+
+	// name is the parameter name, compared with the percent-decoded name in
+	// the query string, case-sensitively. A value that is a positive decimal
+	// integer is the cost, and a value above 1000000000 costs 1000000000. The
+	// largest of several occurrences is the cost.
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Name string `json:"name"`
+
+	// default is the cost of a request without a usable value: the parameter
+	// absent, empty, zero, or anything but decimal digits. It defaults to 1;
+	// the default page size of the API is the usual value.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000000000
+	Default *int32 `json:"default,omitempty"`
 }
 
 // Target restricts a block to part of the traffic of its domain.
@@ -367,8 +407,9 @@ type RuleProblem struct {
 
 	// reason is one of UnresolvedKeyReference, UnresolvedGroupReference,
 	// UnresolvedReplacedRules, IncompatibleOperator, InvalidCounterAxis,
-	// InvalidSpec, InvalidWindow, DomainBudgetExceeded, and
-	// CaptureShadowsMappedKey. CaptureShadowsMappedKey is informational; every
+	// InvalidSpec, InvalidWindow, DomainBudgetExceeded,
+	// CaptureShadowsMappedKey, and CostExceedsCapacity.
+	// CaptureShadowsMappedKey and CostExceedsCapacity are informational; every
 	// other reason blocks the generation.
 	Reason string `json:"reason"`
 

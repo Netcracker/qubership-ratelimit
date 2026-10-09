@@ -73,6 +73,7 @@ func payloadGolden(version int) string {
 // from. It sets every field of the spec, so the golden carries each of them.
 func payloadSample() v1.RateLimitPolicySpec {
 	burst := int32(20)
+	defaultCost := int32(20)
 	return v1.RateLimitPolicySpec{
 		Domain: "gateway.public",
 		Mappings: []v1.ClaimMapping{
@@ -87,6 +88,7 @@ func payloadSample() v1.RateLimitPolicySpec {
 			Target: &v1.Target{Routes: []v1.Route{{
 				Path:    v1.PathMatch{Type: v1.PathMatchTemplate, Value: "/api/v1/orders/{id}"},
 				Methods: []v1.HTTPMethod{"GET", "POST"},
+				Cost:    &v1.RouteCost{Source: v1.CostSourceQueryParameter, Name: "limit", Default: &defaultCost},
 			}}},
 			Mode: v1.BlockModeAll,
 			Rules: []v1.Rule{{

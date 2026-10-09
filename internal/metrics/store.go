@@ -24,9 +24,9 @@ type instrumentedStore struct {
 	next   store.Store
 }
 
-func (s instrumentedStore) Decide(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
+func (s instrumentedStore) Decide(ctx context.Context, buckets []store.Bucket) ([]store.Verdict, error) {
 	start := time.Now()
-	verdicts, err := s.next.Decide(ctx, buckets, cost)
+	verdicts, err := s.next.Decide(ctx, buckets)
 	StoreRoundtrip.WithLabelValues(s.domain).Observe(time.Since(start).Seconds())
 	if err != nil {
 		StoreErrors.WithLabelValues(s.domain, storeErrorReason(err)).Inc()
@@ -34,8 +34,8 @@ func (s instrumentedStore) Decide(ctx context.Context, buckets []store.Bucket, c
 	return verdicts, err
 }
 
-func (s instrumentedStore) Peek(ctx context.Context, buckets []store.Bucket, cost int64) ([]store.Verdict, error) {
-	return s.next.Peek(ctx, buckets, cost)
+func (s instrumentedStore) Peek(ctx context.Context, buckets []store.Bucket) ([]store.Verdict, error) {
+	return s.next.Peek(ctx, buckets)
 }
 
 func (s instrumentedStore) Reset(ctx context.Context, keys []string) error {

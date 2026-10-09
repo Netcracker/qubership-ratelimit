@@ -46,19 +46,23 @@ type Bucket struct {
 	// metrics report permanent rejection long after traffic drops back under
 	// the limit.
 	Shadow bool
+
+	// Cost is the amount the decision charges this bucket, at least 1. The
+	// buckets of one decision may carry different costs.
+	Cost int64
 }
 
 // Verdict is the outcome for one bucket.
 type Verdict struct {
 	Allowed bool
 
-	// Remaining is how many more requests the bucket would admit right now —
+	// Remaining is how many more units of cost the bucket would admit now —
 	// instantaneous capacity, which recovers over time under GCRA. It is
 	// never negative, even when an implementation has counted past the limit.
 	Remaining int64
 
-	// CostExceedsCapacity marks a refusal no waiting can cure: the request
-	// cost is larger than the bucket can ever hold. No retry hint applies,
+	// CostExceedsCapacity marks a refusal no waiting can cure: the bucket's
+	// Cost is larger than the bucket can ever hold. No retry hint applies,
 	// and none must reach the response headers.
 	CostExceedsCapacity bool
 
@@ -84,20 +88,21 @@ type Store interface {
 	// leaves no trace, an admitted one charges every enforcing bucket, and a
 	// shadow bucket is charged per its own verdict (see Shadow). The request
 	// is admitted when no enforcing bucket refuses it. Verdicts come back in
-	// the order the buckets were given. Cost below 1 is an error — a negative
-	// cost would refund counter state — and must charge nothing. Callers never
+	// the order the buckets were given. Every bucket is judged and charged at
+	// its own Cost. A Cost below 1 is an error — a negative cost would refund
+	// counter state — and the decision charges nothing. Callers never
 	// pass an empty bucket list: a request that matched nothing is admitted
 	// without a store round trip. Bucket keys within one decision are unique —
 	// a duplicate is a caller bug and an error, because evaluating one key
 	// twice in a single commit would lose a charge. The key layout pins a
 	// domain's buckets to one Redis Cluster slot (see the key package), so a
 	// decision commits as one atomic script on every supported topology.
-	Decide(ctx context.Context, buckets []Bucket, cost int64) ([]Verdict, error)
+	Decide(ctx context.Context, buckets []Bucket) ([]Verdict, error)
 
-	// Peek judges at the given cost without charging, so that introspection
-	// reports the same numbers the enforcing path would produce. Cost and
-	// duplicate-key rules match Decide.
-	Peek(ctx context.Context, buckets []Bucket, cost int64) ([]Verdict, error)
+	// Peek judges every bucket at its Cost without charging, so that
+	// introspection reports the same numbers the enforcing path would produce.
+	// Cost and duplicate-key rules match Decide.
+	Peek(ctx context.Context, buckets []Bucket) ([]Verdict, error)
 
 	// Reset drops counter state, which is how an operator lifts a limit from a
 	// client without waiting out the window. Keys that do not exist — already
@@ -141,15 +146,15 @@ type Inspector interface {
 }
 
 // GuardBuckets applies the cheap edge of the caller contract, shared by every
-// implementation: cost is positive, keys are unique within the decision, and
-// windows carry the fields whose absence would divide by zero downstream.
+// implementation: every cost is positive, keys are unique within the decision,
+// and windows carry the fields whose absence would divide by zero downstream.
 // Full window semantics stay algo.Check's job at compile time.
-func GuardBuckets(buckets []Bucket, cost int64) error {
-	if cost < 1 {
-		return fmt.Errorf("store: cost must be at least 1, got %d", cost)
-	}
+func GuardBuckets(buckets []Bucket) error {
 	seen := make(map[string]struct{}, len(buckets))
 	for _, b := range buckets {
+		if b.Cost < 1 {
+			return fmt.Errorf("store: bucket %q carries a cost of %d, below 1", b.Key, b.Cost)
+		}
 		if _, dup := seen[b.Key]; dup {
 			return fmt.Errorf("store: duplicate bucket key %q in one decision", b.Key)
 		}

@@ -238,6 +238,11 @@ schema. path/method are mandatory (the gateway always has them; matching without
 (≤8KiB): not echoed, not logged, and not quoted in errors. The response is a best-effort verdict as of evaluatedAt:
 Peek reserves nothing.
 
+cost is the request's own cost, as `hits_addend` is for a check. path may carry a query string, and a block whose
+matched route reads a cost from it ([request cost](ratelimitpolicy-cr-spec.md#request-cost)) is judged at the cost
+that route reads instead: `/api/v1/items?limit=100` is judged at 100 there and at cost in the other blocks. Every
+RuleOutcome carries cost, the amount its windows were judged at, in the units its limit and remaining count.
+
 The binding window and the response forms: RuleOutcome and Headers carry the algorithm + periodSeconds of
 the window whose numbers are shown, and Headers also carries the block and rule of that window, the name the
 `ratelimit-policy` and `ratelimit` response fields carry as `<block>/<rule>`, and effectiveWindowSeconds, the `t` of
@@ -248,8 +253,9 @@ carries one emission interval under GCRA and the time to the boundary under a fi
 deterministic, in strict priority: windows with capacity_exceeded rank
 above any retryable refusals (a fundamental impossibility binds harder than a wait; retryAfterSeconds is undefined for
 them, so among them the tie-break is immediately lexicographic by key); then retryable refusals by the largest
-retryAfterSeconds; on an admission, the window with the smallest absolute remaining; a tie goes to the lexicographically
-smaller counter key (which orders by block/rule, algorithm, and period, the same on every replica). Headers chooses
+retryAfterSeconds; on an admission, the window with the fewest further requests at its cost, its remaining divided by
+that cost, which at a cost of one is the smallest remaining; a tie goes to the lexicographically smaller counter key
+(which orders by block/rule, algorithm, and period, the same on every replica). Headers chooses
 among all applied enforcing windows (shadow does not bind the headers), RuleOutcome among the windows of its own rule.
 Contradictory combinations are inexpressible by the schema: SimulationResponse = oneOf {Admitted, RateLimited,
 CapacityExceeded}; RuleOutcome is split by a oneOf on the verdict and refusalReason (rate_limited:
@@ -259,8 +265,9 @@ in their own outcomes). Per-window outcomes are a possible v1.x extension, not v
 
 A single mode vocabulary: enforce | shadow | bypass in all runtime views (lowercase); RuleView.mode is the rule's CR
 behavior lowercased (Enforce/Shadow/Bypass → enforce/shadow/bypass), while BlockView.mode mirrors the CR's block mode
-(All/FirstMatch), as RouteView.type does, since configuration views keep the configuration vocabulary. ConditionView is
-five named forms with a discriminator by operator: Equals/Contains (a single value), In (values; a compiled InGroup
+(All/FirstMatch), as RouteView.type and RouteView.cost do, since configuration views keep the configuration
+vocabulary. ConditionView is five named forms with a discriminator by operator: Equals/Contains (a single value), In
+(values; a compiled InGroup
 with the group resolved renders here too), Exists/DoesNotExist are unary, and a stray parameter is inexpressible by
 the schema (a mirror of the engine's operatorArity); Contains is element membership in a list-valued claim, never a
 substring; values are strings. periodSeconds is canonical, period is a derived display form; windowless algorithms
