@@ -22,7 +22,6 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	enginestore "github.com/netcracker/qubership-ratelimit/engine/store"
-	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 	redisstore "github.com/netcracker/qubership-ratelimit/engine/store/redis"
 	"github.com/netcracker/qubership-ratelimit/service/internal/records"
 	"github.com/netcracker/qubership-ratelimit/service/internal/redisconn"
@@ -50,13 +49,8 @@ type CounterBackend struct {
 	Closer      io.Closer
 	Description string
 
-	// Shared marks a store every replica counts in. Without one a limit of N
-	// admits N per replica, and the management API's records are per replica
-	// too.
-	Shared bool
-
-	// CheckEviction reads whether the store may evict keys; nil for the
-	// in-process store, which never does.
+	// CheckEviction reads whether the store may evict keys; nil when the
+	// store cannot.
 	CheckEviction func(ctx context.Context) error
 }
 
@@ -92,17 +86,16 @@ func CheckEviction(ctx context.Context, client configReader) error {
 	return nil
 }
 
-// CounterStore picks where the counters live, and returns the client whose
-// lifecycle the caller owns; the store never closes it.
+// CounterStore builds the counter store over the Redis that source resolves,
+// and returns the clients whose lifecycle the caller owns; the store never
+// closes them.
 //
 // Redis is what makes a limit a limit of the domain rather than of each
 // replica: with N replicas counting in their own memory, a limit of 100
-// admits 100*N. In a pod the database is the one DBaaS provisioned for the
-// release, resolved through the platform's DBaaS client from the mounted
-// Secret of its DatabaseSecretClaim; the chart always sets it up, so a
-// replica never falls back to counting on its own. A nil source is the
-// in-process store, correct at one replica and for tests and the local
-// developer loop, and nothing a chart renders.
+// admits 100*N, so the service counts in Redis alone and source is required.
+// In a pod the database is the one DBaaS provisioned for the release,
+// resolved through the platform's DBaaS client from the mounted Secret of its
+// DatabaseSecretClaim.
 //
 // Over Redis the decisions and the management API have a client each,
 // configured by [DecisionOptions] and [ManagementOptions]. The clients are
@@ -111,20 +104,6 @@ func CheckEviction(ctx context.Context, client configReader) error {
 // of the source on every new connection, so a changed password the source
 // picks up reaches the pool without a restart.
 func CounterStore(source *redisconn.Source) CounterBackend {
-	if source == nil {
-		// The records live where the counters do. Leaving them nil would start
-		// the management API with a nil store, and every mutation would panic
-		// into an RLS-0500 while the reads kept working. In-process counting is
-		// correct at one replica, and so are in-process records.
-		counters := memory.New()
-		return CounterBackend{
-			Store:       counters,
-			Management:  counters,
-			Records:     records.NewMemory(counters),
-			Description: "in-process, counted per replica",
-		}
-	}
-
 	addr := source.Connection().Addr()
 	decisions := goredis.NewUniversalClient(DecisionOptions(addr, source.Credentials))
 	management := goredis.NewUniversalClient(ManagementOptions(addr, source.Credentials))
@@ -133,8 +112,7 @@ func CounterStore(source *redisconn.Source) CounterBackend {
 		Management:  redisstore.New(management),
 		Records:     records.NewRedis(management),
 		Closer:      closers{decisions, management},
-		Description: "redis at " + addr + ", provisioned by DBaaS",
-		Shared:      true,
+		Description: "redis at " + addr,
 		CheckEviction: func(ctx context.Context) error {
 			return CheckEviction(ctx, management)
 		},

@@ -205,7 +205,7 @@ build-service: generate fmt vet ## Build the service binary and check it carries
 
 # Running from the host. Both processes read CLOUD_NAMESPACE, which has no
 # default; the operator talks to the cluster of the current kubeconfig, the
-# service to nothing but a directory. The operator is told its Deployment's
+# service to a directory and to the Redis of local-redis. The operator is told its Deployment's
 # name the way the chart tells it, and off cluster it warns that there is
 # none to adopt and writes the ConfigMap without an owner. Each binary reads
 # its application.yaml through the platform's configloader, from the
@@ -217,26 +217,36 @@ OPERATOR_DEPLOYMENT ?= ratelimit-operator
 # would; any directory holding a manifest and its payloads works.
 SERVICE_CONFIG_DIR ?= $(LOCALBIN)/config
 
+# The service counts in a Redis, never in its own memory: from the host it is
+# the disposable one local-redis keeps at LOCAL_REDIS_ADDR.
+LOCAL_REDIS_ADDR ?= 127.0.0.1:6379
+LOCAL_REDIS_NAME ?= ratelimit-local-redis
+
 # In the pair the operator moves off the ports both binaries default to,
 # :8080 for metrics and :8081 for the probes, or whichever binds second dies;
 # run-operator alone keeps the defaults. The four ports are in the README.
 OPERATOR_METRICS_ADDR ?= :8090
 OPERATOR_PROBE_ADDR ?= :8091
 
+.PHONY: local-redis
+local-redis: ## Start the disposable Redis the run targets count in, unless it runs already. Needs Docker.
+	@docker inspect -f '{{.State.Running}}' "$(LOCAL_REDIS_NAME)" 2>/dev/null | grep -q true || \
+	  docker run -d --rm --name "$(LOCAL_REDIS_NAME)" -p "$(LOCAL_REDIS_ADDR):6379" redis:8-alpine >/dev/null
+
 .PHONY: run
-run: manifests generate fmt vet ## Run the operator and the service from your host, the pair.
+run: manifests generate fmt vet local-redis ## Run the operator and the service from your host, the pair.
 	@PROPERTY_FILE_PATH=operator/ go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT) \
 	  --metrics-bind-address=$(OPERATOR_METRICS_ADDR) --health-probe-bind-address=$(OPERATOR_PROBE_ADDR) & operator=$$!; \
 	trap 'kill $$operator 2>/dev/null' EXIT; \
-	PROPERTY_FILE_PATH=service/ go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
+	PROPERTY_FILE_PATH=service/ go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR) --redis-addr=$(LOCAL_REDIS_ADDR)
 
 .PHONY: run-operator
 run-operator: manifests generate fmt vet ## Run the operator from your host against the current kubeconfig.
 	PROPERTY_FILE_PATH=operator/ go run ./operator/cmd/ --deployment=$(OPERATOR_DEPLOYMENT)
 
 .PHONY: run-service
-run-service: generate fmt vet ## Run the service from your host against SERVICE_CONFIG_DIR.
-	PROPERTY_FILE_PATH=service/ go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR)
+run-service: generate fmt vet local-redis ## Run the service from your host against SERVICE_CONFIG_DIR.
+	PROPERTY_FILE_PATH=service/ go run ./service/cmd/ --config-dir=$(SERVICE_CONFIG_DIR) --redis-addr=$(LOCAL_REDIS_ADDR)
 
 .PHONY: service-config
 service-config: ## Export the ratelimit-config ConfigMap of CLOUD_NAMESPACE into SERVICE_CONFIG_DIR.

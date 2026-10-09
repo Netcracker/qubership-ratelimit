@@ -462,9 +462,9 @@ the cluster. Key points:
 The schema cannot express domain uniqueness; the `validateDomains` helper of the service chart holds it (see the
 templates): a duplicate domain among the enabled gateways of one release, or an enabled gateway without a domain,
 fails the render with a clear error. Matching domains **across the releases of a composite** are the model itself
-rather than an error: one domain per role, a shared budget. The service chart has no in-process store to guard: every
-replica it renders reads its DBaaS database, and the in-process store is only what a service started without
-`--redis-dbaas-microservice` counts in, for the developer loop and tests.
+rather than an error: one domain per role, a shared budget. Every replica the service chart renders counts in its DBaaS
+database: the service refuses to start without `--redis-dbaas-microservice`, or `--redis-addr` for a local Redis in the
+developer loop, so no replica counts on its own.
 
 ## Templates
 

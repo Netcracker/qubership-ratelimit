@@ -16,6 +16,7 @@ import (
 	"time"
 
 	dbaasbase "github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3"
+	"github.com/netcracker/qubership-core-lib-go-dbaas-base-client/v3/model/rest"
 	"github.com/netcracker/qubership-core-lib-go/v3/cloudprovidergetter"
 	"github.com/netcracker/qubership-core-lib-go/v3/security/tokensource"
 
@@ -60,12 +61,20 @@ type Options struct {
 	// RedisMicroservice is the microserviceName of the counter store's DBaaS
 	// classifier, the one the chart's claim carries; the database is resolved
 	// through the platform's DBaaS client, which reads the mounted Secret.
-	// Empty is the in-process store, for the developer loop and tests; the
-	// chart always sets it.
+	// The chart always sets it.
 	RedisMicroservice string
+
+	// RedisAddr is the host:port of a Redis without a password that the
+	// service counts in instead of a DBaaS database: the developer loop's,
+	// never a pod's. Exactly one of RedisMicroservice and RedisAddr is set.
+	RedisAddr string
 
 	// RedisResolver replaces the platform's DBaaS pool, for a test.
 	RedisResolver redisconn.Resolver
+
+	// counters replaces the counter store, for a test that counts in
+	// process; RedisMicroservice and RedisAddr are then not read.
+	counters *settings.CounterBackend
 
 	// Resync is how often the watcher re-reads the directory on its own;
 	// zero is config.DefaultResync.
@@ -119,20 +128,10 @@ func Build(namespace string, options Options) (*Service, error) {
 	registry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	metrics.RegisterService(registry, options.Version)
 
-	var connection *redisconn.Source
-	if options.RedisMicroservice != "" {
-		resolver := options.RedisResolver
-		if resolver == nil {
-			resolver = dbaasbase.NewDbaaSPool()
-		}
-		var err error
-		connection, err = redisconn.Open(context.Background(), resolver,
-			redisconn.Classifier(options.RedisMicroservice, namespace), options.Log.WithName("redis"))
-		if err != nil {
-			return nil, err
-		}
+	backend, connection, err := counterStore(namespace, options)
+	if err != nil {
+		return nil, err
 	}
-	backend := settings.CounterStore(connection)
 	platform.Infof("counter store selected backend=%v", backend.Description)
 
 	cacheStats := &engine.CacheStats{}
@@ -186,17 +185,6 @@ func Build(namespace string, options Options) (*Service, error) {
 	}
 
 	if enabled(options.ManagementAddr) {
-		if !backend.Shared {
-			// The in-process counter store is a single-replica configuration
-			// by definition, and the management API assumes a shared one:
-			// records, confirmation tokens, and operations live beside the
-			// counters, so with several replicas a retry that lands elsewhere
-			// finds nothing. The chart never renders it: a pod always reads
-			// its DBaaS database. This line is for the developer loop, and
-			// for a deployment put together without the chart.
-			platform.Warnf("management API is serving over the in-process counter store; " +
-				"it is correct at one replica only, like the limits themselves")
-		}
 		// The callers decide who may mutate counters, and an installation
 		// that lets nobody in shows nowhere else.
 		callers := settings.ManagementCallers(namespace, platform.Errorf)
@@ -359,6 +347,51 @@ func (s *Service) close() {
 	if err := s.closer.Close(); err != nil {
 		s.log.Error(err, "failed to close the counter store")
 	}
+}
+
+// errNoCounterStore refuses a service started without a counter store: the
+// limits are limits of the domain only when every replica counts in one
+// Redis.
+var errNoCounterStore = errors.New("no counter store: set --redis-dbaas-microservice to the DBaaS classifier's " +
+	"microserviceName, or --redis-addr to a local Redis for the developer loop")
+
+// counterStore resolves the Redis the service counts in, and the connection
+// that keeps its credentials current; the connection is nil for a test's
+// in-process store.
+func counterStore(namespace string, options Options) (settings.CounterBackend, *redisconn.Source, error) {
+	if options.counters != nil {
+		return *options.counters, nil, nil
+	}
+	resolver, microservice := options.RedisResolver, options.RedisMicroservice
+	switch {
+	case options.RedisMicroservice != "" && options.RedisAddr != "":
+		return settings.CounterBackend{}, nil, errors.New(
+			"--redis-dbaas-microservice and --redis-addr both name a counter store; set one")
+	case options.RedisAddr != "":
+		resolver, microservice = addressResolver(options.RedisAddr), "local"
+	case options.RedisMicroservice != "":
+		if resolver == nil {
+			resolver = dbaasbase.NewDbaaSPool()
+		}
+	default:
+		return settings.CounterBackend{}, nil, errNoCounterStore
+	}
+	connection, err := redisconn.Open(context.Background(), resolver,
+		redisconn.Classifier(microservice, namespace), options.Log.WithName("redis"))
+	if err != nil {
+		return settings.CounterBackend{}, nil, err
+	}
+	return settings.CounterStore(connection), connection, nil
+}
+
+// addressResolver resolves every database to the Redis at its host:port,
+// without a password.
+type addressResolver string
+
+// GetConnection implements [redisconn.Resolver].
+func (a addressResolver) GetConnection(context.Context, string, map[string]any,
+	rest.BaseDbParams) (map[string]any, error) {
+	return map[string]any{"url": "redis://" + string(a)}, nil
 }
 
 // enabled reads a bind address flag: "0" and empty both disable the listener.

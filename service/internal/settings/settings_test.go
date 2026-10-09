@@ -32,21 +32,6 @@ type warnings []string
 
 func (w *warnings) warn(format string, args ...any) { *w = append(*w, fmt.Sprintf(format, args...)) }
 
-// Without a DBaaS connection the process counts in its own memory, the
-// developer loop's store: management.enabled does not require Redis. The
-// records have to follow the counters there. Leaving them nil starts the
-// management API with a nil store, and every mutation panics into an RLS-0500
-// while the reads keep working, so nothing short of a reset reveals it.
-func TestCounterStore_theInProcessBackendCarriesARecordsStore(t *testing.T) {
-	backend := CounterStore(nil)
-
-	assert.NotNil(t, backend.Store, "the in-process branch must still count somewhere")
-	assert.NotNil(t, backend.Records, "a nil records store panics on the first DELETE /counters")
-	assert.False(t, backend.Shared, "an in-process store counts per replica")
-	assert.Nil(t, backend.Closer, "nothing was dialed, so there is nothing to close")
-	assert.Nil(t, backend.CheckEviction, "the in-process store never evicts")
-}
-
 // With a DBaaS connection the store is Redis at the address the Secret
 // names, shared by every replica, with a client the caller closes.
 func TestCounterStore_countsInTheDatabaseTheSecretNames(t *testing.T) {
@@ -59,7 +44,6 @@ func TestCounterStore_countsInTheDatabaseTheSecretNames(t *testing.T) {
 
 	require.NotNil(t, backend.Closer, "the client the caller closes")
 	t.Cleanup(func() { _ = backend.Closer.Close() })
-	assert.True(t, backend.Shared)
 	assert.NotNil(t, backend.Records)
 	assert.Contains(t, backend.Description, "ratelimit-redis.core:6379")
 	assert.NotNil(t, backend.CheckEviction)

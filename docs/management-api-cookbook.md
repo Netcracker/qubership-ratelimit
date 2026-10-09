@@ -727,9 +727,6 @@ Edge cases:
   snapshot); and in any case the store contract guarantees self-expiry by window.
 - Bulk execution resolves the selector once, at the start of the sweep: a snapshot change in the middle of execution
   does not re-read the selector.
-- The in-process store is the single-replica test mode: the API behaves as with Redis (the store of the sole replica is
-  trivially the installation's shared store). The chart never renders it, and the service warns when it serves the
-  management API over it.
 - cost=1 is the contract of limited and of the listing; for traffic with hits_addend>1 the exact answer comes from a
   simulation with cost (section 3).
 - Do not confuse the two kinds of "path": in the ?path= filter of /rules it is the REQUEST path (matched by the engine:
