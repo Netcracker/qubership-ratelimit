@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -66,6 +67,50 @@ func TestCharts_shipTheAlertRulesBehindMonitoring(t *testing.T) {
 				assert.NotEmpty(t, r.at("annotations", "description").str2(), "description annotation of %s", name)
 			}
 			assert.ElementsMatch(t, wanted, names, "alerts of the PrometheusRule")
+		})
+	}
+}
+
+// severitiesOf maps each alert of a PrometheusRule to its severity label.
+func severitiesOf(rule object) map[string]string {
+	out := map[string]string{}
+	for _, r := range alertRules(rule) {
+		out[r.at("alert").str2()] = r.at("labels", "severity").str2()
+	}
+	return out
+}
+
+// Each alert carries the severity that the tables under "Alerts" in
+// docs/helm-chart.md list for it, so a change of severity updates the chart,
+// that table, and this test together. The rule tests under testdata check the
+// severity only of an alert they see fire, and only where promtool runs.
+func TestCharts_labelEachAlertWithItsSeverity(t *testing.T) {
+	for _, c := range []struct {
+		chart      string
+		severities map[string]string
+	}{
+		{serviceChart, map[string]string{
+			"RatelimitUnknownDomain":           "warning",
+			"RatelimitStoreErrors":             "critical",
+			"RatelimitDecisionLatencyHigh":     "warning",
+			"RatelimitKeyDeclaredNotExtracted": "warning",
+			"RatelimitDomainBudgetNearLimit":   "warning",
+			"RatelimitConfigurationAbsent":     "warning",
+		}},
+		{operatorChart, map[string]string{
+			"RatelimitStalled":           "critical",
+			"RatelimitNotReadyLong":      "warning",
+			"RatelimitNoReplicas":        "critical",
+			"RatelimitChecksStopped":     "warning",
+			"RatelimitRuleProblems":      "warning",
+			"RatelimitConfigWriteErrors": "critical",
+			"RatelimitNoOperatorLeader":  "critical",
+		}},
+	} {
+		t.Run(c.chart, func(t *testing.T) {
+			rule := only(t, render(t, c.chart, "biz", "--set", "MONITORING_ENABLED=true"), "PrometheusRule")
+
+			assert.Equal(t, c.severities, severitiesOf(rule), "severity label of each alert")
 		})
 	}
 }
@@ -281,6 +326,46 @@ func TestCharts_refuseAlertValuesThatBreakTheRules(t *testing.T) {
 
 			require.Error(t, err, "%s rendered with %s", c.chart, c.set)
 			assert.Contains(t, string(out), c.key, "the refusal names the key it refused")
+		})
+	}
+}
+
+// alertNamed returns the rule of the alert name in a PrometheusRule, and
+// stops the test where the rule holds no such alert.
+func alertNamed(t *testing.T, rule object, name string) node {
+	t.Helper()
+	rules := alertRules(rule)
+	i := slices.IndexFunc(rules, func(r node) bool { return r.at("alert").str2() == name })
+	require.NotEqual(t, -1, i, "the PrometheusRule has no alert %s", name)
+	return rules[i]
+}
+
+// The schema admits the values just inside the bounds that
+// TestCharts_refuseAlertValuesThatBreakTheRules refuses at, a latency budget
+// just above zero and a duration that starts with 1, and each reaches the
+// rule it sets. The budget goes in with --set-json, because --set hands a
+// decimal fraction to the schema as a string.
+func TestCharts_acceptAlertValuesJustInsideTheirBounds(t *testing.T) {
+	for _, c := range []struct {
+		name, chart string
+		args        []string
+		alert       string
+		field, want string
+	}{
+		{"latencyBudgetSeconds=0.001", serviceChart, []string{"--set-json", "alerts.latencyBudgetSeconds=0.001"},
+			"RatelimitDecisionLatencyHigh", "expr", "> 0.001"},
+		{"keyNotExtractedWindow=1m", serviceChart, []string{"--set", "alerts.keyNotExtractedWindow=1m"},
+			"RatelimitKeyDeclaredNotExtracted", "expr", "[1m]"},
+		{"stalledFor=1s", operatorChart, []string{"--set", "policyAlerts.stalledFor=1s"},
+			"RatelimitStalled", "for", "1s"},
+		{"configWriteErrorsWindow=1m", operatorChart, []string{"--set", "policyAlerts.configWriteErrorsWindow=1m"},
+			"RatelimitConfigWriteErrors", "expr", "[1m]"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			objects := render(t, c.chart, "biz", append([]string{"--set", "MONITORING_ENABLED=true"}, c.args...)...)
+
+			rule := alertNamed(t, only(t, objects, "PrometheusRule"), c.alert)
+			assert.Contains(t, rule.at(c.field).str2(), c.want, "%s of %s", c.field, c.alert)
 		})
 	}
 }

@@ -36,7 +36,7 @@ var _ = Describe("the operator", Ordered, Label("operator", "leader"), func() {
 	)
 
 	BeforeAll(func() {
-		fleet = scaleFleet(2)
+		scaleFleet(&fleet, 2)
 
 		// What this suite measures is whether every replica answers, not
 		// whether a limit bites, so its policy declares a limit far above any
