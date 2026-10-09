@@ -330,9 +330,9 @@ A positive integer charges what the client asks for. The policy does not know th
 above the cap is charged in full, and a value above a window's capacity is refused (see
 [What the rules of the block see](#what-the-rules-of-the-block-see)). The default charges what an API serves when it
 falls back to its default page on a value it cannot use; an API that answers such a request with 400 serves nothing,
-and the request costs `default` all the same. An API that parses leniently, reading `100abc` or ` 100` as 100, serves
-more than the request paid for. The largest of several occurrences covers an API that takes the first one and an API
-that takes the last.
+and the request costs `default` all the same. An API that parses leniently, reading `limit=100abc` or `limit=+100` as
+100, serves more than the request paid for. The largest of several occurrences covers an API that takes the first one
+and an API that takes the last.
 
 A request that carries the parameter to an endpoint that ignores it is charged anyway. Where that matters, the route
 list separates the endpoints, as [Routes decide the cost](#routes-decide-the-cost) shows.
