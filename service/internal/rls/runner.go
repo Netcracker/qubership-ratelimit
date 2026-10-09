@@ -41,12 +41,12 @@ type Runner struct {
 	serving atomic.Bool
 }
 
-// Serving reports whether the gRPC server is accepting checks: true from the
-// moment it serves until it stops.
 // healthNames are the names the gRPC health service answers for: the whole
 // server and the rate limit service.
 var healthNames = []string{"", envoyratelimit.RateLimitService_ServiceDesc.ServiceName}
 
+// Serving reports whether the gRPC server is accepting checks: true from the
+// moment it serves until it stops.
 func (r *Runner) Serving() bool { return r.serving.Load() }
 
 // Healthz returns an error while the gRPC server is not serving. It ignores

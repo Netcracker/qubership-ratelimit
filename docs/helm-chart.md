@@ -189,8 +189,10 @@ autoscaler off, both directions are `Disabled` and `REPLICAS` sizes the service.
 
 An eviction takes one service replica at a time when the service runs more than one: a `PodDisruptionBudget` with
 `maxUnavailable: 1` makes a node drain, a cluster-autoscaler consolidation, or a descheduler wait until the
-replacement is Ready. The chart renders it only for more than one replica, `REPLICAS` or, with `HPA_ENABLED`,
-`HPA_MIN_REPLICAS`; at one replica the chart promises no availability through an eviction, and the gateways' failure
+replacement is Ready. A pod that runs and is not Ready serves no check, and the budget evicts it at any time
+(`unhealthyPodEvictionPolicy: AlwaysAllow`), so a fleet that has not received a configuration yet does not block a
+drain. The chart renders it only for more than one replica, `REPLICAS` or, with `HPA_ENABLED`, `HPA_MIN_REPLICAS`; at
+one replica the chart promises no availability through an eviction, and the gateways' failure
 mode decides the checks while the replacement starts.
 
 The resource parameters are required in the schema of each chart: the four sizes and `REPLICAS` in both, and the
@@ -241,9 +243,9 @@ policyAlerts:                        # PrometheusRule.yaml: the rules over the p
   noReplicasFor: 5m                  # RatelimitNoReplicas: past a rollout's surge pod, far below notReadyFor
   checksStoppedWindow: 10m           # RatelimitChecksStopped: the window that has to see no check of the domain;
   checksStoppedFor: 15m              #   raise it for a domain idle for long stretches
-  configWriteErrorsWindow: 15m       # RatelimitConfigWriteErrors: any write error in the window fires
-  configWriteErrorsKeepFiring: 30m   #   and keeps firing this long after the last one, past the retry backoff
-  reconcileErrorsWindow: 15m         # RatelimitOperatorReconcileFailing: a controller that completed no reconcile
+  configWriteFailingFor: 5m          # RatelimitConfigWriteErrors: the last write has failed this long
+  reconcileErrorsWindow: 30m         # RatelimitOperatorReconcileFailing: a controller that completed no reconcile;
+                                     #   longer than the retry backoff, 1000 s
   noLeaderFor: 5m                    # RatelimitNoOperatorLeader: past the Lease's own handover
 
 BASELINE_ORIGIN: ""                  # _helpers.tpl (mode): the platform's composite variable, see "Platform
@@ -435,8 +437,8 @@ the cluster. Key points:
 - **the gateway domain pattern is byte-for-byte the CRD's** (`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`, 1..63), in the
   service chart: a value that a policy physically cannot carry is rejected already at installation instead of living
   on as an eternal "unknown rate limit domain" line in the log;
-- `filter.timeout` is a protobuf duration above zero, such as `0.05s`: Envoy rejects Go forms like `50ms`, and a zero
-  timeout fails every check;
+- `filter.timeout` is a protobuf duration above zero, such as `0.05s`: Envoy rejects Go forms like `50ms`, and reads a
+  zero timeout as none, so every check would wait on the service without a bound;
 - `filter.rateLimitedStatus` is one of the 37 4xx and 5xx codes of Envoy's `StatusCode` enumeration: Envoy rejects the
   filter for any other code, 418 or 451 among them, and with it the whole listener update of the gateway, while
   `helm upgrade` succeeds; `runtime.*Percent` is 0..100;
@@ -655,9 +657,8 @@ Both objects carry `spec.operatorNamespace`: a dbaas-operator reconciles only th
 It is `redis.dbaas.operatorNamespace` when that is set, and otherwise the namespace in the host of `API_DBAAS_ADDRESS`
 (the platform parameter, `http://dbaas-aggregator.dbaas:8080` by default), since the operator runs beside its
 aggregator. Read from the address, the host has to be `<aggregator>.<namespace>`, optionally followed by `.svc` or
-`.svc.cluster.local`; `dbaas` is the namespace of the default. A host of one label fails the schema with
-`at '/API_DBAAS_ADDRESS': '<address>' does not match pattern '^https?://[^.:/]+\\.[^.:/]+'`, and a host of any
-other form, an IP address or an external name, fails the render with
+`.svc.cluster.local`; `dbaas` is the namespace of the default, and a namespace may begin with a digit. A host of any
+other form, one label, an IP address, or an external name, fails the render with
 `API_DBAAS_ADDRESS "<address>" does not name the namespace of dbaas-operator: its host is not
 <aggregator>.<namespace>[.svc[.cluster.local]]. Set redis.dbaas.operatorNamespace.` Set
 `redis.dbaas.operatorNamespace` to the namespace dbaas-operator runs in when the address has such a host.
@@ -732,7 +733,7 @@ exclude.
 | `ratelimit_extractions_total` | `domain`, `key` | decisions whose request carried a value for the declared key; the series are SEEDED with zero from the extraction plan at snapshot swap, so "zero" is observable |
 | `ratelimit_tokens_seen_total` | `domain` | decisions with a token on a known domain that a block targeted, the requests whose token the engine reads; the detector's denominator, per domain so that an idle domain's declared keys are not judged by another domain's traffic |
 | `ratelimit_store_roundtrip_seconds` | `domain` | store round-trip histogram (a domain = one shard) |
-| `ratelimit_store_errors_total` | `domain`, `reason: timeout\|server\|other` | store errors: `timeout` is no answer within the check's deadline, `server` the store answering an error, `other` a connection that failed outright, a refused connection or a name that does not resolve; a decision is never retried |
+| `ratelimit_store_errors_total` | `domain`, `reason: timeout\|server\|other` | store errors: `timeout` is no answer within the check's deadline or no free pooled connection, `server` the store answering an error, `other` a connection that failed outright, a refused connection or a name that does not resolve; a decision is never retried |
 | `ratelimit_snapshot_rebuilds_total` | `result: ok\|refused` | applies and swaps of the in-memory snapshot on a service replica; `refused` is a reading the replica would not apply (a format it does not read, an unknown field, a payload that fails the decoder or decompresses past 8 MiB), the snapshot stays and the reason is on `/debug/applied` |
 | `ratelimit_snapshot_timestamp_seconds` | none | when the enforced rules last changed while the replica ran ("did the rules change before the incident"); 0 until the first change after a start, since a restart is not one |
 | `ratelimit_config_absent` | none | 1 while the replica's mounted directory holds no manifest: the ConfigMap is gone, and nothing will change what the replica enforces |
@@ -747,6 +748,7 @@ exclude.
 | `ratelimit_policy_rule_problems` | `domain`, `severity: blocking\|info` | every problem of the latest generation by weight, past the 64 that `ruleProblems` lists too; alert on `blocking` |
 | `ratelimit_domain_blocks` / `ratelimit_domain_rules` / `ratelimit_domain_decision_buckets` | `domain` | domain facts: `decision_buckets` against 128, the headroom before `DomainBudgetExceeded`; `blocks` and `rules` are observed, with no bounds |
 | `ratelimit_config_write_errors_total` | `reason: size\|api\|read\|other` | failed writes of `ratelimit-config`: `size` a state too large even after the fit, `api` an API server answer, `read` a reconcile that could not read and wrote nothing, `other` the rest; the replicas keep their mounted configuration, the last-good fallback is not saved, and the status reports `ReplicaStale` 90 s later |
+| `ratelimit_config_write_failing` | `reason: size\|api\|read\|other` | 1 under the reason of the last write of `ratelimit-config` while it fails, 0 once a write succeeds; `RatelimitConfigWriteErrors` reads it |
 | `ratelimit_leader` | none | 1 on the operator pod that holds the Lease, 0 on the other one while two overlap during a rollout; the fleet series exist only on the pod reporting 1 |
 
 ## Argo CD: how to read the status
@@ -835,11 +837,11 @@ The operator chart, group `ratelimit-operator`:
 | `RatelimitStalled` | critical | `ratelimit_policy_stalled == 1` for `stalledFor`, with the reason in the label: `ReplicaStale`, `ReplicaFormatUnsupported`, or `ConfigMapTooLarge`. `NotCompiled` is left to `RatelimitRuleProblems`, since the last-good generation stays enforced |
 | `RatelimitNotEnforced` | critical | `ratelimit_policy_enforced == 0` for `notEnforcedFor`: the policy enforces no generation at all, so its domain passes unlimited |
 | `RatelimitNotReadyLong` | warning | `ratelimit_policy_ready == 0` for `notReadyFor`: the latest generation is not the one enforced |
-| `RatelimitNoReplicas` | critical | `ratelimit_policy_ready{reason="NoReplicas"} == 0` for `noReplicasFor`: the operator observed no ready service replica, so the gateway's failure mode decides every check of the domain; a fleet it could not observe is `ProbeFailed` and does not fire |
+| `RatelimitNoReplicas` | critical | `ratelimit_policy_ready{reason="NoReplicas"} == 0`, or a domain whose edit is `NotCompiled` with no service replica at all, for `noReplicasFor`: the operator observed no ready service replica, so the gateway's failure mode decides every check of the domain; a fleet it could not observe is `ProbeFailed` and does not fire |
 | `RatelimitChecksStopped` | warning | `ratelimit_policy_replicas{state="applied"} > 0` while the domain's `ratelimit_checks_total` has no rate over `checksStoppedWindow`, for `checksStoppedFor`: the filter is off, removed, or on another domain, and traffic passes unlimited with every status Ready; an idle gateway fires too (the composite case is below the table) |
 | `RatelimitRuleProblems` | warning | `ratelimit_policy_rule_problems{severity="blocking"} > 0` for `ruleProblemsFor`: the latest generation is not enforced and last-good runs instead |
-| `RatelimitConfigWriteErrors` | critical | `increase(ratelimit_config_write_errors_total[configWriteErrorsWindow]) > 0` by `reason`, with no hold, and kept firing for `configWriteErrorsKeepFiring` after the last one: policy changes stop reaching the service |
-| `RatelimitOperatorReconcileFailing` | critical | a controller of the operator records reconcile errors and no successful reconcile over `reconcileErrorsWindow`: the leader holds the Lease and does nothing, so no other alert names it |
+| `RatelimitConfigWriteErrors` | critical | `ratelimit_config_write_failing == 1` by `reason` for `configWriteFailingFor`: the last write failed and none has succeeded since, so policy changes stop reaching the service; a write that succeeds on its retry clears it |
+| `RatelimitOperatorReconcileFailing` | critical | a controller of the operator's leader records reconcile errors and no completed reconcile (`success` or `requeue_after`) over `reconcileErrorsWindow`: the leader holds the Lease and does nothing, so no other alert names it |
 | `RatelimitNoOperatorLeader` | critical | `absent(ratelimit_leader == 1)` for `noLeaderFor`: no operator pod holds the Lease, so nothing compiles policies or writes `ratelimit-config` |
 
 `RatelimitChecksStopped` sums the domain's checks over every gateway, so in a composite one gateway's disabled

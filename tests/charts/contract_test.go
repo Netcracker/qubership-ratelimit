@@ -1400,12 +1400,15 @@ func TestCRDChart_ownsTheCRD(t *testing.T) {
 }
 
 // A service that runs more than one replica gets a disruption budget that
-// lets evictions take one replica at a time; a single-replica one gets none,
-// since any budget there blocks a drain or allows the gap it exists to close.
+// lets evictions take one replica at a time, and a pod that is not Ready at
+// any time; a single-replica one gets none, since any budget there blocks a
+// drain or allows the gap it exists to close.
 func TestServiceChart_rendersADisruptionBudgetForMoreThanOneReplica(t *testing.T) {
 	objects := render(t, serviceChart, "biz", "-f", profileFile(serviceChart, "dev-ha"))
 	budget := only(t, objects, "PodDisruptionBudget")
 	assert.InDelta(t, 1, budget.at("spec", "maxUnavailable").num(), 0, "spec.maxUnavailable")
+	assert.Equal(t, "AlwaysAllow", budget.at("spec", "unhealthyPodEvictionPolicy").v,
+		"spec.unhealthyPodEvictionPolicy")
 	assert.Equal(t, only(t, objects, "Deployment").at("spec", "selector", "matchLabels").v,
 		budget.at("spec", "selector", "matchLabels").v, "the budget does not select the service's pods")
 

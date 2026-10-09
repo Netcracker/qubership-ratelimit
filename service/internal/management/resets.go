@@ -215,7 +215,7 @@ func (a *API) sweep(
 		if errors.Is(err, records.ErrLeaseLost) {
 			// Another hand finalized this command while the walk ran. What it
 			// recorded is the truth; this call reports that rather than its own.
-			return a.replayFrom(c, keys, command)
+			return a.replayFrom(octx, c, keys, command)
 		}
 		a.Log.ErrorC(octx, "failed to record the outcome of a bulk reset error=%v", err)
 		// The record stays accepted, and recovery runs on the lease: a retry
@@ -294,7 +294,7 @@ func (a *API) recordFailure(
 		},
 	}); err != nil {
 		if errors.Is(err, records.ErrLeaseLost) {
-			return a.replayFrom(c, keys, command)
+			return a.replayFrom(ctx, c, keys, command)
 		}
 		// The one error a walker cannot record is the store itself failing. The
 		// record stays accepted, and the lease carries the recovery.
@@ -363,9 +363,11 @@ func (a *API) standing(
 }
 
 // replayFrom re-reads the record and answers from it, for the case where this
-// call lost its lease and another hand recorded the outcome.
-func (a *API) replayFrom(c *fiber.Ctx, keys records.Keys, command bulkCommand) error {
-	record, err := a.Records.Lookup(c.UserContext(), keys)
+// call lost its lease and another hand recorded the outcome. ctx is the
+// context the outcome was recorded under: a sweep can outlive the request's
+// own deadline.
+func (a *API) replayFrom(ctx context.Context, c *fiber.Ctx, keys records.Keys, command bulkCommand) error {
+	record, err := a.Records.Lookup(ctx, keys)
 	if err != nil || !record.Found || !record.Terminal {
 		return storeDown("the outcome of this command could not be read back")
 	}

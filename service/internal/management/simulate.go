@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	engine "github.com/netcracker/qubership-ratelimit/engine"
@@ -74,10 +75,14 @@ func (s *SimulationRequest) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &named); err != nil {
 		return err
 	}
+	// encoding/json matches a field name in any case, so the presence check
+	// does too: {"Cost":0} sets Cost as {"cost":0} does.
 	s.carried = map[string]json.RawMessage{}
-	for _, name := range []string{"cost", "token", "keys"} {
-		if raw, ok := named[name]; ok {
-			s.carried[name] = raw
+	for given, raw := range named {
+		for _, name := range []string{"cost", "token", "keys"} {
+			if strings.EqualFold(given, name) {
+				s.carried[name] = raw
+			}
 		}
 	}
 	return nil

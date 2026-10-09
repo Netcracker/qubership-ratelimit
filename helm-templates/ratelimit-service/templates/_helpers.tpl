@@ -112,7 +112,7 @@ namespace no dbaas-operator watches.
 {{- .Values.redis.dbaas.operatorNamespace -}}
 {{- else -}}
 {{- $host := first (splitList "/" (first (splitList ":" (last (splitList "://" .Values.API_DBAAS_ADDRESS))))) -}}
-{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.[a-z]([-a-z0-9]*[a-z0-9])?(\\.svc(\\.cluster\\.local)?)?$" $host) -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.svc(\\.cluster\\.local)?)?$" $host) -}}
 {{- fail (printf "API_DBAAS_ADDRESS %q does not name the namespace of dbaas-operator: its host is not <aggregator>.<namespace>[.svc[.cluster.local]]. Set redis.dbaas.operatorNamespace." .Values.API_DBAAS_ADDRESS) -}}
 {{- end -}}
 {{- index (splitList "." $host) 1 -}}

@@ -49,8 +49,10 @@ const (
 	// a tighter limit is tried out over a live one.
 	RuleBehaviorShadow RuleBehavior = "Shadow"
 
-	// RuleBehaviorBypass ends the cascade of its own block with a pass and never
-	// touches the counter store. Other blocks still apply.
+	// RuleBehaviorBypass never touches the counter store. In a FirstMatch block
+	// it ends the cascade with a pass; in an All block it frees the request
+	// from the rules it names in replacedRules, at least one. Other blocks
+	// still apply.
 	RuleBehaviorBypass RuleBehavior = "Bypass"
 )
 
@@ -294,9 +296,10 @@ type Rule struct {
 	// request and can refuse it. Shadow counts the request and records its
 	// metrics but never refuses, and in a FirstMatch block it does not end
 	// the cascade; it is how a tighter limit is tried out over a live one.
-	// Bypass ends the cascade of its own block with a pass and counts
-	// nothing; the other blocks of the policy still apply. Defaults to
-	// Enforce.
+	// Bypass counts nothing. In a FirstMatch block it ends the cascade with
+	// a pass. In an All block it frees the request from the rules it names in
+	// replacedRules, and it has to name at least one. The other blocks of the
+	// policy still apply. Defaults to Enforce.
 	// +kubebuilder:default=Enforce
 	Behavior RuleBehavior `json:"behavior,omitempty"`
 

@@ -50,9 +50,35 @@ const (
 // budget" reads exactly rather than interpolated.
 var durationBuckets = []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, 1}
 
-// ConfigErrorRead is the reason of a ConfigWriteErrors sample for a reconcile
-// that could not read what it writes from.
-const ConfigErrorRead = "read"
+// The reasons of a failed write of the configuration ConfigMap: size, a state
+// the object cannot hold even after the fit; api, an answer of the API
+// server; read, a reconcile that could not read the policies or the ConfigMap
+// it writes from, and so wrote nothing; other, the rest.
+const (
+	ConfigErrorSize  = "size"
+	ConfigErrorAPI   = "api"
+	ConfigErrorRead  = "read"
+	ConfigErrorOther = "other"
+)
+
+// configErrorReasons are every reason of a failed write, the series created at
+// zero when the operator registers them.
+var configErrorReasons = []string{ConfigErrorSize, ConfigErrorAPI, ConfigErrorRead, ConfigErrorOther}
+
+// RecordConfigWrite records one attempt to write the configuration ConfigMap:
+// a failure counts in ConfigWriteErrors under reason and sets
+// ConfigWriteFailing to 1 for that reason alone; an empty reason is a write
+// that succeeded and sets every reason of ConfigWriteFailing to 0.
+func RecordConfigWrite(reason string) {
+	for _, r := range configErrorReasons {
+		ConfigWriteFailing.WithLabelValues(r).Set(0)
+	}
+	if reason == "" {
+		return
+	}
+	ConfigWriteErrors.WithLabelValues(reason).Inc()
+	ConfigWriteFailing.WithLabelValues(reason).Set(1)
+}
 
 var (
 	// Checks counts every ShouldRateLimit call by its final verdict. The
@@ -184,6 +210,16 @@ var (
 		Help: "Failed writes of the configuration ConfigMap by reason: size, api, read, other.",
 	}, []string{"reason"})
 
+	// ConfigWriteFailing is 1 under the reason of the last attempt to write
+	// the configuration ConfigMap while that attempt failed, and 0 once a
+	// write succeeds. A write that fails once and succeeds on its retry
+	// returns it to 0 within milliseconds; one that keeps failing holds it at
+	// 1 between the retries of the controller's backoff.
+	ConfigWriteFailing = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "ratelimit_config_write_failing",
+		Help: "1 while the last write of the configuration ConfigMap failed, under its reason; 0 once a write succeeds.",
+	}, []string{"reason"})
+
 	// ConfigAbsent is 1 while the mounted configuration directory holds no
 	// manifest: the ConfigMap is gone, and the replica keeps serving a
 	// snapshot nothing will rebuild, or has none and stays NotReady.
@@ -224,8 +260,14 @@ func RegisterService(registry prometheus.Registerer, version string) {
 // operator carries no check counter at zero for a query to exclude. Idempotent
 // like RegisterService.
 func RegisterOperator(registry prometheus.Registerer, version string) {
+	for _, reason := range configErrorReasons {
+		// Created at zero, so the first failure of a reason is an increase a
+		// rule can see rather than the start of a series.
+		ConfigWriteErrors.WithLabelValues(reason).Add(0)
+		ConfigWriteFailing.WithLabelValues(reason).Set(0)
+	}
 	register(registry,
-		ConfigWriteErrors,
+		ConfigWriteErrors, ConfigWriteFailing,
 		stateCollector{},
 		fleetCollector{},
 		buildInfo(ComponentOperator, version))

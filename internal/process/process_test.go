@@ -2,6 +2,8 @@ package process
 
 import (
 	"errors"
+	"regexp"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -129,8 +131,18 @@ func TestLogrAdapter_keepsTheValuesOfConcurrentCallsApart(t *testing.T) {
 	}
 	wg.Wait()
 
+	// Each goroutine logs its own i 200 times, so a line that carries the pairs
+	// of another call shows as one count too many and one too few.
+	line := regexp.MustCompile(`^call k0=0 k1=1 k2=2 k3=3 k4=4 k5=5 k6=6 k7=7 k8=8 i=([0-7])$`)
+	counts := map[string]int{}
 	for _, message := range messages {
-		assert.Regexp(t, `^call k0=0 k1=1 k2=2 k3=3 k4=4 k5=5 k6=6 k7=7 k8=8 i=[0-7]$`, message)
+		m := line.FindStringSubmatch(message)
+		if assert.NotNil(t, m, "a line of the shared logger: %q", message) {
+			counts[m[1]]++
+		}
+	}
+	for i := range 8 {
+		assert.Equal(t, 200, counts[strconv.Itoa(i)], "the lines that carry i=%d", i)
 	}
 }
 

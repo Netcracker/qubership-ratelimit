@@ -196,8 +196,10 @@ generation that does not compile, with the message `generation <N> does not comp
 recorded once, when the operator drops the saved last-good generation, with the reason, `last-good generation <N> does
 not compile with this operator build: <error>` or `last-good generation <N> was saved from a read that did not carry
 every field`, followed by `; the domain enforces nothing until a generation compiles`. A ConfigMap write error raises
-no event: it counts in `ratelimit_config_write_errors_total` by reason, and the operator logs
-`failed to write the configuration`.
+no event: it counts in `ratelimit_config_write_errors_total` by reason, sets `ratelimit_config_write_failing` to 1
+until a write succeeds, and the operator logs `failed to write the configuration`. A reconcile that cannot read what it
+compiles counts the same way with reason `read` and logs `failed to read the policies; the configuration was not
+written` or `failed to read the configuration; it was not written`.
 
 ## Status
 

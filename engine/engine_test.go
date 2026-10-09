@@ -857,6 +857,35 @@ func TestNoTargetSkipsIdentityWork(t *testing.T) {
 	}
 }
 
+// A request that a block targets is Targeted even when no rule of the block
+// applies to it, so its skips reach the caller: a request without a sub skips
+// the only rule, counts nothing, and still reports the key it did not carry.
+func TestDecide_aTargetedRequestThatNoRuleAppliesToIsTargeted(t *testing.T) {
+	e := engineFor(t, model.Policy{
+		Domain: domain,
+		Blocks: []model.Block{{
+			Name: "per-client",
+			Target: model.Target{Routes: []model.Route{
+				{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/"}}}},
+			Rules: []model.Rule{{Name: "everyone", Counters: []string{model.KeySub},
+				Rates: []model.Rate{{Requests: 100, Period: time.Minute}}}},
+		}},
+	})
+
+	d := decide(t, e, engine.Request{Path: "/api/invoices/1", Method: "GET", Token: "garbage"})
+
+	if !d.Allowed || len(d.Rules) != 0 {
+		t.Errorf(`Decide(token "garbage"): allowed %t, rules %q; want allowed with no rules`, d.Allowed, appliedRules(d))
+	}
+	if !d.Targeted {
+		t.Errorf(`Decide(token "garbage").Targeted = false, want true`)
+	}
+	want := []identity.Skip{{Key: model.KeySub, Reason: identity.SkipDecodeFailed}}
+	if !slices.Equal(d.Skips, want) {
+		t.Errorf(`Decide(token "garbage").Skips = %v, want %v`, d.Skips, want)
+	}
+}
+
 // TestTokenCacheConcurrentChurn hammers a capacity-2 cache from several
 // goroutines over three tokens: rotation and promotion race constantly, and
 // every decision must still see its own token's identity. The race detector

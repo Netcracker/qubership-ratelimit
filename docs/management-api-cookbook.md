@@ -707,7 +707,7 @@ new preview and a new token. Two operators with different keys do not lock each 
 api "$BASE/status"
 # {"replica": "ratelimit-6c9d-x2v", "snapshotSwappedAt": "2026-08-24T13:58:41Z",
 #  "ruleSetVersions": {"gateway.public": "7c31a9f4e0d2"},
-#  "counterStore": {"backend": "redis at redis:6379, provisioned by DBaaS"}}
+#  "counterStore": {"backend": "redis at redis:6379"}}
 ```
 
 Errors are NC.TMFErrorResponse.v1.0: branch on code, and have people quote the id:

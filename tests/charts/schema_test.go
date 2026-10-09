@@ -35,6 +35,8 @@ func TestCharts_refuseValuesThatBreakTheInstallationLater(t *testing.T) {
 			[]string{"--set", "API_DBAAS_ADDRESS=http://10.0.0.1:8080"}},
 		{"a DBaaS address whose host is an external name", serviceChart,
 			[]string{"--set", "API_DBAAS_ADDRESS=https://dbaas.apps.example.com"}},
+		{"a DBaaS address of one label without an operator namespace", serviceChart,
+			[]string{"--set", "API_DBAAS_ADDRESS=http://dbaas-aggregator:8080"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := renderErr(tc.chart, "biz", tc.set...)
@@ -58,6 +60,10 @@ func TestCharts_acceptTheValuesTheSchemasAllow(t *testing.T) {
 			[]string{"--set-string", "metrics.nearLimitRatio=.8"}},
 		{"a DBaaS address with the cluster suffix", serviceChart,
 			[]string{"--set", "API_DBAAS_ADDRESS=http://dbaas-aggregator.dbaas.svc.cluster.local:8080"}},
+		{"a DBaaS address whose namespace begins with a digit", serviceChart,
+			[]string{"--set", "API_DBAAS_ADDRESS=http://dbaas-aggregator.1dbaas:8080"}},
+		{"a DBaaS address of one label beside an explicit operator namespace", serviceChart,
+			[]string{"--set", "API_DBAAS_ADDRESS=http://dbaas-aggregator:8080", "--set", "redis.dbaas.operatorNamespace=dbaas"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := renderErr(tc.chart, "biz", tc.set...)

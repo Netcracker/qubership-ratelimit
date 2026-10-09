@@ -315,9 +315,62 @@ func TestFailClosed_aStoreThatDoesNotAnswerFailsTheRequestAtItsDeadline(t *testi
 	h := newTestAPI(t)
 	h.api.Records = silentRecords{Store: h.records}
 
-	start := time.Now()
-	requireError(t, h.bulk(t, map[string]any{
+	// The call runs aside, so a request that never ends fails this test by
+	// name rather than the whole binary at the timeout of go test.
+	answered := make(chan *testResponse, 1)
+	go func() {
+		answered <- h.bulk(t, map[string]any{
+			"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+		}, "key-1", listedCaller)
+	}()
+	select {
+	case response := <-answered:
+		requireError(t, response, http.StatusServiceUnavailable, CodeStoreDown)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request did not end within 5s of a 50ms deadline")
+	}
+}
+
+// lateLostCommit records the outcome after delay and then answers
+// ErrLeaseLost, as a commit whose reply was lost does once the client's retry
+// finds the lease released, and its Lookup honors the caller's context.
+type lateLostCommit struct {
+	records.Store
+	delay time.Duration
+}
+
+func (l lateLostCommit) Commit(ctx context.Context, commit records.Commit) error {
+	time.Sleep(l.delay)
+	if err := l.Store.Commit(ctx, commit); err != nil {
+		return err
+	}
+	return records.ErrLeaseLost
+}
+
+func (l lateLostCommit) Lookup(ctx context.Context, keys records.Keys) (records.Record, error) {
+	if err := ctx.Err(); err != nil {
+		return records.Record{}, err
+	}
+	return l.Store.Lookup(ctx, keys)
+}
+
+// A sweep that outlives the request's deadline and then finds its lease lost
+// reads the recorded outcome back under the context it recorded it in, and
+// answers it. The read-back used to run under the expired request context
+// and answered 503 for a command that was recorded.
+func TestBulk_readsTheOutcomeBackPastTheRequestsDeadline(t *testing.T) {
+	timeout := requestTimeout
+	requestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { requestTimeout = timeout })
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	h.api.Records = lateLostCommit{Store: h.records, delay: 200 * time.Millisecond}
+
+	var preview BulkResult
+	decode(t, h.bulk(t, map[string]any{
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
-	}, "key-1", listedCaller), http.StatusServiceUnavailable, CodeStoreDown)
-	assert.Less(t, time.Since(start), 5*time.Second)
+	}, "key-1", listedCaller), http.StatusOK, &preview)
+
+	require.NotNil(t, preview.MatchedCount, "the answer of a preview carries matchedCount")
+	assert.Equal(t, 1, *preview.MatchedCount)
 }

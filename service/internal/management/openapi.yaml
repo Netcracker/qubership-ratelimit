@@ -1893,7 +1893,7 @@ paths:
                 ruleSetVersions:
                   gateway.public: 7c31a9f4e0d2
                 counterStore:
-                  backend: redis at redis:6379, provisioned by DBaaS
+                  backend: redis at redis:6379
           headers:
             X-Request-Id:
               $ref: '#/components/headers/XRequestId'
@@ -2865,7 +2865,7 @@ components:
           properties:
             backend:
               type: string
-              example: redis at redis:6379, provisioned by DBaaS
+              example: redis at redis:6379
               description: Human-readable backend description, as the startup log
                 prints it.
           description: Where the counters live.

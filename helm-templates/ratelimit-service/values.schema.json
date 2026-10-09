@@ -227,7 +227,7 @@
       "type": "string",
       "title": "The API_DBAAS_ADDRESS schema",
       "description": "Hostname Dbaas Server.",
-      "pattern": "^https?://[^.:/]+\\.[^.:/]+",
+      "pattern": "^https?://[^.:/]+",
       "default": "http://dbaas-aggregator.dbaas:8080",
       "examples": [
         "http://dbaas-aggregator.dbaas:8080"

@@ -1028,6 +1028,9 @@ func TestSimulation_refusesAnExplicitFieldOutsideItsBounds(t *testing.T) {
 		{"a null token", `"token":null`, "token"},
 		{"empty keys", `"keys":{}`, "keys"},
 		{"null keys", `"keys":null`, "keys"},
+		{"a cost of zero, the name in another case", `"Cost":0`, "cost"},
+		{"an empty token, the name in capitals", `"TOKEN":""`, "token"},
+		{"null keys, the name in another case", `"Keys":null`, "keys"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller,

@@ -243,17 +243,11 @@
           "default": "15m",
           "description": "How long a domain receives no check before RatelimitChecksStopped fires."
         },
-        "configWriteErrorsWindow": {
+        "configWriteFailingFor": {
           "type": "string",
           "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
-          "default": "15m",
-          "description": "The window over which any ConfigMap write error fires RatelimitConfigWriteErrors."
-        },
-        "configWriteErrorsKeepFiring": {
-          "type": "string",
-          "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
-          "default": "30m",
-          "description": "How long RatelimitConfigWriteErrors keeps firing after the last failed write."
+          "default": "5m",
+          "description": "How long the last write of the ConfigMap has failed before RatelimitConfigWriteErrors fires."
         },
         "notEnforcedFor": {
           "type": "string",
@@ -264,8 +258,8 @@
         "reconcileErrorsWindow": {
           "type": "string",
           "pattern": "^[1-9][0-9]*(ms|s|m|h|d|w|y)$",
-          "default": "15m",
-          "description": "The window over which a controller failing every reconcile fires RatelimitOperatorReconcileFailing."
+          "default": "30m",
+          "description": "The window over which a controller failing every reconcile fires RatelimitOperatorReconcileFailing; longer than the controller's longest retry backoff, 1000 seconds."
         },
         "noLeaderFor": {
           "type": "string",

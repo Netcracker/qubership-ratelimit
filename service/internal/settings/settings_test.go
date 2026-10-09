@@ -356,11 +356,56 @@ func TestDecisionOptions_failAtOnceOnARefusedConnection(t *testing.T) {
 
 // A decision without a deadline of its own is bounded by the client.
 func TestDecisionOptions_boundADecisionWithoutADeadline(t *testing.T) {
+	client := goredis.NewUniversalClient(DecisionOptions(silentServer(t), nil))
+	t.Cleanup(func() { _ = client.Close() })
+
+	start := time.Now()
+	err := client.Ping(context.Background()).Err()
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 2*decisionTimeout)
+}
+
+// A decision ends at the check's own deadline, well inside the client's
+// timeouts: the gateway gives up at the filter timeout, and a check it no
+// longer waits for must not hold the store. Without ContextTimeoutEnabled the
+// call ran to the 250 ms read timeout.
+func TestDecisionOptions_endADecisionAtTheChecksDeadline(t *testing.T) {
+	client := goredis.NewUniversalClient(DecisionOptions(silentServer(t), nil))
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.Ping(ctx).Err()
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 150*time.Millisecond)
+}
+
+// A management call ends at its request's deadline, inside the client's 3 s
+// timeouts.
+func TestManagementOptions_endACallAtItsDeadline(t *testing.T) {
+	client := goredis.NewUniversalClient(ManagementOptions(silentServer(t), nil))
+	t.Cleanup(func() { _ = client.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := client.Ping(ctx).Err()
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second)
+}
+
+// silentServer is the address of a server that accepts connections and never
+// answers; closing its listener when the test ends stops it, and the
+// connections it accepted close with the test.
+func silentServer(t *testing.T) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
-	// The server accepts and never answers; closing the listener ends the
-	// loop, and the connections it accepted close with the test.
 	accepted := make(chan net.Conn, 16)
 	t.Cleanup(func() {
 		for {
@@ -385,12 +430,5 @@ func TestDecisionOptions_boundADecisionWithoutADeadline(t *testing.T) {
 			}
 		}
 	}()
-	client := goredis.NewUniversalClient(DecisionOptions(listener.Addr().String(), nil))
-	t.Cleanup(func() { _ = client.Close() })
-
-	start := time.Now()
-	err = client.Ping(context.Background()).Err()
-
-	require.Error(t, err)
-	assert.Less(t, time.Since(start), 2*decisionTimeout)
+	return listener.Addr().String()
 }

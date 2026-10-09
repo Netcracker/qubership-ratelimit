@@ -12,7 +12,9 @@ descheduler evicts one replica at a time, and the next waits until the
 replacement is Ready. It is rendered only when the service runs more than one
 replica: with one, any budget either blocks every drain or allows the gap it
 exists to prevent, and a single-replica profile makes no promise of
-availability.
+availability. A pod that runs and is not Ready serves no check, so the budget
+lets it go: under the default policy a fleet of such pods, one that has not
+received a configuration yet, would block every drain.
 */}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -26,6 +28,7 @@ metadata:
     deployment.netcracker.com/sessionId: '{{ .Values.DEPLOYMENT_SESSION_ID }}'
 spec:
   maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       name: '{{ .Values.SERVICE_NAME }}'

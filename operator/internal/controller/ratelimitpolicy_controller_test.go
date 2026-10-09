@@ -1112,3 +1112,29 @@ func TestJudge_honorsTheConfiguredDeadline(t *testing.T) {
 		})
 	}
 }
+
+// versionedState is a StateReader with no saved state and the given version.
+type versionedState string
+
+func (versionedState) Load(context.Context, []string) (map[string]policy.Bundle, error) {
+	return map[string]policy.Bundle{}, nil
+}
+
+func (s versionedState) OperatorVersion() string { return string(s) }
+
+// compile measures the manifest with the version the writer stamps into it,
+// so at a limit only the unversioned manifest fits the generation is too
+// large, as the writer of the ConfigMap finds it.
+func TestCompile_fitsTheManifestWithTheWritersVersion(t *testing.T) {
+	c, _ := fakeClientWith(t, testPolicy(1))
+	input, err := policy.Load(t.Context(), c, testNamespace)
+	require.NoError(t, err)
+	unversioned, err := policy.Render(policy.Compile(input).State, "")
+	require.NoError(t, err)
+
+	result, err := compile(t.Context(), c, versionedState(strings.Repeat("v", 64)), testNamespace, unversioned.Size)
+
+	require.NoError(t, err)
+	assert.True(t, result.Policies[testRequest().NamespacedName].TooLarge,
+		"Outcome.TooLarge at a limit only the unversioned manifest fits")
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -471,4 +472,46 @@ func TestSave_panicsOnALimitThatIsNotPositive(t *testing.T) {
 	for _, limit := range []int{0, -1} {
 		assert.Panics(t, func() { _ = store.Save(t.Context(), nil, limit) }, "Save with a limit of %d", limit)
 	}
+}
+
+// The writer's fit measures the manifest with the version this Store stamps
+// into it, so at a limit only the unversioned manifest fits, the generation is
+// set back and the write succeeds. Measured without the version, the fit kept
+// the generation and the write was refused as too large.
+func TestReconcile_fitsTheManifestWithTheStoresVersion(t *testing.T) {
+	object := &v1.RateLimitPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: "gateway.public", UID: "u", Generation: 1},
+		Spec:       goodSpec("gateway.public"),
+	}
+	c := fakeClient(t, object)
+	input, err := policy.Load(t.Context(), c, unitNamespace)
+	require.NoError(t, err)
+	unversioned, err := policy.Render(policy.Compile(input).State, "")
+	require.NoError(t, err)
+	store := New(c, unitNamespace, nil, strings.Repeat("v", 64), logr.Discard())
+	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: store, Limit: unversioned.Size}
+
+	_, err = r.Reconcile(t.Context(), reconcileRequest())
+
+	assert.NoError(t, err, "a write at a limit the fit measured with the store's version")
+}
+
+// A reconcile that cannot list the policies writes nothing and is recorded as
+// a failed write with reason read, as one that cannot read the ConfigMap is.
+func TestReconcile_recordsAPolicyListItCannotReadAsAFailedWrite(t *testing.T) {
+	unreachable := errors.New("api server unreachable")
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return unreachable
+		}}).Build()
+	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: New(c, unitNamespace, nil, "v", logr.Discard())}
+	before := testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues(metrics.ConfigErrorRead))
+
+	_, err := r.Reconcile(t.Context(), reconcileRequest())
+
+	assert.ErrorIs(t, err, unreachable)
+	assert.Equal(t, before+1, testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues(metrics.ConfigErrorRead)),
+		`ratelimit_config_write_errors_total{reason="read"}`)
+	assert.InDelta(t, 1, testutil.ToFloat64(metrics.ConfigWriteFailing.WithLabelValues(metrics.ConfigErrorRead)), 0,
+		`ratelimit_config_write_failing{reason="read"}`)
 }

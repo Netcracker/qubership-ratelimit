@@ -373,11 +373,9 @@ the backend's ServiceAccount, never the user. The caller therefore:
 - **Sharding by domain.** The record scope (subject, domain, endpoint) contains the domain, and there are no
   cross-domain commands, so records and tokens carry the same `{ns/domain}` hash tag as the counters: one slot,
   single-slot Lua legal on a cluster, and the independence of records between domains is the physical layout.
-- **The in-memory store is single-replica by definition** (tests and the developer loop, a service started without
-  `--redis-dbaas-microservice`): the chart never renders it, since every replica it installs reads its DBaaS database,
-  and the service warns when it serves the management API over it, so the "the store is shared" assumption is never
-  silent.
-  Bulk still works fully there, since preview and execution are one pod.
+- **The in-memory record store is single-process by definition** and serves tests only. The service always keeps its
+  records in Redis, the same store its counters live in, so the "the store is shared" assumption holds on every
+  replica.
 - **The applicability evaluator** statically evaluates a rule against a partial identity: conditions over the supplied
   values (groups are resolved by compilation), availability of the counting axes (a capture every route of the block
   produces is present; one only some routes produce is decided by `path`), FirstMatch preemption (shadow does not
