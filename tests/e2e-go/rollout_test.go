@@ -39,7 +39,7 @@ var _ = Describe("a same-version rollout", Ordered, Label("rollout"), func() {
 		// draining pod to get wrong. The operator writes the status
 		// throughout, and the assertion on lastCheckTime below is the proof
 		// that it did.
-		fleet = scaleFleet(2)
+		scaleFleet(&fleet, 2)
 
 		Expect(apply(newPolicy(domain, totalLimits(10, 60)))).To(Succeed())
 		applied = true

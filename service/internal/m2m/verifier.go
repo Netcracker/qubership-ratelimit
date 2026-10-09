@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MicahParks/jwkset"
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/netcracker/qubership-core-lib-go/v3/security/oidc"
@@ -127,7 +128,54 @@ func NewVerifier(ctx context.Context, cfg Config) (tokenverifier.Verifier, error
 		jwt.WithIssuer(issuer),
 		jwt.WithAudience(cfg.Audience),
 	)
-	return tokenverifier.NewVerifier(parser, keyFunc, tokenverifier.ValidateIssuedAt)
+	return tokenverifier.NewVerifier(parser, heldKeys{keySource: keyFunc}, tokenverifier.ValidateIssuedAt)
+}
+
+// heldKeys is the key function the verifier looks keys up through. A token
+// whose key id the cached key set does not hold is refused with
+// [jwkset.ErrKeyNotFound] in its chain, whatever ended the lookup: past the
+// first unknown key id in a refresh window the lookup waits on the refresh
+// limiter, and the limiter's error does not wrap [jwkset.ErrKeyNotFound]. The
+// verifier calls KeyfuncCtx alone; the other methods are the wrapped key
+// function's.
+type heldKeys struct {
+	keySource
+}
+
+// keySource names the wrapped key function, so that heldKeys can embed it
+// without a field that shadows its Keyfunc method.
+type keySource = keyfunc.Keyfunc
+
+// KeyfuncCtx implements [keyfunc.Keyfunc]; the verifier looks keys up through it.
+func (k heldKeys) KeyfuncCtx(ctx context.Context) jwt.Keyfunc {
+	lookup := k.keySource.KeyfuncCtx(ctx)
+	return func(token *jwt.Token) (any, error) {
+		key, err := lookup(token)
+		return key, k.unknown(ctx, token, err)
+	}
+}
+
+// unknown adds [jwkset.ErrKeyNotFound] to err when the token names a key id
+// the cached key set does not hold. The set is read from memory; nothing is
+// fetched.
+func (k heldKeys) unknown(ctx context.Context, token *jwt.Token, err error) error {
+	if err == nil || errors.Is(err, jwkset.ErrKeyNotFound) {
+		return err
+	}
+	kid, ok := token.Header[jwkset.HeaderKID].(string)
+	if !ok {
+		return err
+	}
+	held, readErr := k.Storage().KeyReadAll(ctx)
+	if readErr != nil {
+		return err
+	}
+	for _, key := range held {
+		if key.Marshal().KID == kid {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: %w", jwkset.ErrKeyNotFound, err)
 }
 
 // signingMethods are the algorithms a caller's token may be signed with: the

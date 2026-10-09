@@ -138,20 +138,30 @@ func parse(t *testing.T, out []byte) []object {
 // tests assert that a value is refused, and a refusal is helm's exit code.
 // The output is helm's alone; the error also names the command.
 func renderErr(chart, namespace string, extra ...string) ([]byte, error) {
-	platform := []string{"--set", "NAMESPACE=" + namespace, "--set", "TAG=" + imageTag,
+	return helmTemplate(chart, namespace, append(platformParams(namespace), extra...)...)
+}
+
+// platformParams are the parameters the platform sets on every installation
+// in namespace.
+func platformParams(namespace string) []string {
+	return []string{"--set", "NAMESPACE=" + namespace, "--set", "TAG=" + imageTag,
 		"--set", "DEPLOYMENT_SESSION_ID=" + deploymentSession}
-	return helmTemplate(chart, namespace, append(platform, extra...)...)
 }
 
 // helmTemplate is renderErr without the platform parameters renderErr sets,
 // for the tests of what the schemas do with an installation that leaves them
 // out.
 func helmTemplate(chart, namespace string, extra ...string) ([]byte, error) {
-	args := append([]string{"template", "t", chartFile(chart), "-n", namespace,
-		"-f", profileFile(chart, "dev")}, extra...)
-	out, err := exec.Command("helm", args...).CombinedOutput()
+	return helmTemplateArgs(chart, namespace, append([]string{"-f", profileFile(chart, "dev")}, extra...)...)
+}
+
+// helmTemplateArgs runs helm template on the chart in namespace with args and
+// no other values: no resource profile and no platform parameter.
+func helmTemplateArgs(chart, namespace string, args ...string) ([]byte, error) {
+	full := append([]string{"template", "t", chartFile(chart), "-n", namespace}, args...)
+	out, err := exec.Command("helm", full...).CombinedOutput()
 	if err != nil {
-		return out, fmt.Errorf("helm %s: %w\n%s", strings.Join(args, " "), err, out)
+		return out, fmt.Errorf("helm %s: %w\n%s", strings.Join(full, " "), err, out)
 	}
 	return out, nil
 }
@@ -285,9 +295,12 @@ func TestServiceChart_podServesTheContractsPortAndMountsItsConfigMap(t *testing.
 		"the pod starts before the operator has written")
 }
 
-// The data plane holds no credentials: no Role, no RoleBinding, and no
-// token mounted in the pod or offered by its ServiceAccount.
-func TestServiceChart_holdsNoCredentials(t *testing.T) {
+// The data plane reaches no API server object: no Role, no RoleBinding, and
+// no token automounted in the pod or offered by its ServiceAccount. The one
+// token the pod holds is the one the chart mounts for the management API,
+// which TestServiceChart_mountsTheServiceAccountTokenForTheManagementAPIAlone
+// covers.
+func TestServiceChart_reachesNoAPIServerObject(t *testing.T) {
 	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
 		"--set", "management.callers={ui-backend}")
 
@@ -416,6 +429,92 @@ func splitFilters(t *testing.T, objects []object) (filters, rest map[string]stri
 	return filters, rest
 }
 
+// rateLimitFilterOf returns the typed_config of the rate limit HTTP filter an
+// EnvoyFilter inserts, and stops the test where the EnvoyFilter holds no
+// HTTP_FILTER patch or several.
+func rateLimitFilterOf(t *testing.T, filter object) node {
+	t.Helper()
+	var configs []node
+	for _, patch := range filter.at("spec", "configPatches").list() {
+		if patch.at("applyTo").str2() == "HTTP_FILTER" {
+			configs = append(configs, patch.at("patch", "value", "typed_config"))
+		}
+	}
+	require.Len(t, configs, 1, "HTTP_FILTER patches of %s", filter.name())
+	return configs[0]
+}
+
+// Each dial sets its own field of the rate limit filter on both gateways:
+// runtime.enabledPercent the default share of filter_enabled,
+// runtime.enforcedPercent the default share of filter_enforced, and
+// filter.failClosed failure_mode_deny. enabledPercent 0 switches the filter
+// off and enforcedPercent 0 is a dry run, so the two fields are not
+// interchangeable. Without a dial the filter checks and enforces every
+// request and lets traffic through when the service is unreachable; that
+// subtest is the control of each dial's row.
+func TestServiceChart_aDialSetsItsOwnFieldOfTheFilter(t *testing.T) {
+	dials := []struct {
+		dial          string
+		field         []string
+		unset, dialed any
+	}{
+		{"runtime.enabledPercent=0", []string{"filter_enabled", "default_value", "numerator"}, float64(100), float64(0)},
+		{"runtime.enforcedPercent=0", []string{"filter_enforced", "default_value", "numerator"}, float64(100), float64(0)},
+		{"filter.failClosed=true", []string{"failure_mode_deny"}, false, true},
+	}
+	t.Run("without a dial each field holds its default", func(t *testing.T) {
+		filters := ofKind(render(t, serviceChart, "biz"), envoyFilterKind)
+		require.Len(t, filters, 2, "one filter per enabled gateway")
+
+		for _, filter := range filters {
+			for _, c := range dials {
+				assert.Equal(t, c.unset, rateLimitFilterOf(t, filter).at(c.field...).v,
+					"typed_config.%s of %s", strings.Join(c.field, "."), filter.name())
+			}
+		}
+	})
+	for _, c := range dials {
+		t.Run(c.dial, func(t *testing.T) {
+			filters := ofKind(render(t, serviceChart, "biz", "--set", c.dial), envoyFilterKind)
+			require.Len(t, filters, 2, "one filter per enabled gateway")
+
+			for _, filter := range filters {
+				assert.Equal(t, c.dialed, rateLimitFilterOf(t, filter).at(c.field...).v,
+					"typed_config.%s of %s", strings.Join(c.field, "."), filter.name())
+			}
+		})
+	}
+}
+
+// The rate limit filter of each gateway sends its checks to the contract's
+// Service: the gRPC cluster_name and authority of the filter name the Service
+// in NAMESPACE in the baseline, and the one in BASELINE_ORIGIN in a
+// satellite.
+func TestServiceChart_filtersNameTheServiceOfTheContractInTheirGRPCService(t *testing.T) {
+	for _, c := range []struct {
+		name, releaseNamespace string
+		args                   []string
+		serviceNamespace       string
+	}{
+		{"in the baseline the Service in NAMESPACE", "biz", nil, "biz"},
+		{"in a satellite the Service in BASELINE_ORIGIN", "sat", []string{"--set", "BASELINE_ORIGIN=base"}, "base"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			filters := ofKind(render(t, serviceChart, c.releaseNamespace, c.args...), envoyFilterKind)
+			require.Len(t, filters, 2, "one filter per enabled gateway")
+
+			for _, filter := range filters {
+				grpc := rateLimitFilterOf(t, filter).at("rate_limit_service", "grpc_service", "envoy_grpc")
+				assert.Equal(t, fmt.Sprintf("outbound|%d||%s.%s.svc.cluster.local",
+					contract.GRPCPort, contract.ServiceName, c.serviceNamespace), grpc.at("cluster_name").str2(),
+					"cluster_name of %s", filter.name())
+				assert.Equal(t, fmt.Sprintf("%s.%s.svc.cluster.local", contract.ServiceName, c.serviceNamespace),
+					grpc.at("authority").str2(), "authority of %s", filter.name())
+			}
+		})
+	}
+}
+
 // grant is one rule of a Role on one resource: the resourceNames it is
 // narrowed to, nil where it reaches every object of the resource, and its
 // verbs, sorted.
@@ -491,6 +590,27 @@ func TestCharts_refuseABaselineOriginOfTheirOwnNamespace(t *testing.T) {
 	}
 }
 
+// The satellite guard compares BASELINE_ORIGIN with NAMESPACE and not with
+// the release namespace: under a NAMESPACE of its own, a BASELINE_ORIGIN that
+// names the release namespace renders a satellite of it, the service chart's
+// filters alone and nothing from the operator chart.
+func TestCharts_acceptABaselineOriginOfTheReleaseNamespaceUnderAnotherNAMESPACE(t *testing.T) {
+	for _, c := range []struct {
+		chart string
+		kinds []string
+	}{
+		{operatorChart, nil},
+		{serviceChart, []string{envoyFilterKind}},
+	} {
+		t.Run(c.chart, func(t *testing.T) {
+			objects := render(t, c.chart, "release-ns", "--set", "NAMESPACE=biz", "--set", "BASELINE_ORIGIN=release-ns")
+
+			assert.Equal(t, c.kinds, kinds(objects),
+				"kinds rendered in release-ns with NAMESPACE=biz and BASELINE_ORIGIN=release-ns")
+		})
+	}
+}
+
 // Without CLOUD_TOPOLOGIES both Deployments spread their pods the way the
 // platform's other services do: one constraint on CLOUD_TOPOLOGY_KEY, the
 // node by default, selecting the Deployment's own pods.
@@ -537,6 +657,21 @@ func TestCharts_spreadTheirPodsOnceForEachCloudTopology(t *testing.T) {
 	}
 }
 
+// A CLOUD_TOPOLOGIES entry that leaves maxSkew out spreads with a maxSkew of
+// 1, the schema's default for the key.
+func TestCharts_spreadACloudTopologyEntryWithoutMaxSkewByOne(t *testing.T) {
+	for _, chart := range namespaceCharts {
+		t.Run(chart, func(t *testing.T) {
+			deployment := only(t, render(t, chart, "biz",
+				"--set", "CLOUD_TOPOLOGIES[0].topologyKey=topology.kubernetes.io/zone"), "Deployment")
+
+			spread := deployment.at("spec", "template", "spec", "topologySpreadConstraints").list()
+			require.Len(t, spread, 1, "topologySpreadConstraints")
+			assert.EqualValues(t, 1, spread[0].at("maxSkew").v, "maxSkew of the zone entry")
+		})
+	}
+}
+
 // The schemas refuse a whenUnsatisfiable of a CLOUD_TOPOLOGIES entry other
 // than ScheduleAnyway and DoNotSchedule.
 func TestCharts_refuseAnUnknownWhenUnsatisfiable(t *testing.T) {
@@ -553,8 +688,10 @@ func TestCharts_refuseAnUnknownWhenUnsatisfiable(t *testing.T) {
 
 // The management port's AuthorizationPolicy is worth something only in the
 // exact shape it has: DENY on the management port for every principal except
-// the callers. The check reads the structure, so a policy that keeps the same
-// principals under principals, or turns into an ALLOW, fails here.
+// the callers. A <name> caller is the ServiceAccount of that name in
+// NAMESPACE, and a <namespace>/<name> caller the one in its own namespace.
+// The check reads the structure, so a policy that keeps the same principals
+// under principals, or turns into an ALLOW, fails here.
 func TestServiceChart_managementPolicyDeniesAllButTheCallers(t *testing.T) {
 	objects := render(t, serviceChart, "biz", "--set", "management.enabled=true",
 		"--set", "management.callers={ui-backend,platform/ops-backend}")
@@ -572,33 +709,58 @@ func TestServiceChart_managementPolicyDeniesAllButTheCallers(t *testing.T) {
 	require.Len(t, ports, 1, "spec.rules[0].to[0].operation.ports")
 	assert.Contains(t, argsOf(containerOf(t, objects)), "--management-bind-address=:"+ports[0],
 		"the policy covers a port other than the one the management listener binds")
+	source := policySource(t, policy)
+	assert.ElementsMatch(t, []string{"cluster.local/ns/biz/sa/ui-backend", "cluster.local/ns/platform/sa/ops-backend"},
+		strs(source.at("notPrincipals")), "spec.rules[0].from[0].source.notPrincipals")
+	assert.Nil(t, source.at("principals").v, "a principals list turns the exception into the target")
+}
+
+// policySource returns the one source of the one rule of an
+// AuthorizationPolicy, and stops the test where the policy holds another
+// number of rules or of sources.
+func policySource(t *testing.T, policy object) node {
+	t.Helper()
+	rules := policy.at("spec", "rules").list()
+	require.Len(t, rules, 1, "spec.rules")
 	from := rules[0].at("from").list()
 	require.Len(t, from, 1, "spec.rules[0].from")
-	assert.Equal(t, []string{"cluster.local/ns/biz/sa/ui-backend", "cluster.local/ns/platform/sa/ops-backend"},
-		strs(from[0].at("source", "notPrincipals")),
-		"a <name> caller is not in NAMESPACE, or a <namespace>/<name> caller not in its own namespace")
-	assert.Nil(t, from[0].at("source", "principals").v, "a principals list turns the exception into the target")
+	return from[0].at("source")
 }
 
 // An explicit allowedServiceAccounts list replaces the callers as the
-// principals, in the callers' grammar: the callers come through a gateway,
-// whose workload the policy then sees, and a caller in another namespace that
-// reaches the port directly is listed beside it. An entry of another shape is
-// refused rather than rendered as a principal nothing holds.
+// principals, in the callers' grammar. A release sets it when the callers
+// come through a gateway, whose workload the policy then sees, and lists a
+// caller in another namespace that reaches the port directly beside it.
 func TestServiceChart_managementPolicyTakesAnExplicitListOverTheCallers(t *testing.T) {
 	policy := only(t, render(t, serviceChart, "biz", "--set", "management.enabled=true",
 		"--set", "management.callers={ui-backend}",
 		"--set", "management.authorizationPolicy.allowedServiceAccounts={private-gateway-istio,platform/ops-backend}"),
 		"AuthorizationPolicy")
 
-	from := policy.at("spec", "rules").list()[0].at("from").list()
-	assert.Equal(t, []string{"cluster.local/ns/biz/sa/private-gateway-istio", "cluster.local/ns/platform/sa/ops-backend"},
-		strs(from[0].at("source", "notPrincipals")))
+	assert.ElementsMatch(t,
+		[]string{"cluster.local/ns/biz/sa/private-gateway-istio", "cluster.local/ns/platform/sa/ops-backend"},
+		strs(policySource(t, policy).at("notPrincipals")), "spec.rules[0].from[0].source.notPrincipals")
+}
 
-	_, err := renderErr(serviceChart, "biz", "--set", "management.enabled=true",
-		"--set", "management.callers={ui-backend}",
-		"--set", "management.authorizationPolicy.allowedServiceAccounts={a/b/c}")
-	assert.Error(t, err, "the schema accepts an entry that is no ServiceAccount")
+// The schema refuses an entry of management.callers or of
+// management.authorizationPolicy.allowedServiceAccounts that is neither <name>
+// nor <namespace>/<name>, rather than rendering a principal no workload holds.
+func TestServiceChart_refusesAServiceAccountEntryOfAnotherShape(t *testing.T) {
+	for _, c := range []struct {
+		key  string
+		args []string
+	}{
+		{"callers", []string{"--set", "management.callers={a/b/c}"}},
+		{"allowedServiceAccounts", []string{"--set", "management.callers={ui-backend}",
+			"--set", "management.authorizationPolicy.allowedServiceAccounts={a/b/c}"}},
+	} {
+		t.Run(c.key, func(t *testing.T) {
+			out, err := renderErr(serviceChart, "biz", append([]string{"--set", "management.enabled=true"}, c.args...)...)
+
+			require.Error(t, err, "helm template %s", strings.Join(c.args, " "))
+			assert.Contains(t, string(out), c.key, "the refusal names the key it refused")
+		})
+	}
 }
 
 // The dashboard opens on its own release's namespace. Domain names repeat
@@ -763,6 +925,25 @@ func TestCharts_acceptTheOtherChartsValues(t *testing.T) {
 	}
 }
 
+// Rendered with the other chart's values.yaml, a chart still refuses a key
+// that neither chart declares in a block of its own, so the render of
+// TestCharts_acceptTheOtherChartsValues passes with the schema applied. The
+// key goes into a closed block because the root of both schemas stays open.
+func TestCharts_refuseAnUndeclaredKeyOfTheirOwnBlockBesideTheOtherChartsValues(t *testing.T) {
+	for _, c := range []struct{ chart, other, set string }{
+		{operatorChart, serviceChart, "policyAlerts.undeclared=true"},
+		{serviceChart, operatorChart, "alerts.undeclared=true"},
+	} {
+		t.Run(c.chart, func(t *testing.T) {
+			out, err := renderErr(c.chart, "biz", "-f", chartFile(c.other, "values.yaml"), "--set", "MONITORING_ENABLED=true",
+				"--set", c.set)
+
+			require.Error(t, err, "helm template with the values.yaml of %s and %s", c.other, c.set)
+			assert.Contains(t, string(out), "undeclared", "the refusal names the key it refused")
+		})
+	}
+}
+
 // Without the optional platform parameters, the Deployment runs the chart's
 // own image from ghcr.io, carries an empty version label and Helm as its
 // manager, and rolls out keeping every pod until its replacement is Ready.
@@ -857,6 +1038,52 @@ func TestCharts_renderNoAutoscalerWithoutAServiceDeployment(t *testing.T) {
 			assert.NotContains(t, kinds(render(t, c.chart, "biz", c.args...)), "HorizontalPodAutoscaler")
 		})
 	}
+}
+
+// renderErrWithoutAProfile is renderErr for an installation that passes no
+// resource profile and sets the sizes itself, to the dev profile's values.
+// Such an installation can leave out a key that every profile sets, which
+// renderErr cannot: helmTemplate applies the dev profile, and helm hands
+// --set KEY=null to the schema as null when the chart's values.yaml has no
+// KEY.
+func renderErrWithoutAProfile(chart, namespace string, extra ...string) ([]byte, error) {
+	sizes := []string{"--set", "CPU_REQUEST=10m", "--set", "MEMORY_REQUEST=64Mi",
+		"--set", "CPU_LIMIT=500m", "--set", "MEMORY_LIMIT=128Mi"}
+	args := append(append(platformParams(namespace), sizes...), extra...)
+	return helmTemplateArgs(chart, namespace, args...)
+}
+
+// With HPA_ENABLED and no HPA_MIN_REPLICAS, the autoscaler scales down to
+// REPLICAS and no further. Every profile sets HPA_MIN_REPLICAS, so the case
+// is an installation that passes no profile.
+func TestServiceChart_scalesDownToREPLICASWithoutHPAMinReplicas(t *testing.T) {
+	out, err := renderErrWithoutAProfile(serviceChart, "biz", "--set", "REPLICAS=3", "--set", "HPA_ENABLED=true",
+		"--set", "HPA_MAX_REPLICAS=4")
+	require.NoError(t, err, "%s", out)
+
+	spec := only(t, parse(t, out), "HorizontalPodAutoscaler").at("spec")
+	assert.EqualValues(t, 3, spec.at("minReplicas").v, "minReplicas")
+}
+
+// With HPA_ENABLED the render fails without HPA_MAX_REPLICAS, and the failure
+// names it. Every profile sets HPA_MAX_REPLICAS, so the case is an
+// installation that passes no profile.
+func TestServiceChart_refusesTheAutoscalerWithoutHPAMaxReplicas(t *testing.T) {
+	out, err := renderErrWithoutAProfile(serviceChart, "biz", "--set", "REPLICAS=3", "--set", "HPA_ENABLED=true")
+
+	require.Error(t, err, "helm template with HPA_ENABLED=true and no HPA_MAX_REPLICAS")
+	assert.Contains(t, string(out), "HPA_MAX_REPLICAS", "the refusal names the parameter left out")
+}
+
+// Without HPA_ENABLED the render needs no HPA_MAX_REPLICAS: the autoscaler is
+// rendered disabled, with a maxReplicas of 9999 of its own. It is the control
+// of TestServiceChart_refusesTheAutoscalerWithoutHPAMaxReplicas.
+func TestServiceChart_rendersWithoutHPAMaxReplicasWhileHPAEnabledIsOff(t *testing.T) {
+	out, err := renderErrWithoutAProfile(serviceChart, "biz", "--set", "REPLICAS=3")
+	require.NoError(t, err, "%s", out)
+
+	spec := only(t, parse(t, out), "HorizontalPodAutoscaler").at("spec")
+	assert.EqualValues(t, 9999, spec.at("maxReplicas").v, "maxReplicas")
 }
 
 // The operator reads REPLICAS like the service: the HA profiles run a
@@ -973,6 +1200,35 @@ func TestCharts_rollOutByTheStrategyType(t *testing.T) {
 		{"custom_rollout with its parameters", []string{"--set", "DEPLOYMENT_STRATEGY_TYPE=custom_rollout",
 			"--set", "DEPLOYMENT_STRATEGY_MAXSURGE=2", "--set-string", "DEPLOYMENT_STRATEGY_MAXUNAVAILABLE=50%"},
 			`{"type": "RollingUpdate", "rollingUpdate": {"maxSurge": 2, "maxUnavailable": "50%"}}`},
+	}
+	for _, chart := range namespaceCharts {
+		t.Run(chart, func(t *testing.T) {
+			for _, c := range cases {
+				t.Run(c.name, func(t *testing.T) {
+					strategy := only(t, render(t, chart, "biz", c.args...), "Deployment").at("spec", "strategy")
+
+					assert.JSONEq(t, c.want, jsonOf(t, strategy.v), "spec.strategy")
+				})
+			}
+		})
+	}
+}
+
+// custom_rollout reads DEPLOYMENT_STRATEGY_MAXSURGE and
+// DEPLOYMENT_STRATEGY_MAXUNAVAILABLE each on its own: with one of them set,
+// the other is 25%.
+func TestCharts_rollOutCustomWithTheUnsetParameterAt25Percent(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"DEPLOYMENT_STRATEGY_MAXSURGE alone", []string{"--set", "DEPLOYMENT_STRATEGY_TYPE=custom_rollout",
+			"--set", "DEPLOYMENT_STRATEGY_MAXSURGE=2"},
+			`{"type": "RollingUpdate", "rollingUpdate": {"maxSurge": 2, "maxUnavailable": "25%"}}`},
+		{"DEPLOYMENT_STRATEGY_MAXUNAVAILABLE alone", []string{"--set", "DEPLOYMENT_STRATEGY_TYPE=custom_rollout",
+			"--set-string", "DEPLOYMENT_STRATEGY_MAXUNAVAILABLE=50%"},
+			`{"type": "RollingUpdate", "rollingUpdate": {"maxSurge": "25%", "maxUnavailable": "50%"}}`},
 	}
 	for _, chart := range namespaceCharts {
 		t.Run(chart, func(t *testing.T) {

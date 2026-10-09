@@ -247,6 +247,18 @@ func TestDecide_namesTheExtractedKeys(t *testing.T) {
 	}
 }
 
+// An explicit key the policy does not declare is the caller's own name, not an
+// identity key, so the names list the declared sub alone.
+func TestDecide_namesOnlyTheDeclaredKeysAmongTheExtractedOnes(t *testing.T) {
+	req := orderRequest(t, "alice")
+	req.Keys = map[string][]string{"own": {"x"}}
+
+	d := decide(t, newEngine(t), req)
+	if got, want := d.ExtractedKeys, []string{model.KeySub}; !slices.Equal(got, want) {
+		t.Errorf("Decide(token of alice, keys own=x).ExtractedKeys = %q, want %q", got, want)
+	}
+}
+
 // everyone has a minute window of 100 and a day window of 10000, and its
 // outcome carries the numbers of the minute window, its own strictest.
 func TestRuleOutcomeCarriesTheNumbersOfItsOwnStrictestBucket(t *testing.T) {
@@ -426,6 +438,34 @@ func TestShadowReportsWithoutVetoing(t *testing.T) {
 	}
 }
 
+// The headers come from the strictest applied enforcing rule. A shadow rule
+// never contributes to the verdict, so a request that applies shadow rules
+// alone carries no headers, and the same rule enforcing names itself in them.
+func TestHeaders_comeFromAnEnforcingRuleOnly(t *testing.T) {
+	decideUnder := func(t *testing.T, behavior model.Behavior) engine.Decision {
+		t.Helper()
+		e := engineFor(t, model.Policy{Domain: domain, Blocks: []model.Block{{Name: "b", Rules: []model.Rule{{
+			Name: "trial", Behavior: behavior, Rates: []model.Rate{{Requests: 10, Period: time.Minute}}}}}}})
+		return decide(t, e, engine.Request{Path: "/x", Method: "GET"})
+	}
+
+	t.Run("a shadow rule alone", func(t *testing.T) {
+		d := decideUnder(t, model.BehaviorShadow)
+		if got, want := appliedRules(d), []string{"b/trial"}; !slices.Equal(got, want) {
+			t.Fatalf("precondition: Decide applied %q, want %q", got, want)
+		}
+		if d.Headers != nil {
+			t.Errorf("Decide under the shadow rule b/trial alone: headers %+v, want none", *d.Headers)
+		}
+	})
+	t.Run("the same rule enforcing", func(t *testing.T) {
+		h := headersOf(t, decideUnder(t, model.BehaviorEnforce))
+		if got, want := windowOf(h), (window{Block: "b", Rule: "trial", Limit: 10, PeriodSeconds: 60}); got != want {
+			t.Errorf("Decide under the enforcing rule b/trial: headers report %+v, want %+v", got, want)
+		}
+	})
+}
+
 func TestHeaders_aRefusalNamesTheRefusingWindowWithARetryHint(t *testing.T) {
 	e := newEngine(t)
 	for i := range 100 {
@@ -482,6 +522,73 @@ func TestDecide_refusesACostThatNeverFitsWithoutARetryHint(t *testing.T) {
 	}
 }
 
+// itemsAndCalls is a domain of two blocks over /api/items: items reads the
+// cost from limit and counts 1000 items an hour, and calls reads no cost and
+// counts calls requests an hour.
+func itemsAndCalls(calls int64) model.Policy {
+	route := model.Route{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"}}
+	costRoute := route
+	costRoute.Cost = &model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 20}
+	return model.Policy{Domain: domain, Blocks: []model.Block{
+		{Name: "items", Target: model.Target{Routes: []model.Route{costRoute}},
+			Rules: []model.Rule{{Name: "per-hour", Rates: []model.Rate{{Requests: 1000, Period: time.Hour}}}}},
+		{Name: "calls", Target: model.Target{Routes: []model.Route{route}},
+			Rules: []model.Rule{{Name: "per-hour", Rates: []model.Rate{{Requests: calls, Period: time.Hour}}}}},
+	}}
+}
+
+// The cost a route reads replaces the request's own cost in its block: a
+// request of cost 5 with limit=100 charges items 100 and calls 5, and each
+// outcome reports the cost its windows were charged.
+func TestDecide_chargesTheCostARouteReads(t *testing.T) {
+	d := decide(t, engineFor(t, itemsAndCalls(30)),
+		engine.Request{Path: "/api/items?limit=100", Method: "GET", Cost: 5})
+
+	items := outcomeOf(t, d, "items", "per-hour")
+	if items.Cost != 100 || items.Remaining != 900 {
+		t.Errorf("items after limit=100 at request cost 5: cost %d, remaining %d; want 100, 900",
+			items.Cost, items.Remaining)
+	}
+	calls := outcomeOf(t, d, "calls", "per-hour")
+	if calls.Cost != 5 || calls.Remaining != 25 {
+		t.Errorf("calls after limit=100 at request cost 5: cost %d, remaining %d; want 5, 25",
+			calls.Cost, calls.Remaining)
+	}
+}
+
+// On an admission the headers come from the window with the fewest further
+// requests at the cost it was charged, compared exactly. After limit=100,
+// items has 900 left, nine more such requests, and binds before the 29 of
+// calls; after limit=10, items has 990 left, 99 more, and calls binds. With
+// calls at 31 an hour and a request cost of 3, calls has 28 left, 9.33 more,
+// and items binds with its 9: both round down to nine, where the tie would
+// go to calls, the smaller key.
+func TestHeaders_comeFromTheWindowWithTheFewestRequestsLeftAtItsCost(t *testing.T) {
+	cases := []struct {
+		name  string
+		calls int64
+		cost  int64
+		query string
+		want  window
+	}{
+		{"limit=100", 30, 1, "limit=100", window{Block: "items", Rule: "per-hour", Limit: 1000, PeriodSeconds: 3600}},
+		{"limit=10", 30, 1, "limit=10", window{Block: "calls", Rule: "per-hour", Limit: 30, PeriodSeconds: 3600}},
+		{"ratios that round down alike", 31, 3, "limit=100",
+			window{Block: "items", Rule: "per-hour", Limit: 1000, PeriodSeconds: 3600}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := decide(t, engineFor(t, itemsAndCalls(tc.calls)),
+				engine.Request{Path: "/api/items?" + tc.query, Method: "GET", Cost: tc.cost})
+
+			if got := windowOf(headersOf(t, d)); got != tc.want {
+				t.Errorf("Decide(/api/items?%s at cost %d, calls %d an hour) headers report %+v, want %+v",
+					tc.query, tc.cost, tc.calls, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExplicitKeysOverrideTheToken(t *testing.T) {
 	req := orderRequest(t, "alice")
 	req.Keys = map[string][]string{model.KeySub: {"t1"}}
@@ -489,6 +596,30 @@ func TestExplicitKeysOverrideTheToken(t *testing.T) {
 	d := decide(t, newEngine(t), req)
 	if got, want := appliedRules(d), []string{"cascade/everyone", "cascade/trial", "total/all"}; !slices.Equal(got, want) {
 		t.Errorf("Decide(token of alice, keys sub=t1) applied %q, want %q", got, want)
+	}
+}
+
+// Explicit keys override the token per key, so a key they leave absent keeps
+// the token's value: the explicit tenant globex replaces the token's acme, and
+// the token's sub alice still applies the rule that names her.
+func TestExplicitKeysLeaveTheTokensOtherKeysInPlace(t *testing.T) {
+	e := engineFor(t, model.Policy{
+		Domain:   domain,
+		Mappings: []model.KeyMapping{{Key: "tenant", Claim: "org_id"}},
+		Blocks: []model.Block{{Name: "b", Rules: []model.Rule{
+			{Name: "alice", Matches: []model.Predicate{{Key: model.KeySub, Operator: model.OperatorEquals, Value: "alice"}},
+				Rates: []model.Rate{{Requests: 100, Period: time.Minute}}},
+			{Name: "globex", Matches: []model.Predicate{{Key: "tenant", Operator: model.OperatorEquals, Value: "globex"}},
+				Rates: []model.Rate{{Requests: 100, Period: time.Minute}}},
+		}}},
+	})
+	req := engine.Request{Path: "/x", Method: "GET",
+		Token: claimsToken(t, map[string]any{"sub": "alice", "org_id": "acme"}),
+		Keys:  map[string][]string{"tenant": {"globex"}}}
+
+	d := decide(t, e, req)
+	if got, want := appliedRules(d), []string{"b/alice", "b/globex"}; !slices.Equal(got, want) {
+		t.Errorf("Decide(token of alice and acme, keys tenant=globex) applied %q, want %q", got, want)
 	}
 }
 
@@ -652,6 +783,36 @@ func TestTokenCacheDisabledStillExtracts(t *testing.T) {
 	}
 }
 
+// A capacity of zero or below disables the token cache, so the same token
+// twice is never served from it, while a capacity of one already caches it.
+// Either way the decision reads the token's identity.
+func TestWithTokenCache_disablesTheCacheAtACapacityOfZeroOrBelow(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		capacity int
+		hits     uint64
+	}{
+		{"a capacity of one", 1, 1},
+		{"a capacity of zero", 0, 0},
+		{"a negative capacity", -1, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stats := &engine.CacheStats{}
+			e := cacheProbe(t, engine.WithTokenCache(c.capacity), engine.WithCacheStats(stats))
+			req := engine.Request{Path: "/x", Method: "GET", Token: token(t, "alice")}
+
+			decide(t, e, req)
+			d := decide(t, e, req)
+			if got := stats.Hits(); got != c.hits {
+				t.Errorf("WithTokenCache(%d), the same token twice: %d cache hits, want %d", c.capacity, got, c.hits)
+			}
+			if got, want := appliedRules(d), []string{"b/alice-only"}; !slices.Equal(got, want) {
+				t.Errorf("WithTokenCache(%d), the second request of alice applied %q, want %q", c.capacity, got, want)
+			}
+		})
+	}
+}
+
 // probeClient is a client of cacheProbe with the rules its token applies.
 type probeClient struct {
 	sub, token string
@@ -787,6 +948,29 @@ func TestCacheStatsCountEligibleLookups(t *testing.T) {
 	}
 }
 
+// One CacheStats value outlives the engines it counts for: an engine built
+// over a new snapshot adds to the counts of the one it replaced. Each engine
+// pays one miss for alice's token and serves her second request from its own
+// cache.
+func TestCacheStats_keepCountingAcrossTheEnginesThatShareThem(t *testing.T) {
+	stats := &engine.CacheStats{}
+	req := engine.Request{Path: "/x", Method: "GET", Token: token(t, "alice")}
+	first := cacheProbe(t, engine.WithCacheStats(stats))
+	decide(t, first, req)
+	decide(t, first, req)
+
+	second := cacheProbe(t, engine.WithCacheStats(stats))
+	decide(t, second, req)
+	decide(t, second, req)
+
+	if got := stats.Hits(); got != 2 {
+		t.Errorf("alice twice on each of two engines: %d hits, want 2", got)
+	}
+	if got := stats.Misses(); got != 2 {
+		t.Errorf("alice twice on each of two engines: %d misses, want 2", got)
+	}
+}
+
 // Peek reports the remaining of alice's strictest window as it stands: the
 // minute window of 100 holds 100 before anything is charged.
 func TestPeek_chargesNothing(t *testing.T) {
@@ -893,6 +1077,31 @@ func TestHeaders_twoCapacityExceededWindowsTieBreakByKey(t *testing.T) {
 		if h.RetryAfter >= 0 {
 			t.Errorf("attempt %d: headers retry after %s, want negative", attempt+1, h.RetryAfter)
 		}
+	}
+}
+
+// An admission that leaves two windows with equal remaining ranks them by
+// bucket key, as a refusal does: the headers name the window with the smaller
+// key, which declaration order would not pick.
+func TestHeaders_twoWindowsWithEqualRemainingTieBreakByKey(t *testing.T) {
+	e := engineFor(t, model.Policy{Domain: domain, Blocks: []model.Block{{
+		Name: "b",
+		Rules: []model.Rule{
+			// First in the snapshot, and the larger key.
+			{Name: "zzz", Rates: []model.Rate{{Requests: 10, Period: time.Minute}}},
+			{Name: "aaa", Rates: []model.Rate{{Requests: 10, Period: time.Hour}}},
+		},
+	}}})
+
+	d := decide(t, e, engine.Request{Path: "/any", Method: "GET"})
+	zzz, aaa := outcomeOf(t, d, "b", "zzz"), outcomeOf(t, d, "b", "aaa")
+	if !d.Allowed || zzz.Remaining != 9 || aaa.Remaining != 9 {
+		t.Fatalf("precondition: allowed %t, remaining of zzz %d and of aaa %d; want an admission leaving 9 in each",
+			d.Allowed, zzz.Remaining, aaa.Remaining)
+	}
+	want := window{Block: "b", Rule: "aaa", Limit: 10, PeriodSeconds: 3600}
+	if got := windowOf(headersOf(t, d)); got != want {
+		t.Errorf("headers report %+v, want %+v, the smaller key", got, want)
 	}
 }
 

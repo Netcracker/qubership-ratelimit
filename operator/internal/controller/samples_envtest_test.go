@@ -108,5 +108,6 @@ var _ = Describe("the samples in config/samples", func() {
 		},
 		Entry("the public sample", "ratelimit_v1_ratelimitpolicy_public.yaml"),
 		Entry("the tiered sample", "ratelimit_v1_ratelimitpolicy_tiered.yaml"),
+		Entry("the private sample", "ratelimit_v1_ratelimitpolicy_private.yaml"),
 	)
 })

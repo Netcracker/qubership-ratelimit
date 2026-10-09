@@ -25,8 +25,10 @@ linters:
     - unused
   settings:
     # The service is the data plane and holds no Kubernetes client: its pod
-    # carries no Role and no token, so a package under service/ that imported
-    # one would be a design breach the compiler cannot see. The rule covers
+    # carries no Role, and its token reaches the API server only for the OIDC
+    # discovery and the keys that verify a management API caller. A package
+    # under service/ that imported a client would be a design breach the
+    # compiler cannot see. The rule covers
     # what the files under service/ import; the build-information check in CI
     # covers what they import transitively.
     depguard:

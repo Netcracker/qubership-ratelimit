@@ -48,7 +48,9 @@ type SimulationRequest struct {
 	// Keys are pre-extracted identity values, the direct-consumer form.
 	Keys map[string][]string `json:"keys,omitempty"`
 
-	// Cost judges every window at this cost; the simulation charges nothing.
+	// Cost is the request's own cost: the windows of a block are judged at it
+	// unless the block's matched route reads a cost from the query string of
+	// Path. The simulation charges nothing.
 	Cost int64 `json:"cost,omitempty"`
 }
 
@@ -119,6 +121,10 @@ type RuleOutcomeView struct {
 
 	Limit     int64 `json:"limit"`
 	Remaining int64 `json:"remaining"`
+
+	// Cost is what every window of the rule was judged at, in the units Limit
+	// and Remaining count.
+	Cost int64 `json:"cost"`
 
 	// RefusalReason is mandatory on a refusal, and RetryAfterSeconds is present
 	// exactly when it is rate_limited: no waiting cures capacity_exceeded, so
@@ -283,6 +289,7 @@ func ruleOutcomeView(outcome engine.RuleOutcome) RuleOutcomeView {
 		PeriodSeconds: outcome.PeriodSeconds,
 		Limit:         outcome.Limit,
 		Remaining:     outcome.Remaining,
+		Cost:          outcome.Cost,
 	}
 	if outcome.Allowed {
 		return view

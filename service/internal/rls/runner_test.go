@@ -17,7 +17,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
+	counters "github.com/netcracker/qubership-ratelimit/engine/store"
 	"github.com/netcracker/qubership-ratelimit/engine/store/memory"
 )
 
@@ -80,6 +82,7 @@ func TestRunner_isNotServingBeforeStart(t *testing.T) {
 	runner := &Runner{Addr: freeAddr(t), Server: server, Log: logr.Discard()}
 
 	assert.False(t, runner.Serving())
+	assert.Error(t, runner.Healthz(nil), "Healthz before Start")
 }
 
 // A started runner reports itself ready and returns a verdict for a check over
@@ -142,4 +145,71 @@ func TestRunner_refusesACheckOverTheMessageSizeLimit(t *testing.T) {
 
 	_, err = client.ShouldRateLimit(callCtx, request("gateway.public", map[string]string{"path": "/api/v1/orders"}))
 	assert.NoError(t, err, "a check of ordinary size")
+}
+
+// A check of exactly 128 KiB (131072 bytes), the size docs/limits.md allows,
+// is served. TestRunner_refusesACheckOverTheMessageSizeLimit refuses a larger
+// one.
+func TestRunner_servesACheckOfExactlyTheMessageSizeLimit(t *testing.T) {
+	server, _ := newServerOver(ruleSetOver(t, "gateway.public", nil, memory.New()))
+	runner, _ := startRunner(t, server, time.Second)
+	client := dialRunner(t, runner)
+	atTheLimit := request("gateway.public", map[string]string{"path": "/" + strings.Repeat("a", 131037)})
+	require.Equal(t, 131072, proto.Size(atTheLimit), "the encoded size of the check")
+	callCtx, callCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer callCancel()
+
+	_, err := client.ShouldRateLimit(callCtx, atTheLimit)
+
+	assert.NoError(t, err, "a check of 131072 bytes")
+}
+
+// heldCounters is a counter store that holds a decision in flight: Decide
+// signals entered, and returns once the call's context ends.
+type heldCounters struct {
+	entered chan struct{}
+}
+
+func (h heldCounters) Decide(ctx context.Context, _ []counters.Bucket) ([]counters.Verdict, error) {
+	select {
+	case h.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (heldCounters) Peek(context.Context, []counters.Bucket) ([]counters.Verdict, error) {
+	return nil, errors.New("heldCounters serves Decide alone")
+}
+
+func (heldCounters) Reset(context.Context, []string) error {
+	return errors.New("heldCounters serves Decide alone")
+}
+
+// A check in flight when the context ends holds up the drain for
+// DrainTimeout at most: Start then closes the connections and returns. Only
+// the end of the check's context releases it from the store, so the drain
+// alone never completes.
+func TestRunner_endsTheDrainAtTheDrainTimeout(t *testing.T) {
+	held := heldCounters{entered: make(chan struct{}, 1)}
+	p := domainWidePolicy(1, time.Hour)
+	server, _ := newServerOver(ruleSetOver(t, "gateway.public", &p, held))
+	runner, stop := startRunner(t, server, 200*time.Millisecond)
+	client := dialRunner(t, runner)
+	go func() {
+		_, _ = client.ShouldRateLimit(context.Background(),
+			request("gateway.public", map[string]string{"path": "/api"}))
+	}()
+	select {
+	case <-held.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waited 5s for the check to reach the counter store")
+	}
+	started := time.Now()
+
+	err := stop()
+
+	require.NoError(t, err, "Runner.Start with a check in flight past the drain timeout")
+	assert.GreaterOrEqual(t, time.Since(started), 200*time.Millisecond, "the time Start spent draining")
 }

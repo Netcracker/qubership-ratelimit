@@ -211,6 +211,24 @@ func wholeDomainBlocks() []model.Block {
 	}}
 }
 
+// itemBlocks counts items, not calls: the route over /api/items reads the cost
+// of a request from limit, 20 when the request carries none, and per-client
+// holds 1000 items an hour for each client.
+func itemBlocks() []model.Block {
+	return []model.Block{{
+		Name: "items",
+		Target: model.Target{Routes: []model.Route{{
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"},
+			Cost: &model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 20},
+		}}},
+		Rules: []model.Rule{{
+			Name:     "per-client",
+			Counters: []string{model.KeySub},
+			Rates:    []model.Rate{{Requests: 1000, Period: time.Hour}},
+		}},
+	}}
+}
+
 // testPolicy is the singleton of the domain: the blocks under test plus the
 // identity keys the fixtures read, a scalar plan, lowercased, and an
 // array-valued roles. The mappings and the blocks are one object and compile
@@ -326,9 +344,9 @@ func (h *testAPI) call(t *testing.T, method, target string, caller string, body 
 // not produce, such as a value followed by trailing data.
 type rawJSON string
 
-// callWith runs one request, letting the caller shape the headers, such as an
-// Idempotency-Key or another subject's token, before it goes out. A body other
-// than a rawJSON is sent as its JSON encoding.
+// callWith runs one request as caller, letting the test shape the headers, such
+// as an Idempotency-Key or a request id, before it goes out. A body other than a
+// rawJSON is sent as its JSON encoding.
 func (h *testAPI) callWith(
 	t *testing.T,
 	method, target string,

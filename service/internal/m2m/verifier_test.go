@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MicahParks/jwkset"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,9 +63,17 @@ func (c *cluster) podToken() (string, error) {
 		SignedString(jwt.UnsafeAllowNoneSignatureType)
 }
 
-// token signs claims over a ServiceAccount token's defaults with key under kid;
-// a claim overridden with nil is left out.
+// token signs claims over a ServiceAccount token's defaults with key under kid,
+// with RS256 as the API server does; a claim overridden with nil is left out.
 func (c *cluster) token(t *testing.T, key *rsa.PrivateKey, kid string, override jwt.MapClaims) string {
+	t.Helper()
+	return c.signed(t, jwt.SigningMethodRS256, key, kid, override)
+}
+
+// signed signs claims over a ServiceAccount token's defaults with method and
+// key under kid; a claim overridden with nil is left out.
+func (c *cluster) signed(t *testing.T, method jwt.SigningMethod, key any, kid string,
+	override jwt.MapClaims) string {
 	t.Helper()
 	now := time.Now()
 	claims := jwt.MapClaims{
@@ -79,28 +88,51 @@ func (c *cluster) token(t *testing.T, key *rsa.PrivateKey, kid string, override 
 		}
 		claims[name] = value
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token := jwt.NewWithClaims(method, claims)
 	token.Header["kid"] = kid
 	signed, err := token.SignedString(key)
 	require.NoError(t, err)
 	return signed
 }
 
-// The verifier checks a token as the platform's Kubernetes verifier does:
-// signature, issuer, audience, and expiry, each refused with the jwt sentinel
-// the management API maps onto its 401 detail.
-func TestNewVerifier_checksATokenAsThePlatformDoes(t *testing.T) {
+// A token of the cluster passes every check of the platform's Kubernetes
+// verifier, and its expiry is read with the platform's 30 s of leeway. It is
+// the control of TestNewVerifier_refusesATokenThatFailsOneCheck, whose rows
+// each differ from these in one claim or in the signature.
+func TestNewVerifier_acceptsATokenOfTheCluster(t *testing.T) {
 	c := newCluster(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
 	require.NoError(t, err)
 
-	verified, err := verifier.Verify(ctx, c.token(t, c.key, "cluster", nil))
+	for _, tc := range []struct {
+		name  string
+		token string
+	}{
+		{"the API server's defaults", c.token(t, c.key, "cluster", nil)},
+		{"expired inside the leeway", c.token(t, c.key, "cluster",
+			jwt.MapClaims{"exp": time.Now().Add(-15 * time.Second).Unix()})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verified, err := verifier.Verify(ctx, tc.token)
+			require.NoError(t, err, "Verify of a token the cluster signed")
+			subject, err := verified.Claims.GetSubject()
+			require.NoError(t, err, "the sub claim of the verified token")
+			assert.Equal(t, "system:serviceaccount:biz:ui-backend", subject, "the sub claim of the verified token")
+		})
+	}
+}
+
+// A token that fails one check of the platform's Kubernetes verifier, the
+// signature, the issuer, the audience, or the expiry, is refused with the
+// sentinel the management API maps onto its 401 detail.
+func TestNewVerifier_refusesATokenThatFailsOneCheck(t *testing.T) {
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
 	require.NoError(t, err)
-	subject, err := verified.Claims.GetSubject()
-	require.NoError(t, err)
-	assert.Equal(t, "system:serviceaccount:biz:ui-backend", subject)
 
 	stranger, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
@@ -111,14 +143,20 @@ func TestNewVerifier_checksATokenAsThePlatformDoes(t *testing.T) {
 	}{
 		{"expired", c.token(t, c.key, "cluster", jwt.MapClaims{"exp": time.Now().Add(-time.Hour).Unix()}),
 			jwt.ErrTokenExpired},
+		{"expired past the leeway", c.token(t, c.key, "cluster",
+			jwt.MapClaims{"exp": time.Now().Add(-45 * time.Second).Unix()}), jwt.ErrTokenExpired},
 		{"another audience", c.token(t, c.key, "cluster", jwt.MapClaims{"aud": []string{"other"}}),
 			jwt.ErrTokenInvalidAudience},
 		{"another issuer", c.token(t, c.key, "cluster", jwt.MapClaims{"iss": "https://idp.example"}),
 			jwt.ErrTokenInvalidIssuer},
 		{"another key under the cluster's key id", c.token(t, stranger, "cluster", nil), jwt.ErrTokenSignatureInvalid},
-		{"an unknown key id", c.token(t, stranger, "idp", nil), jwt.ErrTokenUnverifiable},
+		{"an unknown key id", c.token(t, stranger, "idp", nil), jwkset.ErrKeyNotFound},
 		{"no expiry", c.token(t, c.key, "cluster", jwt.MapClaims{"exp": nil}), jwt.ErrTokenRequiredClaimMissing},
-		{"an HMAC signature under the cluster's key id", hmacToken(t, c), jwt.ErrTokenSignatureInvalid},
+		// HS256 is an algorithm no API server signs with, refused before a
+		// key is looked up.
+		{"an HMAC signature under the cluster's key id",
+			c.signed(t, jwt.SigningMethodHS256, []byte("a shared secret"), "cluster", nil),
+			jwt.ErrTokenSignatureInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := verifier.Verify(ctx, tc.token)
@@ -127,37 +165,32 @@ func TestNewVerifier_checksATokenAsThePlatformDoes(t *testing.T) {
 	}
 }
 
-// hmacToken is a token of the cluster's issuer and audience signed with HS256
-// under the cluster's key id: an algorithm no API server signs with, which the
-// verifier refuses before it looks a key up.
-func hmacToken(t *testing.T, c *cluster) string {
-	t.Helper()
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"iss": c.server.URL, "aud": []string{audience}, "sub": "system:serviceaccount:biz:ui-backend",
-		"iat": time.Now().Unix(), "exp": time.Now().Add(10 * time.Minute).Unix(),
-	})
-	token.Header["kid"] = "cluster"
-	signed, err := token.SignedString([]byte("a shared secret"))
-	require.NoError(t, err)
-	return signed
-}
-
 // The discovery is read with the pod's own token as the bearer, which the API
 // server requires of it, and without one on GKE, which requires the opposite.
-func TestNewVerifier_readsTheDiscoveryWithThePodsToken(t *testing.T) {
-	c := newCluster(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	own, err := c.podToken()
-	require.NoError(t, err)
+func TestNewVerifier_readsTheDiscoveryWithThePodsTokenUnlessAnonymous(t *testing.T) {
+	t.Run("the pod's token by default", func(t *testing.T) {
+		c := newCluster(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		own, err := c.podToken()
+		require.NoError(t, err)
 
-	_, err = NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
-	require.NoError(t, err)
-	assert.Equal(t, "Bearer "+own, c.podAuth.Load())
+		_, err = NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
 
-	_, err = NewVerifier(ctx, Config{Audience: audience, Token: c.podToken, Anonymous: true})
-	require.NoError(t, err)
-	assert.Equal(t, "", c.podAuth.Load())
+		require.NoError(t, err)
+		assert.Equal(t, "Bearer "+own, c.podAuth.Load(), "Authorization of the discovery request")
+	})
+
+	t.Run("no token when Anonymous is set", func(t *testing.T) {
+		c := newCluster(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+
+		_, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken, Anonymous: true})
+
+		require.NoError(t, err)
+		assert.Equal(t, "", c.podAuth.Load(), "Authorization of the discovery request")
+	})
 }
 
 // A discovery that accepts the connection and never answers is given up after
@@ -178,13 +211,20 @@ func TestNewVerifier_givesUpOnADiscoveryThatDoesNotAnswer(t *testing.T) {
 			SignedString(jwt.UnsafeAllowNoneSignatureType)
 	}
 
-	start := time.Now()
-	_, err := NewVerifier(context.Background(),
-		Config{Audience: audience, Token: podToken, Timeout: 100 * time.Millisecond})
+	built := make(chan error, 1)
+	go func() {
+		_, err := NewVerifier(context.Background(),
+			Config{Audience: audience, Token: podToken, Timeout: 100 * time.Millisecond})
+		built <- err
+	}()
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "OIDC discovery")
-	assert.Less(t, time.Since(start), 5*time.Second, "the discovery was waited on past its timeout")
+	select {
+	case err := <-built:
+		assert.ErrorIs(t, err, context.DeadlineExceeded, "NewVerifier with a 100ms timeout")
+		assert.ErrorContains(t, err, "OIDC discovery", "NewVerifier with a 100ms timeout")
+	case <-time.After(5 * time.Second):
+		t.Fatal("NewVerifier with a 100ms timeout was still waiting on the discovery after 5s")
+	}
 }
 
 // A pod token without an issuer names no discovery to read.
@@ -197,30 +237,59 @@ func TestNewVerifier_refusesAPodTokenWithoutAnIssuer(t *testing.T) {
 	assert.ErrorContains(t, err, "carries no issuer")
 }
 
-// A key set that does not answer fails the construction, so the caller keeps
-// retrying and answers 503 meanwhile, rather than holding a verifier without
-// keys that refuses every token with 401.
-func TestNewVerifier_failsWhenTheKeySetDoesNotAnswer(t *testing.T) {
+// A key set that cannot be fetched, here one the API server answers with 503,
+// fails the construction, so the caller keeps retrying and answers 503
+// meanwhile, rather than holding a verifier without keys that refuses every
+// token with 401.
+func TestNewVerifier_failsWhenTheKeySetCannotBeFetched(t *testing.T) {
 	c := newCluster(t)
 	c.keysOut.Store(true)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
 	_, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken, Timeout: time.Second})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "fetch the key set")
+
+	assert.ErrorContains(t, err, "fetch the key set", "NewVerifier with the key set answering 503")
 }
 
 // A token signed with a key the key set does not hold, such as the identity
 // provider's, is refused without waiting out the refresh limiter: the first
 // one refreshes the key set, and the next ones in the same window are refused
-// within unknownKeyWait.
+// at once.
 func TestNewVerifier_refusesAnUnknownKeyWithoutWaitingForTheRefresh(t *testing.T) {
-	// A window short enough that the limiter's next refresh is within the
-	// one minute it would otherwise wait for it.
-	window := unknownKeyRefresh
-	unknownKeyRefresh = 3 * time.Second
-	t.Cleanup(func() { unknownKeyRefresh = window })
+	// A 3 s window puts the limiter's next refresh well inside the minute
+	// keyfunc waits for it by default, so a verifier that does not bound the
+	// wait itself refuses the second token only after about 3 s.
+	window := 3 * time.Second
+	previous := unknownKeyRefresh
+	unknownKeyRefresh = window
+	t.Cleanup(func() { unknownKeyRefresh = previous })
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+	stranger, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	token := c.token(t, stranger, "idp", nil)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		start := time.Now()
+		_, err := verifier.Verify(ctx, token)
+		elapsed := time.Since(start)
+
+		assert.ErrorIs(t, err, jwt.ErrTokenUnverifiable, "Verify under an unknown key id, attempt %d", attempt)
+		assert.Less(t, elapsed, window/2, "Verify under an unknown key id, attempt %d", attempt)
+	}
+}
+
+// Every token under a key id the key set does not hold, signed with an
+// algorithm the verifier accepts, is refused as such, the second one in a
+// refresh window too; the management API names the unknown key in its 401
+// detail on jwkset.ErrKeyNotFound. The second token used to get the refresh
+// limiter's error instead, and its caller was told that the signature could not
+// be verified.
+func TestNewVerifier_refusesEveryUnknownKeyAsAKeyTheClusterDoesNotHold(t *testing.T) {
 	c := newCluster(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -229,20 +298,44 @@ func TestNewVerifier_refusesAnUnknownKeyWithoutWaitingForTheRefresh(t *testing.T
 	stranger, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
-	for range 3 {
-		start := time.Now()
-		_, err := verifier.Verify(ctx, c.token(t, stranger, "idp", nil))
-		assert.ErrorIs(t, err, jwt.ErrTokenUnverifiable)
-		assert.Less(t, time.Since(start), unknownKeyWait+500*time.Millisecond,
-			"an unknown key waited on the refresh limiter")
-	}
+	_, first := verifier.Verify(ctx, c.token(t, stranger, "idp", nil))
+	_, second := verifier.Verify(ctx, c.token(t, stranger, "idp", nil))
+
+	assert.ErrorIs(t, first, jwkset.ErrKeyNotFound, "the first token under the unknown key id")
+	assert.ErrorIs(t, second, jwkset.ErrKeyNotFound, "the second token under it, inside the refresh window")
+}
+
+// A token under a key id the key set holds whose lookup fails for another
+// reason, an algorithm the key does not carry, is not refused as an unknown
+// key. This is the control of
+// TestNewVerifier_refusesEveryUnknownKeyAsAKeyTheClusterDoesNotHold.
+func TestNewVerifier_refusesAnAlgorithmTheKeyDoesNotCarryAsAKnownKey(t *testing.T) {
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+
+	_, err = verifier.Verify(ctx, c.signed(t, jwt.SigningMethodRS512, c.key, "cluster", nil))
+
+	assert.ErrorIs(t, err, jwt.ErrTokenUnverifiable)
+	assert.NotErrorIs(t, err, jwkset.ErrKeyNotFound)
 }
 
 // A pod token that is not a JWT names no issuer to read the discovery of.
 func TestNewVerifier_refusesAPodTokenThatIsNotAJWT(t *testing.T) {
-	for _, own := range []string{"opaque", "a.!!!.c", "a." + base64.RawURLEncoding.EncodeToString([]byte("[]")) + ".c"} {
-		_, err := NewVerifier(context.Background(), Config{Audience: audience,
-			Token: func() (string, error) { return own, nil }})
-		assert.ErrorContains(t, err, "the pod's ServiceAccount token", "pod token %q", own)
+	for _, tc := range []struct {
+		name string
+		own  string
+	}{
+		{"one segment", "opaque"},
+		{"a payload that is not base64url", "a.!!!.c"},
+		{"a payload that is not a JSON object", "a." + base64.RawURLEncoding.EncodeToString([]byte("[]")) + ".c"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewVerifier(context.Background(), Config{Audience: audience,
+				Token: func() (string, error) { return tc.own, nil }})
+			assert.ErrorContains(t, err, "the pod's ServiceAccount token", "NewVerifier with pod token %q", tc.own)
+		})
 	}
 }

@@ -142,6 +142,38 @@ func TestBucketKeyPrefixesOnlyItsOwnSubtree(t *testing.T) {
 	}
 }
 
+// A management scan narrowed to a block walks the keys under the block's
+// prefix, so the prefix starts every key of the block's rules and no key of a
+// block whose name merely starts with the same characters. The prefix escapes
+// the block name as the keys do, so it also starts the keys of a block whose
+// name holds a slash.
+func TestBlockPrefixStartsTheKeysOfItsOwnBlockOnly(t *testing.T) {
+	gcra := mustAlgo(t, "GCRA")
+	w := algo.Window{Requests: 100, Period: time.Minute, Burst: 100}
+	ruleOf := func(block string) Ident {
+		return Ident{Namespace: "core-1-core", Domain: "gateway.public", Block: block, Rule: "per-user"}
+	}
+
+	for _, c := range []struct {
+		name   string
+		block  string
+		key    string
+		starts bool
+	}{
+		{"the rule prefix of a rule of the block", "api", RulePrefix(ruleOf("api")), true},
+		{"a bucket key of a rule of the block", "api", bucketOf(ruleOf("api"), gcra, w, []string{"alice"}), true},
+		{"a block named with a slash", "api/x", RulePrefix(ruleOf("api/x")), true},
+		{"a block whose name extends the block's", "api", RulePrefix(ruleOf("api2")), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prefix := BlockPrefix("core-1-core", "gateway.public", c.block)
+			if got := strings.HasPrefix(c.key, prefix); got != c.starts {
+				t.Errorf("BlockPrefix(block %q) = %q starts %q: %t, want %t", c.block, prefix, c.key, got, c.starts)
+			}
+		})
+	}
+}
+
 func TestRulePrefixStartsWithTheDomainPrefix(t *testing.T) {
 	if got, want := RulePrefix(id), DomainPrefix(id.Namespace, id.Domain); !strings.HasPrefix(got, want) {
 		t.Errorf("RulePrefix(%+v) = %q lacks domain prefix %q", id, got, want)

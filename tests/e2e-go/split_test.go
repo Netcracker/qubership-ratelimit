@@ -45,14 +45,7 @@ var _ = Describe("the seams of the split", Ordered, Label("split"), func() {
 			// The service release at zero replicas: the Service has no ready
 			// endpoint, and nothing enforces the policy. The operator says
 			// so rather than reporting a fleet of none as whole.
-			//
-			// A retry of a failure between scaleFleet(0) and fleet.restore()
-			// starts with the release at zero, so fleet keeps the count the
-			// first attempt read.
-			scaled := scaleFleet(0)
-			if fleet == nil {
-				fleet = scaled
-			}
+			scaleFleet(&fleet, 0)
 			Eventually(readyReason(domain)).WithTimeout(2*time.Minute).WithPolling(2*time.Second).
 				Should(Equal(v1.ReasonNoReplicas), "the operator did not report the missing service")
 			Expect(policyCondition(domain, v1.ConditionStalled)()).To(Equal("False"),

@@ -1,15 +1,18 @@
 package management
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	engine "github.com/netcracker/qubership-ratelimit/engine"
 	"github.com/netcracker/qubership-ratelimit/engine/model"
 	"github.com/netcracker/qubership-ratelimit/service/internal/ruleview"
 )
@@ -61,6 +64,20 @@ func TestRules_reportsTheCompiledSet(t *testing.T) {
 	require.Len(t, everyone.Rates, 1, "rates of %s", everyone.ID)
 	assert.Equal(t, int64(60), everyone.Rates[0].PeriodSeconds, "the rate of %s", everyone.ID)
 	assert.Equal(t, "1m0s", everyone.Rates[0].Period, "the rate of %s", everyone.ID)
+}
+
+// A route that reads a cost shows its entry within the routes of its block.
+func TestRules_showsTheCostEntryOfARoute(t *testing.T) {
+	h := newTestAPI(t, itemBlocks()...)
+
+	var view ruleview.RuleSetView
+	decode(t, h.call(t, http.MethodGet, BasePath+"/domains/"+testDomain+"/rules", listedCaller, nil),
+		http.StatusOK, &view)
+
+	require.Len(t, view.Blocks, 1, "the blocks of the item policy")
+	require.Len(t, view.Blocks[0].Routes, 1, "the routes of items")
+	assert.Equal(t, &ruleview.CostView{Source: "QueryParameter", Name: "limit", Default: 20},
+		view.Blocks[0].Routes[0].Cost, "the cost entry of the route over /api/items")
 }
 
 // Unscoped, no rule is annotated: an annotation without a question would be an
@@ -625,6 +642,39 @@ func TestSimulation_reportsCapacityExceededWithoutARetryHint(t *testing.T) {
 	assert.Nil(t, response.Rules[0].RetryAfterSeconds, "retryAfterSeconds of orders/per-client")
 }
 
+// A simulation path with a query string judges a block whose route reads a
+// cost at the value the route reads, in place of the cost the body names, and
+// the outcome reports that cost beside the remaining it counts in. The block
+// calls over the same path reads no cost and is judged at the body's 5.
+func TestSimulation_judgesTheCostTheMatchedRouteReads(t *testing.T) {
+	calls := model.Block{
+		Name:   "calls",
+		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"}}}},
+		Rules: []model.Rule{{Name: "per-client", Counters: []string{model.KeySub},
+			Rates: []model.Rate{{Requests: 100, Period: time.Hour}}}},
+	}
+	h := newTestAPI(t, append(itemBlocks(), calls)...)
+	keys := map[string][]string{model.KeySub: {"alice"}}
+	h.spend(t, "/api/items?limit=100", keys, 1)
+
+	var response SimulationResponse
+	decode(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
+		Domain: testDomain,
+		Path:   "/api/items?limit=950",
+		Method: http.MethodGet,
+		Keys:   keys,
+		Cost:   5,
+	}), http.StatusOK, &response)
+
+	assert.False(t, response.Allowed, "allowed of 950 items with 900 left")
+	require.Len(t, response.Rules, 2, "the rules the simulation applies")
+	assert.Equal(t, "items/per-client", response.Rules[0].ID)
+	assert.Equal(t, int64(950), response.Rules[0].Cost, "the cost of items/per-client")
+	assert.Equal(t, int64(900), response.Rules[0].Remaining, "the remaining of items/per-client")
+	assert.Equal(t, "calls/per-client", response.Rules[1].ID)
+	assert.Equal(t, int64(5), response.Rules[1].Cost, "the cost of calls/per-client")
+}
+
 func TestSimulation_refusesTheCombinationsTheFormsForbid(t *testing.T) {
 	h := newTestAPI(t)
 
@@ -792,4 +842,168 @@ func TestQueryNames_admitTheAxisFamily(t *testing.T) {
 	response := h.call(t, http.MethodGet,
 		BasePath+"/domains/"+testDomain+"/counters?axis.sub=alice&axis.order_id=4711", listedCaller, nil)
 	assert.Equal(t, http.StatusOK, response.Code, "body: %s", response.Body.String())
+}
+
+// axesOf returns the axes of each listed counter, in listing order.
+func axesOf(items []CounterView) []map[string]string {
+	out := make([]map[string]string, 0, len(items))
+	for _, item := range items {
+		out = append(out, item.Axes)
+	}
+	return out
+}
+
+// Axis filters of two names select a counter only when it carries a selected
+// value of each. by-order/each counts by sub and order_id, so of the three
+// identities spent here only alice's order 4711 is listed, once for each of
+// the rule's two windows; alice's other order and bob's same order match one
+// name each.
+func TestCounters_axesOfTwoNamesSelectOnlyTheCountersMatchingBoth(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders/4711", map[string][]string{model.KeySub: {"alice"}}, 1)
+	h.spend(t, "/api/orders/4712", map[string][]string{model.KeySub: {"alice"}}, 1)
+	h.spend(t, "/api/orders/4711", map[string][]string{model.KeySub: {"bob"}}, 1)
+
+	var list CounterList
+	decode(t, h.call(t, http.MethodGet,
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=by-order/each&axis.sub=alice&axis.order_id=4711",
+		listedCaller, nil), http.StatusOK, &list)
+
+	assert.ElementsMatch(t, []map[string]string{
+		{"sub": "alice", "order_id": "4711"},
+		{"sub": "alice", "order_id": "4711"},
+	}, axesOf(list.Items))
+}
+
+// pageSize admits 1 to 500, both ends included.
+// TestCounters_refusesAPageSizeOutsideItsRange holds the sizes past either end.
+func TestCounters_acceptsAPageSizeAtEitherEndOfItsRange(t *testing.T) {
+	for _, tc := range []struct{ name, pageSize string }{
+		{name: "the floor", pageSize: "1"},
+		{name: "the ceiling", pageSize: "500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestAPI(t)
+			h.spend(t, "/api/invoices/1", map[string][]string{model.KeySub: {"alice"}}, 1)
+
+			var list CounterList
+			decode(t, h.call(t, http.MethodGet,
+				BasePath+"/domains/"+testDomain+"/counters?pageSize="+tc.pageSize, listedCaller, nil),
+				http.StatusOK, &list)
+
+			assert.Equal(t, []string{"alice"}, subsOf(list.Items), "GET counters?pageSize=%s", tc.pageSize)
+		})
+	}
+}
+
+// A page size outside 1 to 500, or not a whole number, is refused and the
+// refusal names the parameter. TestCounters_refusesAPageSizeOverTheCeiling holds
+// a size far past the ceiling.
+func TestCounters_refusesAPageSizeOutsideItsRange(t *testing.T) {
+	for _, tc := range []struct{ name, pageSize string }{
+		{name: "one over the ceiling", pageSize: "501"},
+		{name: "zero", pageSize: "0"},
+		{name: "a negative size", pageSize: "-1"},
+		{name: "not a number", pageSize: "ten"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestAPI(t)
+
+			body := requireError(t, h.call(t, http.MethodGet,
+				BasePath+"/domains/"+testDomain+"/counters?pageSize="+tc.pageSize, listedCaller, nil),
+				http.StatusBadRequest, CodeInvalidRequest)
+
+			assert.Equal(t, []string{"pageSize"}, body.Meta.Fields, "GET counters?pageSize=%s", tc.pageSize)
+		})
+	}
+}
+
+// A shadow counter counts and never refuses: once crawler has spent the 3
+// requests an hour of a shadow per-client rule, its next request is still
+// admitted, and the listing reports the counter in mode shadow, limited, with
+// nothing left.
+func TestCounters_listsAShadowCounterAsLimitedWhileItsRequestsAreAdmitted(t *testing.T) {
+	blocks := orderBlocks()
+	blocks[0].Rules[0].Behavior = model.BehaviorShadow
+	h := newTestAPI(t, blocks...)
+	crawler := map[string][]string{model.KeySub: {"crawler"}}
+	h.spend(t, "/api/orders", crawler, 3)
+
+	fourth, err := h.engine.Decide(context.Background(), engine.Request{
+		Path: "/api/orders", Method: http.MethodGet, Keys: crawler,
+	})
+	require.NoError(t, err, "the decision on the fourth request of crawler")
+	var list CounterList
+	decode(t, h.call(t, http.MethodGet,
+		BasePath+"/domains/"+testDomain+"/counters?ruleId=orders/per-client", listedCaller, nil),
+		http.StatusOK, &list)
+
+	assert.True(t, fourth.Allowed, "allowed of the fourth request of crawler, past the shadow limit of 3")
+	assert.Equal(t, []counterState{{
+		RuleID: "orders/per-client", Axes: map[string]string{"sub": "crawler"}, Mode: "shadow",
+		Limit: 3, Remaining: 0, Limited: true,
+	}}, statesOf(list.Items))
+}
+
+// The token may be as long as 8 KiB (8192 bytes): a token of exactly that
+// length is judged. The token one byte longer is a row of
+// TestSimulation_refusesTheCombinationsTheFormsForbid.
+func TestSimulation_acceptsATokenOfExactlyTheLimit(t *testing.T) {
+	h := newTestAPI(t)
+
+	recorder := h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, SimulationRequest{
+		Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
+		Token: strings.Repeat("x", 8192),
+	})
+
+	assert.Equal(t, http.StatusOK, recorder.Code, "body: %s", recorder.Body.String())
+}
+
+// A negative cost, an identity key without values, and a pure form without
+// its one source are refused, and the refusal names the field at fault.
+func TestSimulation_refusesAMissingIdentityOrANegativeCost(t *testing.T) {
+	h := newTestAPI(t)
+
+	cases := []struct {
+		name    string
+		request SimulationRequest
+		field   string
+	}{
+		{
+			name: "a negative cost",
+			request: SimulationRequest{
+				Domain: testDomain, Path: "/api/orders", Method: http.MethodGet, Cost: -1,
+			},
+			field: "cost",
+		},
+		{
+			name: "a key without values",
+			request: SimulationRequest{
+				Domain: testDomain, Path: "/api/orders", Method: http.MethodGet,
+				Keys: map[string][]string{model.KeySub: {}},
+			},
+			field: "keys",
+		},
+		{
+			name: "the keys form without keys",
+			request: SimulationRequest{
+				Domain: testDomain, Path: "/api/orders", Method: http.MethodGet, IdentitySource: identityKeys,
+			},
+			field: "keys",
+		},
+		{
+			name: "the token form without a token",
+			request: SimulationRequest{
+				Domain: testDomain, Path: "/api/orders", Method: http.MethodGet, IdentitySource: identityToken,
+			},
+			field: "token",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := requireError(t, h.call(t, http.MethodPost, BasePath+"/simulations", listedCaller, tc.request),
+				http.StatusBadRequest, CodeInvalidRequest)
+			assert.Equal(t, []string{tc.field}, body.Meta.Fields, "POST simulations %+v", tc.request)
+		})
+	}
 }

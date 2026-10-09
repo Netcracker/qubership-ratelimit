@@ -331,6 +331,19 @@ func TestSanitizePath_truncatesAPathPast256Bytes(t *testing.T) {
 	assert.Equal(t, "/"+strings.Repeat("a", 255)+"[truncated]", sanitizePath("/"+strings.Repeat("a", 500)))
 }
 
+// The cut is at 256 bytes: a path of 256 bytes is logged whole, and one of
+// 257 bytes loses its last byte to the cut and carries the mark.
+func TestSanitizePath_cutsOnlyAPathPast256Bytes(t *testing.T) {
+	for _, tc := range []struct{ name, path, want string }{
+		{"256 bytes", "/" + strings.Repeat("a", 255), "/" + strings.Repeat("a", 255)},
+		{"257 bytes", "/" + strings.Repeat("a", 256), "/" + strings.Repeat("a", 255) + "[truncated]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, sanitizePath(tc.path))
+		})
+	}
+}
+
 // A byte cut through a multi-byte rune leaves an invalid UTF-8 sequence, so a
 // rune that crosses the cut at 256 bytes is dropped whole. An é is two bytes:
 // 200 of them are cut between two runes, and a leading slash moves the cut
@@ -439,6 +452,92 @@ func TestShouldRateLimit_chargesTheCostTheHitsAddendSets(t *testing.T) {
 	}
 }
 
+// itemsPolicy counts items over /api/items: the route reads the cost from
+// limit, 20 when the request carries none, and items/all holds 1000 a minute.
+func itemsPolicy() model.Policy {
+	return model.Policy{Blocks: []model.Block{{
+		Name: "items",
+		Target: model.Target{Routes: []model.Route{{
+			Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/items"},
+			Cost: &model.RouteCost{Source: model.CostQueryParameter, Name: "limit", Default: 20},
+		}}},
+		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 1000, Period: time.Minute}}}},
+	}}}
+}
+
+// The cost a route reads from the query string of the path entry replaces the
+// hits_addend of the request and of the descriptor alike.
+func TestShouldRateLimit_chargesTheCostARouteReadsFromThePath(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		path       string
+		request    uint32
+		descriptor *wrapperspb.UInt64Value
+		remaining  string
+	}{
+		{"the value of limit", "/api/items?limit=100", 0, nil, "900"},
+		{"the value of limit over the request's cost", "/api/items?limit=100", 7, nil, "900"},
+		{"the value of limit over the descriptor's cost", "/api/items?limit=100", 0, wrapperspb.UInt64(5), "900"},
+		{"the default without limit", "/api/items", 7, nil, "980"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := newServerOver(ruleSetWith(t, itemsPolicy()))
+			req := request("gateway.public", map[string]string{"path": tc.path, "method": "GET"})
+			req.HitsAddend = tc.request
+			req.Descriptors[0].HitsAddend = tc.descriptor
+
+			resp := shouldRateLimit(t, server, req)
+
+			assert.Equal(t, tc.remaining, headerMap(resp)["x-ratelimit-remaining"],
+				"x-ratelimit-remaining of 1000 items a minute after %s at a request cost of %d and a descriptor cost of %v",
+				tc.path, tc.request, tc.descriptor)
+		})
+	}
+}
+
+// Across the descriptors of one check the headers come from the window with
+// the fewest further requests at its cost, as within one decision: after
+// limit=100 the items window has 900 left, nine more such pages, and binds
+// before the 29 a calls window of 30 has left.
+func TestShouldRateLimit_takesTheHeadersOfTheDescriptorWithTheFewestRequestsLeftAtItsCost(t *testing.T) {
+	policy := itemsPolicy()
+	policy.Blocks = append(policy.Blocks, model.Block{
+		Name:   "calls",
+		Target: model.Target{Routes: []model.Route{{Path: model.PathMatch{Type: model.PathPrefix, Value: "/api/calls"}}}},
+		Rules:  []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 30, Period: time.Minute}}}},
+	})
+	server, _ := newServerOver(ruleSetWith(t, policy))
+
+	resp := shouldRateLimit(t, server, request("gateway.public",
+		map[string]string{"path": "/api/calls", "method": "GET"},
+		map[string]string{"path": "/api/items?limit=100", "method": "GET"}))
+
+	assert.Equal(t, map[string]string{"x-ratelimit-limit": "1000", "x-ratelimit-remaining": "900"},
+		map[string]string{
+			"x-ratelimit-limit":     headerMap(resp)["x-ratelimit-limit"],
+			"x-ratelimit-remaining": headerMap(resp)["x-ratelimit-remaining"],
+		}, "the headers of a check of /api/calls and /api/items?limit=100")
+}
+
+// A descriptor whose hits_addend is an explicit zero is checked without
+// charging under a route that reads a cost too: after three such checks of
+// limit=100, the first charged check of limit=100 leaves 900 of 1000.
+func TestShouldRateLimit_anExplicitZeroDescriptorCostChargesNothingUnderARouteCost(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, itemsPolicy()))
+	for i := range 3 {
+		req := request("gateway.public", map[string]string{"path": "/api/items?limit=100", "method": "GET"})
+		req.Descriptors[0].HitsAddend = wrapperspb.UInt64(0)
+		resp := shouldRateLimit(t, server, req)
+		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "zero-cost check %d", i+1)
+	}
+
+	resp := shouldRateLimit(t, server,
+		request("gateway.public", map[string]string{"path": "/api/items?limit=100", "method": "GET"}))
+
+	assert.Equal(t, "900", headerMap(resp)["x-ratelimit-remaining"],
+		"x-ratelimit-remaining of 1000 items a minute after three zero-cost checks and one of limit=100")
+}
+
 // zeroCostCheck builds a check of gateway.public whose request cost is 7 and
 // whose one descriptor sets an explicit hits_addend of zero.
 func zeroCostCheck() *envoyratelimit.RateLimitRequest {
@@ -514,6 +613,9 @@ func invalidCosts() []struct {
 	}{
 		{"is_negative_hits", func(d *envoycommon.RateLimitDescriptor) {
 			d.HitsAddend, d.IsNegativeHits = wrapperspb.UInt64(5), true
+		}},
+		{"is_negative_hits without a hits_addend", func(d *envoycommon.RateLimitDescriptor) {
+			d.IsNegativeHits = true
 		}},
 		{"a cost over the maximum", func(d *envoycommon.RateLimitDescriptor) {
 			d.HitsAddend = wrapperspb.UInt64(maxHitsAddend + 1)
@@ -671,11 +773,11 @@ func TestShouldRateLimit_refusesADecisionOverTheBucketBudget(t *testing.T) {
 // unreachable Redis.
 type failingCounters struct{}
 
-func (failingCounters) Decide(context.Context, []counters.Bucket, int64) ([]counters.Verdict, error) {
+func (failingCounters) Decide(context.Context, []counters.Bucket) ([]counters.Verdict, error) {
 	return nil, errors.New("store is down")
 }
 
-func (failingCounters) Peek(context.Context, []counters.Bucket, int64) ([]counters.Verdict, error) {
+func (failingCounters) Peek(context.Context, []counters.Bucket) ([]counters.Verdict, error) {
 	return nil, errors.New("store is down")
 }
 
@@ -729,6 +831,59 @@ func TestShouldRateLimit_refusesACheckWhenAnyDescriptorRefuses(t *testing.T) {
 	assert.Equal(t, "3600", headerMap(mixed)["retry-after"], "retry-after of a check of a spent alice and a fresh bob")
 }
 
+// An admission of several descriptors carries the numbers of the decision
+// with the least remaining. alice has spent three of ten per hour, and her
+// descriptor sits between two fresh clients, so hers is neither the first
+// decision nor the last.
+func TestShouldRateLimit_anAdmissionOfSeveralDescriptorsCarriesTheLeastRemaining(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(10)))
+	for i := range 3 {
+		resp := shouldRateLimit(t, server, request("gateway.public", map[string]string{"sub": "alice"}))
+		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "check %d of alice", i+1)
+	}
+
+	resp := shouldRateLimit(t, server, request("gateway.public",
+		map[string]string{"sub": "bob"}, map[string]string{"sub": "alice"}, map[string]string{"sub": "carol"}))
+
+	require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "the check of bob, alice, and carol")
+	assert.Equal(t, "6", headerMap(resp)["x-ratelimit-remaining"],
+		"x-ratelimit-remaining of a check where bob and carol have 9 left and alice 6")
+}
+
+// hourAndMinutePolicy limits /hourly to one request an hour, under hourly/all,
+// and /minutely to one request a minute, under minutely/all.
+func hourAndMinutePolicy() model.Policy {
+	block := func(name string, period time.Duration) model.Block {
+		return model.Block{
+			Name: name,
+			Target: model.Target{Routes: []model.Route{
+				{Path: model.PathMatch{Type: model.PathPrefix, Value: "/" + name}}}},
+			Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 1, Period: period}}}},
+		}
+	}
+	return model.Policy{Blocks: []model.Block{block("hourly", time.Hour), block("minutely", time.Minute)}}
+}
+
+// A refusal of several descriptors carries the numbers of the decision with
+// the longest wait: after it every window is open again. The hourly refusal
+// sits between two minutely ones, so it is neither the first decision nor the
+// last.
+func TestShouldRateLimit_aRefusalOfSeveralDescriptorsCarriesTheLongestRetryHint(t *testing.T) {
+	server, _ := newServerOver(ruleSetWith(t, hourAndMinutePolicy()))
+	for _, path := range []string{"/hourly", "/minutely"} {
+		resp := shouldRateLimit(t, server, request("gateway.public", map[string]string{"path": path}))
+		require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(), "the first check of %s", path)
+	}
+
+	resp := shouldRateLimit(t, server, request("gateway.public", map[string]string{"path": "/minutely"},
+		map[string]string{"path": "/hourly"}, map[string]string{"path": "/minutely"}))
+
+	require.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode(),
+		"the check of /minutely, /hourly, and /minutely")
+	assert.Equal(t, "3600", headerMap(resp)["retry-after"],
+		"retry-after of a check refused for 60 s on /minutely and for 3600 s on /hourly")
+}
+
 // A direct consumer that sends no descriptor at all still meets the
 // domain-wide rules.
 func TestShouldRateLimit_limitsACheckWithoutDescriptorsByTheDomainWideRule(t *testing.T) {
@@ -777,16 +932,16 @@ type failAfterStore struct {
 	calls int
 }
 
-func (f *failAfterStore) Decide(ctx context.Context, buckets []counters.Bucket, cost int64) ([]counters.Verdict, error) {
+func (f *failAfterStore) Decide(ctx context.Context, buckets []counters.Bucket) ([]counters.Verdict, error) {
 	f.calls++
 	if f.calls > f.limit {
 		return nil, errors.New("store is down")
 	}
-	return f.inner.Decide(ctx, buckets, cost)
+	return f.inner.Decide(ctx, buckets)
 }
 
-func (f *failAfterStore) Peek(ctx context.Context, buckets []counters.Bucket, cost int64) ([]counters.Verdict, error) {
-	return f.inner.Peek(ctx, buckets, cost)
+func (f *failAfterStore) Peek(ctx context.Context, buckets []counters.Bucket) ([]counters.Verdict, error) {
+	return f.inner.Peek(ctx, buckets)
 }
 
 func (f *failAfterStore) Reset(ctx context.Context, keys []string) error {
@@ -799,7 +954,7 @@ func (f *failAfterStore) Reset(ctx context.Context, keys []string) error {
 // serves the first two Decide calls, both alice's, and fails bob's.
 func TestShouldRateLimit_refusesACheckWhenTheStoreFailsAfterADescriptorRefused(t *testing.T) {
 	p := perClientPerHourPolicy(1)
-	server, _ := newServerOver(ruleSetOver(t, "gateway.public", &p, &failAfterStore{inner: memory.New(), limit: 2}))
+	server, log := newServerOver(ruleSetOver(t, "gateway.public", &p, &failAfterStore{inner: memory.New(), limit: 2}))
 	first := shouldRateLimit(t, server, request("gateway.public", map[string]string{"sub": "alice"}))
 	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode(), "the first check of alice")
 
@@ -808,6 +963,7 @@ func TestShouldRateLimit_refusesACheckWhenTheStoreFailsAfterADescriptorRefused(t
 
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
 	assert.Equal(t, "3600", headerMap(resp)["retry-after"], "retry-after of alice's refusal")
+	assert.Contains(t, log.output(), "rate limit store error after a refusal domain=gateway.public")
 }
 
 // exemptPrefix and exemptDomain stand in for what the service passes to
@@ -976,4 +1132,22 @@ func TestShouldRateLimit_refusesARequestCostPastOneBillion(t *testing.T) {
 
 	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
 	assert.Contains(t, log.output(), "a total cost of 2000000000")
+}
+
+// A check without descriptors costs its request-level hits_addend, and the
+// bound of 1000000000 holds for it too: a cost at the bound is decided like any
+// other, and one more is refused as a protocol violation.
+func TestShouldRateLimit_refusesTheCostOfACheckWithoutDescriptorsOnlyPastOneBillion(t *testing.T) {
+	server, log := newServerOver(ruleSetWith(t, domainWidePolicy(100, time.Minute)))
+	atTheBound := request("gateway.public")
+	atTheBound.HitsAddend = 1_000_000_000
+	pastTheBound := request("gateway.public")
+	pastTheBound.HitsAddend = 1_000_000_001
+
+	shouldRateLimit(t, server, atTheBound)
+	assert.NotContains(t, log.output(), "over the limit of", "log after a check without descriptors of cost 1000000000")
+
+	resp := shouldRateLimit(t, server, pastTheBound)
+	assert.Equal(t, envoyratelimit.RateLimitResponse_OVER_LIMIT, resp.GetOverallCode())
+	assert.Contains(t, log.output(), "a total cost of 1000000001, over the limit of 1000000000")
 }

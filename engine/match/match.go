@@ -1,6 +1,7 @@
 package match
 
 import (
+	"net/url"
 	"slices"
 	"strings"
 
@@ -21,30 +22,97 @@ type Candidates struct {
 
 // hit is one targeted block. pathAxis is what the path axis reports inside
 // the block — the template string when a template route matched, the request
-// path otherwise — and captures are the route's template placeholders.
+// path otherwise — and captures are the route's template placeholders. cost
+// is what the matched route read from the query string, and zero where the
+// route reads no cost.
 type hit struct {
 	block    *compile.Block
 	pathAxis string
 	captures map[string]string
+	cost     int64
 }
 
-// Match runs the target phase over the path and method alone. A query
-// string never participates: it is stripped before any path predicate and
-// before path serves as an axis.
+// Match runs the target phase over the path and method alone. The query
+// string is stripped before any path predicate and before path serves as an
+// axis; the one part of it that takes effect is the parameter a matched
+// route reads its cost from.
 func Match(snap *compile.Snapshot, path, method string) Candidates {
-	if i := strings.IndexByte(path, '?'); i >= 0 {
-		path = path[:i]
-	}
+	path, query, _ := strings.Cut(path, "?")
 	out := Candidates{method: method}
 	for i := range snap.Blocks {
 		block := &snap.Blocks[i]
-		pathAxis, captures, ok := matchTarget(block, path, method)
+		route, pathAxis, captures, ok := matchTarget(block, path, method)
 		if !ok {
 			continue
 		}
-		out.hits = append(out.hits, hit{block: block, pathAxis: pathAxis, captures: captures})
+		h := hit{block: block, pathAxis: pathAxis, captures: captures}
+		if route != nil && route.Cost != nil {
+			h.cost = queryCost(route.Cost, query)
+		}
+		out.hits = append(out.hits, h)
 	}
 	return out
+}
+
+// queryCost reads a route's cost from a raw query string. Each occurrence of
+// the parameter costs its value when that is a positive decimal integer,
+// lowered to model.MaxCost, and the entry's default otherwise; the request
+// costs the largest of them, and the default when the parameter is absent.
+// Names and values are percent-decoded, with + as a space, before they are
+// compared and parsed.
+func queryCost(cost *compile.Cost, query string) int64 {
+	found := false
+	var largest int64
+	for query != "" {
+		var pair string
+		pair, query, _ = strings.Cut(query, "&")
+		name, value, _ := strings.Cut(pair, "=")
+		if unescape(name) != cost.Parameter {
+			continue
+		}
+		found = true
+		occurrence := positiveInteger(unescape(value))
+		if occurrence == 0 {
+			occurrence = cost.Default
+		}
+		largest = max(largest, occurrence)
+	}
+	if !found {
+		return cost.Default
+	}
+	return largest
+}
+
+// unescape percent-decodes one name or value of a query string, + included.
+// A malformed escape yields the empty string, which no parameter name equals
+// and no cost parses from.
+func unescape(s string) string {
+	if !strings.ContainsAny(s, "%+") {
+		return s
+	}
+	decoded, err := url.QueryUnescape(s)
+	if err != nil {
+		return ""
+	}
+	return decoded
+}
+
+// positiveInteger parses a string of decimal digits, leading zeros allowed,
+// and lowers a value above model.MaxCost to it. Anything else, the empty
+// string and zero included, is 0.
+func positiveInteger(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	var n int64
+	for i := range len(s) {
+		d := s[i]
+		if d < '0' || d > '9' {
+			return 0
+		}
+		n = min(n*10+int64(d-'0'), model.MaxCost+1)
+	}
+	return min(n, model.MaxCost)
 }
 
 // BlocksByPath lists the blocks whose target admits a path under any method,
@@ -206,11 +274,18 @@ func (c Candidates) Blocks() []*compile.Block {
 // identity values; a key's value is a set — scalar keys carry one element,
 // array keys their elements, absent keys nothing. Built-in path and method
 // are not listed there; the matcher derives them itself.
-func (c Candidates) Evaluate(keys map[string][]string) Result {
+//
+// The buckets of a block carry the cost its matched route read from the
+// query string, and cost, the request's own cost, where the route reads
+// none; cost is at least 1.
+func (c Candidates) Evaluate(keys map[string][]string, cost int64) Result {
 	var out Result
 	for i := range c.hits {
 		h := &c.hits[i]
-		ctx := blockCtx{method: c.method, keys: keys, pathAxis: h.pathAxis, captures: h.captures}
+		ctx := blockCtx{method: c.method, keys: keys, pathAxis: h.pathAxis, captures: h.captures, cost: h.cost}
+		if ctx.cost == 0 {
+			ctx.cost = cost
+		}
 		out.Rules = append(out.Rules, evalBlock(h.block, &ctx)...)
 	}
 	return out
@@ -246,17 +321,22 @@ type MatchedRule struct {
 	// never veto.
 	Shadow bool
 
+	// Cost is the amount every bucket of the rule charges.
+	Cost int64
+
 	Buckets []store.Bucket
 }
 
 // blockCtx is the request as one block sees it: the path axis takes the
 // template string when a template route matched — axis cardinality bounded by
-// construction — and the route's captures become block-scoped keys.
+// construction — the route's captures become block-scoped keys, and cost is
+// what every bucket of the block charges.
 type blockCtx struct {
 	method   string
 	keys     map[string][]string
 	pathAxis string
 	captures map[string]string
+	cost     int64
 }
 
 // valueOf resolves a key to its value set within the block.
@@ -274,12 +354,13 @@ func (c *blockCtx) valueOf(k string) []string {
 }
 
 // matchTarget finds the first matching route in authored order — the only
-// deterministic choice when several of an OR-list match — and reports the
-// block's path-axis view plus the route's captures. A block without routes is
-// the documented "whole domain" form and matches everything.
-func matchTarget(block *compile.Block, path, method string) (string, map[string]string, bool) {
+// deterministic choice when several of an OR-list match — and reports it with
+// the block's path-axis view and the route's captures. A block without routes
+// is the documented "whole domain" form: it matches everything, and the route
+// is nil.
+func matchTarget(block *compile.Block, path, method string) (*compile.Route, string, map[string]string, bool) {
 	if len(block.Routes) == 0 {
-		return path, nil, true
+		return nil, path, nil, true
 	}
 	for i := range block.Routes {
 		route := &block.Routes[i]
@@ -293,11 +374,11 @@ func matchTarget(block *compile.Block, path, method string) (string, map[string]
 			continue
 		}
 		if route.Type == model.PathTemplate {
-			return route.Value, captures, true
+			return route, route.Value, captures, true
 		}
-		return path, captures, true
+		return route, path, captures, true
 	}
-	return "", nil, false
+	return nil, "", nil, false
 }
 
 func matchPath(route *compile.Route, path string) (map[string]string, bool) {
@@ -472,6 +553,7 @@ func matchedRule(block *compile.Block, rule *compile.Rule, ctx *blockCtx) Matche
 		Block:   block.Name,
 		Rule:    rule.Name,
 		Shadow:  rule.Behavior == model.BehaviorShadow,
+		Cost:    ctx.cost,
 		Buckets: make([]store.Bucket, 0, len(rule.Rates)),
 	}
 	for i := range rule.Rates {
@@ -481,6 +563,7 @@ func matchedRule(block *compile.Block, rule *compile.Rule, ctx *blockCtx) Matche
 			Algorithm: rate.Algorithm.ID(),
 			Window:    rate.Window,
 			Shadow:    out.Shadow,
+			Cost:      out.Cost,
 		})
 	}
 	return out

@@ -196,9 +196,10 @@ func hourlyGCRALimits(prefix, rule string, requests int32) []v1.LimitBlock {
 	return blocks
 }
 
-// unsignedToken builds an alg-none JWT that carries the given claims. Neither
-// the engine nor the management API verifies a signature - the gateway owns
-// signatures - so an empty signature segment is a valid fixture.
+// unsignedToken builds an alg-none JWT that carries the given claims. The
+// engine reads claims without checking a signature - the gateway owns
+// signatures - so the token is a valid fixture for a rate-limit key; the
+// management API verifies signatures and refuses it.
 func unsignedToken(claims any) string {
 	segment := func(v any) string {
 		raw, err := json.Marshal(v)

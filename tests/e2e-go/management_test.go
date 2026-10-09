@@ -121,7 +121,7 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		}
 	})
 
-	It("lists the domain to a viewer through the gateway", func() {
+	It("lists the domain to a listed caller through the gateway", func() {
 		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
 			map[string]string{"Authorization": "Bearer " + managementToken()})
 		Expect(code).To(Equal(http.StatusOK),
@@ -151,28 +151,30 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 			"a pod outside the allowed list read the enforced rule set; body: %s", body)
 
 		// The code alone cannot say who answered: the mesh refuses with a 403
-		// of its own, and so does the API for a token without the role. What
-		// separates them is the body, because every answer the API writes is
-		// either a listing or a TMF error carrying an RLS code. A refusal that
-		// carries neither never reached the service. For a connection the
-		// mesh reset, code 0, the body is curl's error line, which carries
-		// neither as well.
+		// of its own, and so does the API for a caller the release does not
+		// list. What separates them is the body, because every answer the API
+		// writes is either a listing or a TMF error carrying an RLS code. A
+		// refusal that carries neither never reached the service. For a
+		// connection the mesh reset, code 0, the body is curl's error line,
+		// which carries neither as well.
 		Expect(body).NotTo(ContainSubstring(errorCodePrefix),
 			"the refusal came from the API, so the port is open to the whole mesh")
 		Expect(body).NotTo(ContainSubstring(`"items"`),
 			"the API answered a pod outside the allowed list")
 	})
 
-	// The service verifies every token itself. Each request below reaches the
-	// API through the gateway the policy admits, so the answer is the API's,
-	// and its code says which check refused the token.
+	// The refusals of a token. The service verifies every token itself, and
+	// each request reaches the API through the gateway the policy admits, so
+	// the API writes the answer: 403 for a verified caller the release does
+	// not list, 401 for a token that does not verify.
 	It("refuses a ServiceAccount the release does not list", func() {
 		token := serviceAccountToken(namespace, unlisted, readManagementCaller().audience)
 		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
 			map[string]string{"Authorization": "Bearer " + token})
 
-		Expect(code).To(Equal(http.StatusForbidden), "body: %s", body)
-		Expect(body).To(ContainSubstring(`"RLS-0403"`), "the refusal is not the API's; body: %s", body)
+		Expect(code).To(Equal(http.StatusForbidden),
+			"GET %s/domains with a token of %s/%s; body: %s", basePath, namespace, unlisted, body)
+		Expect(body).To(ContainSubstring(`"RLS-0403"`), "the refusal is not the API's")
 	})
 
 	It("refuses a listed caller's token issued for another audience", func() {
@@ -181,17 +183,23 @@ var _ = Describe("the management port through the private gateway", Ordered, Lab
 		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
 			map[string]string{"Authorization": "Bearer " + token})
 
-		Expect(code).To(Equal(http.StatusUnauthorized), "body: %s", body)
-		Expect(body).To(ContainSubstring(`"RLS-0401"`), "the refusal is not the API's; body: %s", body)
-		Expect(body).To(ContainSubstring("audience"), "the refusal does not name the audience; body: %s", body)
+		Expect(code).To(Equal(http.StatusUnauthorized),
+			"GET %s/domains with a token of %s/%s for the audience e2e-another-audience; body: %s",
+			basePath, caller.namespace, caller.name, body)
+		Expect(body).To(ContainSubstring(`"RLS-0401"`), "the refusal is not the API's")
+		Expect(body).To(ContainSubstring("audience"), "the refusal does not name the audience check")
 	})
 
-	It("refuses an unsigned token of the shape it read before it verified tokens", func() {
+	// The service read the subject and the roles out of sub and roles, the
+	// claims this token carries, without checking a signature until it
+	// verified tokens itself.
+	It("refuses an unsigned token that claims the operator role", func() {
+		token := unsignedToken(map[string]any{"sub": "e2e@example.com", "roles": []string{"operator"}})
 		body, code := gatewayGetBody("private-gateway", basePath+"/domains",
-			map[string]string{"Authorization": "Bearer " + unsignedToken(map[string]any{"sub": "e2e@example.com", "roles": []string{"operator"}})})
+			map[string]string{"Authorization": "Bearer " + token})
 
-		Expect(code).To(Equal(http.StatusUnauthorized), "body: %s", body)
-		Expect(body).To(ContainSubstring(`"RLS-0401"`), "the refusal is not the API's; body: %s", body)
+		Expect(code).To(Equal(http.StatusUnauthorized), "GET %s/domains with an unsigned token; body: %s", basePath, body)
+		Expect(body).To(ContainSubstring(`"RLS-0401"`), "the refusal is not the API's")
 	})
 
 	// The reset flows. Each spends a path's budget through the private
@@ -443,9 +451,8 @@ func managementToken() string {
 // an hour, as a projected token is.
 func serviceAccountToken(ns, name, audience string) string {
 	account := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
-	if err := k8s.Create(ctx, account); err != nil && !apierrors.IsAlreadyExists(err) {
-		Expect(err).NotTo(HaveOccurred(), "create the ServiceAccount %s/%s", ns, name)
-	}
+	Expect(client.IgnoreAlreadyExists(k8s.Create(ctx, account))).To(Succeed(),
+		"create the ServiceAccount %s/%s", ns, name)
 	expiration := int64(3600)
 	issued, err := clientset.CoreV1().ServiceAccounts(ns).CreateToken(ctx, name, &authenticationv1.TokenRequest{
 		Spec: authenticationv1.TokenRequestSpec{Audiences: []string{audience}, ExpirationSeconds: &expiration},

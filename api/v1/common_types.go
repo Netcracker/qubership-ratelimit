@@ -144,6 +144,11 @@ const (
 	// ProblemCaptureShadowsMappedKey is informational: inside the block, a
 	// route capture takes precedence over the mapped key of the same name.
 	ProblemCaptureShadowsMappedKey = "CaptureShadowsMappedKey"
+
+	// ProblemCostExceedsCapacity is informational: the default cost of a route
+	// is above the capacity of a window of a rule of its block, so that window
+	// refuses every request through the route that carries no usable value.
+	ProblemCostExceedsCapacity = "CostExceedsCapacity"
 )
 
 // BlockingProblem reports whether a reason keeps its generation out of the
@@ -152,11 +157,11 @@ const (
 // The compiler carries the same bit on every problem it raises, but
 // RuleProblem does not: the status lists root causes for an author, who reads
 // the reason rather than a boolean. The severity is a property of the reason
-// alone - every one of them is blocking except the shadowed capture - so a
-// reader that needs it derives it here rather than storing a second copy in
-// the object.
+// alone - every one of them is blocking except the shadowed capture and the
+// default cost above a window's capacity - so a reader that needs it derives
+// it here rather than storing a second copy in the object.
 func BlockingProblem(reason string) bool {
-	return reason != ProblemCaptureShadowsMappedKey
+	return reason != ProblemCaptureShadowsMappedKey && reason != ProblemCostExceedsCapacity
 }
 
 // Descriptor keys the engine produces on its own. A mapping entry cannot

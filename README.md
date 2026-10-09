@@ -35,10 +35,10 @@ identity read out of the token, and on the path and method through the routes of
 The delivery is two components in one namespace, joined by one ConfigMap. The operator, one active replica, watches the
 policies of its namespace, compiles them, and writes `ratelimit-config`: a manifest with the generation, UID, and
 content hash of every domain, and one compressed payload per domain. The service replicas mount that ConfigMap as a
-volume, hold no Kubernetes credentials at all, apply what the kubelet projects, and answer checks from it. The operator
-also reads `/debug/applied` on every ready replica through the Service and writes the policy status from what it finds.
-The operator's Lease covers the overlap of two pods during its own rollout; it signs the lease with its pod name, which
-the chart passes as `POD_NAME` through the Downward API.
+volume, are bound to no Role and read no API server object, apply what the kubelet projects, and answer checks from it.
+The operator also reads `/debug/applied` on every ready replica through the Service and writes the policy status from
+what it finds. The operator's Lease covers the overlap of two pods during its own rollout; it signs the lease with its
+pod name, which the chart passes as `POD_NAME` through the Downward API.
 
 | Component            | Runs in               | Does                                                             |
 |----------------------|-----------------------|------------------------------------------------------------------|
@@ -72,6 +72,11 @@ rule or block that names it through `preset`, with the fields written at the poi
 presets into the blocks and rules before the policy compiles, so a preset name is part of no counter key and reaches no
 service.
 
+A request costs one unit of every window it meets, unless the route of its block reads the cost from a query
+parameter: with `cost` on `limit`, a page of 100 items costs 100, and a window of `requests: 50000` an hour holds 50000
+items whatever the page sizes. The parameter is named per route, so each API brings its own
+([request cost](docs/ratelimitpolicy-cr-spec.md#request-cost)).
+
 `spec.mappings` declares how identity is read out of the JWT and `spec.groups` holds the named value lists `InGroup`
 resolves against. Both live in the same object as the rules that reference them, which is the point of the singleton:
 they change in one edit and apply as one generation, so a request never sees new rules over old extraction. The
@@ -99,6 +104,7 @@ The schema rejects what it can see; the compiler reports what needs the domain t
 | `DomainBudgetExceeded`      | blocking      | the worst-case decision is over 128 buckets                                  |
 | `ResolvedPolicyTooLarge`    | blocking      | the presets written into the rules would make the policy larger than 1.5 MiB |
 | `CaptureShadowsMappedKey`   | informational | inside this block a route capture wins over the mapped key                   |
+| `CostExceedsCapacity`       | informational | a route's default cost is above the capacity of a window of its block        |
 
 One blocking entry invalidates the whole generation: not one of its rules enters the snapshot. Applying the healthy
 rules of a broken generation would be worse than applying none — a `FirstMatch` cascade missing a rule silently hands
@@ -245,14 +251,15 @@ RBAC cannot narrow by name), and reaches nothing else in the namespace beyond th
 the EndpointSlices.
 
 `ratelimit-service` renders `REPLICAS` service replicas that mount the `ratelimit-config` ConfigMap at
-`/etc/ratelimit/config` with `optional: true`, hold no token and no `Role`, the `Service` `ratelimit` with the ports
-`grpc`, `metrics`, and `management`, the management `AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`,
-a `PrometheusRule`, the dashboard, and one `EnvoyFilter` per enabled gateway. Its values are `redis.*`,
-`metrics.*`, `management.*`, `alerts.*`, the filter's (`filter.*`; the port the filters send checks to is the contract's
-9000 and not a value), `runtime.*`, `gateways.*`, `responseHeaders.*` (the IETF `RateLimit` fields, on by default), the
-gateway names, and the five resource keys. Neither chart renders the ConfigMap: the operator writes it. Both read
-`BASELINE_ORIGIN` the same way: a satellite gets the filters from the service chart and nothing from the operator chart,
-so the platform installs the same pair in every namespace.
+`/etc/ratelimit/config` with `optional: true`, are bound to no `Role` and mount their ServiceAccount token only with
+`management.enabled`, the `Service` `ratelimit` with the ports `grpc`, `metrics`, and `management`, the management
+`AuthorizationPolicy`, a `HorizontalPodAutoscaler`, a `PodMonitor`, a `PrometheusRule`, the dashboard, and one
+`EnvoyFilter` per enabled gateway. Its values are `redis.*`, `metrics.*`, `management.*`, `alerts.*`, the filter's
+(`filter.*`; the port the filters send checks to is the contract's 9000 and not a value), `runtime.*`, `gateways.*`,
+`responseHeaders.*` (the IETF `RateLimit` fields, on by default), the gateway names, and the five resource keys. Neither
+chart renders the ConfigMap: the operator writes it. Both read `BASELINE_ORIGIN` the same way: a satellite gets the
+filters from the service chart and nothing from the operator chart, so the platform installs the same pair in every
+namespace.
 
 The monitoring objects, the two `PodMonitor`s, the two `PrometheusRule`s, and the dashboard, render with
 `MONITORING_ENABLED`, the platform parameter, because each needs its operator's CRDs. The alert rules are split the way

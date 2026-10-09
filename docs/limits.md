@@ -19,11 +19,13 @@ no list needs `maxItems`.
 | **Call** | descriptors of one gRPC check | ≤ 16 | every descriptor is its own decision and its own store trip; a gateway sends one | the adapter, `too_many_descriptors` → `OVER_LIMIT` |
 | | cost of one descriptor (`hits_addend`) | ≤ 1 000 000 000, not negative | Envoy's own ceiling; the engine gives no budget back | the adapter, `invalid_cost` → `OVER_LIMIT` |
 | | cost of the whole check, summed over its descriptors | ≤ 1 000 000 000 | spreading the largest cost over descriptors would multiply it | the adapter, `invalid_cost` → `OVER_LIMIT` |
+| | cost a route reads from the query string (`cost`) | 1..1 000 000 000; a larger value costs 1 000 000 000 | the ceiling of `hits_addend`; a value above a window's capacity is refused by the window | the engine, when it reads the value |
 | | size of one gRPC check | ≤ 128 KiB | a gateway's check is bounded by Envoy's 60 KiB header limit; gRPC's default of 4 MiB would let a direct caller choose a counter key of megabytes | the gRPC server, `RESOURCE_EXHAUSTED` |
 | | identity value of a descriptor, values of one key | ≤ 256 bytes, ≤ 64 values | the token's sanitary limits, applied to the direct form too | the engine; a key past them is absent and counted in `ratelimit_extraction_skips_total`, and a key the domain lowercases is lowercased |
 | **Block** | rules, routes | unbounded | object size only | — |
 | | route methods | enum: the 8 RFC 9110 methods + `PATCH` (RFC 5789) | closed set; a method outside the enum matches only routes without `methods` | enum, `listType: set` |
 | | route path | ≤ 2048 characters | the conventional URL length limit | `maxLength` |
+| | route cost: `cost.name`, `cost.default` | name ≤ 64, `^[A-Za-z0-9_.\-\[\]]+$`; default 1..1 000 000 000 | the characters of a query parameter name; the ceiling of a request's cost | pattern, `maxLength`, `minimum`/`maximum`; the compiler, `CostExceedsCapacity` (informational) for a default above a window's capacity |
 | **Rule** | windows (`rates`) | unbounded; periods are unique | per decision, the bucket budget cuts them | `listType: map` by `periodSeconds` |
 | | axes, predicates, `In` values, `replacedRules` | unbounded | object size only; key length is the author's concern | — |
 | **Window** | `periodSeconds` | 1..86400 | whole seconds per the API convention; a day is the ceiling for rate limiting, beyond that it is a quota | `minimum`/`maximum` |

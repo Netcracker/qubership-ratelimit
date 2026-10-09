@@ -264,6 +264,23 @@ func TestSave_refusesAStateTheObjectCannotHold(t *testing.T) {
 	assert.ErrorContains(t, err, "the limit is 16")
 }
 
+// A state the object cannot hold is refused before anything is written, so the
+// object keeps the state of the last write, and the replicas keep the
+// configuration they mounted.
+func TestSave_leavesTheObjectAsItWasWhenTheStateDoesNotFit(t *testing.T) {
+	kept := map[string]policy.Bundle{
+		"gateway.kept": {UID: "uk", GoodGeneration: 1, GoodSpec: goodSpec("gateway.kept")}}
+	store := storeOver(t, written(t, kept))
+
+	err := store.Save(t.Context(),
+		map[string]policy.Bundle{"gateway.big": {UID: "ub", GoodGeneration: 1, GoodSpec: goodSpec("gateway.big")}}, 16)
+
+	assert.ErrorIs(t, err, ErrTooLarge)
+	bundles, err := store.Load(t.Context(), []string{"gateway.kept", "gateway.big"})
+	require.NoError(t, err)
+	assert.Equal(t, kept, bundles, "Load after the refused Save")
+}
+
 func TestSave_reportsAWriteThatFails(t *testing.T) {
 	refused := errors.New("write refused")
 	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
@@ -340,6 +357,29 @@ func TestReconcile_returnsAReadFailure(t *testing.T) {
 	assert.ErrorIs(t, err, unreachable)
 }
 
+// Policies that cannot be listed are not an empty namespace: Reconcile returns
+// the error and writes nothing, so the object keeps every domain it holds
+// rather than a configuration compiled from no policy at all.
+func TestReconcile_writesNothingWhenThePoliciesCannotBeListed(t *testing.T) {
+	unreachable := errors.New("api server unreachable")
+	kept := map[string]policy.Bundle{
+		"gateway.public": {UID: "u", GoodGeneration: 1, GoodSpec: goodSpec("gateway.public")}}
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithObjects(written(t, kept)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return unreachable
+			}}).Build()
+	store := New(c, unitNamespace, nil, "v", logr.Discard())
+	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: store}
+
+	_, err := r.Reconcile(t.Context(), reconcileRequest())
+
+	assert.ErrorIs(t, err, unreachable)
+	bundles, err := store.Load(t.Context(), []string{"gateway.public"})
+	require.NoError(t, err)
+	assert.Equal(t, kept, bundles, "Load after the failed Reconcile")
+}
+
 // A write the size refused is counted under its reason, which is what the
 // dashboard's panel watches. A limit nothing fits makes the fit set the
 // generation back to an empty bundle, and the write still carries a manifest
@@ -358,6 +398,31 @@ func TestReconcile_returnsAWriteFailureCountedUnderItsReason(t *testing.T) {
 	assert.ErrorIs(t, err, ErrTooLarge)
 	assert.Equal(t, before+1, testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues("size")),
 		`ratelimit_config_write_errors_total{reason="size"}`)
+}
+
+// An update of the existing object that the API server refuses comes back as
+// the error and is counted under api, the reason for an answer of the API
+// server. The object holds no domain yet, so the write is not spared.
+func TestReconcile_countsAnUpdateTheAPIServerRefusedUnderAPI(t *testing.T) {
+	object := &v1.RateLimitPolicy{
+		ObjectMeta: metav1.ObjectMeta{Namespace: unitNamespace, Name: "gateway.public", UID: "u", Generation: 1},
+		Spec:       goodSpec("gateway.public"),
+	}
+	refused := apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, contract.ConfigMapName,
+		errors.New("the object has been modified"))
+	c := fake.NewClientBuilder().WithScheme(unitScheme(t)).WithObjects(written(t, nil), object).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+				return refused
+			}}).Build()
+	r := &Reconciler{Client: c, Namespace: unitNamespace, Store: New(c, unitNamespace, nil, "v", logr.Discard())}
+	before := testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues("api"))
+
+	_, err := r.Reconcile(t.Context(), reconcileRequest())
+
+	assert.ErrorIs(t, err, refused)
+	assert.Equal(t, before+1, testutil.ToFloat64(metrics.ConfigWriteErrors.WithLabelValues("api")),
+		`ratelimit_config_write_errors_total{reason="api"}`)
 }
 
 func TestWriteErrorReason_namesTheCause(t *testing.T) {

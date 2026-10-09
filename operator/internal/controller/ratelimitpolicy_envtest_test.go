@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilfield "k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -340,6 +341,56 @@ var _ = Describe("RateLimitPolicy", func() {
 			Expect(create(policy)).
 				To(rejectedAt(metav1.CauseTypeFieldValueInvalid, "spec.limits[0].target.routes[0].path.value"))
 		})
+
+		// policyWithCost is a policy of one block whose one route, over /api/,
+		// reads the cost of a request through the entry cost.
+		policyWithCost := func(cost ratelimitv1.RouteCost) *ratelimitv1.RateLimitPolicy {
+			policy := policyWith("gateway.public", blockWith("api", ruleWith("total")))
+			policy.Spec.Limits[0].Target = &ratelimitv1.Target{Routes: []ratelimitv1.Route{{
+				Path: ratelimitv1.PathMatch{Type: ratelimitv1.PathMatchPrefix, Value: "/api/"},
+				Cost: &cost,
+			}}}
+			return policy
+		}
+
+		DescribeTable("rejects a cost entry the schema does not admit",
+			func(cost ratelimitv1.RouteCost, causeType metav1.CauseType, costField string) {
+				Expect(create(policyWithCost(cost))).
+					To(rejectedAt(causeType, "spec.limits[0].target.routes[0].cost."+costField))
+			},
+			Entry("a source other than QueryParameter",
+				ratelimitv1.RouteCost{Source: "Header", Name: "limit"},
+				metav1.CauseTypeFieldValueNotSupported, "source"),
+			Entry("a name with a space",
+				ratelimitv1.RouteCost{Source: ratelimitv1.CostSourceQueryParameter, Name: "page size"},
+				metav1.CauseTypeFieldValueInvalid, "name"),
+			Entry("a name of 65 characters",
+				ratelimitv1.RouteCost{Source: ratelimitv1.CostSourceQueryParameter, Name: strings.Repeat("l", 65)},
+				metav1.CauseType(utilfield.ErrorTypeTooLong), "name"),
+			Entry("a default of zero",
+				ratelimitv1.RouteCost{Source: ratelimitv1.CostSourceQueryParameter, Name: "limit", Default: new(int32(0))},
+				metav1.CauseTypeFieldValueInvalid, "default"),
+			Entry("a default above the ceiling of 1000000000",
+				ratelimitv1.RouteCost{
+					Source: ratelimitv1.CostSourceQueryParameter, Name: "limit", Default: new(int32(1_000_000_001))},
+				metav1.CauseTypeFieldValueInvalid, "default"),
+		)
+
+		DescribeTable("admits a cost entry at the bounds of the schema",
+			func(cost ratelimitv1.RouteCost) {
+				Expect(create(policyWithCost(cost))).To(Succeed())
+			},
+			Entry("no default",
+				ratelimitv1.RouteCost{Source: ratelimitv1.CostSourceQueryParameter, Name: "limit"}),
+			Entry("a name of 64 characters",
+				ratelimitv1.RouteCost{Source: ratelimitv1.CostSourceQueryParameter, Name: strings.Repeat("l", 64)}),
+			Entry("brackets and a dot in the name, and a default of one",
+				ratelimitv1.RouteCost{
+					Source: ratelimitv1.CostSourceQueryParameter, Name: "page[size].v2", Default: new(int32(1))}),
+			Entry("a default at the ceiling of 1000000000",
+				ratelimitv1.RouteCost{
+					Source: ratelimitv1.CostSourceQueryParameter, Name: "limit", Default: new(int32(1_000_000_000))}),
+		)
 
 		It("admits a camelCase descriptor key", func() {
 			// One pattern covers every place a key is named, and it admits the

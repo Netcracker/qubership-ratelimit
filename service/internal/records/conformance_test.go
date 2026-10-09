@@ -98,6 +98,21 @@ func runConformance(t *testing.T, build factory) {
 		assert.True(t, again.TokenMissing, "Accept(command-b) with the token command-a consumed = %+v", again)
 	})
 
+	t.Run("a confirmation token past its TTL is missing", func(t *testing.T) {
+		commands, _ := build(t)
+		k := freshKeys(t)
+		k.Token = k.Record + ":token"
+		require.NoError(t, commands.Put(t.Context(), k.Token, []byte(`{"selection":"x"}`), 100*time.Millisecond))
+		waitForTokenToExpire(t, commands, k.Token)
+
+		accepted := acceptWith(t, commands, k, "command-a", "fence-1", time.Minute)
+
+		assert.True(t, accepted.TokenMissing, "Accept(command-a) with a token past its TTL = %+v", accepted)
+		record, err := commands.Lookup(t.Context(), k)
+		require.NoError(t, err)
+		assert.False(t, record.Found, "Lookup of the record of command-a = %+v", record)
+	})
+
 	t.Run("a bound key reports the command it carries", func(t *testing.T) {
 		commands, _ := build(t)
 		k := freshKeys(t)
@@ -193,6 +208,10 @@ func runConformance(t *testing.T, build factory) {
 		})
 
 		assert.ErrorIs(t, err, records.ErrLeaseLost)
+		record, err := commands.Lookup(t.Context(), k)
+		require.NoError(t, err)
+		assert.False(t, record.Terminal, "Record.Terminal after the refused Commit")
+		assert.True(t, record.Alive(), "Alive() after the refused Commit of %+v", record)
 	})
 
 	t.Run("a dead sweep is finalized from its committed progress", func(t *testing.T) {
@@ -248,6 +267,21 @@ func runConformance(t *testing.T, build factory) {
 
 		require.NoError(t, err)
 		assert.Equal(t, records.Outcome{Progress: records.Progress{Reset: 7}}, record.Outcome, "Record.Outcome")
+	})
+
+	t.Run("finalizing a record never accepted writes nothing", func(t *testing.T) {
+		commands, _ := build(t)
+		k := freshKeys(t)
+
+		record, err := commands.Finalize(t.Context(), records.Finalize{
+			Keys: k, Outcome: records.Outcome{Failed: true, Code: "RLS-0501"},
+		})
+
+		require.NoError(t, err)
+		assert.False(t, record.Found, "Finalize of a record never accepted = %+v", record)
+		after, err := commands.Lookup(t.Context(), k)
+		require.NoError(t, err)
+		assert.False(t, after.Found, "Lookup after the Finalize = %+v", after)
 	})
 
 	t.Run("the addressed reset binds, deletes, and records in one step", func(t *testing.T) {
@@ -403,6 +437,18 @@ func waitForLease(t *testing.T, commands records.Store, k records.Keys) {
 	}, 2*time.Second, 20*time.Millisecond, "the lease of the record to expire")
 }
 
+// waitForTokenToExpire blocks until the confirmation token under key has
+// expired, as Get reports it.
+func waitForTokenToExpire(t *testing.T, commands records.Store, key string) {
+	t.Helper()
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		_, found, err := commands.Get(t.Context(), key)
+		assert.NoError(c, err, "Get(%q)", key)
+		assert.False(c, found, "Get(%q) found the token", key)
+	}, 2*time.Second, 20*time.Millisecond, "the confirmation token %s to expire", key)
+}
+
 // keysUnder walks the keys of one prefix to the end, which is how a test
 // checks whether a counter still exists on any store.
 func keysUnder(t *testing.T, counters store.Store, prefix string) []string {
@@ -428,7 +474,8 @@ func spend(t *testing.T, counters store.Store, k string) string {
 		Key:       k,
 		Algorithm: algo.GCRAID,
 		Window:    algo.Window{Requests: 10, Period: time.Minute, Burst: 10},
-	}}, 1)
+		Cost:      1,
+	}})
 	require.NoError(t, err)
 	return k
 }

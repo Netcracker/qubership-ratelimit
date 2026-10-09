@@ -278,6 +278,10 @@ func TestCompileRejectsAStructuralDefectAsInvalidSpec(t *testing.T) {
 			p.Blocks[0].Rules[0].Matches = []model.Predicate{
 				{Key: model.KeyToken, Operator: model.OperatorExists}}
 		}},
+		{"method in matches", func(p *model.Policy) {
+			p.Blocks[0].Rules[0].Matches = []model.Predicate{
+				{Key: model.KeyMethod, Operator: model.OperatorEquals, Value: "GET"}}
+		}},
 		{"unknown path type", func(p *model.Policy) { p.Blocks[0].Target.Routes[0].Path.Type = "Regex" }},
 		{"relative path", func(p *model.Policy) { p.Blocks[0].Target.Routes[0].Path.Value = "api/" }},
 		{"unknown method", func(p *model.Policy) { p.Blocks[0].Target.Routes[0].Methods = []string{"FETCH"} }},
@@ -344,6 +348,18 @@ func TestCompileRejectsAStructuralDefectAsInvalidSpec(t *testing.T) {
 		{"placeholder named after the built-in sub", func(p *model.Policy) {
 			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{sub}"}
 		}},
+		{"placeholder named after the built-in path", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{path}"}
+		}},
+		{"placeholder named after the built-in method", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{method}"}
+		}},
+		{"placeholder named token", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{token}"}
+		}},
+		{"placeholder repeated within one template", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{Type: model.PathTemplate, Value: "/orders/{id}/items/{id}"}
+		}},
 		// A segment is a literal or a single placeholder. A brace outside a
 		// placeholder used to compile into a literal that only a request
 		// carrying the braces verbatim matched, and the rule behind it was
@@ -376,6 +392,12 @@ func TestCompileRejectsAStructuralDefectAsInvalidSpec(t *testing.T) {
 		{"mapping over a built-in", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: model.KeyPath, Claim: "x"}}
 		}},
+		{"mapping over the built-in method", func(p *model.Policy) {
+			p.Mappings = []model.KeyMapping{{Key: model.KeyMethod, Claim: "x"}}
+		}},
+		{"mapping named token", func(p *model.Policy) {
+			p.Mappings = []model.KeyMapping{{Key: model.KeyToken, Claim: "x"}}
+		}},
 		{"claim and claimPath together", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: "plan", Claim: "a", ClaimPath: []string{"b"}}}
 		}},
@@ -400,6 +422,27 @@ func TestCompileRejectsAStructuralDefectAsInvalidSpec(t *testing.T) {
 		}},
 		{"unknown normalization", func(p *model.Policy) {
 			p.Mappings = []model.KeyMapping{{Key: "plan", Claim: "a", Normalization: "Uppercase"}}
+		}},
+		{"unknown cost source", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{Source: "Header", Name: "limit"}
+		}},
+		{"empty cost parameter", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{Source: model.CostQueryParameter}
+		}},
+		{"cost parameter with a space", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{Source: model.CostQueryParameter, Name: "page size"}
+		}},
+		{"cost parameter of 65 characters", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{
+				Source: model.CostQueryParameter, Name: strings.Repeat("l", 65)}
+		}},
+		{"negative default cost", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{
+				Source: model.CostQueryParameter, Name: "limit", Default: -1}
+		}},
+		{"default cost above the ceiling", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{
+				Source: model.CostQueryParameter, Name: "limit", Default: model.MaxCost + 1}
 		}},
 	}
 
@@ -428,6 +471,55 @@ func TestCompileReportsEachDefectOfABypassRuleUnderAll(t *testing.T) {
 	}
 	if got := blockNames(snap.Blocks); len(got) != 0 {
 		t.Errorf("Compile blocks = %v, want none", got)
+	}
+}
+
+// address is where a problem points: its block, its rule, and its reason.
+type address struct {
+	Block, Rule string
+	Reason      Reason
+}
+
+func addressesOf(problems []Problem) []address {
+	out := make([]address, 0, len(problems))
+	for _, p := range problems {
+		out = append(out, address{Block: p.Block, Rule: p.Rule, Reason: p.Reason})
+	}
+	return out
+}
+
+// A problem carries the address the status shows the author: a problem of a
+// rule names its block and the rule, a problem of a block names the block
+// alone, and a problem of the policy as a whole, such as the decision budget,
+// names neither.
+func TestCompileAddressesAProblemToItsBlockAndRule(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*model.Policy)
+		want   address
+	}{
+		{"a problem of a rule", func(p *model.Policy) {
+			p.Blocks[0].Rules[0].Counters = []string{"ghost"}
+		}, address{Block: "api", Rule: "per-user", Reason: ReasonUnresolvedKeyReference}},
+		{"a problem of a block", func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path.Value = "api/"
+		}, address{Block: "api", Reason: ReasonInvalidSpec}},
+		// 33 rules of four windows each, 132 buckets.
+		{"a problem of the policy", func(p *model.Policy) {
+			*p = budgetPolicy(model.ModeAll, counting(33, ""))
+		}, address{Reason: ReasonDomainBudgetExceeded}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPolicy()
+			tc.mutate(&p)
+
+			_, problems := compileOne(p)
+
+			if got := addressesOf(problems); !slices.Equal(got, []address{tc.want}) {
+				t.Errorf("Compile problems point at %+v, want [%+v]; problems: %v", got, tc.want, problems)
+			}
+		})
 	}
 }
 
@@ -486,6 +578,8 @@ func TestCompileRejectsAMalformedDomain(t *testing.T) {
 	}{
 		{"empty", ""},
 		{"uppercase letters and an underscore", "Bad_Domain"},
+		{"uppercase letters", "Gateway.public"},
+		{"an underscore", "gateway_public"},
 		{"a leading hyphen", "-x"},
 		{"a slash", "a/b"},
 		{"64 characters", strings.Repeat("a", 64)},
@@ -498,6 +592,44 @@ func TestCompileRejectsAMalformedDomain(t *testing.T) {
 			snap, problems := Compile(namespace, tc.domain, &p)
 
 			assertRejectedWhole(t, snap, problems, ReasonInvalidSpec)
+		})
+	}
+}
+
+// A domain, a mapping key, and a placeholder of 63 characters sit on the bound
+// the schema and the compiler share, and compile. TestCompileRejectsAMalformedDomain
+// and TestCompileRejectsAStructuralDefectAsInvalidSpec refuse one character more.
+func TestCompileAcceptsANameOfExactly63Characters(t *testing.T) {
+	cases := []struct {
+		name   string
+		domain string
+		mutate func(*model.Policy)
+	}{
+		{"a domain", strings.Repeat("a", 63), func(*model.Policy) {}},
+		{"a mapping key", domain, func(p *model.Policy) {
+			p.Mappings = []model.KeyMapping{{Key: strings.Repeat("k", 63), Claim: "a"}}
+		}},
+		{"a placeholder", domain, func(p *model.Policy) {
+			p.Blocks[0].Target.Routes[0].Path = model.PathMatch{
+				Type:  model.PathTemplate,
+				Value: "/api/{" + strings.Repeat("k", 63) + "}",
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPolicy()
+			p.Domain = tc.domain
+			tc.mutate(&p)
+
+			snap, problems := Compile(namespace, tc.domain, &p)
+
+			if len(problems) != 0 {
+				t.Errorf("Compile problems = %v, want none", problems)
+			}
+			if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"api"}) {
+				t.Errorf("Compile blocks = %v, want [api]", got)
+			}
 		})
 	}
 }
@@ -635,6 +767,33 @@ func TestACaptureDoesNotResolveInAnotherBlock(t *testing.T) {
 	}
 	if got := problems[0]; got.Block != "stranger" || got.Reason != ReasonUnresolvedKeyReference {
 		t.Errorf("Compile problem = %+v, want an UnresolvedKeyReference in block stranger", got)
+	}
+}
+
+// A capture shadows the array-valued mapping of its name inside its block,
+// where the key is a scalar and Equals applies to it. One compilation holds
+// block api, whose template captures roles, and block stranger, which has no
+// such capture: Equals on roles is refused in stranger alone, and api reports
+// only the informational shadowing.
+func TestEqualsAppliesToAnArrayKeyInTheBlockWhoseCaptureShadowsIt(t *testing.T) {
+	equalsAdmin := []model.Predicate{{Key: "roles", Operator: model.OperatorEquals, Value: "admin"}}
+	p := validPolicy()
+	p.Mappings = []model.KeyMapping{{Key: "roles", Claim: "realm_access.roles", Type: model.ValueStringArray}}
+	p.Blocks[0].Target.Routes = []model.Route{{Path: model.PathMatch{Type: model.PathTemplate, Value: "/api/{roles}"}}}
+	p.Blocks[0].Rules[0].Matches = equalsAdmin
+	p.Blocks = append(p.Blocks, model.Block{
+		Name:  "stranger",
+		Rules: []model.Rule{{Name: "r", Matches: equalsAdmin, Rates: []model.Rate{rate(1, time.Minute)}}},
+	})
+
+	_, problems := compileOne(p)
+
+	want := []address{
+		{Block: "api", Reason: ReasonCaptureShadowsMappedKey},
+		{Block: "stranger", Rule: "r", Reason: ReasonIncompatibleOperator},
+	}
+	if got := addressesOf(problems); !slices.Equal(got, want) {
+		t.Errorf("Compile problems point at %+v, want %+v; problems: %v", got, want, problems)
 	}
 }
 
@@ -883,4 +1042,92 @@ func TestCompileEnforcesTheDecisionBucketBudget(t *testing.T) {
 
 		assertRejectedWhole(t, snap, problems, ReasonDomainBudgetExceeded)
 	})
+}
+
+// policyWithCost returns validPolicy with the cost entry on its one route and
+// the window of its one rule a fixed window as large as the ceiling of a
+// cost, so that no default is above the window's capacity.
+func policyWithCost(cost model.RouteCost) model.Policy {
+	p := validPolicy()
+	p.Blocks[0].Target.Routes[0].Cost = &cost
+	p.Blocks[0].Rules[0].Rates = []model.Rate{{Requests: model.MaxCost, Period: time.Hour, Algorithm: "FixedWindow"}}
+	return p
+}
+
+// A cost entry at the edge of what the schema admits compiles into the route,
+// with an absent default resolved to one.
+func TestCompileCarriesTheCostEntryOfARoute(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry model.RouteCost
+		want  Cost
+	}{
+		{"no default", model.RouteCost{Source: model.CostQueryParameter, Name: "limit"},
+			Cost{Parameter: "limit", Default: 1}},
+		{"brackets in the name", model.RouteCost{Source: model.CostQueryParameter, Name: "page[size]", Default: 20},
+			Cost{Parameter: "page[size]", Default: 20}},
+		{"a name of 64 characters", model.RouteCost{Source: model.CostQueryParameter, Name: strings.Repeat("l", 64)},
+			Cost{Parameter: strings.Repeat("l", 64), Default: 1}},
+		{"the ceiling as the default", model.RouteCost{
+			Source: model.CostQueryParameter, Name: "page.size", Default: model.MaxCost},
+			Cost{Parameter: "page.size", Default: model.MaxCost}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snap, problems := compileOne(policyWithCost(tc.entry))
+
+			if len(problems) != 0 {
+				t.Fatalf("Compile(cost %+v) problems = %v, want none", tc.entry, problems)
+			}
+			if got := snap.Blocks[0].Routes[0].Cost; got == nil || *got != tc.want {
+				t.Errorf("Compile(cost %+v): route cost = %+v, want %+v", tc.entry, got, tc.want)
+			}
+		})
+	}
+}
+
+// A route whose default cost is above the capacity of a window of its block
+// is reported under CostExceedsCapacity, at the block and the rule of the
+// window, and the generation stays valid. The capacity is the burst of a GCRA
+// window and the requests of a fixed one; a default equal to it is no
+// problem.
+func TestADefaultCostAboveAWindowCapacityIsReportedWithoutBlocking(t *testing.T) {
+	cases := []struct {
+		name         string
+		defaultCost  int64
+		rate         model.Rate
+		wantProblems []Reason
+	}{
+		{"a default equal to the burst", 5,
+			model.Rate{Requests: 100, Period: time.Minute, Burst: 5}, []Reason{}},
+		{"a default one above the burst", 6,
+			model.Rate{Requests: 100, Period: time.Minute, Burst: 5}, []Reason{ReasonCostExceedsCapacity}},
+		{"a default equal to the requests of a fixed window", 100,
+			model.Rate{Requests: 100, Period: time.Minute, Algorithm: "FixedWindow"}, []Reason{}},
+		{"a default one above the requests of a fixed window", 101,
+			model.Rate{Requests: 100, Period: time.Minute, Algorithm: "FixedWindow"},
+			[]Reason{ReasonCostExceedsCapacity}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := validPolicy()
+			p.Blocks[0].Target.Routes[0].Cost = &model.RouteCost{
+				Source: model.CostQueryParameter, Name: "limit", Default: tc.defaultCost}
+			p.Blocks[0].Rules[0].Rates = []model.Rate{tc.rate}
+
+			snap, problems := compileOne(p)
+
+			if got := reasonsOf(problems); !slices.Equal(got, tc.wantProblems) {
+				t.Errorf("Compile reasons = %v, want %v; problems: %v", got, tc.wantProblems, problems)
+			}
+			for _, problem := range problems {
+				if problem.Blocking || problem.Block != "api" || problem.Rule != "per-user" {
+					t.Errorf("Compile problem %+v, want an informational one at api/per-user", problem)
+				}
+			}
+			if got := blockNames(snap.Blocks); !slices.Equal(got, []string{"api"}) {
+				t.Errorf("Compile blocks = %v, want [api]", got)
+			}
+		})
+	}
 }

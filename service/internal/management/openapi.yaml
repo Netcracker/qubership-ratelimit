@@ -1700,7 +1700,8 @@ paths:
       description: |
         Runs the full decision pipeline - matching, identity extraction,
         per-rule verdicts - through the store's non-charging read, at the
-        cost the body names. The answer is the verdict as of evaluatedAt - nothing is reserved, and parallel traffic can change the real outcome - plus the per-rule breakdown the gateway never sees.
+        cost the body names or, in a block whose matched route reads a cost,
+        at the cost that route reads from the query string of path. The answer is the verdict as of evaluatedAt - nothing is reserved, and parallel traffic can change the real outcome - plus the per-rule breakdown the gateway never sees.
 
         Identity comes from `identitySource`; the three request forms are
         structural (see SimulationRequest):
@@ -1776,6 +1777,7 @@ paths:
                   refusalReason: rate_limited
                   limit: 100
                   remaining: 0
+                  cost: 1
                   retryAfterSeconds: 23.4
                   algorithm: gcra
                   periodSeconds: 60
@@ -1784,6 +1786,7 @@ paths:
                   allowed: true
                   limit: 100
                   remaining: 61
+                  cost: 1
                   algorithm: gcra
                   periodSeconds: 60
                 - id: tenants/per-tenant
@@ -1791,6 +1794,7 @@ paths:
                   allowed: true
                   limit: 1000
                   remaining: 902
+                  cost: 1
                   algorithm: gcra
                   periodSeconds: 60
                 - id: total/all
@@ -1798,6 +1802,7 @@ paths:
                   allowed: true
                   limit: 5000
                   remaining: 4310
+                  cost: 1
                   algorithm: gcra
                   periodSeconds: 60
                 extractedKeys:
@@ -2358,7 +2363,35 @@ components:
           items:
             type: string
           description: HTTP methods the route accepts; absent means any.
+        cost:
+          $ref: '#/components/schemas/CostView'
       description: One compiled route matcher of a block's target.
+    CostView:
+      type: object
+      additionalProperties: false
+      required:
+      - source
+      - name
+      - default
+      properties:
+        source:
+          type: string
+          enum:
+          - QueryParameter
+          description: Where the cost is read from, spelled as the custom resource
+            spells it.
+        name:
+          type: string
+          example: limit
+          description: 'The query parameter whose value is the cost of a request
+            matched through the route: a positive decimal integer, at most 1000000000.'
+        default:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The cost of a request without a usable value in the parameter.
+      description: 'How a route reads the cost of a request from its query string;
+        absent on a route that reads none, where the request costs one unit.'
     RuleView:
       type: object
       required:
@@ -2482,7 +2515,8 @@ components:
         requests:
           type: integer
           format: int64
-          description: The window's request budget.
+          description: The window's budget in units of cost - requests, unless the
+            route of its block reads a cost.
         periodSeconds:
           type: integer
           format: int64
@@ -2575,12 +2609,13 @@ components:
         limit:
           type: integer
           format: int64
-          description: The window's request budget.
+          description: The window's budget in units of cost - requests, unless the
+            route of its block reads a cost.
         remaining:
           type: integer
           format: int64
-          description: Requests the counter would still admit right now; recovers
-            over time under gcra.
+          description: Units of cost the counter would still admit right now - requests,
+            unless the route of its block reads a cost; recovers over time under gcra.
         limited:
           type: boolean
           description: Would refuse the next cost=1 request. A shadow-mode counter
@@ -2636,9 +2671,9 @@ components:
         path:
           type: string
           example: /api/invoices/1
-          description: 'The request path; matching ignores the query string. Required:
-            a gateway request always has one, and route matching is undefined without
-            it.'
+          description: 'The request path. Matching ignores the query string, and a
+            route with a cost reads its parameter from it. Required: a gateway request
+            always has one, and route matching is undefined without it.'
         method:
           type: string
           example: GET
@@ -2657,8 +2692,9 @@ components:
           format: int64
           minimum: 1
           default: 1
-          description: Every window is judged using this cost; the simulation never
-            charges counters.
+          description: The request's own cost. The windows of a block are judged
+            using it unless the block's matched route reads a cost from the query
+            string; the simulation never charges counters.
       description: 'The gateway-mirroring form: identity extracted from the token
         with explicit keys overlaid per key; with neither present the simulation
         is anonymous.'
@@ -2677,7 +2713,8 @@ components:
           description: The rate limit domain, as the gateway's filter names it.
         path:
           type: string
-          description: The request path; matching ignores the query string.
+          description: The request path. Matching ignores the query string, and a
+            route with a cost reads its parameter from it.
         method:
           type: string
           description: The HTTP method of the request.
@@ -2693,8 +2730,9 @@ components:
           format: int64
           minimum: 1
           default: 1
-          description: Every window is judged using this cost; the simulation never
-            charges counters.
+          description: The request's own cost. The windows of a block are judged
+            using it unless the block's matched route reads a cost from the query
+            string; the simulation never charges counters.
       description: 'The pure-token form: identity comes from extraction alone, and
         the shape admits no keys field.'
     SimulationKeys:
@@ -2712,7 +2750,8 @@ components:
           description: The rate limit domain, as the gateway's filter names it.
         path:
           type: string
-          description: The request path; matching ignores the query string.
+          description: The request path. Matching ignores the query string, and a
+            route with a cost reads its parameter from it.
         method:
           type: string
           description: The HTTP method of the request.
@@ -2728,8 +2767,9 @@ components:
           format: int64
           minimum: 1
           default: 1
-          description: Every window is judged using this cost; the simulation never
-            charges counters.
+          description: The request's own cost. The windows of a block are judged
+            using it unless the block's matched route reads a cost from the query
+            string; the simulation never charges counters.
       description: 'The pure-keys form: identity comes from explicit values alone,
         and the shape admits no token field.'
     SimulationTokenValue:
@@ -2880,6 +2920,7 @@ components:
       - periodSeconds
       - limit
       - remaining
+      - cost
       properties:
         id:
           type: string
@@ -2911,12 +2952,21 @@ components:
         limit:
           type: integer
           format: int64
-          description: The window's request budget.
+          description: The window's budget in units of cost - requests, unless the
+            route of its block reads a cost.
         remaining:
           type: integer
           format: int64
-          description: Requests the counter would still admit right now; recovers
-            over time under gcra.
+          description: Units of cost the counter would still admit right now - requests,
+            unless the route of its block reads a cost; recovers over time under gcra.
+        cost:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The cost every window of the rule was judged at - the value
+            the matched route of its block read from the query string, or the
+            request's own cost where that route reads none. limit and remaining
+            count the same units.
     RuleOutcomeRefused:
       description: The rule refused; refusalReason is mandatory, and retryAfterSeconds
         is present exactly when the refusal is rate_limited - a capacity_exceeded
@@ -2942,6 +2992,7 @@ components:
       - periodSeconds
       - limit
       - remaining
+      - cost
       - refusalReason
       - retryAfterSeconds
       properties:
@@ -2984,12 +3035,21 @@ components:
         limit:
           type: integer
           format: int64
-          description: The window's request budget.
+          description: The window's budget in units of cost - requests, unless the
+            route of its block reads a cost.
         remaining:
           type: integer
           format: int64
-          description: Requests the counter would still admit right now; recovers
-            over time under gcra.
+          description: Units of cost the counter would still admit right now - requests,
+            unless the route of its block reads a cost; recovers over time under gcra.
+        cost:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The cost every window of the rule was judged at - the value
+            the matched route of its block read from the query string, or the
+            request's own cost where that route reads none. limit and remaining
+            count the same units.
         retryAfterSeconds:
           type: number
           description: Seconds until the refusing window would admit the request;
@@ -3007,6 +3067,7 @@ components:
       - periodSeconds
       - limit
       - remaining
+      - cost
       - refusalReason
       properties:
         id:
@@ -3048,12 +3109,21 @@ components:
         limit:
           type: integer
           format: int64
-          description: The window's request budget.
+          description: The window's budget in units of cost - requests, unless the
+            route of its block reads a cost.
         remaining:
           type: integer
           format: int64
-          description: Requests the counter would still admit right now; recovers
-            over time under gcra.
+          description: Units of cost the counter would still admit right now - requests,
+            unless the route of its block reads a cost; recovers over time under gcra.
+        cost:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The cost every window of the rule was judged at - the value
+            the matched route of its block read from the query string, or the
+            request's own cost where that route reads none. limit and remaining
+            count the same units.
     HeadersAdmitted:
       type: object
       additionalProperties: false
@@ -3124,7 +3194,8 @@ components:
         is undefined for them, so among them the tie-break is the smallest counter
         key. Then retryable refusals, by the longest retryAfterSeconds - the constraint
         that actually binds the client. Then, on an admission, the window with the
-        least remaining. Every remaining tie breaks by the lexicographically smallest
+        fewest further requests at the cost it was charged, its remaining divided
+        by that cost. Every remaining tie breaks by the lexicographically smallest
         counter key, which orders by the block/rule id, then algorithm,
         then periodSeconds - the same on every replica.'
       required:
@@ -3188,7 +3259,8 @@ components:
         is undefined for them, so among them the tie-break is the smallest counter
         key. Then retryable refusals, by the longest retryAfterSeconds - the constraint
         that actually binds the client. Then, on an admission, the window with the
-        least remaining. Every remaining tie breaks by the lexicographically smallest
+        fewest further requests at the cost it was charged, its remaining divided
+        by that cost. Every remaining tie breaks by the lexicographically smallest
         counter key, which orders by the block/rule id, then algorithm,
         then periodSeconds - the same on every replica.'
       required:

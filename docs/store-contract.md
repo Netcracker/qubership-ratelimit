@@ -9,9 +9,9 @@ faster to read. A rule author does not need this document; that layer is describ
 
 ```go
 type Store interface {
-    Decide(ctx, buckets []Bucket, cost int64) ([]Verdict, error)  // decide and charge
-    Peek(ctx, buckets []Bucket, cost int64) ([]Verdict, error)    // decide without charging
-    Reset(ctx, keys []string) error                               // reset the state
+    Decide(ctx, buckets []Bucket) ([]Verdict, error)  // decide and charge, each bucket at its Cost
+    Peek(ctx, buckets []Bucket) ([]Verdict, error)    // decide without charging
+    Reset(ctx, keys []string) error                   // reset the state
 }
 
 type Inspector interface {                       // management overview, separate from the decision path
@@ -37,7 +37,8 @@ limit below 1 is an error.
 | --- | --- |
 | A decision is atomic: a refusal leaves no trace, an allowed request charges all enforcing buckets | charging one by one burns the daily quota with requests rejected by the per-minute limit |
 | A shadow bucket is charged only on its own verdict | unconditional charging accumulates infinite debt, and the "would have rejected" metric lies |
-| `cost < 1` is an error, nothing executes | a negative cost is a quota "refund" |
+| Every bucket carries its own `Cost`, and the buckets of one decision may carry different ones | a block whose route reads a cost from the query string charges that cost, and the other blocks of the request charge theirs |
+| A bucket `Cost < 1` is an error, nothing executes | a negative cost is a quota "refund" |
 | A duplicate key in one decision is an error | two evaluations of one state in one commit lose one charge |
 | An empty bucket list is not passed | a request outside the rules is allowed without a trip to the store |
 | Time is taken from the store, not from the caller | engine replicas drift apart in their clocks; a shared bucket must not |
@@ -102,8 +103,9 @@ func TestConformsToTheStoreContract(t *testing.T) {
 ```
 
 The suite checks the properties the type system cannot see: all-or-nothing, `Peek` does not spend, a refusal does not
-move state (regular and shadow), an impossible cost is flagged and not charged, a non-positive cost and duplicates are
-rejected, reset and its idempotence, verdict order, fixed window counting, enumeration by prefix (if there is an
+move state (regular and shadow), each bucket is judged and charged at its own cost, an impossible cost is flagged and
+not charged, a non-positive cost and duplicates are rejected, reset and its idempotence, verdict order, fixed window
+counting, enumeration by prefix (if there is an
 `Inspector`). Fixture keys carry a hash tag, so the suite also runs through Cluster.
 
 The suite's honest limitations: "a refusal does not spend" is observable only through GCRA (with fixed window, an extra
