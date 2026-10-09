@@ -37,7 +37,7 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 	)
 	var (
 		store  counterStore
-		viewer map[string]string
+		caller map[string]string
 	)
 
 	// checks reads ratelimit_checks_total of the domain for one verdict,
@@ -60,7 +60,7 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 		if err := k8s.Get(ctx, client.ObjectKey{Namespace: store.namespace, Name: store.service}, &dep); err != nil {
 			Skip("the store at " + store.addr + " is not a Deployment this suite can scale")
 		}
-		viewer = map[string]string{"Authorization": "Bearer " + managementToken()}
+		caller = map[string]string{"Authorization": "Bearer " + managementToken()}
 
 		// Every change below registers its own undo before it is made, so a
 		// step that fails halfway is still undone, and one undo that fails
@@ -87,7 +87,7 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 		// after this point is the outage, not a route that never arrived.
 		waitGatewayServes(gateway, controlPath)
 		Eventually(func() []string {
-			body, code := gatewayGetBody(gateway, basePath+"/domains", viewer)
+			body, code := gatewayGetBody(gateway, basePath+"/domains", caller)
 			if code != http.StatusOK {
 				return nil
 			}
@@ -128,7 +128,7 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 		DescribeTable("answer 200 with the store down",
 			func(path string) {
 				Eventually(func() int {
-					_, code := gatewayGetBody(gateway, basePath+path, viewer)
+					_, code := gatewayGetBody(gateway, basePath+path, caller)
 					return code
 				}).WithTimeout(30*time.Second).WithPolling(2*time.Second).Should(Equal(http.StatusOK),
 					"GET %s through %s with the store down", basePath+path, gateway)
@@ -150,7 +150,7 @@ var _ = Describe("the management API during a store outage", Ordered, Label("man
 		// request reached the service, and that the service named the store.
 		counters := basePath + "/domains/" + domain + "/counters"
 		Eventually(func(g Gomega) {
-			body, code := gatewayGetBody(gateway, counters, viewer)
+			body, code := gatewayGetBody(gateway, counters, caller)
 			g.Expect(code).To(Equal(http.StatusServiceUnavailable), "body: %s", body)
 			g.Expect(body).To(ContainSubstring("RLS-0503"))
 		}).WithTimeout(30*time.Second).WithPolling(2*time.Second).Should(Succeed(),

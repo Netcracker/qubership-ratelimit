@@ -477,3 +477,42 @@ func TestBulk_recordsAFailedMintWhenShutdownEndsTheWalk(t *testing.T) {
 		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
 	}, "key-1", listedCaller), http.StatusInternalServerError, CodeInterrupted)
 }
+
+// The Retry-After of a poll never exceeds the time left on the lease, which
+// bounds the answer: with 2 seconds left, it is 2 rather than the 5-second poll
+// interval. TestBulk_retryOfARunningCommandPolls holds the interval.
+func TestBulk_aPollAsksForNoMoreThanTheLeaseHasLeft(t *testing.T) {
+	h := newTestAPI(t)
+	h.clock(t)
+	h.accepted(t, "key-1", previewCommand(t), 2*time.Second)
+
+	recorder := h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}}, "dryRun": true,
+	}, "key-1", listedCaller)
+
+	require.Equal(t, http.StatusAccepted, recorder.Code, "body: %s", recorder.Body.String())
+	assert.Equal(t, "2", recorder.Header().Get("Retry-After"))
+}
+
+// An execution refused because another sweep holds the domain is refused before
+// acceptance, so it spends neither its key nor its confirmation token: once the
+// other sweep's lease is gone, the same key and the same token run.
+// TestBulk_aSweepRefusedForABusyDomainBindsNothing holds the key of a preview.
+func TestBulk_anExecutionRefusedForABusyDomainRunsOnceTheDomainIsFree(t *testing.T) {
+	h := newTestAPI(t)
+	now := h.clock(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	selector := map[string]any{"ruleIds": []string{"orders"}}
+	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
+	execute := map[string]any{"selector": selector, "confirmationToken": preview.ConfirmationToken}
+	h.occupy(t, 30*time.Second)
+	refused := requireError(t, h.bulk(t, execute, "key-execute", listedCaller), http.StatusConflict, CodeConflict)
+	require.Equal(t, ConflictSweepInFlight, refused.Meta.ConflictType, "the execution while the domain is busy")
+
+	*now = now.Add(time.Minute)
+
+	var executed BulkResult
+	decode(t, h.bulk(t, execute, "key-execute", listedCaller), http.StatusOK, &executed)
+	require.NotNil(t, executed.ResetCount, "the answer of an execution carries resetCount")
+	assert.Equal(t, 1, *executed.ResetCount, "counters the execution reset once the domain was free")
+}

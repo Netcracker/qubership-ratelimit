@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -214,6 +215,32 @@ func TestObserve_repliesThatDoNotDecodeCountAsNoAnswer(t *testing.T) {
 	assert.ErrorContains(t, err, contract.AppliedPath, "the error of a fleet that answers nothing")
 	var syntax *json.SyntaxError
 	assert.ErrorAs(t, err, &syntax)
+}
+
+// The probe decodes only the first 1 MiB (1048576 bytes) of a reply, so a
+// replica whose report ends past it counts as one that did not answer, and a
+// reply one byte under 1 MiB is read whole. Both replies are the same report
+// behind leading whitespace: the padding goes first so that the end of the
+// report, not padding after it, falls past the cut in the longer reply. The
+// handler pads whichever request arrives first past the bound, so the test
+// does not name the silent replica.
+func TestObserve_aReportThatEndsPastTheFirstMebibyteCountsAsNoAnswer(t *testing.T) {
+	const bound = 1 << 20
+	report, err := json.Marshal(applied.Report{Domains: appliedBy(7)})
+	require.NoError(t, err)
+	var once sync.Once
+	probe := fleet(t, func(w http.ResponseWriter, _ *http.Request) {
+		size := bound - 1
+		once.Do(func() { size = bound + 1 })
+		_, _ = w.Write([]byte(strings.Repeat(" ", size-len(report)) + string(report)))
+	}, ready("ratelimit-a"), ready("ratelimit-b"))
+
+	view, err := probe.Observe(context.Background(), testDomain, want(7), false)
+
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), view.Applied, "view.Applied")
+	assert.Len(t, view.Silent, 1, "view.Silent")
+	assert.Empty(t, view.Behind, "view.Behind")
 }
 
 // An empty fleet is not an error: it is the NoReplicas case, and the leader

@@ -6,14 +6,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -153,6 +157,21 @@ func TestRead_reportsAMissingDirectoryAsAbsent(t *testing.T) {
 	_, err := Read(filepath.Join(newFixture(t).dir, "not-mounted"))
 
 	assert.ErrorIs(t, err, ErrAbsent)
+}
+
+// A manifest the reader cannot open as a file, here a directory under the
+// manifest's key, is a read that failed on the way: neither ErrAbsent nor a
+// *Refusal.
+func TestRead_reportsAManifestItCannotOpenAsAFailedRead(t *testing.T) {
+	f := newFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(f.dir, contract.ManifestKey), 0o750))
+
+	_, err := Read(f.dir)
+
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrAbsent)
+	var refusal *Refusal
+	assert.NotErrorAs(t, err, &refusal)
 }
 
 // Every row starts from a sound directory and damages one part of it. The
@@ -347,6 +366,7 @@ func TestApplier_servesTheReportAsJSON(t *testing.T) {
 	a.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, contract.AppliedPath, nil))
 
 	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
 	var served applied.Report
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &served))
 	assert.Equal(t, int64(4), served.Domains["gateway.private"].Generation)
@@ -475,7 +495,13 @@ func TestApplier_aSpecThatDoesNotCompileHereAndWasNeverAppliedClaimsTheDomainEmp
 
 func startWatcher(t *testing.T, dir string, a *Applier) {
 	t.Helper()
-	w := &Watcher{Dir: dir, Applier: a, Log: logr.Discard(), Resync: 200 * time.Millisecond, Settle: 20 * time.Millisecond}
+	runWatcher(t, &Watcher{Dir: dir, Applier: a, Log: logr.Discard(),
+		Resync: 200 * time.Millisecond, Settle: 20 * time.Millisecond})
+}
+
+// runWatcher runs w until the test ends.
+func runWatcher(t *testing.T, w *Watcher) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -625,4 +651,89 @@ func TestWatcher_appliesTheSameManifestOnce(t *testing.T) {
 
 	assert.Never(t, func() bool { return !a.Store.SwappedAt().Equal(swapped) },
 		500*time.Millisecond, 10*time.Millisecond, "the rule set was swapped again for the same manifest")
+}
+
+// A refused manifest is reported once, however often it is read again: the
+// resync timer reads it every 200 ms here, over three resyncs, and the
+// refusal counter grows by one.
+// TestWatcher_reportsADifferentRefusedManifestAgain is the control.
+func TestWatcher_reportsARefusedManifestOnce(t *testing.T) {
+	f := newFixture(t)
+	f.writeManifest(unsupported)
+	a := newApplier()
+	refused := metrics.SnapshotRebuilds.WithLabelValues("refused")
+	before := testutil.ToFloat64(refused)
+
+	startWatcher(t, f.dir, a)
+
+	require.Eventually(t, func() bool { return testutil.ToFloat64(refused) == before+1 },
+		2*time.Second, 10*time.Millisecond, "waiting for the refusal of the manifest to be counted")
+	assert.Never(t, func() bool { return testutil.ToFloat64(refused) != before+1 },
+		700*time.Millisecond, 10*time.Millisecond, "the refusal was reported again for the same manifest")
+	assert.Equal(t, before+1, testutil.ToFloat64(refused), `ratelimit_snapshot_rebuilds_total{result="refused"}`)
+}
+
+// A refused manifest that differs from the one refused before it is reported
+// in its turn: the refusal counter grows by one more, and the report carries
+// the refusal of the new manifest, here of format version 98 after 99.
+func TestWatcher_reportsADifferentRefusedManifestAgain(t *testing.T) {
+	f := newFixture(t)
+	f.writeManifest(unsupported)
+	a := newApplier()
+	refused := metrics.SnapshotRebuilds.WithLabelValues("refused")
+	before := testutil.ToFloat64(refused)
+	startWatcher(t, f.dir, a)
+	waitForRefusal(t, a)
+
+	f.writeManifest([]byte(`{"formatVersion": 98, "operatorVersion": "x", "domains": {}}`))
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		refusal := a.Report().Refusal
+		require.NotNil(c, refusal, "the reported refusal")
+		assert.Equal(c, 98, refusal.FormatVersion, "the format version of the reported refusal")
+		assert.Equal(c, before+2, testutil.ToFloat64(refused), `ratelimit_snapshot_rebuilds_total{result="refused"}`)
+	}, 2*time.Second, 10*time.Millisecond, "waiting for the refusal of the manifest of format version 98")
+}
+
+// failedReads counts the lines a watcher logs about a manifest it could not
+// read, one line per read.
+type failedReads struct {
+	lines atomic.Int64
+}
+
+func (r *failedReads) logger() logr.Logger {
+	return funcr.New(func(_, args string) {
+		if strings.Contains(args, "failed to read the configuration") {
+			r.lines.Add(1)
+		}
+	}, funcr.Options{})
+}
+
+func waitForFailedReads(t *testing.T, reads *failedReads, want int64) {
+	t.Helper()
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, want, reads.lines.Load(), "the failed reads logged")
+	}, 3*time.Second, 10*time.Millisecond, "waiting for %d failed reads", want)
+}
+
+// The watcher reads once per burst of events. A manifest that cannot be read
+// logs a line on every read, which makes the reads countable: one at start,
+// and one for a burst of five files written at once. The resync timer is an
+// hour away.
+func TestWatcher_readsOncePerBurstOfEvents(t *testing.T) {
+	f := newFixture(t)
+	require.NoError(t, os.Mkdir(filepath.Join(f.dir, contract.ManifestKey), 0o750))
+	var reads failedReads
+	runWatcher(t, &Watcher{Dir: f.dir, Applier: newApplier(), Log: reads.logger(),
+		Resync: time.Hour, Settle: 300 * time.Millisecond})
+	waitForFailedReads(t, &reads, 1)
+
+	for i := range 5 {
+		require.NoError(t, os.WriteFile(filepath.Join(f.dir, fmt.Sprintf("burst-%d", i)), nil, 0o600))
+	}
+
+	waitForFailedReads(t, &reads, 2)
+	assert.Never(t, func() bool { return reads.lines.Load() > 2 }, time.Second, 10*time.Millisecond,
+		"the burst of five writes was read more than once")
+	assert.Equal(t, int64(2), reads.lines.Load(), "the failed reads logged")
 }

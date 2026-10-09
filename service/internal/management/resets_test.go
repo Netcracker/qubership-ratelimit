@@ -28,8 +28,8 @@ func (h *testAPI) bulk(t *testing.T, body any, idempotencyKey string, caller str
 	})
 }
 
-// preview runs step one over body, which it marks as a preview, and returns
-// its answer.
+// preview runs step one as listedCaller over body, which it marks as a preview,
+// and returns its answer.
 func (h *testAPI) preview(t *testing.T, body map[string]any, key string) BulkResult {
 	t.Helper()
 	body["dryRun"] = true
@@ -164,15 +164,9 @@ func TestBulk_tokenIsBoundToItsSubject(t *testing.T) {
 	selector := map[string]any{"ruleIds": []string{"orders"}}
 	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
 
-	target := BasePath + "/domains/" + testDomain + "/counter-resets"
-	recorder := h.callWith(t, http.MethodPost, target, listedCaller, map[string]any{
+	body := requireError(t, h.bulk(t, map[string]any{
 		"selector": selector, "confirmationToken": preview.ConfirmationToken,
-	}, func(request *http.Request) {
-		request.Header.Set("Idempotency-Key", "key-execute")
-		request.Header.Set("Authorization", "Bearer "+testToken(otherCaller))
-	})
-
-	body := requireError(t, recorder, http.StatusConflict, CodeConflict)
+	}, "key-execute", otherCaller), http.StatusConflict, CodeConflict)
 	assert.Equal(t, ConflictStaleConfirmation, body.Meta.ConflictType)
 }
 
@@ -407,4 +401,35 @@ func TestBulk_refusesAMutationWithoutAUsableIdempotencyKey(t *testing.T) {
 			assert.Equal(t, []string{"Idempotency-Key"}, body.Meta.Fields)
 		})
 	}
+}
+
+// A confirmation token is bound to the rule set its preview looked at: once a
+// rollout moves the set, the execution is refused with stale_rule_set, and
+// nothing is deleted.
+func TestBulk_refusesAnExecutionOnceTheRuleSetMoved(t *testing.T) {
+	h := newTestAPI(t)
+	h.spend(t, "/api/orders", map[string][]string{model.KeySub: {"alice"}}, 1)
+	selector := map[string]any{"ruleIds": []string{"orders"}}
+	preview := h.preview(t, map[string]any{"selector": selector}, "key-preview")
+
+	h.replaceRules(t, append(cascadeBlocks(), widerOrders()...)...)
+
+	body := requireError(t, h.bulk(t, map[string]any{
+		"selector": selector, "confirmationToken": preview.ConfirmationToken,
+	}, "key-execute", listedCaller), http.StatusConflict, CodeConflict)
+	assert.Equal(t, ConflictStaleRuleSet, body.Meta.ConflictType)
+	_, found := h.remaining(t, "alice")
+	assert.True(t, found, "the counter of alice is gone after the refused execution")
+}
+
+// The period of a selector body follows the grammar of the query's period, so
+// a period that is neither seconds nor a duration is refused in a body too.
+// The selector also names a rule, so that without the period it would still
+// select something.
+func TestBulk_refusesASelectorPeriodTheGrammarCannotRead(t *testing.T) {
+	h := newTestAPI(t)
+
+	requireError(t, h.bulk(t, map[string]any{
+		"selector": map[string]any{"ruleIds": []string{"orders"}, "period": "soon"}, "dryRun": true,
+	}, "key-1", listedCaller), http.StatusBadRequest, CodeInvalidRequest)
 }

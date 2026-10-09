@@ -227,16 +227,38 @@ func TestReconcile_reportsAHealthyGeneration(t *testing.T) {
 
 // The fleet is asked about the enforced generation together with the object's
 // UID, because a generation number alone is ambiguous across a delete and
-// recreate: a fresh object starts at generation 1 too.
+// recreate: a fresh object starts at generation 1 too. While a last-good
+// generation serves, the enforced generation is that one, not the latest.
 func TestReconcile_asksTheFleetForTheGenerationThatRuns(t *testing.T) {
-	enforcing := enforcingFleet{replicas: 2, enforced: applied.Domain{Generation: 4, UID: string(testUID)}}
-	reconciler, fakeClient := newReconciler(t, enforcing, testPolicy(4))
+	brokenLatest := testPolicy(5, ratelimitv1.Rule{
+		Name:    "per-plan",
+		Matches: []ratelimitv1.Predicate{{Key: "plan", Operator: ratelimitv1.OperatorExists}},
+		Rates:   []ratelimitv1.Rate{{Requests: 10, PeriodSeconds: 60}},
+	})
+	tests := []struct {
+		name   string
+		object *ratelimitv1.RateLimitPolicy
+		state  StateReader
+	}{
+		{"the latest generation 4, which compiles", testPolicy(4), nil},
+		{
+			"the last-good generation 4 under a latest generation 5 that does not compile", brokenLatest,
+			fakeState{bundle: policy.Bundle{UID: string(testUID), GoodGeneration: 4, GoodSpec: testPolicy(4).Spec}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			enforcing := enforcingFleet{replicas: 2, enforced: applied.Domain{Generation: 4, UID: string(testUID)}}
+			reconciler, fakeClient := newReconciler(t, enforcing, tt.object)
+			reconciler.State = tt.state
 
-	_, err := reconciler.Reconcile(context.Background(), testRequest())
-	require.NoError(t, err)
+			_, err := reconciler.Reconcile(context.Background(), testRequest())
+			require.NoError(t, err)
 
-	assert.Equal(t, int32(2), fetch(t, fakeClient).Status.Replicas.Applied,
-		"status.replicas.applied of a fleet that enforces generation 4 of %s", testUID)
+			assert.Equal(t, int32(2), fetch(t, fakeClient).Status.Replicas.Applied,
+				"status.replicas.applied of a fleet that enforces generation 4 of %s", testUID)
+		})
+	}
 }
 
 // A status write comes back as an event on the policy, so writing an
@@ -487,19 +509,40 @@ func TestReconcile_returnsTheErrorOfAFailedStatusWrite(t *testing.T) {
 	assert.ErrorIs(t, err, rejected)
 }
 
-// A condition message past the limit of the API server is cut to the limit and
-// ends with an ellipsis.
+// A condition message past the limit of the API server, by one byte or more, is
+// cut to the limit and ends with an ellipsis.
 func TestTruncateMessage_cutsAMessagePastTheAPIServerLimit(t *testing.T) {
-	message := strings.Repeat("x", maxMessageLength+100)
+	tests := []struct {
+		name   string
+		length int
+	}{
+		{"a hundred bytes past the limit", maxMessageLength + 100},
+		{"one byte past the limit", maxMessageLength + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			truncated := truncateMessage(strings.Repeat("x", tt.length))
 
-	truncated := truncateMessage(message)
-
-	require.Equal(t, maxMessageLength, len(truncated), "length of truncateMessage(%d bytes)", len(message))
-	assert.Equal(t, "...", truncated[maxMessageLength-3:], "the end of the cut message")
+			require.Equal(t, maxMessageLength, len(truncated), "length of truncateMessage(%d bytes)", tt.length)
+			assert.Equal(t, "...", truncated[maxMessageLength-3:], "the end of the cut message of %d bytes", tt.length)
+		})
+	}
 }
 
 func TestTruncateMessage_leavesAMessageWithinTheLimitWhole(t *testing.T) {
 	assert.Equal(t, "short", truncateMessage("short"))
+}
+
+// A message of exactly the limit is one the API server accepts, and it reaches
+// the condition whole. It ends in "end", which a cut would replace with the
+// ellipsis.
+func TestTruncateMessage_leavesAMessageOfExactlyTheLimitWhole(t *testing.T) {
+	message := strings.Repeat("x", maxMessageLength-3) + "end"
+
+	kept := truncateMessage(message)
+
+	require.Equal(t, maxMessageLength, len(kept), "length of truncateMessage(%d bytes)", len(message))
+	assert.Equal(t, "end", kept[maxMessageLength-3:], "the end of truncateMessage(%d bytes)", len(message))
 }
 
 // The message of a domain with nothing enforced says why its last-good
@@ -774,24 +817,40 @@ func TestReconcile_namesSilentReplicasApartFromLaggingOnes(t *testing.T) {
 // lastCheckTime is the freshness of the probe, and an operator reads a stale
 // one as a dead leader. A status that does not otherwise change is written
 // once the stamp is lastCheckMaxAge old, so the field keeps moving while the
-// leader keeps probing.
-func TestReconcile_refreshesAProbeTimeOlderThanTheBound(t *testing.T) {
+// leader keeps probing. A younger stamp stays as it is.
+func TestReconcile_refreshesAnUnchangedProbeTimeOnceItIsTheBoundOld(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
-	reconciler, fakeClient := newReconciler(t, unanimous(1), testPolicy(1))
-	reconciler.Now = (&fakeClock{base: now}).now
-	_, err := reconciler.Reconcile(context.Background(), testRequest())
-	require.NoError(t, err)
-	stored := fetch(t, fakeClient)
-	stored.Status.Replicas.LastCheckTime = &metav1.Time{Time: now.Add(-2 * lastCheckMaxAge)}
-	require.NoError(t, fakeClient.Status().Update(context.Background(), stored))
+	tests := []struct {
+		name  string
+		stamp time.Time
+		want  time.Time
+	}{
+		{"a stamp twice the bound old", now.Add(-2 * lastCheckMaxAge), now},
+		{"a stamp exactly the bound old", now.Add(-lastCheckMaxAge), now},
+		{
+			"a stamp a second younger than the bound",
+			now.Add(-lastCheckMaxAge + time.Second), now.Add(-lastCheckMaxAge + time.Second),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler, fakeClient := newReconciler(t, unanimous(1), testPolicy(1))
+			reconciler.Now = (&fakeClock{base: now}).now
+			_, err := reconciler.Reconcile(context.Background(), testRequest())
+			require.NoError(t, err)
+			stored := fetch(t, fakeClient)
+			stored.Status.Replicas.LastCheckTime = &metav1.Time{Time: tt.stamp}
+			require.NoError(t, fakeClient.Status().Update(context.Background(), stored))
 
-	_, err = reconciler.Reconcile(context.Background(), testRequest())
-	require.NoError(t, err)
+			_, err = reconciler.Reconcile(context.Background(), testRequest())
+			require.NoError(t, err)
 
-	stamped := fetch(t, fakeClient).Status.Replicas.LastCheckTime
-	require.NotNil(t, stamped, "status.replicas.lastCheckTime")
-	assert.Equal(t, now, stamped.UTC(),
-		"status.replicas.lastCheckTime after a Reconcile at %v over a stamp of %v", now, now.Add(-2*lastCheckMaxAge))
+			stamped := fetch(t, fakeClient).Status.Replicas.LastCheckTime
+			require.NotNil(t, stamped, "status.replicas.lastCheckTime")
+			assert.Equal(t, tt.want, stamped.UTC(),
+				"status.replicas.lastCheckTime after a Reconcile at %v over a stamp of %v", now, tt.stamp)
+		})
+	}
 }
 
 // An EndpointSlice change reconciles every policy of the namespace, because a

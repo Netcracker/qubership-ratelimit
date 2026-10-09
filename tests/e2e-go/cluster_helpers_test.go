@@ -455,21 +455,27 @@ type fleetScale struct {
 	original int32
 }
 
-// scaleFleet sets the replica count of the service release and returns what
-// restores it. The release and its current count are read from the
-// Deployment rather than assumed.
-func scaleFleet(replicas int32) *fleetScale {
-	var dep appsv1.Deployment
-	Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: serviceDeployment()}, &dep)).
-		To(Succeed())
-	release := dep.Annotations["meta.helm.sh/release-name"]
-	Expect(release).NotTo(BeEmpty(), "cannot determine the Helm release owning %s", dep.Name)
-	scale := &fleetScale{release: release, original: 1}
-	if dep.Spec.Replicas != nil {
-		scale.original = *dep.Spec.Replicas
+// scaleFleet sets the replica count of the service release. When *fleet is
+// nil, it first stores in *fleet what restores the release: the release and
+// its current count, read from the Deployment rather than assumed. It stores
+// the record before the upgrade and does not replace a non-nil *fleet. A
+// restore therefore puts back the count the first call found, also after an
+// upgrade that applied and then failed, and after a retry of the spec or the
+// BeforeAll that called scaleFleet.
+func scaleFleet(fleet **fleetScale, replicas int32) {
+	if *fleet == nil {
+		var dep appsv1.Deployment
+		Expect(k8s.Get(ctx, client.ObjectKey{Namespace: namespace, Name: serviceDeployment()}, &dep)).
+			To(Succeed())
+		release := dep.Annotations["meta.helm.sh/release-name"]
+		Expect(release).NotTo(BeEmpty(), "cannot determine the Helm release owning %s", dep.Name)
+		scale := &fleetScale{release: release, original: 1}
+		if dep.Spec.Replicas != nil {
+			scale.original = *dep.Spec.Replicas
+		}
+		*fleet = scale
 	}
-	helmScale(release, replicas)
-	return scale
+	helmScale((*fleet).release, replicas)
 }
 
 func (f *fleetScale) restore() {

@@ -10,8 +10,8 @@
 # CROSSSLOT. Three is the smallest cluster redis-cli will create; replicas
 # would only serve failover, which no test here exercises.
 #
-#   hack/redis-cluster.sh up      # prints the REDIS_ADDR value to use
-#   hack/redis-cluster.sh down
+#   .github/scripts/redis-cluster.sh up      # prints the REDIS_ADDR value to use
+#   .github/scripts/redis-cluster.sh down
 set -euo pipefail
 
 NAME="${CLUSTER_NAME:-ratelimit-redis-cluster}"

@@ -46,6 +46,18 @@ func token(t testing.TB, claims map[string]any) string {
 	return "h." + base64.RawURLEncoding.EncodeToString(raw) + ".sig"
 }
 
+// tokenOfLength is token(t, claims) with its signature padded so that the
+// whole token is n bytes long. The signature is never verified, so its length
+// is free to vary.
+func tokenOfLength(t testing.TB, claims map[string]any, n int) string {
+	t.Helper()
+	tok := token(t, claims)
+	if len(tok) > n {
+		t.Fatalf("the token of %v is %d bytes, longer than the %d wanted", claims, len(tok), n)
+	}
+	return tok + strings.Repeat("s", n-len(tok))
+}
+
 // skipsOf indexes skips by key, for a test that asserts the reason of one key.
 func skipsOf(skips []Skip) map[string]SkipReason {
 	out := map[string]SkipReason{}
@@ -110,6 +122,8 @@ func TestExtract_skipsEveryPlannedKeyOfAnUndecodableToken(t *testing.T) {
 		{"a payload segment that is not base64url", "a.b.c"},
 		{"a well-formed token past MaxTokenBytes",
 			token(t, map[string]any{"sub": "alice", "pad": strings.Repeat("x", MaxTokenBytes)})},
+		{"a well-formed token one byte past MaxTokenBytes",
+			tokenOfLength(t, map[string]any{"sub": "alice"}, MaxTokenBytes+1)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			keys, skips := Extract(plan(t), c.token)
@@ -167,6 +181,8 @@ func TestExtract_dropsAnAnomalousClaimWithItsReason(t *testing.T) {
 			"roles", SkipTooManyItems},
 		{"a scalar under an array-typed key",
 			map[string]any{"realm_access": map[string]any{"roles": "admin"}}, "roles", SkipBadType},
+		{"an array with an element that is not a string",
+			map[string]any{"realm_access": map[string]any{"roles": []any{"user", 42}}}, "roles", SkipBadType},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			keys, skips := Extract(plan(t), token(t, c.claims))
@@ -175,6 +191,38 @@ func TestExtract_dropsAnAnomalousClaimWithItsReason(t *testing.T) {
 			}
 			if got := skipsOf(skips)[c.key]; got != c.reason {
 				t.Errorf("Extract(plan, token) skip of %s = %q, want %q", c.key, got, c.reason)
+			}
+		})
+	}
+}
+
+// A token, a value, and an array exactly at their bounds are read in full,
+// with no skip. The values one past each bound are refused in
+// TestExtract_skipsEveryPlannedKeyOfAnUndecodableToken and
+// TestExtract_dropsAnAnomalousClaimWithItsReason.
+func TestExtract_keepsWhatSitsExactlyOnASanitaryBound(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		token string
+		key   string
+		want  []string
+	}{
+		{"a token of exactly MaxTokenBytes",
+			tokenOfLength(t, map[string]any{"sub": "alice"}, MaxTokenBytes), "sub", []string{"alice"}},
+		{"a value of exactly MaxValueBytes",
+			token(t, map[string]any{"sub": strings.Repeat("x", MaxValueBytes)}),
+			"sub", []string{strings.Repeat("x", MaxValueBytes)}},
+		{"an array of exactly MaxArrayItems",
+			token(t, map[string]any{"realm_access": map[string]any{"roles": slices.Repeat([]any{"r"}, MaxArrayItems)}}),
+			"roles", slices.Repeat([]string{"r"}, MaxArrayItems)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			keys, skips := Extract(plan(t), c.token)
+			if got := keys[c.key]; !slices.Equal(got, c.want) {
+				t.Errorf("Extract(plan, %.32q)[%s] = %.64q, want %.64q", c.token, c.key, got, c.want)
+			}
+			if len(skips) != 0 {
+				t.Errorf("Extract(plan, %.32q) skips = %v, want none", c.token, skips)
 			}
 		})
 	}
@@ -228,11 +276,13 @@ func nested(depth int) any {
 	return v
 }
 
-// wide builds a payload of n claims that holds 2n separators: n colons and
-// n-1 commas between the claims, and one comma inside the pair.
-func wide(n int) map[string]any {
-	claims := map[string]any{"sub": "alice", "pair": []int{1, 1}}
-	for i := range n - 2 {
+// wide builds a payload that holds exactly separators separators, at least
+// four. Each claim holds a colon, a comma stands between each two claims, and
+// the pair array adds a comma for each item past its first: one for an even
+// count and two for an odd one.
+func wide(separators int) map[string]any {
+	claims := map[string]any{"sub": "alice", "pair": slices.Repeat([]int{1}, 2+separators%2)}
+	for i := range separators/2 - 2 {
 		claims[fmt.Sprintf("c%04d", i)] = 1
 	}
 	return claims
@@ -246,7 +296,7 @@ func TestExtract_decodesAPayloadWithinTheShapeBounds(t *testing.T) {
 		claims map[string]any
 	}{
 		{"nesting at MaxPayloadDepth", map[string]any{"sub": "alice", "deep": nested(MaxPayloadDepth - 1)}},
-		{"separators at MaxPayloadSeparators", wide(MaxPayloadSeparators / 2)},
+		{"separators at MaxPayloadSeparators", wide(MaxPayloadSeparators)},
 		{"key syntax inside a string", map[string]any{"sub": "alice", "note": strings.Repeat(`{[,:]}"\`, 400)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -269,7 +319,8 @@ func TestExtract_refusesAPayloadPastAShapeBound(t *testing.T) {
 		claims map[string]any
 	}{
 		{"nesting one level past MaxPayloadDepth", map[string]any{"sub": "alice", "deep": nested(MaxPayloadDepth)}},
-		{"separators past MaxPayloadSeparators", wide(MaxPayloadSeparators/2 + 1)},
+		{"separators one past MaxPayloadSeparators", wide(MaxPayloadSeparators + 1)},
+		{"separators past MaxPayloadSeparators", wide(MaxPayloadSeparators + 2)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			keys, skips := Extract(plan(t), token(t, c.claims))

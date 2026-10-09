@@ -219,3 +219,36 @@ func TestPolicy_readsThePeriodAsSeconds(t *testing.T) {
 		})
 	}
 }
+
+// A block without a target applies to all traffic of the domain, and the
+// engine reads that from a target with no routes.
+func TestPolicy_convertsABlockWithoutATargetToATargetWithNoRoutes(t *testing.T) {
+	policy := Policy(&v1.RateLimitPolicySpec{Domain: testDomain, Limits: []v1.LimitBlock{{
+		Name: "api", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: 100, PeriodSeconds: 60}}}},
+	}}})
+
+	require.Len(t, policy.Blocks, 1)
+	assert.Empty(t, policy.Blocks[0].Target.Routes, "the routes of the block without a target")
+}
+
+// The blocks and the rules within each keep the author's order: a FirstMatch
+// block applies the first rule that matches, so the order of its rules is
+// semantics. The names are out of alphabetical order, so a sort fails the
+// test too.
+func TestPolicy_keepsTheOrderOfTheBlocksAndOfTheirRules(t *testing.T) {
+	rule := func(name string) v1.Rule {
+		return v1.Rule{Name: name, Rates: []v1.Rate{{Requests: 100, PeriodSeconds: 60}}}
+	}
+	policy := Policy(&v1.RateLimitPolicySpec{Domain: testDomain, Limits: []v1.LimitBlock{
+		{Name: "orders", Mode: v1.BlockModeFirstMatch, Rules: []v1.Rule{rule("partners"), rule("everyone")}},
+		{Name: "invoices", Rules: []v1.Rule{rule("per-user"), rule("anonymous")}},
+	}})
+
+	got := make([]string, 0, 4)
+	for _, block := range policy.Blocks {
+		for _, rule := range block.Rules {
+			got = append(got, block.Name+"/"+rule.Name)
+		}
+	}
+	assert.Equal(t, []string{"orders/partners", "orders/everyone", "invoices/per-user", "invoices/anonymous"}, got)
+}

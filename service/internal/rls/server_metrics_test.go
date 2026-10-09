@@ -2,6 +2,7 @@ package rls
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -87,16 +88,22 @@ func TestShouldRateLimit_countsAShadowRuleApartFromTheEnforcedOutcomes(t *testin
 	assert.Equal(t, map[string]float64{"decisions shadow_over_limit": 1, "near limit": 0}, got)
 }
 
-// A check outside every route charges nothing, and the unmatched series counts
-// it.
-func TestShouldRateLimit_countsAnUnmatchedCheck(t *testing.T) {
-	const domain = "gateway.unmatched"
-	p := model.Policy{Blocks: []model.Block{{
+// onlyRoutePolicy limits the one path /api/only with the rule b/all of one
+// request per hour; no route matches any other path.
+func onlyRoutePolicy() model.Policy {
+	return model.Policy{Blocks: []model.Block{{
 		Name: "b",
 		Target: model.Target{Routes: []model.Route{
 			{Path: model.PathMatch{Type: model.PathExact, Value: "/api/only"}}}},
 		Rules: []model.Rule{{Name: "all", Rates: []model.Rate{{Requests: 1, Period: time.Hour}}}},
 	}}}
+}
+
+// A check outside every route charges nothing, and the unmatched series counts
+// it.
+func TestShouldRateLimit_countsAnUnmatchedCheck(t *testing.T) {
+	const domain = "gateway.unmatched"
+	p := onlyRoutePolicy()
 	server, _ := newServerOver(ruleSetOver(t, domain, &p, memory.New()))
 
 	got := deltas(map[string]func() float64{
@@ -106,6 +113,23 @@ func TestShouldRateLimit_countsAnUnmatchedCheck(t *testing.T) {
 	})
 
 	assert.Equal(t, map[string]float64{"unmatched checks": 1}, got)
+}
+
+// A check on the route applies its rule, and the unmatched series does not
+// count it. TestShouldRateLimit_countsAnUnmatchedCheck is the control, where a
+// check of another path counts.
+func TestShouldRateLimit_countsNoUnmatchedCheckForACheckOnTheRoute(t *testing.T) {
+	const domain = "gateway.unmatched"
+	p := onlyRoutePolicy()
+	server, _ := newServerOver(ruleSetOver(t, domain, &p, memory.New()))
+
+	got := deltas(map[string]func() float64{
+		"unmatched checks": valueOf(metrics.UnmatchedChecks.WithLabelValues(domain)),
+	}, func() {
+		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api/only"}))
+	})
+
+	assert.Equal(t, map[string]float64{"unmatched checks": 0}, got)
 }
 
 func TestShouldRateLimit_countsACheckOfTooManyDescriptorsAsItsOwnRefusalCause(t *testing.T) {
@@ -165,6 +189,51 @@ func TestShouldRateLimit_samplesTheViolationLogWhileCountingEveryViolation(t *te
 	assert.Contains(t, []int{1, 2}, lines, "violation log lines of five checks at a budget of one per second")
 }
 
+// With a refusal log budget of one line per second, five refusals leave one
+// line, or two when the checks straddle a second, while the check series
+// counts all five. The test lowers the budget of the server's own sampler,
+// which NewServer sets to 10 lines per second.
+func TestShouldRateLimit_samplesTheRefusalLogWhileCountingEveryRefusal(t *testing.T) {
+	const domain = "gateway.public"
+	server, log := newServerOver(ruleSetWith(t, domainWidePolicy(1, time.Hour)))
+	server.refusalLog.limit = 1
+	first := shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
+	require.Equal(t, envoyratelimit.RateLimitResponse_OK, first.GetOverallCode(), "the first check of one per hour")
+
+	got := deltas(map[string]func() float64{
+		"checks over_limit": valueOf(metrics.Checks.WithLabelValues(domain, metrics.VerdictOverLimit)),
+	}, func() {
+		for range 5 {
+			shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
+		}
+	})
+
+	assert.Equal(t, map[string]float64{"checks over_limit": 5}, got)
+	lines := strings.Count(log.output(), "rate limit refused")
+	assert.Contains(t, []int{1, 2}, lines, "refusal log lines of five refusals at a budget of one per second")
+}
+
+// With an unknown-domain log budget of one line per second, five checks of an
+// unknown domain leave one line, or two when the checks straddle a second,
+// while the unknown-domain series counts all five. The test lowers the budget
+// of the server's own sampler, which NewServer sets to 10 lines per second.
+func TestShouldRateLimit_samplesTheUnknownDomainLogWhileCountingEveryCheck(t *testing.T) {
+	server, log := newServerOver(nil)
+	server.unknownLog.limit = 1
+
+	got := deltas(map[string]func() float64{
+		"unknown domain checks": valueOf(metrics.UnknownDomainChecks),
+	}, func() {
+		for range 5 {
+			shouldRateLimit(t, server, request("gateway.typo", map[string]string{"path": "/api"}))
+		}
+	})
+
+	assert.Equal(t, map[string]float64{"unknown domain checks": 5}, got)
+	lines := strings.Count(log.output(), "unknown rate limit domain")
+	assert.Contains(t, []int{1, 2}, lines, "unknown-domain log lines of five checks at a budget of one per second")
+}
+
 // An unknown domain is counted in its own series, and its check under the
 // placeholder domain, never the caller's name.
 func TestShouldRateLimit_countsAnUnknownDomainUnderThePlaceholder(t *testing.T) {
@@ -193,18 +262,20 @@ func TestShouldRateLimit_countsAnExtractionForATokenCarryingTheClaim(t *testing.
 	assert.Equal(t, map[string]float64{"extractions sub": 1}, got)
 }
 
-// An undecodable token counts as a skip for the key the rule plans to read.
+// An undecodable token counts as a skip for the key the rule plans to read,
+// and as no extraction of it.
 func TestShouldRateLimit_countsADecodeFailedSkipForAnUndecodableToken(t *testing.T) {
 	const domain = "gateway.public"
 	server, _ := newServerOver(ruleSetWith(t, perClientPerHourPolicy(10)))
 
 	got := deltas(map[string]func() float64{
 		"skips sub decode_failed": valueOf(metrics.ExtractionSkips.WithLabelValues(domain, model.KeySub, "decode_failed")),
+		"extractions sub":         valueOf(metrics.Extractions.WithLabelValues(domain, model.KeySub)),
 	}, func() {
 		shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api", "token": "garbage"}))
 	})
 
-	assert.Equal(t, map[string]float64{"skips sub decode_failed": 1}, got)
+	assert.Equal(t, map[string]float64{"skips sub decode_failed": 1, "extractions sub": 0}, got)
 }
 
 // A direct caller's value is held to the identity layer's bounds, as the
@@ -287,6 +358,41 @@ func TestNearLimit_countsARemainingAtOrUnderATenthOfTheCapacity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.near, nearLimit(tc.rule, 0.9), "nearLimit(%+v, 0.9)", tc.rule)
+		})
+	}
+}
+
+// WithNearLimitRatio sets the margin from a ratio inside (0, 1), and a ratio
+// outside it keeps the default of 0.9. Nine admissions of ten per hour leave
+// 9 down to 1: a ratio of 0.5 counts the five that leave 5 or fewer, and the
+// default counts the one that leaves 1.
+func TestShouldRateLimit_countsNearLimitAdmissionsByTheRatioItWasGiven(t *testing.T) {
+	const domain = "gateway.public"
+	for _, tc := range []struct {
+		name string
+		opts []Option
+		near float64
+	}{
+		{"no ratio is the default", nil, 1},
+		{"a ratio of 0.5", []Option{WithNearLimitRatio(0.5)}, 5},
+		{"a ratio of zero keeps the default", []Option{WithNearLimitRatio(0)}, 1},
+		{"a ratio of one keeps the default", []Option{WithNearLimitRatio(1)}, 1},
+		{"a ratio of NaN keeps the default", []Option{WithNearLimitRatio(math.NaN())}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := newServerOver(ruleSetWith(t, domainWidePolicy(10, time.Hour)), tc.opts...)
+
+			got := deltas(map[string]func() float64{
+				"near limit": valueOf(metrics.NearLimit.WithLabelValues(domain, "b/all")),
+			}, func() {
+				for i := range 9 {
+					resp := shouldRateLimit(t, server, request(domain, map[string]string{"path": "/api"}))
+					require.Equal(t, envoyratelimit.RateLimitResponse_OK, resp.GetOverallCode(),
+						"check %d of ten per hour", i+1)
+				}
+			})
+
+			assert.Equal(t, map[string]float64{"near limit": tc.near}, got)
 		})
 	}
 }

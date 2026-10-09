@@ -48,7 +48,7 @@ var _ = Describe("a replica the operator cannot reach", Ordered, Label("lagging"
 	)
 
 	BeforeAll(func() {
-		fleet = scaleFleet(3)
+		scaleFleet(&fleet, 3)
 
 		Expect(apply(newPolicy(domain, totalLimits(10, 60)))).To(Succeed())
 		applied = true

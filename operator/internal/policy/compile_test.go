@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -137,6 +138,25 @@ func TestCompile_summarizesEveryBlockingReason(t *testing.T) {
 	assert.ErrorContains(t, outcome.Err, "2 blocking problems")
 	assert.ErrorContains(t, outcome.Err, v1.ProblemUnresolvedKeyReference)
 	assert.ErrorContains(t, outcome.Err, v1.ProblemInvalidWindow)
+}
+
+// The Accepted message counts every blocking problem and names each reason
+// once: two rules on two undeclared keys are two problems of one reason.
+func TestCompile_summarizesARepeatedReasonOnce(t *testing.T) {
+	object := policyObject(v1.LimitBlock{
+		Name: "a",
+		Rules: []v1.Rule{
+			simpleRule("one", v1.Predicate{Key: "plan", Operator: v1.OperatorExists}),
+			simpleRule("two", v1.Predicate{Key: "tier", Operator: v1.OperatorExists}),
+		},
+	})
+
+	outcome := compileOf(object).Policies[key()]
+
+	require.Error(t, outcome.Err, "Outcome.Err")
+	assert.ErrorContains(t, outcome.Err, "2 blocking problems")
+	assert.Equal(t, 1, strings.Count(outcome.Err.Error(), v1.ProblemUnresolvedKeyReference),
+		"occurrences of %s in %q", v1.ProblemUnresolvedKeyReference, outcome.Err)
 }
 
 // TestCompile_theMappingsOfTheObjectResolveItsOwnRules pins the point of the
@@ -402,6 +422,19 @@ func TestDecode_reportsOnlyTheUnknownFieldsOfTheSpec(t *testing.T) {
 	assert.Equal(t, testDomain, decoded.Spec.Domain, "decoded Spec.Domain")
 }
 
+// An object whose spec the typed structure cannot hold is not a
+// RateLimitPolicy at all, which the API server does not store, so Decode
+// returns an error and no object.
+func TestDecode_refusesAnObjectThatIsNotARateLimitPolicy(t *testing.T) {
+	stored := unstructuredPolicy(t, policyObject(), map[string]any{"limits": "not a list"})
+
+	decoded, skew, err := Decode(stored)
+
+	assert.Error(t, err, `Decode(spec.limits="not a list")`)
+	assert.Nil(t, decoded, `the object Decode(spec.limits="not a list") returned`)
+	assert.Empty(t, skew, `the skew Decode(spec.limits="not a list") returned`)
+}
+
 func TestDecode_isSilentOnAnObjectThisSchemaFullyDefines(t *testing.T) {
 	stored := unstructuredPolicy(t, policyObject(
 		v1.LimitBlock{Name: "a", Rules: []v1.Rule{simpleRule("total")}}), nil)
@@ -439,6 +472,31 @@ func TestCompile_anUnknownFieldKeepsTheLastGoodGenerationServing(t *testing.T) {
 	require.Len(t, outcome.Problems, 1, "Outcome.Problems")
 	assert.Equal(t, v1.ProblemInvalidSpec, outcome.Problems[0].Reason, "Problems[0].Reason")
 	assert.Len(t, blocksOf(t, result, testDomain), 1, "Snapshots[%q].Blocks", testDomain)
+}
+
+// While the latest generation carries an unknown field, the snapshot that
+// serves is compiled from the last-good spec, not from the part of the latest
+// spec that decoded. The two specs name their block apart, so the name of the
+// block shows which spec the snapshot came from.
+func TestCompile_anUnknownFieldServesTheSnapshotOfTheLastGoodSpec(t *testing.T) {
+	good := policyObject(v1.LimitBlock{Name: "good", Rules: []v1.Rule{simpleRule("total")}})
+	newer := policyObject(v1.LimitBlock{Name: "newer", Rules: []v1.Rule{simpleRule("total")}})
+	newer.Generation = 2
+
+	result := Compile(Input{
+		Namespace: testNamespace,
+		Policies:  []v1.RateLimitPolicy{newer},
+		Skew: map[client.ObjectKey][]v1.RuleProblem{
+			key(): {{Reason: v1.ProblemInvalidSpec, Message: `unknown field "spec.burstProfile"`}},
+		},
+		State: map[string]Bundle{testDomain: {
+			UID: "uid-1", GoodGeneration: 1, GoodSpec: good.Spec,
+		}},
+	})
+
+	blocks := blocksOf(t, result, testDomain)
+	require.Len(t, blocks, 1, "Snapshots[%q].Blocks", testDomain)
+	assert.Equal(t, "good", blocks[0].Name, "the block of Snapshots[%q]", testDomain)
 }
 
 // TestCompile_anUnknownFieldWithNoLastGoodEnforcesNothing is the other half:
@@ -654,5 +712,40 @@ func TestFit_isDeterministicAcrossRuns(t *testing.T) {
 	require.Contains(t, slices.Collect(maps.Values(first)), false, "TooLarge by domain: %v", first)
 	for run := range 10 {
 		assert.Equal(t, first, verdict(), "TooLarge by domain on run %d after the first", run+1)
+	}
+}
+
+// The fit sets back only a generation that moved in this compilation. A
+// namespace already over the limit with the generation it persisted is left
+// as it is: that generation cannot be set back any further, and the write that
+// follows fails, which is the signal. The same wide spec at a generation that
+// moved since the persisted one is set back.
+func TestFit_setsBackOnlyAGenerationThatMoved(t *testing.T) {
+	persisted := Bundle{UID: "uid-1", GoodGeneration: 1, GoodSpec: policyObject(wideBlocks("wide", 100)...).Spec}
+	tests := []struct {
+		name         string
+		generation   int64
+		wantTooLarge bool
+	}{
+		{"generation 1, the one persisted", 1, false},
+		{"generation 2, moved since generation 1 was persisted", 2, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			object := policyObject(wideBlocks("wide", 100)...)
+			object.Generation = tt.generation
+			in := Input{
+				Namespace: testNamespace,
+				Policies:  []v1.RateLimitPolicy{object},
+				State:     map[string]Bundle{testDomain: persisted},
+			}
+			result := Compile(in)
+
+			Fit(in, result, 1024)
+
+			assert.Equal(t, tt.wantTooLarge, result.Policies[key()].TooLarge,
+				"Outcome.TooLarge of generation %d over a persisted generation 1, both over the limit of 1024",
+				tt.generation)
+		})
 	}
 }

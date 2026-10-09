@@ -8,9 +8,9 @@
 // The client reads that mount before anything else: it matches the Secret's
 // metadata.json to the classifier and type asked for, and reads
 // connectionProperties.json fresh on every call. Only on a miss does it fall
-// back to asking DBaaS over REST, which the service pod, holding no token,
-// cannot do; a miss is therefore an error that names the classifier, never a
-// database guessed from elsewhere.
+// back to asking DBaaS over REST, which the service cannot do, since its DBaaS
+// client holds no credentials; a miss is therefore an error that names the
+// classifier, never a database guessed from elsewhere.
 //
 // A password that changes in the Secret reaches the replica through the same
 // mount: the kubelet swaps the projection, and the next resolution here reads
