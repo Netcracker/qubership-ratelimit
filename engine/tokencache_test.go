@@ -40,6 +40,30 @@ func TestTokenCacheNeverExceedsCapacity(t *testing.T) {
 	}
 }
 
+// A token found in the previous generation is promoted into the current one,
+// so a token in active use survives the next rotation, while the token stored
+// beside it and never read again is dropped by it.
+func TestTokenCache_aHitInThePreviousGenerationSurvivesTheNextRotation(t *testing.T) {
+	c := newTokenCache(4, tokenCacheBytes) // two entries a generation
+	c.store(hashOf(0), cacheEntry{})
+	c.store(hashOf(1), cacheEntry{})
+	c.store(hashOf(2), cacheEntry{}) // rotates 0 and 1 into the previous generation
+	if _, ok := c.lookup(hashOf(0)); !ok {
+		t.Fatal("precondition: lookup(0) after the first rotation missed, want a hit in the previous generation")
+	}
+
+	// Two more tokens rotate the generations again.
+	c.store(hashOf(3), cacheEntry{})
+	c.store(hashOf(4), cacheEntry{})
+
+	if _, ok := c.lookup(hashOf(0)); !ok {
+		t.Error("after the next rotation, lookup(0) of the token read in between missed, want a hit")
+	}
+	if _, ok := c.lookup(hashOf(1)); ok {
+		t.Error("after the next rotation, lookup(1) of the token never read again hit, want a miss")
+	}
+}
+
 // hashOf is a distinct token hash for each i below 65536.
 func hashOf(i int) [sha256.Size]byte {
 	var h [sha256.Size]byte

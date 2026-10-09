@@ -47,16 +47,27 @@ func TestDecideRefusesABucketThatSkippedValidation(t *testing.T) {
 }
 
 // Peek shares the cost rule of Decide: a cost below 1 is refused.
-func TestPeekRefusesACostOfZero(t *testing.T) {
-	s := memory.New()
+func TestPeekRefusesACostBelowOne(t *testing.T) {
 	b := store.Bucket{
 		Key:       "p:{d}:k",
 		Algorithm: algo.GCRAID,
 		Window:    algo.Window{Requests: 10, Period: time.Hour, Burst: 10},
 	}
 
-	if _, err := s.Peek(t.Context(), []store.Bucket{b}, 0); err == nil {
-		t.Errorf("Peek(%q, cost 0) = no error, want one", b.Key)
+	for _, c := range []struct {
+		name string
+		cost int64
+	}{
+		{"a cost of zero", 0},
+		{"a negative cost", -1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := memory.New()
+
+			if _, err := s.Peek(t.Context(), []store.Bucket{b}, c.cost); err == nil {
+				t.Errorf("Peek(%q, cost %d) = no error, want one", b.Key, c.cost)
+			}
+		})
 	}
 }
 
