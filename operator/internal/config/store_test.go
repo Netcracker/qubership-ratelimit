@@ -63,6 +63,14 @@ func goodSpec(domain string) v1.RateLimitPolicySpec {
 		Name: "a", Rules: []v1.Rule{{Name: "total", Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60}}}}}}}
 }
 
+// resolvedGoodSpec is goodSpec as the writer saves it: the resolver fills in
+// the mode, the behavior, and the algorithm the author left out.
+func resolvedGoodSpec(domain string) v1.RateLimitPolicySpec {
+	return v1.RateLimitPolicySpec{Domain: domain, Limits: []v1.LimitBlock{{
+		Name: "a", Mode: v1.BlockModeAll, Rules: []v1.Rule{{Name: "total", Behavior: v1.RuleBehaviorEnforce,
+			Rates: []v1.Rate{{Requests: 1, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}}}}}}}
+}
+
 // readConfigMap reads the namespace's ConfigMap through c.
 func readConfigMap(t *testing.T, c client.Client) *corev1.ConfigMap {
 	t.Helper()
@@ -451,7 +459,7 @@ func TestReconcile_writesTheNamespace(t *testing.T) {
 	bundles, err := store.Load(t.Context(), []string{"gateway.public"})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]policy.Bundle{
-		"gateway.public": {UID: "u", GoodGeneration: 1, GoodSpec: goodSpec("gateway.public")},
+		"gateway.public": {UID: "u", GoodGeneration: 1, GoodSpec: resolvedGoodSpec("gateway.public")},
 	}, bundles)
 }
 

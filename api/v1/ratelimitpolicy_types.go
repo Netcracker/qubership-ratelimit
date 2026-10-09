@@ -106,11 +106,13 @@ type HTTPMethod string
 // PathMatch selects request paths.
 type PathMatch struct {
 	// type selects how value is compared.
+	// +required
 	Type PathMatchType `json:"type"`
 
 	// value is the path, the prefix, or the template. It starts with a slash;
 	// the query string of a request is cut before matching, so it never appears
 	// here.
+	// +required
 	// +kubebuilder:validation:Pattern=`^/`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=2048
@@ -121,6 +123,7 @@ type PathMatch struct {
 // with AND; the routes of a target combine with OR.
 type Route struct {
 	// path selects request paths.
+	// +required
 	Path PathMatch `json:"path"`
 
 	// methods accepts a request whose method is one of the listed values. An
@@ -150,12 +153,14 @@ const CostSourceQueryParameter CostSource = "QueryParameter"
 type RouteCost struct {
 	// source is where the value is read from. QueryParameter is the only
 	// source.
+	// +required
 	Source CostSource `json:"source"`
 
 	// name is the parameter name, compared with the percent-decoded name in
 	// the query string, case-sensitively. A value that is a positive decimal
 	// integer is the cost, and a value above 1000000000 costs 1000000000. The
 	// largest of several occurrences is the cost.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9_.\-\[\]]+$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=64
@@ -173,6 +178,7 @@ type RouteCost struct {
 // Target restricts a block to part of the traffic of its domain.
 type Target struct {
 	// routes is an OR-list. A block without a target sees the whole domain.
+	// +required
 	// +kubebuilder:validation:MinItems=1
 	// +listType=atomic
 	Routes []Route `json:"routes"`
@@ -189,12 +195,14 @@ type Target struct {
 type Predicate struct {
 	// key names the descriptor key the predicate reads: sub, a mappings
 	// key, or a capture of the block's own Template routes.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Key string `json:"key"`
 
 	// operator is the predicate applied to the value set of the key.
+	// +required
 	Operator PredicateOperator `json:"operator"`
 
 	// value is the operand of Equals, Contains, and InGroup. For InGroup it is
@@ -216,12 +224,14 @@ type Predicate struct {
 // buckets, so a rate limit and a quota live side by side.
 type Rate struct {
 	// requests is the quota of the window.
+	// +required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=2147483647
 	Requests int32 `json:"requests"`
 
 	// periodSeconds is the length of the window. A day is the ceiling: beyond
 	// it a counter stops being a rate limit and becomes an accounting record.
+	// +required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=86400
 	PeriodSeconds int32 `json:"periodSeconds"`
@@ -234,24 +244,68 @@ type Rate struct {
 	// +kubebuilder:validation:Maximum=2147483647
 	Burst *int32 `json:"burst,omitempty"`
 
-	// algorithm is a property of the window rather than of the rule.
-	// +kubebuilder:default=GCRA
+	// algorithm is a property of the window rather than of the rule. Absent,
+	// it is GCRA. A rule that takes a preset and leaves rates out takes the
+	// preset's windows with their algorithms; a window the rule writes
+	// carries its own.
+	// +optional
 	Algorithm Algorithm `json:"algorithm,omitempty"`
 }
+
+// The lists of a rule are omitzero rather than omitempty: a list a Go client
+// writes empty, such as counters: [] for one shared bucket over a preset's
+// axes, has to reach the API server as [] and stay a value, where omitempty
+// would drop it and the rule would take the preset's list.
+//
+// The Kubernetes API conventions prescribe a pointer to a slice, with
+// omitempty, for a list whose empty value differs from its absence. The
+// compiler, the engine, and the manifest format take plain slices, so the lists
+// stay plain slices. The omitzero tag keeps the empty list in the serialized
+// object the way a pointer would, in encoding/json and in the unstructured
+// converter of apimachinery alike.
 
 // Rule is one counter of a block.
 type Rule struct {
 	// name is unique within its block and is part of the counter key.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
 
+	// preset names the entry of spec.presets.rules the rule starts from. The
+	// rule begins as a copy of that body, and every field it writes replaces
+	// the field of the preset whole; a field it leaves out comes from the
+	// preset. A list written empty is a value: counters: [] is one shared
+	// bucket, whatever axes the preset has. name is always the rule's own. A
+	// rule that overrides a rule of its block's preset by name carries none.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Preset string `json:"preset,omitempty" manifest:"-"`
+
+	// before places a rule that is new to a block taking a block preset in
+	// front of the rule it names: a rule of the preset, or a new rule
+	// written earlier in the same list. Without it a new rule goes after
+	// the preset's rules. It is accepted on a new rule only; a rule that
+	// overrides a rule of the preset by name keeps the preset's position.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Before string `json:"before,omitempty" manifest:"-"`
+
+	// dropped leaves the preset's rule of this name out of a block that takes a
+	// block preset. A dropped rule carries nothing beside name.
+	// +optional
+	Dropped bool `json:"dropped,omitempty" manifest:"-"`
+
 	// matches is a conjunction of predicates. An empty list matches every
 	// request the block sees.
 	// +optional
 	// +listType=atomic
-	Matches []Predicate `json:"matches,omitempty"`
+	Matches []Predicate `json:"matches,omitzero"`
 
 	// counters are the axes of the bucket. An empty list gives the rule a
 	// single shared bucket. A rule whose axis the request does not carry, such
@@ -261,17 +315,18 @@ type Rule struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:items:MaxLength=63
 	// +listType=atomic
-	Counters []string `json:"counters,omitempty"`
+	Counters []string `json:"counters,omitzero"`
 
 	// rates are the counting windows of the rule, keyed by period. A rule with
 	// behavior Bypass carries none; every other rule carries at least one.
 	// +optional
 	// +listType=map
 	// +listMapKey=periodSeconds
-	Rates []Rate `json:"rates,omitempty"`
+	Rates []Rate `json:"rates,omitzero"`
 
-	// behavior selects what the rule does with the verdict.
-	// +kubebuilder:default=Enforce
+	// behavior selects what the rule does with the verdict. Absent, it is
+	// Enforce, or the behavior of the preset the rule takes.
+	// +optional
 	Behavior RuleBehavior `json:"behavior,omitempty"`
 
 	// replacedRules silences rules of the same block, which is how a narrow
@@ -282,7 +337,7 @@ type Rule struct {
 	// +optional
 	// +kubebuilder:validation:items:MaxLength=63
 	// +listType=atomic
-	ReplacedRules []string `json:"replacedRules,omitempty"`
+	ReplacedRules []string `json:"replacedRules,omitzero"`
 }
 
 // LimitBlock is a target plus the rules that count the traffic it selects.
@@ -290,10 +345,25 @@ type Rule struct {
 // verdict of each.
 type LimitBlock struct {
 	// name is unique within its policy and is part of the counter key.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
 	Name string `json:"name"`
+
+	// preset names the entry of spec.presets.blocks the block starts from.
+	// target and mode written in the block replace the preset's whole; left
+	// out, they come from the preset. The rules merge with the preset's by
+	// name: a rule of a name the preset holds overrides that rule field by
+	// field and keeps its position, a rule of a new name is inserted in
+	// front of the rule its before names or appended, and a dropped rule
+	// leaves the preset's rule of that name out. name is always the block's
+	// own.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Preset string `json:"preset,omitempty" manifest:"-"`
 
 	// target restricts the block. An absent target lets the block see the whole
 	// domain.
@@ -301,15 +371,123 @@ type LimitBlock struct {
 	Target *Target `json:"target,omitempty"`
 
 	// mode selects how the rules of the block combine. It has no effect across
-	// blocks.
-	// +kubebuilder:default=All
+	// blocks. Absent, it is All, or the mode of the preset the block takes.
+	// +optional
 	Mode BlockMode `json:"mode,omitempty"`
 
-	// rules are the counters of the block.
-	// +kubebuilder:validation:MinItems=1
+	// rules are the counters of the block. A block that takes a preset may
+	// leave them out and take the preset's; a block that holds no rule once
+	// its preset, if any, is resolved is rejected by the compiler.
+	// +optional
 	// +listType=map
 	// +listMapKey=name
-	Rules []Rule `json:"rules"`
+	Rules []Rule `json:"rules,omitempty"`
+}
+
+// RulePreset is a rule body a rule of spec.limits takes by name through its
+// preset field: the fields of a rule except preset, before, and dropped, with
+// name as the name of the preset. A body may be partial, a preset of windows
+// alone or of predicates alone. Presets do not chain: a body has no preset
+// field, and before and dropped belong to the rules of a block that takes a
+// block preset. The content of a body is checked through the rules that take
+// it, so a body no rule takes may name a key the domain lacks and no problem
+// reports it.
+type RulePreset struct {
+	// name is the name a rule's preset refers to. It is unique among the
+	// rule presets of the policy and is part of no counter key.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// matches is the conjunction of predicates a rule that takes the preset
+	// starts with. An empty list matches every request the block sees.
+	// +optional
+	// +listType=atomic
+	Matches []Predicate `json:"matches,omitzero"`
+
+	// counters are the axes of the bucket a rule that takes the preset
+	// starts with. An empty list is a single shared bucket.
+	// +optional
+	// +kubebuilder:validation:items:Pattern=`^[a-z][a-zA-Z0-9_]*$`
+	// +kubebuilder:validation:items:MaxLength=63
+	// +listType=atomic
+	Counters []string `json:"counters,omitzero"`
+
+	// rates are the counting windows a rule that takes the preset starts
+	// with, keyed by period, each with its own algorithm.
+	// +optional
+	// +listType=map
+	// +listMapKey=periodSeconds
+	Rates []Rate `json:"rates,omitzero"`
+
+	// behavior is the behavior a rule that takes the preset starts with:
+	// Enforce, Shadow, or Bypass.
+	// +optional
+	Behavior RuleBehavior `json:"behavior,omitempty"`
+
+	// replacedRules are the rules a rule that takes the preset silences.
+	// They are rules of the block that holds that rule.
+	// +optional
+	// +kubebuilder:validation:items:MaxLength=63
+	// +listType=atomic
+	ReplacedRules []string `json:"replacedRules,omitzero"`
+}
+
+// BlockPreset is a block body a block of spec.limits takes by name through
+// its preset field: target, mode, and rules, each optional, with name as the
+// name of the preset. Presets do not chain: a body has no preset field. The
+// rules of a body may take rule presets and carry no before or dropped,
+// which belong to the rules of a block that takes a block preset; the
+// compiler reports a rule that carries one, whether a block takes the preset
+// or not. The content of a body is checked through the blocks that take it.
+type BlockPreset struct {
+	// name is the name a block's preset refers to. It is unique among the
+	// block presets of the policy and is part of no counter key.
+	// +required
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+
+	// target restricts a block that takes the preset and writes no target
+	// of its own. A block replaces a preset target and cannot remove it.
+	// +optional
+	Target *Target `json:"target,omitempty"`
+
+	// mode is the mode a block that takes the preset starts with. Absent at
+	// every layer, it is All.
+	// +optional
+	Mode BlockMode `json:"mode,omitempty"`
+
+	// rules are the rules a block that takes the preset starts with, merged
+	// by name with the rules the block writes. A rule here may take a rule
+	// preset and carries no before or dropped.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Rules []Rule `json:"rules,omitempty"`
+}
+
+// Presets are the bodies a rule or a block of spec.limits takes by name
+// through its preset field. The operator writes them into the rules and
+// blocks that take them before the policy compiles, so the counter keys, the
+// status, the configuration the service reads, and the management API see
+// the resolved rules and blocks under the names of the point of use, and a
+// preset name appears nowhere outside the object.
+type Presets struct {
+	// rules holds the rule presets.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Rules []RulePreset `json:"rules,omitempty"`
+
+	// blocks holds the block presets.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Blocks []BlockPreset `json:"blocks,omitempty"`
 }
 
 // RateLimitPolicySpec is the whole rate limit configuration of one domain:
@@ -325,6 +503,7 @@ type RateLimitPolicySpec struct {
 	// namespace from the domain inside the tag, so none of them is allowed
 	// here. The naming convention is <kind>.<name>: gateway.public,
 	// service.billing.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -343,7 +522,14 @@ type RateLimitPolicySpec struct {
 	// +listMapKey=name
 	Groups []Group `json:"groups,omitempty"`
 
+	// presets are the rule bodies and block bodies a rule or a block of
+	// limits starts from through its preset field, resolved inside this
+	// object before it compiles.
+	// +optional
+	Presets *Presets `json:"presets,omitempty" manifest:"-"`
+
 	// limits are the blocks of the policy.
+	// +required
 	// +kubebuilder:validation:MinItems=1
 	// +listType=map
 	// +listMapKey=name
@@ -378,11 +564,12 @@ type RuleProblem struct {
 	Rule string `json:"rule,omitempty"`
 
 	// reason is one of UnresolvedKeyReference, UnresolvedGroupReference,
-	// UnresolvedReplacedRules, IncompatibleOperator, InvalidCounterAxis,
-	// InvalidSpec, InvalidWindow, DomainBudgetExceeded,
-	// CaptureShadowsMappedKey, and CostExceedsCapacity.
-	// CaptureShadowsMappedKey and CostExceedsCapacity are informational; every
-	// other reason blocks the generation.
+	// UnresolvedReplacedRules, UnresolvedPresetReference,
+	// IncompatibleOperator, InvalidCounterAxis, InvalidSpec, InvalidWindow,
+	// DomainBudgetExceeded, ResolvedPolicyTooLarge, CaptureShadowsMappedKey,
+	// and CostExceedsCapacity. CaptureShadowsMappedKey and CostExceedsCapacity
+	// are informational; every other reason blocks the generation.
+	// +required
 	Reason string `json:"reason"`
 
 	// message says what the rule references and what the domain offers.
@@ -484,7 +671,7 @@ type RateLimitPolicyStatus struct {
 // +kubebuilder:printcolumn:name="Rules",type=integer,JSONPath=`.status.rules`
 // +kubebuilder:printcolumn:name="Problems",type=integer,JSONPath=`.status.problems`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.domain",message="metadata.name has to equal spec.domain: the policy is the singleton of its domain"
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == self.spec.domain",message="metadata.name must equal spec.domain: the policy is the singleton of its domain"
 
 // RateLimitPolicy is the whole rate limit configuration of one gateway domain.
 //
@@ -497,8 +684,8 @@ type RateLimitPolicyStatus struct {
 // Everything the domain needs lives in this one object: the claim mapping, the
 // groups, and the rules change in one edit and apply atomically, so a request
 // never sees old extraction mixed with new rules. The compiler resolves the
-// references from rules to keys and groups inside the object, with no
-// cross-object arbitration anywhere.
+// presets and the references from rules to keys and groups inside the object,
+// with no cross-object arbitration anywhere.
 //
 // A generation is enforced whole or not at all. The API server checks only the
 // shape — patterns, enums, ranges, duplicate names, and this name rule — while
@@ -510,12 +697,14 @@ type RateLimitPolicy struct {
 
 	// spec is the rate limit configuration of the domain the policy is named
 	// after.
-	Spec RateLimitPolicySpec `json:"spec,omitempty"`
+	// +required
+	Spec RateLimitPolicySpec `json:"spec"`
 
 	// status is what the operator observed: whether the latest generation
 	// compiles, which generation the service replicas enforce, and the
 	// problems of the latest generation.
-	Status RateLimitPolicyStatus `json:"status,omitempty"`
+	// +optional
+	Status RateLimitPolicyStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true

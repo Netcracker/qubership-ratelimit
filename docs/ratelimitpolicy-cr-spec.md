@@ -89,6 +89,13 @@ spec:
   - name: mvno-group-1
     values: [mvno_acc1, mvno_acc2]           # compared with the predicate's key after its normalization (sub: Lowercase)
 
+  presets:                                   # rule bodies a rule takes by name through preset; see "Presets"
+    rules:
+    - name: standard-client                  # a partial body: the axes and the windows, no predicates
+      counters: [sub]
+      rates:
+      - { requests: 100, periodSeconds: 60 }
+
   limits:
   # ── Block 1: a cascade of plans ────────────────────────────────────
   - name: order-management                   # unique within the policy; part of the counter key
@@ -123,10 +130,8 @@ spec:
       counters: [sub]
       rates:
       - { requests: 1000, periodSeconds: 60, burst: 100 }
-    - name: per-user                         # no matches: matches everyone who has sub
-      counters: [sub]                     # (the missing-axis semantics cuts anonymous callers off)
-      rates:
-      - { requests: 100, periodSeconds: 60 }
+    - name: per-user                         # the preset's axes and windows under the rule's own name:
+      preset: standard-client                # no matches, so everyone who has sub (anonymous callers are cut off)
     - name: anonymous
       matches:
       - { key: sub, operator: DoesNotExist } # an explicit absence predicate
@@ -140,8 +145,8 @@ spec:
       routes:
       - path: { type: Prefix, value: /api/ }
     rules:                                   # mode: All (default): the rules add up
-    - name: per-user                         # axis: user; all paths share one bucket
-      counters: [sub]
+    - name: per-user                         # the preset's axis, the rule's own windows: a field written
+      preset: standard-client                # at the point of use replaces the preset's whole
       rates:                                 # rate + quota in one rule:
       - { requests: 300, periodSeconds: 60 }        # minute window: GCRA, smoothing
       - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }  # daily quota with a reset
@@ -173,6 +178,7 @@ spec:
 | `domain` | string, required | binding to the traffic source (see above); equals `metadata.name` |
 | `mappings` | list | extraction of keys from token claims; empty = built-in keys only |
 | `groups` | list | named value lists, `values` at least one per group; an `InGroup` predicate refers to a group by name and compares its values with the predicate's key after that key's normalization |
+| `presets` | object | named rule bodies and block bodies that `preset` refers to; see "Presets" |
 | `limits` | list of blocks, required, at least one | block = `target` + `mode` + `rules`; blocks are always additive with each other |
 
 ### The mappings[] entry
@@ -196,27 +202,45 @@ then applies (`None` by default); what the `mappings` entry declares for a mappe
 segment was sent. Group values are stored and compared as written, and the exact case is the author's
 responsibility. The compiler adds no normalization of its own.
 
+### The presets.rules[] entry
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string, required | unique among rule presets; the name a rule's `preset` refers to; not part of any counter key |
+| the fields of a rule except `preset`, `before`, `dropped` | | each optional; a body may be partial |
+
+### The presets.blocks[] entry
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string, required | unique among block presets; the name a block's `preset` refers to; not part of any counter key |
+| `target`, `mode`, `rules` | as in a block | each optional; the rules may carry `preset` and may not carry `before` or `dropped` |
+
 ### The limits[] block
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string, required | unique within the policy; part of the counter key |
+| `preset` | string | the `presets.blocks` entry the block starts from; see "Presets" |
 | `target.routes` | list of routes, at least one when `target` is set | an OR list; no `target` = the block sees all traffic of the domain |
 | `target.routes[].path` | `{type, value}`, required with both fields | `type: Exact \| Prefix \| Template`; `value` starts with `/` |
 | `target.routes[].methods` | list of enum values: `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `CONNECT`, `OPTIONS`, `TRACE` | OR over the values; absent = any method |
 | `target.routes[].cost` | `{source, name, default}` | the cost of a request matched through the route, read from a query parameter; absent = one unit; see [Request cost](#request-cost) |
-| `mode` | `All` (default) \| `FirstMatch` | how the block's rules combine |
-| `rules` | list of rules, required, at least one | the block's counters |
+| `mode` | `All` \| `FirstMatch`; absent = `All`, or the preset's | how the block's rules combine |
+| `rules` | list of rules | the block's counters; may be left out in a block with `preset`; a block with no rules after resolution is `InvalidSpec` |
 
 ### The rules[] rule
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `name` | string, required | unique within the block; part of the counter key |
+| `preset` | string | the `presets.rules` entry the rule starts from; see "Presets" |
+| `before` | string | only in a block with `preset`, on a new rule: the rule of the preset, or a new rule written earlier, this one goes in front of |
+| `dropped` | bool | only in a block with `preset`: leave the preset's rule of this `name` out; no other field beside `name` |
 | `matches` | list of predicates, each with `key` and `operator` | a conjunction; the key is `sub`, a `mappings` key, or a capture of its own block (`path`/`method`/`token` are forbidden: routes go in `target`); empty = everyone |
 | `counters` | list of keys | bucket axes: `sub`, `path`, `method`, a scalar `mappings` key, or a capture; empty = one shared bucket |
 | `rates` | list of entries | counting windows; absent in a rule with `behavior: Bypass` |
-| `behavior` | `Enforce` (default) \| `Shadow` \| `Bypass` | Shadow: count and write metrics, never refuse; Bypass: skip without going to the store |
+| `behavior` | `Enforce` \| `Shadow` \| `Bypass`; absent = `Enforce`, or the preset's | Shadow: count and write metrics, never refuse; Bypass: skip without going to the store |
 | `replacedRules` | list of names | suppresses rules of its own block (only with `mode: All`); inert while the rule is `Shadow` |
 
 ### The rates[] entry
@@ -226,7 +250,7 @@ responsibility. The compiler adds no normalization of its own.
 | `requests` | int32, required, 1..2 147 483 647 | the window's quota |
 | `periodSeconds` | int32, required | window length in seconds, 1..86400 (one day); unique within the rule |
 | `burst` | int32, 1..2 147 483 647 | only with the `GCRA` algorithm; defaults to `requests` (a full bucket) |
-| `algorithm` | `GCRA` (default) \| `FixedWindow` | a property of the window; every entry is an independent bucket |
+| `algorithm` | `GCRA` \| `FixedWindow`; absent = `GCRA` | a property of the window; every entry is an independent bucket |
 
 ### The cost entry
 
@@ -275,6 +299,188 @@ a `/`; `/api/v1/orders` matches `/api/v1/orders` and `/api/v1/orders/42` but not
 `/` in the value means "sub-paths only". Both types are case-sensitive. This differs from Envoy's plain string
 `prefix_match`, and the difference is deliberate: the matcher lives in the engine, and segment semantics removes the
 "accidentally caught a neighboring resource" class of mistakes.
+
+## Presets
+
+A preset is a rule body or a block body declared once under `spec.presets` and used by name from `spec.limits`. A rule
+or a block that names a preset starts as a copy of it, and every field written at the point of use replaces the field
+of the preset. The operator resolves presets inside the object that declares them, before the compiler's checks; an
+object with a field this schema does not define is refused unread, presets included (see "Validity and last-good").
+The counter keys, the status, the ConfigMap, and `GET /rules` of the management API show the resolved rules and
+blocks under the names of the point of use, and a preset name appears nowhere outside the object.
+
+```yaml
+spec:
+  domain: gateway.public
+  mappings:
+  - { key: plan, claim: plan, normalization: Lowercase }
+  groups:
+  - { name: partners, values: [00000000-0000-4000-8000-00000000c001] }
+  presets:
+    rules:
+    - name: internal-bypass
+      matches: [ { key: sub, operator: Equals, value: prometheus } ]
+      behavior: Bypass
+    - name: standard-client                 # a partial body: axes and windows
+      counters: [sub]
+      rates:
+      - { requests: 100, periodSeconds: 60, burst: 20 }
+      - { requests: 20000, periodSeconds: 86400, algorithm: FixedWindow }
+    blocks:
+    - name: plan-cascade                    # no target: every block that uses it brings one
+      mode: FirstMatch
+      rules:
+      - { name: internal, preset: internal-bypass }
+      - name: enterprise
+        matches: [ { key: plan, operator: Equals, value: enterprise } ]
+        counters: [sub]
+        rates: [ { requests: 1000, periodSeconds: 60 } ]
+      - { name: per-user, preset: standard-client }
+      - name: anonymous
+        matches: [ { key: sub, operator: DoesNotExist } ]
+        counters: []
+        rates: [ { requests: 20, periodSeconds: 60 } ]
+  limits:
+  - name: orders                            # the cascade as declared
+    preset: plan-cascade
+    target: { routes: [ { path: { type: Prefix, value: /api/v1/orders } } ] }
+  - name: catalog                           # one rule changed in place: counters stay [sub], the windows are replaced
+    preset: plan-cascade
+    target: { routes: [ { path: { type: Prefix, value: /api/v1/catalog } } ] }
+    rules:
+    - { name: per-user, rates: [ { requests: 300, periodSeconds: 60 } ] }
+  - name: exports                           # a rule inserted into the cascade, a rule dropped from it
+    preset: plan-cascade
+    target: { routes: [ { path: { type: Prefix, value: /api/v1/exports } } ] }
+    rules:
+    - name: partner
+      before: per-user
+      matches: [ { key: sub, operator: InGroup, value: partners } ]
+      counters: [sub]
+      rates: [ { requests: 500, periodSeconds: 60 } ]
+    - { name: anonymous, dropped: true }
+  - name: health                            # a plain block beside the ones that use presets
+    target: { routes: [ { path: { type: Exact, value: /health } } ] }
+    rules:
+    - { name: scraper, preset: internal-bypass, replacedRules: [per-caller] }
+    - { name: per-caller, counters: [sub], rates: [ { requests: 60, periodSeconds: 60 } ] }
+```
+
+### Rule presets
+
+`spec.presets.rules[]` holds rule bodies: the fields of a rule, with `name` as the name of the preset. A body may be
+partial. A preset of windows alone is a preset of rates, a preset of predicates alone is a preset of matches. A rule
+preset body has no `preset`, `before`, or `dropped` field: rule presets do not chain, and a body that writes one of
+them is refused under strict field validation, which kubectl asks for by default, and pruned with a warning
+otherwise. The content of a preset is checked through the rules that use it only: a preset no rule uses can hold a
+window the math cannot enforce or a key the domain lacks, and no problem reports it.
+
+A rule of a block takes a preset through `preset`. The rule keeps its own `name`, which stays unique within the
+block and stays the rule's segment of the counter key. Every other field written in the rule replaces the field of
+the preset whole, and a field left out comes from the preset. A list written empty is a value, not an omission:
+
+| Written at the point of use | Effect |
+| --- | --- |
+| `counters: []` | one shared bucket, whatever axes the preset has |
+| `matches: []` | the rule matches everyone |
+| `rates: []` | no windows; valid only together with `behavior: Bypass` |
+| `behavior: Shadow` over a `Bypass` preset | a Shadow rule, which has to carry `rates` of its own |
+
+`rates` is taken or replaced whole: a rule that leaves it out takes the preset's windows, their `algorithm` included,
+and a window the rule writes carries its own `algorithm`, `GCRA` when absent.
+
+The merged rule is checked exactly like a rule written out in full, and a problem is reported at the rule's own
+address, the block and the rule of the point of use, with the preset named in the message. `replacedRules` and
+captures are resolved in the block that holds the rule: a preset with `replacedRules: [per-user]` is valid in a
+block that holds `per-user` and `UnresolvedReplacedRules` in a block that does not, and the point of use may write
+its own `replacedRules`.
+
+### Block presets
+
+`spec.presets.blocks[]` holds block bodies: `target`, `mode`, and `rules`, each optional, with `name` as the name of
+the preset. A block preset body has no `preset` field. The rules of a block preset may name rule presets and may not
+carry `before` or `dropped`; that shape is checked whether a block uses the preset or not, and the content through
+the blocks that use it.
+
+A block of `limits` takes a preset through `preset` and keeps its own `name`, which stays unique within the policy
+and stays the block's segment of the counter key. `target` and `mode` written in the block replace the preset's
+whole; left out, they come from the preset. A preset `target` cannot be removed at the point of use, only replaced,
+so a block preset usually carries no `target`, and every block that uses it brings its own.
+
+The rules of the block merge with the rules of the preset by name:
+
+| Rule at the point of use | Effect |
+| --- | --- |
+| a name the preset holds | the written fields replace those of the preset's rule; the rule keeps the preset's position |
+| a name the preset does not hold | a new rule, placed in front of the rule `before` names, or appended after the preset's rules without `before` |
+| a name the preset holds, with `dropped: true` and nothing else beside `name` | the preset's rule is left out |
+
+The merge runs in three passes over the preset's list: overrides first, then insertions in the order written, each
+directly in front of its anchor, then drops. A dropped rule serves as an anchor until the drops run, so `x` with
+`before: b` next to `b` with `dropped: true` puts `x` where `b` was, and two rules with the same anchor keep the order
+they are written in. `before` names a rule of the preset or a new rule written earlier in the same list, and is
+accepted on a new rule only: an overridden rule keeps the preset's position. In an `All` block the order carries no
+meaning, and `before` changes the listed order alone. A rule that overrides by name does not write `preset`, and a
+new rule may.
+
+### Resolution
+
+The operator resolves presets after the strict decode of the spec and before the compiler's checks, in this order:
+
+1. The size of the result is estimated before any preset is written into a block or a rule. A resolved policy whose
+   estimate is above 1.5 MiB (1572864 bytes), the etcd wall of an authored object ([limits](limits.md)), is
+   `ResolvedPolicyTooLarge`: nothing is resolved, and last-good stays enforced. A preset therefore produces nothing
+   that one object could not hold written out, and the payload bound of the service, 8 MiB per domain, keeps resting
+   on that. The estimate never falls below the resolved size: it is the serialized size of the spec as written, with
+   the defaults of step 4 written in, plus the size of each preset, with its defaults written in, once per rule or
+   block that takes it, less the preset rules the blocks drop, so a field that a layer replaces is counted twice. The
+   estimate can therefore reject a policy whose resolved size is below the wall; that is the price of a check that
+   writes no preset into a block or a rule.
+2. Every block with `preset` becomes a copy of its preset, with `target` and `mode` overridden and the rules merged
+   by name as the table of "Block presets" says.
+3. Every rule with `preset`, in every block, becomes a copy of its preset with the written fields on top. A rule of
+   a block preset keeps its own `preset` under an override by name, so up to three layers apply, in this order: the
+   rule preset, the rule of the block preset, the rule at the point of use.
+4. The compiler's defaults are written into the result, after the last layer: `mode`, `behavior`, and `algorithm`
+   absent at every layer become `All`, `Enforce`, and `GCRA`.
+5. The resolved spec, without `presets`, `preset`, `before`, and `dropped`, is what every further check reads, what the
+   ConfigMap carries, what last-good holds, and what the service enforces.
+
+What follows for the rest of the object:
+
+- **Counter keys** are built from the names at the point of use: a cascade used by five blocks is five independent
+  families of buckets, and renaming a preset changes no key.
+- **The decision budget** counts resolved blocks and rules. A `FirstMatch` preset costs the widest of its rules plus
+  its `Shadow` rules once per block that uses it ([limits](limits.md)).
+- **Problems** carry the block and the rule names of the point of use, and the preset name in the message.
+- **Last-good** holds the resolved spec. A generation whose presets do not resolve is invalid as a whole, and the
+  previous generation keeps running.
+- **The management API** renders resolved rules, and `ruleSetVersion` changes when a preset edit changes a resolved
+  rule.
+
+### Why the defaults of mode, behavior, and algorithm leave the schema
+
+The API server writes a schema default into every object at admission. A rule that names a `Shadow` preset would
+carry `behavior: Enforce` as a written field, and the compiler could not tell that field from an omission, so the
+preset's `behavior` would never apply. With no schema default, an absent field is an omission and the compiler
+reads it as `Enforce`, `GCRA`, or `All`, which is what the engine does with an empty value. `algorithm` leaves the
+schema with the other two: a window is taken or replaced with the whole `rates` list, so a stored `algorithm: GCRA`
+changes nothing. The defaults of the three fields then live in one place, the compiler. The defaults of `type` and
+`normalization` in a `mappings` entry stay in the schema, because no preset supplies those fields. A default the
+compiler reads belongs to the operator release, not to the API version: a later change of such a default changes how
+the compiler reads a stored object, and the `apiVersion` of the object stays the same. `kubectl get -o yaml` shows
+`behavior`, `algorithm`, and `mode` only on objects that wrote them.
+
+**Objects stored before the change.** Such an object may carry `mode: All`, `behavior: Enforce`, and
+`algorithm: GCRA` as written fields where it left them out, because the API server wrote them at admission. A stored
+value can survive an apply that leaves the field out; under server-side apply the outcome depends on which manager
+owns the field. A rule that keeps such a value and takes a preset keeps that value over the preset's, and the
+compiler cannot tell the stored default from a value the author wrote. Before a rule or a block of such an object
+takes a preset, read the stored object and remove, with a JSON patch, the stored `mode` or `behavior` where the preset
+is meant to supply it; a value the author wrote on purpose, such as `behavior: Shadow`, stays, and a stored
+`algorithm` needs nothing, since a window is taken or replaced with the whole `rates` list. Replacing the object from
+its manifest with `kubectl replace -f` does the same, since the manifest carries only what the author wrote. An
+object written under the changed schema needs nothing. The commands are in the [runbook](runbook.md), section 3.
 
 ## Request cost
 
@@ -359,7 +565,8 @@ A `Template` matches as many segments as it names, so a collection and a single 
 without listing the resources. Where the list cannot separate them, a `cost` with `default` left at 1 is the
 alternative: a request without the parameter costs one unit, and only a request that names a page size pays for it.
 
-A block without a target has no routes and charges the request's own cost.
+A block without a target has no routes and charges the request's own cost. A block that takes a block preset with a
+`target` takes its routes with their `cost`, and a `target` written at the point of use replaces the whole list.
 
 ### What the rules of the block see
 
@@ -505,9 +712,10 @@ A domain is one object, and compilation is a pure function of it:
 
 ```text
 compile(RateLimitPolicy) =
-    keys:   built-in + spec.mappings (+ captures of Template routes, visible to their own block)
-  + groups: spec.groups
-  + blocks: spec.limits in the author's order
+    resolve: presets into the blocks and rules of spec.limits
+    keys:    built-in + spec.mappings (+ captures of Template routes, visible to their own block)
+  + groups:  spec.groups
+  + blocks:  the resolved spec.limits in the author's order
 
 verdict(request) = AND over all buckets of all matched blocks
 ```
@@ -597,7 +805,7 @@ operator Deployment; no chart renders it.
 
 ```text
 ConfigMap ratelimit-config             owner: the operator Deployment; the operator writes, every service replica mounts it
-├── binaryData.<domain>.json.gz        the validated spec in the resource's own format, gzip-compressed; one key per domain
+├── binaryData.<domain>.json.gz        the validated spec with presets resolved, in the resource's own format, gzip-compressed; one key per domain
 └── data.manifest                      plain JSON: an integer formatVersion, operatorVersion, and per domain generation, uid, hash
 ```
 
@@ -765,10 +973,13 @@ in them) and contain only root causes:
 | `UnresolvedKeyReference`: a key outside the effective set of the domain | blocking |
 | `UnresolvedGroupReference`: `InGroup` on a non-existent group | blocking |
 | `UnresolvedReplacedRules`: `replacedRules` names a rule outside its own block | blocking |
+| `UnresolvedPresetReference`: `preset` names a preset that does not exist; `before` names a rule that is neither in the block preset nor written earlier in the list; `dropped` names a rule the block preset does not hold | blocking |
 | `IncompatibleOperator` / `InvalidCounterAxis`: the key type does not suit the operator or the axis | blocking |
 | `InvalidSpec`: a structural defect invisible to the schema: predicate arity, `Bypass` without `replacedRules` in `All`, a repeated placeholder, a template segment that is neither a literal nor a single placeholder (a brace outside a placeholder, an empty segment), an unknown field or enum value of a newer schema | blocking |
+| `InvalidSpec` on presets: a rule of a block preset that carries `before` or `dropped`; a preset declared twice or without a name; `before` or `dropped` in a block without `preset`; `dropped` beside any field other than `name`; `before` on a rule the block preset holds; `preset` on a rule that overrides a rule of its block preset by name; a block with no rules after resolution | blocking |
 | `InvalidWindow`: a window the math cannot enforce | blocking |
 | `DomainBudgetExceeded`: the worst case of a decision above 128 buckets | blocking |
+| `ResolvedPolicyTooLarge`: the estimated serialized size of the resolved policy is above 1.5 MiB (1572864 bytes) | blocking |
 | `CaptureShadowsMappedKey`: shadowing; inside the block the capture is in effect | informational |
 | `CostExceedsCapacity`: a route's `cost.default` above the capacity of a window of a rule of its block, so that window refuses every request without a usable value, without a retry hint | informational |
 
@@ -793,20 +1004,42 @@ Schema (OpenAPI):
   `^[a-z][a-zA-Z0-9_]*$`, camelCase allowed (`{orderId}` in the examples is valid); predicate values, group values, and
   claim paths ≤ 256 characters, where the engine skips an extracted value longer than 256 bytes, so a non-ASCII
   literal past 256 bytes passes the schema and never matches; a route path ≤ 2048 (the conventional URL limit);
-- uniqueness through list types: `limits`, `rules`, and `groups` are a `map` by `name`, `mappings` a `map` by `key`,
-  `rates` a `map` by `periodSeconds`, `methods` a `set`; `conditions` a `map` by `type`; the remaining lists are
-  atomic;
+- uniqueness through list types: `limits`, `rules`, `groups`, `presets.rules`, and `presets.blocks` are a `map` by
+  `name`, `mappings` a `map` by `key`, `rates` a `map` by `periodSeconds`, `methods` a `set`; `conditions` a `map`
+  by `type`; the remaining lists are atomic;
+- `preset` and `before` follow the pattern and the length of a rule or block name; `rules` of a block is optional,
+  and the compiler requires at least one rule after resolution;
+- a rule preset body has the fields of a rule except `preset`, `before`, and `dropped`, and a block preset body has
+  `target`, `mode`, and `rules`: presets do not chain, and a body that writes a `preset` is refused as a field the
+  schema does not define, or pruned for a client that does not ask for strict field validation;
 - enums for `mode`, `behavior`, `algorithm`, `type`, `normalization`, `operator`, `methods`, `cost.source`;
   `periodSeconds` is 1..86400; `requests` and `burst` are 1..2 147 483 647; `cost.default` is 1..1000000000, and
   `cost.name` takes `^[A-Za-z0-9_.\-\[\]]+$`, at most 64 characters; `ruleProblems[].message` ≤ 1024 characters and
   `ruleProblems` ≤ 64 entries, both cut by the operator before the write; `status.problems` counts every problem,
   past 64 too, so a `PROBLEMS` column of 70 beside 64 entries is expected; required fields are marked in the field
   reference;
+- `mode`, `behavior`, and `algorithm` carry no schema default; an absent value is read by the compiler as `All`,
+  `Enforce`, and `GCRA` (see "Presets");
 - apart from the status's `ruleProblems`, there is no `maxItems` on the lists: the only CEL rule walks no lists, and
-  the bounds that mean something to the engine are held by the compiler.
+  the bounds that mean something to the engine are held by the compiler; a check that a `preset` exists would walk
+  `presets` and `limits` together, which the cost estimator rejects for the reason given under "Why not CEL".
 
 The operator's compiler, on every generation, with the result in `status.ruleProblems`, `Accepted`/`Ready`, and
-last-good:
+last-good. After the strict decode of the spec, which refuses an object with a field this schema does not define,
+and before the compiler's checks, the presets:
+
+- references: `preset` names an entry of `presets.rules` or `presets.blocks`; `before` names a rule of the block
+  preset or a new rule written earlier in the list; `dropped` names a rule of the block preset
+  (`UnresolvedPresetReference`);
+- size (`ResolvedPolicyTooLarge`): the estimated serialized size of the resolved policy is at most 1.5 MiB
+  (1572864 bytes), computed from the serialized sizes of the spec as written and of the presets, with the defaults
+  written in, before any preset is written into a block or a rule;
+- structure (`InvalidSpec`): the cases listed under the reasons table; the rules of a block preset may carry
+  `preset`;
+- everything below runs on the resolved spec, with the problems addressed to the block and the rule of the point of
+  use and the preset named in the message.
+
+Then:
 
 - references: a predicate key is `sub`, a `mappings` key, or a capture of a `Template` route of its own block; an
   axis key is `sub`, `path`, `method`, a scalar `mappings` key, or the same kind of capture
@@ -836,13 +1069,14 @@ Why not CEL: the cost of a CEL rule grows with list cardinality, since the estim
 the estimator's sake and maintaining a second copy of the compiler's rules. The only gain would be a message on `apply`
 instead of a status. The measurements are in [limits](limits.md).
 
-List markup for server-side apply: `+listType=map` for `limits`, `rules`, and `groups` by `name`, `mappings` by `key`,
-`rates` by `periodSeconds`, `conditions` by `type`; `methods` is a `set`; the remaining lists (`matches`, `routes`,
-`counters`, `fallbacks`, `values`, `replacedRules`) are atomic.
+List markup for server-side apply: `+listType=map` for `limits`, `rules`, `groups`, `presets.rules`, and
+`presets.blocks` by `name`, `mappings` by `key`, `rates` by `periodSeconds`, `conditions` by `type`; `methods` is a
+`set`; the remaining lists (`matches`, `routes`, `counters`, `fallbacks`, `values`, `replacedRules`) are atomic.
 
 ## A worked example
 
 [`ratelimitpolicy-example.yaml`](ratelimitpolicy-example.yaml) is a commented policy that exercises the whole spec in
-one object: claim mappings for a scalar and an array claim, named groups, an `All` block with per-path, per-client,
-plan-override, bypass, group, role, and shadow rules, and a `FirstMatch` block over template routes that counts by a
-path capture. A second, minimal document in the same file shows the smallest policy that does anything.
+one object: claim mappings for a scalar and an array claim, named groups, a rule preset taken by two rules, a block
+preset taken by two blocks, an `All` block with per-path, per-client, plan-override, bypass, group, role, and shadow
+rules, and a `FirstMatch` cascade over template routes that counts by a path capture. A second, minimal document in
+the same file shows the smallest policy that does anything.

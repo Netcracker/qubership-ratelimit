@@ -189,14 +189,18 @@ func compileDomainFitting(
 ) (Outcome, *enginecompile.Snapshot, Bundle) {
 	domain := object.Spec.Domain
 
-	snapshot, outcome := latestGeneration(namespace, object, skew)
+	snapshot, outcome, resolved := latestGeneration(namespace, object, skew)
 
 	if outcome.Compiled() && tooLarge == "" {
 		outcome.ActiveGeneration = object.Generation
+		// The bundle holds the spec as resolved, not as written: a restart
+		// re-enforces the generation from it, and the ConfigMap written from
+		// it carries no preset, which a service of the previous release
+		// could not read.
 		bundle := Bundle{
 			UID:            string(object.UID),
 			GoodGeneration: object.Generation,
-			GoodSpec:       *object.Spec.DeepCopy(),
+			GoodSpec:       *resolved,
 		}
 		return withContribution(outcome, snapshot), snapshot, bundle
 	}
@@ -232,7 +236,7 @@ func compileDomainFitting(
 	}
 
 	fallback, fallbackProblems := enginecompile.Compile(namespace, domain, convert.Policy(&good.GoodSpec))
-	if err := blockingError(fallbackProblems); err != nil {
+	if err := blockingError(ruleProblems(fallbackProblems, nil)); err != nil {
 		// A persisted spec that no longer compiles means the component's own
 		// rules changed under it. There is nothing left to fall back to.
 		outcome.LastGoodLost = fmt.Sprintf(
@@ -243,8 +247,10 @@ func compileDomainFitting(
 	return withContribution(outcome, fallback), fallback, *good
 }
 
-// latestGeneration compiles the generation the object carries, or refuses it
-// unread when the object holds fields this build's schema does not define.
+// latestGeneration resolves and compiles the generation the object carries,
+// or refuses it unread when the object holds fields this build's schema does
+// not define. The spec it returns is the resolved one, and nil when the
+// generation does not compile.
 //
 // A skewed object is never compiled. The decoded spec would compile - the
 // unknown fields are gone from it - and it would compile to something the
@@ -252,28 +258,43 @@ func compileDomainFitting(
 // widen it, and enforcing the remainder is a guess either way. The snapshot
 // that stands in for it is the one an empty spec produces, so the domain is
 // claimed and enforces nothing until either the object or this build changes.
+// A generation whose presets do not resolve is refused the same way: there is
+// no spec to compile until every reference resolves.
 func latestGeneration(
 	namespace string,
 	object *v1.RateLimitPolicy,
 	skew []v1.RuleProblem,
-) (*enginecompile.Snapshot, Outcome) {
+) (*enginecompile.Snapshot, Outcome, *v1.RateLimitPolicySpec) {
 	outcome := Outcome{
 		UID:        string(object.UID),
 		Generation: object.Generation,
 	}
-	if len(skew) > 0 {
-		empty, _ := enginecompile.Compile(namespace, object.Spec.Domain,
+	empty := func() *enginecompile.Snapshot {
+		snapshot, _ := enginecompile.Compile(namespace, object.Spec.Domain,
 			convert.Policy(&v1.RateLimitPolicySpec{Domain: object.Spec.Domain}))
+		return snapshot
+	}
+	if len(skew) > 0 {
 		outcome.Problems = skew
 		outcome.Err = fmt.Errorf("%d %s this schema does not define (%s)",
 			len(skew), plural(len(skew), "field"), v1.ProblemInvalidSpec)
-		return empty, outcome
+		return empty(), outcome, nil
 	}
 
-	snapshot, problems := enginecompile.Compile(namespace, object.Spec.Domain, convert.Policy(&object.Spec))
-	outcome.Problems = ruleProblems(problems)
-	outcome.Err = blockingError(problems)
-	return snapshot, outcome
+	resolved, unresolved := Resolve(&object.Spec)
+	if len(unresolved) > 0 {
+		outcome.Problems = unresolved
+		outcome.Err = blockingError(unresolved)
+		return empty(), outcome, nil
+	}
+
+	snapshot, problems := enginecompile.Compile(namespace, object.Spec.Domain, convert.Policy(&resolved.Spec))
+	outcome.Problems = ruleProblems(problems, resolved)
+	outcome.Err = blockingError(outcome.Problems)
+	if outcome.Err != nil {
+		return snapshot, outcome, nil
+	}
+	return snapshot, outcome, &resolved.Spec
 }
 
 // withContribution records what the active generation put into the snapshot,
@@ -317,18 +338,31 @@ func sortedPolicies(policies []v1.RateLimitPolicy) []*v1.RateLimitPolicy {
 	return out
 }
 
-// ruleProblems renders the compiler's findings for the status.
-func ruleProblems(problems []enginecompile.Problem) []v1.RuleProblem {
+// ruleProblems renders the compiler's findings for the status. A finding at a
+// rule or a block that took a preset names the preset, because the defect may
+// be in the preset's body rather than in the fields written at the point of
+// use; resolved is nil for a spec that went through no resolution, such as a
+// persisted last-good one.
+func ruleProblems(problems []enginecompile.Problem, resolved *Resolved) []v1.RuleProblem {
 	if len(problems) == 0 {
 		return nil
 	}
 	out := make([]v1.RuleProblem, 0, len(problems))
 	for _, problem := range problems {
+		message := problem.Message
+		if resolved != nil {
+			if preset, ok := resolved.Presets[RuleRef{Block: problem.Block, Rule: problem.Rule}]; ok {
+				message = fmt.Sprintf("%s; the rule takes preset %q", message, preset)
+			}
+			if preset, ok := resolved.BlockPresets[problem.Block]; ok {
+				message = fmt.Sprintf("%s; the block takes preset %q", message, preset)
+			}
+		}
 		out = append(out, v1.RuleProblem{
 			Block:   problem.Block,
 			Rule:    problem.Rule,
 			Reason:  string(problem.Reason),
-			Message: problem.Message,
+			Message: message,
 		})
 	}
 	return out
@@ -337,12 +371,12 @@ func ruleProblems(problems []enginecompile.Problem) []v1.RuleProblem {
 // blockingError summarizes why a generation does not compile. The individual
 // reasons stay in RuleProblems: conditions are a map by type, and a generation
 // can break in several places at once.
-func blockingError(problems []enginecompile.Problem) error {
+func blockingError(problems []v1.RuleProblem) error {
 	var reasons []string
 	count := 0
-	seen := map[enginecompile.Reason]struct{}{}
+	seen := map[string]struct{}{}
 	for _, problem := range problems {
-		if !problem.Blocking {
+		if !v1.BlockingProblem(problem.Reason) {
 			continue
 		}
 		count++
@@ -350,7 +384,7 @@ func blockingError(problems []enginecompile.Problem) error {
 			continue
 		}
 		seen[problem.Reason] = struct{}{}
-		reasons = append(reasons, string(problem.Reason))
+		reasons = append(reasons, problem.Reason)
 	}
 	if count == 0 {
 		return nil

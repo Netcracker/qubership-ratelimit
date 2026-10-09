@@ -102,6 +102,12 @@ const (
 	// outside its own block. Blocking.
 	ProblemUnresolvedReplacedRules = "UnresolvedReplacedRules"
 
+	// ProblemUnresolvedPresetReference marks a preset a rule or a block names
+	// that spec.presets does not hold, a before that names a rule neither in
+	// the block's preset nor written earlier in the list, or a dropped rule
+	// the block's preset does not hold. Blocking.
+	ProblemUnresolvedPresetReference = "UnresolvedPresetReference"
+
 	// ProblemIncompatibleOperator marks an operator that cannot apply to the
 	// type of its key, such as Equals against an array claim. Blocking.
 	ProblemIncompatibleOperator = "IncompatibleOperator"
@@ -110,9 +116,12 @@ const (
 	// such as an array-typed key. Blocking.
 	ProblemInvalidCounterAxis = "InvalidCounterAxis"
 
-	// ProblemInvalidSpec marks a structural defect the schema cannot see:
-	// predicate arity, a Bypass without replacedRules under All, a repeated
-	// placeholder, an unknown field or enum value of a newer schema. Blocking.
+	// ProblemInvalidSpec marks a structural defect the schema cannot see,
+	// such as predicate arity, a Bypass without replacedRules under All, a
+	// repeated placeholder, an unknown field or enum value of a newer
+	// schema, or a shape a preset or a block that takes one may not have;
+	// the reasons table of the resource specification lists every case.
+	// Blocking.
 	ProblemInvalidSpec = "InvalidSpec"
 
 	// ProblemInvalidWindow marks a rate the counting math cannot honor, such
@@ -125,6 +134,12 @@ const (
 	// Blocking: enforcing it would leave the widest paths to the runtime
 	// backstop, which refuses them outright.
 	ProblemDomainBudgetExceeded = "DomainBudgetExceeded"
+
+	// ProblemResolvedPolicyTooLarge marks a generation whose presets, written
+	// into the rules that take them, are estimated to make the policy larger
+	// than one authored object may be: 1.5 MiB (1572864 bytes). The estimate
+	// is made before any preset is written into a rule. Blocking.
+	ProblemResolvedPolicyTooLarge = "ResolvedPolicyTooLarge"
 
 	// ProblemCaptureShadowsMappedKey is informational: inside the block, a
 	// route capture takes precedence over the mapped key of the same name.
@@ -204,6 +219,7 @@ type ClaimMapping struct {
 	// descriptor key pattern of this API, camelCase included; path, method and
 	// token are produced by the engine and cannot be redefined, while sub
 	// is an allowed override.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z][a-zA-Z0-9_]*$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -226,10 +242,12 @@ type ClaimMapping struct {
 	ClaimPath []string `json:"claimPath,omitempty"`
 
 	// type is the shape of the extracted value.
+	// +optional
 	// +kubebuilder:default=String
 	Type ClaimType `json:"type,omitempty"`
 
 	// normalization is applied to the extracted value.
+	// +optional
 	// +kubebuilder:default=None
 	Normalization NormalizeMode `json:"normalization,omitempty"`
 
@@ -247,6 +265,7 @@ type ClaimMapping struct {
 type Group struct {
 	// name is how a predicate references the group. It is unique within the
 	// policy.
+	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -258,6 +277,7 @@ type Group struct {
 	// applies (None by default); what the mapping entry declares for a
 	// mapped key; and a path capture as the segment was sent. The members
 	// are compared as written, so their case is the author's responsibility.
+	// +required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:items:MaxLength=256
 	// +listType=atomic

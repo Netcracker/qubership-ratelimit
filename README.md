@@ -67,7 +67,10 @@ A rule carries axes (`counters`) and windows (`rates`). Each window is an indepe
 daily quota live in one rule and either can reject. `GCRA` meters at a steady rate with a burst allowance; `FixedWindow`
 counts per wall-clock window and resets at the boundary. A rule whose axis the request does not carry does not match at
 all — there is nothing to key the bucket by, which is what excludes an anonymous caller from a rule counting by
-`sub`.
+`sub`. A rule body written once under `spec.presets.rules`, or a block body under `spec.presets.blocks`, serves every
+rule or block that names it through `preset`, with the fields written at the point of use on top; the operator writes
+presets into the blocks and rules before the policy compiles, so a preset name is part of no counter key and reaches no
+service.
 
 A request costs one unit of every window it meets, unless the route of its block reads the cost from a query
 parameter: with `cost` on `limit`, a page of 100 items costs 100, and a window of `requests: 50000` an hour holds 50000
@@ -88,18 +91,20 @@ sample that stopped being valid fails the build.
 The schema rejects what it can see; the compiler reports what needs the domain to judge. Those land in
 `status.ruleProblems`, and the `PROBLEMS` printer column counts them:
 
-| Reason                     | Weight        | Means                                                                       |
-|----------------------------|---------------|-----------------------------------------------------------------------------|
-| `UnresolvedKeyReference`   | blocking      | nothing produces the key — no built-in, no mapping, no capture              |
-| `UnresolvedGroupReference` | blocking      | `InGroup` names a group the policy does not define                          |
-| `UnresolvedReplacedRules`  | blocking      | `replacedRules` names a rule outside its own block                          |
-| `IncompatibleOperator`     | blocking      | the operator cannot apply to the type of the key, e.g. `Equals` on an array |
-| `InvalidCounterAxis`       | blocking      | an array key cannot key a bucket                                            |
-| `InvalidSpec`              | blocking      | a structural defect the schema cannot see, an unknown field among them      |
-| `InvalidWindow`            | blocking      | a window the counting math cannot honor                                     |
-| `DomainBudgetExceeded`     | blocking      | the worst-case decision is over 128 buckets                                 |
-| `CaptureShadowsMappedKey`  | informational | inside this block a route capture wins over the mapped key                  |
-| `CostExceedsCapacity`      | informational | a route's default cost is above the capacity of a window of its block       |
+| Reason                      | Weight        | Means                                                                        |
+|-----------------------------|---------------|------------------------------------------------------------------------------|
+| `UnresolvedKeyReference`    | blocking      | nothing produces the key — no built-in, no mapping, no capture               |
+| `UnresolvedGroupReference`  | blocking      | `InGroup` names a group the policy does not define                           |
+| `UnresolvedReplacedRules`   | blocking      | `replacedRules` names a rule outside its own block                           |
+| `UnresolvedPresetReference` | blocking      | `preset`, `before`, or `dropped` names a preset or rule that does not exist  |
+| `IncompatibleOperator`      | blocking      | the operator cannot apply to the type of the key, e.g. `Equals` on an array  |
+| `InvalidCounterAxis`        | blocking      | an array key cannot key a bucket                                             |
+| `InvalidSpec`               | blocking      | a structural defect the schema cannot see, an unknown field among them       |
+| `InvalidWindow`             | blocking      | a window the counting math cannot honor                                      |
+| `DomainBudgetExceeded`      | blocking      | the worst-case decision is over 128 buckets                                  |
+| `ResolvedPolicyTooLarge`    | blocking      | the presets written into the rules would make the policy larger than 1.5 MiB |
+| `CaptureShadowsMappedKey`   | informational | inside this block a route capture wins over the mapped key                   |
+| `CostExceedsCapacity`       | informational | a route's default cost is above the capacity of a window of its block        |
 
 One blocking entry invalidates the whole generation: not one of its rules enters the snapshot. Applying the healthy
 rules of a broken generation would be worse than applying none — a `FirstMatch` cascade missing a rule silently hands
