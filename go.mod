@@ -17,7 +17,7 @@ require (
 	github.com/netcracker/qubership-core-lib-go-fiber-server-utils/v2 v2.11.0
 	github.com/netcracker/qubership-core-lib-go/v3 v3.14.1
 	github.com/netcracker/qubership-ratelimit/engine v0.0.0-00010101000000-000000000000
-	github.com/onsi/ginkgo/v2 v2.33.0
+	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
