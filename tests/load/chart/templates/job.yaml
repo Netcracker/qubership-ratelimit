@@ -1,0 +1,167 @@
+{{- $tokens := .Values.tokens -}}
+{{- if not .Values.image.tag }}
+{{- fail "image.tag is required" }}
+{{- end }}
+{{- if eq $tokens.source "keycloak" }}
+{{- if not (and $tokens.keycloak.url $tokens.keycloak.realm $tokens.keycloak.clientId $tokens.keycloak.passwordSecret.name) }}
+{{- fail "tokens.source keycloak needs tokens.keycloak.url, realm, clientId, and passwordSecret.name" }}
+{{- end }}
+{{- else if ne $tokens.source "self-signed" }}
+{{- fail (printf "tokens.source is %q; want keycloak or self-signed" $tokens.source) }}
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "loadtest.name" . }}-generator
+  labels:
+    {{- include "loadtest.labels" . | nindent 4 }}
+    app.kubernetes.io/component: generator
+spec:
+  completionMode: Indexed
+  completions: {{ .Values.load.generators }}
+  parallelism: {{ .Values.load.generators }}
+  # A failed run is reported, not repeated: a second run would start from
+  # counters the first one charged.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        {{- include "loadtest.labels" . | nindent 8 }}
+        app.kubernetes.io/component: generator
+        {{- with .Values.load.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: generator
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: LT_HOST
+              value: {{ default (printf "%s-istio.%s.svc.cluster.local" .Values.gateway.name (include "loadtest.gatewayNamespace" .)) .Values.gateway.host | quote }}
+            - name: LT_PORT
+              value: {{ .Values.gateway.port | quote }}
+            - name: LT_PREFIX
+              value: {{ .Values.route.pathPrefix | quote }}
+            - name: LT_GROUPS
+              value: {{ join "," .Values.policy.groups | quote }}
+            - name: LT_MIX
+              value: {{ printf "%d,%d,%d" (int .Values.load.mix.read) (int .Values.load.mix.list) (int .Values.load.mix.search) | quote }}
+            - name: LT_USERS
+              value: {{ .Values.load.users | quote }}
+            - name: LT_USER_PREFIX
+              value: {{ $tokens.userPrefix | quote }}
+            - name: LT_HOT_USERS
+              value: {{ .Values.load.hotUsers | quote }}
+            - name: LT_HOT_RATE_PER_MINUTE
+              value: {{ .Values.load.hotRatePerMinute | quote }}
+            - name: LT_STEPS
+              value: {{ include "loadtest.steps" . | quote }}
+            - name: LT_WARMUP_SECONDS
+              value: {{ .Values.load.warmupSeconds | quote }}
+            - name: LT_START_AT
+              value: {{ add (now | unixEpoch) .Values.load.startDelaySeconds | quote }}
+            - name: LT_GENERATORS
+              value: {{ .Values.load.generators | quote }}
+            - name: LT_THREADS
+              value: {{ .Values.load.threads | quote }}
+            - name: LT_HOT_THREADS
+              value: {{ .Values.load.hotThreads | quote }}
+            - name: LT_WINDOWS
+              value: {{ include "loadtest.windows" . | quote }}
+            - name: LT_REQUIRE_DECISIONS
+              value: {{ .Values.load.requireDecisions | quote }}
+            - name: LT_VERIFY_ARGS
+              value: {{ .Values.load.verifyArgs | quote }}
+            - name: LT_HOLD_SECONDS
+              value: {{ .Values.load.holdSeconds | quote }}
+            - name: LT_TOKEN_SOURCE
+              value: {{ $tokens.source | quote }}
+            - name: HEAP
+              value: {{ .Values.load.heap | quote }}
+            {{- if eq $tokens.source "keycloak" }}
+            - name: LT_KEYCLOAK_URL
+              value: {{ $tokens.keycloak.url | quote }}
+            - name: LT_KEYCLOAK_REALM
+              value: {{ $tokens.keycloak.realm | quote }}
+            - name: LT_KEYCLOAK_CLIENT_ID
+              value: {{ $tokens.keycloak.clientId | quote }}
+            - name: LT_KEYCLOAK_PASSWORD_FILE
+              value: /etc/loadtest/password/password
+            {{- if $tokens.keycloak.clientSecret.name }}
+            - name: LT_KEYCLOAK_CLIENT_SECRET_FILE
+              value: /etc/loadtest/client-secret/client-secret
+            {{- end }}
+            {{- if $tokens.keycloak.caConfigMap.name }}
+            - name: LT_KEYCLOAK_CA_FILE
+              value: /etc/loadtest/ca/ca.crt
+            {{- end }}
+            - name: LT_KEYCLOAK_INSECURE
+              value: {{ $tokens.keycloak.insecureSkipVerify | quote }}
+            {{- end }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            {{- toYaml .Values.load.resources | nindent 12 }}
+          volumeMounts:
+            - name: results
+              mountPath: /results
+            - name: tmp
+              mountPath: /tmp
+            {{- if eq $tokens.source "keycloak" }}
+            - name: password
+              mountPath: /etc/loadtest/password
+              readOnly: true
+            {{- if $tokens.keycloak.clientSecret.name }}
+            - name: client-secret
+              mountPath: /etc/loadtest/client-secret
+              readOnly: true
+            {{- end }}
+            {{- if $tokens.keycloak.caConfigMap.name }}
+            - name: ca
+              mountPath: /etc/loadtest/ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+      volumes:
+        - name: results
+          emptyDir:
+            sizeLimit: {{ .Values.load.resultsSizeLimit }}
+        - name: tmp
+          emptyDir: {}
+        {{- if eq $tokens.source "keycloak" }}
+        - name: password
+          secret:
+            secretName: {{ $tokens.keycloak.passwordSecret.name }}
+            items:
+              - key: {{ $tokens.keycloak.passwordSecret.key }}
+                path: password
+        {{- if $tokens.keycloak.clientSecret.name }}
+        - name: client-secret
+          secret:
+            secretName: {{ $tokens.keycloak.clientSecret.name }}
+            items:
+              - key: {{ $tokens.keycloak.clientSecret.key }}
+                path: client-secret
+        {{- end }}
+        {{- if $tokens.keycloak.caConfigMap.name }}
+        - name: ca
+          configMap:
+            name: {{ $tokens.keycloak.caConfigMap.name }}
+            items:
+              - key: {{ $tokens.keycloak.caConfigMap.key }}
+                path: ca.crt
+        {{- end }}
+        {{- end }}

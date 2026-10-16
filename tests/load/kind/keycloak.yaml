@@ -1,0 +1,94 @@
+# A Keycloak in dev mode for the load test workflow, with the realm loadtest
+# and its public client loadtest, which has Direct access grants enabled.
+# Access tokens live two minutes, so a run of a few minutes renews every
+# token at least once. The workflow creates the test users with
+# loadkit keycloak-users and the admin Secret keycloak-admin itself.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+data:
+  loadtest.json: |
+    {
+      "realm": "loadtest",
+      "enabled": true,
+      "accessTokenLifespan": 120,
+      "clients": [
+        {
+          "clientId": "loadtest",
+          "enabled": true,
+          "publicClient": true,
+          "directAccessGrantsEnabled": true,
+          "standardFlowEnabled": false
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.7.5@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85
+          args: ["start-dev", "--import-realm", "--http-port=8080", "--health-enabled=true"]
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: admin
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: password
+            # Half the limit for the heap: at the default 70 percent, sixteen
+            # concurrent password grants pushed the JVM past a limit of 1Gi.
+            - name: JAVA_OPTS_KC_HEAP
+              value: -XX:MaxRAMPercentage=50
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 9000
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+              ephemeral-storage: 256Mi
+            limits:
+              memory: 2Gi
+              ephemeral-storage: 1Gi
+          volumeMounts:
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+      volumes:
+        - name: realm
+          configMap:
+            name: keycloak-realm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

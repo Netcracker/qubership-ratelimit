@@ -422,6 +422,11 @@ checks stay clean on every replica while the pod is replaced, that the Lease mov
 replacement resumes the status writes. It restores the original replica count through Helm — a `kubectl scale` would
 take field-manager ownership of `.spec.replicas` and make every later `helm upgrade` conflict.
 
+The load test kit under `tests/load` is an image and a chart that load-test the rate limit through a gateway on a
+cluster of your own, and check their own results; [Load testing](docs/load-testing.md) describes a run. The `Load test`
+workflow runs the kit on kind for every pull request that changes it, and uploads the summary and the JMeter report as
+the `load-results` artifact.
+
 `make test` runs the envtest suites of `operator/internal` against a real API server, which is where the CRD schema
 and the status subresource actually exist — the fake client the other tests use validates nothing. The first run
 downloads the envtest binaries into `bin/`, so it needs internet. Both derive their Kubernetes version from `go.mod`,

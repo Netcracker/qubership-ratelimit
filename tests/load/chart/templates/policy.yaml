@@ -1,0 +1,32 @@
+{{- if .Values.policy.create }}
+{{- if not (has .Values.policy.algorithm (list "FixedWindow" "GCRA")) }}
+{{- fail (printf "policy.algorithm is %q; want FixedWindow or GCRA" .Values.policy.algorithm) }}
+{{- end }}
+apiVersion: ratelimit.netcracker.com/v1
+kind: RateLimitPolicy
+metadata:
+  name: {{ .Values.gateway.domain }}
+  labels:
+    {{- include "loadtest.labels" . | nindent 4 }}
+spec:
+  domain: {{ .Values.gateway.domain }}
+  limits:
+    {{- range .Values.policy.groups }}
+    - name: {{ . }}
+      target:
+        routes:
+          - path:
+              type: Prefix
+              value: {{ $.Values.route.pathPrefix }}/{{ . }}
+            methods: [GET, POST]
+      rules:
+        - name: per-user
+          counters: [sub]
+          rates:
+            {{- range $.Values.policy.windows }}
+            - requests: {{ mul (int64 .requests) (int64 $.Values.policy.multiplier) }}
+              periodSeconds: {{ int64 .periodSeconds }}
+              algorithm: {{ $.Values.policy.algorithm }}
+            {{- end }}
+    {{- end }}
+{{- end }}

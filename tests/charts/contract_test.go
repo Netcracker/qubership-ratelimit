@@ -4,8 +4,10 @@
 // name, its ports, the ConfigMap name, and the mount path as fixed strings,
 // because a satellite computes the RLS address from the constants alone;
 // this test is what keeps those strings equal to the ones the binaries
-// import. It needs the helm binary and skips without it, unless
-// CHARTS_TEST_REQUIRE_HELM is set, which the CI helm job does.
+// import. It also renders the chart of the load test kit under tests/load
+// and checks what its generator reads. It needs the helm binary and skips
+// without it, unless CHARTS_TEST_REQUIRE_HELM is set, which the CI helm job
+// does.
 package charts
 
 import (

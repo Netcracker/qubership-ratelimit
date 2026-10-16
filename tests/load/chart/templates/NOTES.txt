@@ -1,0 +1,14 @@
+The generators run as the Job {{ include "loadtest.name" . }}-generator, one pod per generator.
+
+Each pod writes the file /results/done once its run is over: 0 when the check passed, 1 when a check failed,
+2 when the check could not run, 3 when JMeter failed. To collect the results of every pod that is done and let
+it finish:
+
+  for pod in $(kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=generator -o name); do
+    status=$(kubectl exec -n {{ .Release.Namespace }} "$pod" -- cat /results/done 2>/dev/null) || { echo "$pod is not done"; continue; }
+    echo "$pod: $status"
+    kubectl cp -n {{ .Release.Namespace }} "${pod#pod/}:/results" "results/${pod#pod/}"
+    kubectl exec -n {{ .Release.Namespace }} "$pod" -- touch /results/release
+  done
+
+results/<pod>/summary.md is the verdict of one generator, results/<pod>/report/index.html its JMeter report.
