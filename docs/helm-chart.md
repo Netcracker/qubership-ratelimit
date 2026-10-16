@@ -42,8 +42,9 @@ helm-templates/ratelimit-service/templates/
 ├── _helpers.tpl                   # mode (satellite iff BASELINE_ORIGIN; every template but EnvoyFilter.yaml is
 │                                  #   wrapped in it, so a satellite release holds the filters alone),
 │                                  #   serviceName (the constant ratelimit), grpcPort, serviceNamespace,
-│                                  #   rlsAuthority/rlsCluster, statPrefix, validateDomains (fails the render on a
-│                                  #   duplicate domain), dbaasNamespace, millicores (the autoscaler's CPU target)
+│                                  #   rlsAuthority/rlsCluster, rlsReferencedService, statPrefix, validateDomains
+│                                  #   (fails the render on a duplicate domain), dbaasNamespace, millicores (the
+│                                  #   autoscaler's CPU target)
 ├── Deployment.yaml                # the Deployment ratelimit-service, REPLICAS replicas; mounts ratelimit-config
 │                                  #   at /etc/ratelimit/config with optional: true and the counter store's
 │                                  #   Secret under /etc/secrets/dbaas-secrets without it; the ServiceAccount
@@ -536,6 +537,11 @@ There are four descriptor actions (VIRTUAL_HOST, MERGE), and they are a contract
 
 `request_id` is only for correlating a check with the gateway access log (the service puts it into the logging
 context); it is never an identity.
+
+Each filter carries the annotation `envoyfilter.istio.io/referenced-services: <serviceNamespace>/<rlsAuthority>`, the
+Service behind `cluster_name`, in every mode. Without `PILOT_FILTER_GATEWAY_CLUSTER_CONFIG` on istiod it changes
+nothing; with it, istiod adds that Service to the gateways the filter targets, which otherwise get no cluster of a
+Service no route of theirs points at. Note that Istio releases up to 1.30.6 drop the cluster again on the next route change and require the HTTPRoute to pin.
 
 ### Service.yaml (service chart): the critical detail
 

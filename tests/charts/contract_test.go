@@ -515,6 +515,31 @@ func TestServiceChart_filtersNameTheServiceOfTheContractInTheirGRPCService(t *te
 	}
 }
 
+// Every filter references the Service of its cluster_name, so istiod keeps the
+// cluster with PILOT_FILTER_GATEWAY_CLUSTER_CONFIG=true.
+func TestServiceChart_filtersReferenceTheServiceOfTheirCluster(t *testing.T) {
+	for _, c := range []struct {
+		name, releaseNamespace string
+		args                   []string
+		serviceNamespace       string
+	}{
+		{"in the baseline the Service in NAMESPACE", "biz", nil, "biz"},
+		{"in a satellite the Service in BASELINE_ORIGIN", "sat", []string{"--set", "BASELINE_ORIGIN=base"}, "base"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			filters := ofKind(render(t, serviceChart, c.releaseNamespace, c.args...), envoyFilterKind)
+			require.Len(t, filters, 2, "one filter per enabled gateway")
+
+			want := fmt.Sprintf("%s/%s.%s.svc.cluster.local", c.serviceNamespace, contract.ServiceName, c.serviceNamespace)
+			for _, filter := range filters {
+				assert.Equal(t, want,
+					filter.at("metadata", "annotations", "envoyfilter.istio.io/referenced-services").str2(),
+					"referenced-services annotation of %s", filter.name())
+			}
+		})
+	}
+}
+
 // grant is one rule of a Role on one resource: the resourceNames it is
 // narrowed to, nil where it reaches every object of the resource, and its
 // verbs, sorted.

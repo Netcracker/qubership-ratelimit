@@ -61,6 +61,11 @@ worse outcome than one line here.
 {{- printf "outbound|%s||%s" (include "ratelimit.grpcPort" .) (include "ratelimit.rlsAuthority" .) -}}
 {{- end -}}
 
+{{/* The RLS Service as referenced-services names it: <namespace>/<hostname>. */}}
+{{- define "ratelimit.rlsReferencedService" -}}
+{{- printf "%s/%s" (include "ratelimit.serviceNamespace" .) (include "ratelimit.rlsAuthority" .) -}}
+{{- end -}}
+
 {{/*
 Envoy stat_prefix from a gateway name: dashes become underscores, so the
 filter's stats land under one clean prefix per gateway.

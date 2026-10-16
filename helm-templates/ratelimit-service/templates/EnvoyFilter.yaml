@@ -27,6 +27,10 @@ metadata:
     app.kubernetes.io/part-of: '{{ $root.Values.APPLICATION_NAME }}'
     app.kubernetes.io/managed-by: '{{ $root.Values.MANAGED_BY }}'
     deployment.netcracker.com/sessionId: '{{ $root.Values.DEPLOYMENT_SESSION_ID }}'
+  annotations:
+    {{- /* Keeps the cluster of cluster_name on the gateway when istiod runs with
+           PILOT_FILTER_GATEWAY_CLUSTER_CONFIG=true. */}}
+    envoyfilter.istio.io/referenced-services: '{{ include "ratelimit.rlsReferencedService" $root }}'
 spec:
   targetRefs:
     - group: gateway.networking.k8s.io
