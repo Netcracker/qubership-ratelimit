@@ -1,0 +1,316 @@
+# Load test kit
+#
+# Proves the kit under tests/load end to end before anyone takes it to a real
+# stand: stands up a kind cluster with the platform's mesh and gateways, the
+# three rate limit charts, and a Keycloak with test users, installs the load
+# test chart with tests/load/kind/values.yaml, and fails when the generator's
+# own check (loadkit verify) fails. The rates are low on purpose: a shared
+# runner measures the kit, not the capacity of the rate limit.
+
+name: Load test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'tests/load/**'
+      - '.github/workflows/load-test.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: load-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GATEWAY_API_VERSION: v1.4.0
+  ISTIO_REPO: https://github.com/Netcracker/qubership-istio.git
+  ISTIO_REF: main
+  MESH_CONFIG_REPO: https://github.com/Netcracker/qubership-core-mesh-config.git
+  MESH_CONFIG_REF: main
+  LOAD_NAMESPACE: ratelimit-load
+  REDIS_NAMESPACE: ratelimit-load-redis
+  KEYCLOAK_NAMESPACE: loadtest-keycloak
+  OPERATOR_IMAGE: ratelimit-operator:kind
+  SERVICE_IMAGE: ratelimit-service:kind
+  LOADTEST_IMAGE: ratelimit-loadtest:kind
+
+jobs:
+  load-test:
+    name: load test (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # loadkit keycloak-users runs on the runner, the way an operator of a
+      # stand runs it from a workstation. The cache-poisoning audit is
+      # suppressed as in the E2E workflow: this workflow uploads run
+      # diagnostics only, not release material.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 # zizmor: ignore[cache-poisoning]
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the operator image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: operator/Dockerfile
+          load: true
+          tags: ${{ env.OPERATOR_IMAGE }}
+          cache-from: type=gha,scope=e2e-operator-image
+          cache-to: type=gha,scope=e2e-operator-image,mode=max
+
+      - name: Build the service image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: service/Dockerfile
+          load: true
+          tags: ${{ env.SERVICE_IMAGE }}
+          cache-from: type=gha,scope=e2e-service-image
+          cache-to: type=gha,scope=e2e-service-image,mode=max
+
+      - name: Build the load test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: tests/load/Dockerfile
+          load: true
+          tags: ${{ env.LOADTEST_IMAGE }}
+          cache-from: type=gha,scope=load-loadtest-image
+          cache-to: type=gha,scope=load-loadtest-image,mode=max
+
+      - name: Create kind cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: ratelimit-load
+          config: tests/e2e/kind-config.yaml
+
+      - name: Load the images into kind
+        run: |
+          for image in "${OPERATOR_IMAGE}" "${SERVICE_IMAGE}" "${LOADTEST_IMAGE}"; do
+            kind load docker-image "${image}" --name ratelimit-load
+          done
+
+      - name: Install Gateway API CRDs
+        run: |
+          kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
+
+      - name: Install qubership-istio
+        run: |
+          git clone --depth 1 --branch "${ISTIO_REF}" "${ISTIO_REPO}" /tmp/qubership-istio
+          helm dependency update /tmp/qubership-istio/helm-templates/qubership-istio
+          kubectl create namespace istio-system
+          helm upgrade --install qubership-istio /tmp/qubership-istio/helm-templates/qubership-istio \
+            --namespace istio-system \
+            --set global.istioNamespace=istio-system \
+            --set MONITORING_ENABLED=false \
+            --wait --timeout 10m
+          kubectl rollout status deployment/istiod -n istio-system --timeout=300s
+          kubectl rollout status daemonset/ztunnel -n istio-system --timeout=300s
+          kubectl rollout status daemonset/istio-cni-node -n istio-system --timeout=300s
+
+      - name: Install qubership-core-mesh-config
+        run: |
+          git clone --depth 1 --branch "${MESH_CONFIG_REF}" "${MESH_CONFIG_REPO}" /tmp/mesh-config
+          kubectl create namespace "${LOAD_NAMESPACE}"
+          kubectl label namespace "${LOAD_NAMESPACE}" istio.io/dataplane-mode=ambient --overwrite
+          kubectl label namespace "${LOAD_NAMESPACE}" istio.io/use-waypoint=waypoint --overwrite
+          helm upgrade --install core-istio-mesh /tmp/mesh-config \
+            --namespace "${LOAD_NAMESPACE}" \
+            -f /tmp/mesh-config/resource-profiles/dev.yaml \
+            --set SERVICE_MESH_TYPE=Istio \
+            --set MONITORING_ENABLED=false \
+            --set CPU_REQUEST=10m \
+            --set WAYPOINT_CPU_REQUEST=100m \
+            --wait --timeout 10m
+          kubectl wait gateways.gateway.networking.k8s.io/public-gateway -n "${LOAD_NAMESPACE}" \
+            --for=condition=Programmed --timeout=300s
+          kubectl rollout status deployment/public-gateway-istio -n "${LOAD_NAMESPACE}" --timeout=300s
+
+      # The summary's table of the calls to the rate limit service reads
+      # statistics the gateway keeps only when its proxy configuration asks.
+      - name: Enable the gateway's statistics of the rate limit service
+        run: |
+          kubectl patch gateways.gateway.networking.k8s.io/public-gateway -n "${LOAD_NAMESPACE}" \
+            --type merge --patch-file tests/load/gateway-stats.yaml
+          kubectl rollout status deployment/public-gateway-istio -n "${LOAD_NAMESPACE}" --timeout=300s
+
+      # The kind cluster has no DBaaS, so the workflow stands in for its Redis
+      # adapter the way the E2E workflow does: a Redis with a password in a
+      # namespace of its own, and the Secret dbaas-operator would write.
+      - name: Deploy the counter store
+        run: |
+          kubectl create namespace "${REDIS_NAMESPACE}"
+          password="$(openssl rand -hex 8)"
+          echo "::add-mask::${password}"
+          kubectl create secret generic e2e-redis-auth -n "${REDIS_NAMESPACE}" \
+            --from-file=password=<(printf '%s' "${password}")
+          kubectl apply -n "${REDIS_NAMESPACE}" -f tests/e2e/manifests/redis.yaml
+          kubectl rollout status deployment/e2e-redis -n "${REDIS_NAMESPACE}" --timeout=120s
+
+      - name: Install the rate limit charts
+        run: |
+          helm upgrade --install ratelimit-crds helm-templates/ratelimit-crds \
+            --namespace "${LOAD_NAMESPACE}" --wait --timeout 2m
+          helm upgrade --install ratelimit-operator helm-templates/ratelimit-operator \
+            --namespace "${LOAD_NAMESPACE}" \
+            --set NAMESPACE="${LOAD_NAMESPACE}" \
+            --set-string DEPLOYMENT_SESSION_ID="${GITHUB_RUN_ID}" \
+            -f helm-templates/ratelimit-operator/resource-profiles/dev.yaml \
+            --set IMAGE_REPOSITORY=ratelimit-operator \
+            --set TAG=kind \
+            --wait --timeout 5m
+          helm upgrade --install ratelimit-service helm-templates/ratelimit-service \
+            --namespace "${LOAD_NAMESPACE}" \
+            --set NAMESPACE="${LOAD_NAMESPACE}" \
+            --set-string DEPLOYMENT_SESSION_ID="${GITHUB_RUN_ID}" \
+            -f helm-templates/ratelimit-service/resource-profiles/dev.yaml \
+            --set IMAGE_REPOSITORY=ratelimit-service \
+            --set TAG=kind \
+            --set redis.dbaas.enabled=false
+
+      - name: Write the counter store's Secret
+        run: |
+          password="$(kubectl get secret e2e-redis-auth -n "${REDIS_NAMESPACE}" \
+            -o jsonpath='{.data.password}' | base64 -d)"
+          echo "::add-mask::${password}"
+          connection="$(jq -cn --arg host "e2e-redis.${REDIS_NAMESPACE}" --arg password "${password}" \
+            '{host: $host, port: 6379, url: ("redis://" + $host + ":6379"), password: $password,
+              role: "admin", service: "e2e-redis"}')"
+          metadata="$(jq -cn --arg namespace "${LOAD_NAMESPACE}" \
+            '{classifier: {microserviceName: "ratelimit-service", namespace: $namespace, scope: "service"},
+              type: "redis", name: "e2e-redis", namespace: $namespace}')"
+          kubectl create secret generic ratelimit-service-redis -n "${LOAD_NAMESPACE}" \
+            --from-file=connectionProperties.json=<(printf '%s' "${connection}") \
+            --from-file=metadata.json=<(printf '%s' "${metadata}")
+          kubectl rollout status deployment/ratelimit-service -n "${LOAD_NAMESPACE}" --timeout=5m
+
+      - name: Deploy Keycloak
+        run: |
+          kubectl create namespace "${KEYCLOAK_NAMESPACE}"
+          password="$(openssl rand -hex 12)"
+          echo "::add-mask::${password}"
+          kubectl create secret generic keycloak-admin -n "${KEYCLOAK_NAMESPACE}" \
+            --from-file=password=<(printf '%s' "${password}")
+          kubectl apply -n "${KEYCLOAK_NAMESPACE}" -f tests/load/kind/keycloak.yaml
+          kubectl rollout status deployment/keycloak -n "${KEYCLOAK_NAMESPACE}" --timeout=5m
+
+      # The same command an operator runs against the Keycloak of a stand,
+      # through a port-forward. The users' password ends up in the Secret
+      # the chart's passwordSecret names.
+      - name: Create the test users
+        run: |
+          umask 077
+          secrets="${RUNNER_TEMP}/loadtest-secrets"
+          mkdir -p "${secrets}"
+          kubectl get secret keycloak-admin -n "${KEYCLOAK_NAMESPACE}" \
+            -o jsonpath='{.data.password}' | base64 -d >"${secrets}/admin-password"
+          openssl rand -hex 12 >"${secrets}/users-password"
+          echo "::add-mask::$(cat "${secrets}/users-password")"
+          kubectl create secret generic loadtest-users -n "${LOAD_NAMESPACE}" \
+            --from-file=password="${secrets}/users-password"
+
+          kubectl port-forward -n "${KEYCLOAK_NAMESPACE}" svc/keycloak 18081:8080 >/dev/null 2>&1 &
+          forward=$!
+          trap 'kill "${forward}"' EXIT
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:18081/realms/loadtest && break
+            sleep 1
+          done
+          users="$(yq '.load.users' tests/load/kind/values.yaml)"
+          go run ./tests/load/loadkit keycloak-users \
+            -keycloak-url http://127.0.0.1:18081 -realm loadtest \
+            -admin-user admin -admin-password-file "${secrets}/admin-password" \
+            -users "${users}" -password-file "${secrets}/users-password"
+          rm -rf "${secrets}"
+
+      - name: Install the load test chart
+        run: |
+          helm lint tests/load/chart -f tests/load/kind/values.yaml
+          helm upgrade --install loadtest tests/load/chart \
+            --namespace "${LOAD_NAMESPACE}" \
+            -f tests/load/kind/values.yaml
+          kubectl wait ratelimitpolicies.ratelimit.netcracker.com/gateway.public -n "${LOAD_NAMESPACE}" \
+            --for=condition=Ready --timeout=180s
+
+      # A generator writes /results/done once its run is over and then waits
+      # for /results/release; a pod that fails before that has its log shown.
+      # The access tokens of the realm live two minutes, so a run of several
+      # minutes renews them, and tokens.log records every rewrite of the file.
+      - name: Wait for the run and collect the results
+        id: run
+        run: |
+          selector=app.kubernetes.io/instance=loadtest,app.kubernetes.io/component=generator
+          pod=""
+          for _ in $(seq 1 60); do
+            pod="$(kubectl get pods -n "${LOAD_NAMESPACE}" -l "${selector}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            [ -n "${pod}" ] && break
+            sleep 2
+          done
+          [ -n "${pod}" ] || { echo "::error::no generator pod appeared within 120 seconds"; exit 1; }
+          deadline=$((SECONDS + 1500))
+          until kubectl exec -n "${LOAD_NAMESPACE}" "${pod}" -- test -e /results/done 2>/dev/null; do
+            phase="$(kubectl get pod -n "${LOAD_NAMESPACE}" "${pod}" -o jsonpath='{.status.phase}')"
+            if [ "${phase}" = Failed ] || [ "${phase}" = Succeeded ]; then
+              kubectl logs -n "${LOAD_NAMESPACE}" "${pod}" --tail=200
+              echo "::error::the generator pod ended in phase ${phase} before it wrote its results"
+              exit 1
+            fi
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              kubectl logs -n "${LOAD_NAMESPACE}" "${pod}" --tail=200
+              echo "::error::the generator wrote no results within 25 minutes"
+              exit 1
+            fi
+            sleep 10
+          done
+          mkdir -p load-results
+          kubectl cp -n "${LOAD_NAMESPACE}" "${pod}:/results" load-results
+          kubectl exec -n "${LOAD_NAMESPACE}" "${pod}" -- touch /results/release
+          kubectl logs -n "${LOAD_NAMESPACE}" "${pod}" >load-results/generator.log
+          if [ -f load-results/summary.md ]; then
+            cat load-results/summary.md >>"${GITHUB_STEP_SUMMARY}"
+          fi
+          status="$(cat load-results/done)"
+          if [ "${status}" != 0 ]; then
+            echo "::error::the generator's run failed with status ${status}; see the job summary and the load-results artifact"
+            exit 1
+          fi
+          if ! jq -e '.rlsCalls | length > 0 and all(.gatewayCalls > 0 and .serviceChecks > 0)' \
+            load-results/summary.json >/dev/null; then
+            echo "::error::summary.json lacks the calls to the rate limit service of some step; see metrics.log"
+            exit 1
+          fi
+          writes="$(grep -c ' wrote ' load-results/tokens.log || true)"
+          if [ "${writes}" -lt 2 ]; then
+            echo "::error::tokens.log records ${writes} write of the tokens file; a run this long renews the tokens at least once"
+            exit 1
+          fi
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: load-results
+          path: load-results/
+          if-no-files-found: ignore
+
+      - name: Dump state on failure
+        if: failure()
+        run: |
+          kubectl get all,ratelimitpolicies,gateways.gateway.networking.k8s.io,httproutes \
+            -n "${LOAD_NAMESPACE}" -o wide || true
+          kubectl describe pods -n "${LOAD_NAMESPACE}" || true
+          kubectl get ratelimitpolicies -n "${LOAD_NAMESPACE}" -o yaml || true
+          kubectl logs -n "${LOAD_NAMESPACE}" -l app.kubernetes.io/name=ratelimit-operator --tail=200 || true
+          kubectl logs -n "${LOAD_NAMESPACE}" -l app.kubernetes.io/name=ratelimit-service --tail=200 || true
+          kubectl logs -n "${KEYCLOAK_NAMESPACE}" deployment/keycloak --tail=100 || true

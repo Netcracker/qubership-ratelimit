@@ -1,0 +1,8 @@
+apiVersion: v2
+name: ratelimit-loadtest
+description: >-
+  Load test of the rate limit through a gateway: a backend that answers every
+  request, a route to it, the RateLimitPolicy of the gateway's domain, and a
+  Job of JMeter generators that check their own results.
+type: application
+version: 0.1.0

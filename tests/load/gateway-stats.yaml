@@ -1,0 +1,18 @@
+# A merge patch for the Gateway a load test runs through: Istio copies these
+# annotations to the gateway's pods, which restart with them.
+# proxyStatsMatcher keeps Envoy's statistics of its cluster of the rate limit
+# service and of the rate limit filter, which Istio drops by default; the
+# buckets count the calls to the service in steps of a millisecond up to 10.
+#
+#   kubectl patch gateway public-gateway -n <namespace> --type merge \
+#     --patch-file tests/load/gateway-stats.yaml
+spec:
+  infrastructure:
+    annotations:
+      proxy.istio.io/config: |
+        proxyStatsMatcher:
+          inclusionRegexps:
+          - ".*outbound\\|9000\\|\\|ratelimit\\..*"
+          - ".*\\.ratelimit\\..*"
+      sidecar.istio.io/statsHistogramBuckets: >-
+        {"cluster.outbound|9000||ratelimit":[0.5,1,2,3,4,5,6,7,8,9,10,15,20,25,50,100,250,1000]}

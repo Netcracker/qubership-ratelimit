@@ -1,0 +1,74 @@
+# Values of the load test chart for the kind cluster of the load test
+# workflow: a few minutes at low rates on a shared runner, enough to prove
+# that the kit works end to end, not to measure capacity.
+image:
+  repository: ratelimit-loadtest
+  tag: kind
+  pullPolicy: IfNotPresent
+
+policy:
+  # The hour window is small enough for the hot users to fill it within the
+  # run, so the check covers two windows of one rule.
+  windows:
+    - requests: 50
+      periodSeconds: 60
+    - requests: 120
+      periodSeconds: 3600
+    - requests: 5000
+      periodSeconds: 86400
+
+backend:
+  replicas: 1
+  workerProcesses: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 16Mi
+      ephemeral-storage: 16Mi
+    limits:
+      cpu: 500m
+      memory: 64Mi
+      ephemeral-storage: 64Mi
+
+tokens:
+  source: keycloak
+  keycloak:
+    url: http://keycloak.loadtest-keycloak.svc.cluster.local:8080
+    realm: loadtest
+    clientId: loadtest
+    passwordSecret:
+      name: loadtest-users
+
+load:
+  users: 200
+  hotUsers: 4
+  hotRatePerMinute: 75
+  steps:
+    - rate: 10
+      seconds: 120
+    - rate: 30
+      seconds: 120
+  warmupSeconds: 15
+  startDelaySeconds: 60
+  threads: 20
+  hotThreads: 4
+  # A shared runner may stall a moment, and a stall past the rate limit
+  # filter's timeout leaves a response undecided; the default checks stay
+  # strict about errors, refusals, and admissions.
+  verifyArgs: -min-rate-ratio 0.8 -max-undecided-ratio 0.01
+  holdSeconds: 1800
+  heap: -Xms384m -Xmx384m -XX:MaxMetaspaceSize=128m
+  resources:
+    requests:
+      cpu: 250m
+      memory: 640Mi
+    limits:
+      cpu: "1"
+      memory: 640Mi
+  resultsSizeLimit: 256Mi
+
+metrics:
+  # The workflow patches the gateway with tests/load/gateway-stats.yaml, so
+  # every step has to carry the statistics of the calls to the rate limit
+  # service.
+  required: true

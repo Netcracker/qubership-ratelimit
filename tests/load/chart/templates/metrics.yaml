@@ -1,0 +1,36 @@
+{{- if .Values.metrics.enabled }}
+{{- /* Headless Services, so the first generator resolves the address of
+       every gateway pod and every rate limit service pod and samples each. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "loadtest.name" . }}-gateway-stats
+  namespace: {{ include "loadtest.gatewayNamespace" . }}
+  labels:
+    {{- include "loadtest.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  clusterIP: None
+  selector:
+    gateway.networking.k8s.io/gateway-name: {{ .Values.gateway.name }}
+  ports:
+    - name: http-envoy-prom
+      port: {{ .Values.metrics.gatewayPort }}
+      targetPort: {{ .Values.metrics.gatewayPort }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "loadtest.name" . }}-service-metrics
+  labels:
+    {{- include "loadtest.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+spec:
+  clusterIP: None
+  selector:
+    {{- toYaml .Values.metrics.servicePodLabels | nindent 4 }}
+  ports:
+    - name: http-metrics
+      port: {{ .Values.metrics.servicePort }}
+      targetPort: {{ .Values.metrics.servicePort }}
+{{- end }}

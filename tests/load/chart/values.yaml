@@ -1,0 +1,191 @@
+# The load test of the rate limit through one gateway. docs/load-testing.md
+# describes a run from start to end; each value is described here.
+
+image:
+  # The image built from tests/load/Dockerfile.
+  repository: ghcr.io/netcracker/qubership-ratelimit-loadtest
+  # Required.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+gateway:
+  # The Gateway the route attaches to and the generators send through.
+  name: public-gateway
+  # Its namespace; empty is the release namespace.
+  namespace: ""
+  # The rate limit domain this gateway sends, the gateways.<role>.domain of
+  # the ratelimit-service chart. The policy is named after it.
+  domain: gateway.public
+  # The host and port the generators connect to; an empty host is the
+  # gateway's Service, <name>-istio.<namespace>.svc.cluster.local.
+  host: ""
+  port: 8080
+
+route:
+  # Every request of the test goes under this path, one segment per group:
+  # <pathPrefix>/<group>/items, <pathPrefix>/<group>/items/<id>, and
+  # <pathPrefix>/<group>/search.
+  pathPrefix: /ratelimit-loadtest
+
+policy:
+  # Render the RateLimitPolicy of gateway.domain. A domain has one policy
+  # object, so on a stand whose domain already has one the install fails;
+  # set false there and add the blocks of this chart to that policy by hand.
+  create: true
+  # One block per group, each with a per-user rule over the windows.
+  groups: [customers, orders, incidents, billing, products]
+  # FixedWindow or GCRA. The limit check of loadkit verify is exact for
+  # FixedWindow only, so load.checkLimits applies to FixedWindow alone.
+  algorithm: FixedWindow
+  windows:
+    - requests: 50
+      periodSeconds: 60
+    - requests: 1000
+      periodSeconds: 3600
+    - requests: 5000
+      periodSeconds: 86400
+  # The requests of every window are multiplied by this. A capacity run sets
+  # 1000: the store does the same work per request, and no limit fires.
+  multiplier: 1
+
+backend:
+  # Answers 200 to every request of the test, so response times measure the
+  # gateway and the rate limit rather than an application. It must not be the
+  # ceiling of the run: the baseline scenario shows where its ceiling is.
+  image: nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+  replicas: 2
+  # nginx workers of one replica; keep it at the CPU limit. More workers
+  # than CPUs leave every worker throttled, and the readiness probe then
+  # times out under load.
+  workerProcesses: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 32Mi
+      ephemeral-storage: 16Mi
+    limits:
+      cpu: "2"
+      memory: 64Mi
+      ephemeral-storage: 64Mi
+
+tokens:
+  # keycloak: every test user logs in to the realm with the password grant,
+  # and the generator renews the tokens before they expire. self-signed: the
+  # generator signs tokens with a key of its own, for a gateway that checks
+  # no token.
+  source: keycloak
+  # The test users are <userPrefix>0001 to <userPrefix><load.users>, padded
+  # to the width of load.users.
+  userPrefix: svt-user-
+  keycloak:
+    # The server root, the part of the URL before /realms.
+    url: ""
+    realm: ""
+    # A client with Direct access grants enabled.
+    clientId: ""
+    # The Secret key that holds the password every test user has. Required
+    # with source keycloak.
+    passwordSecret:
+      name: ""
+      key: password
+    # The Secret key that holds the client secret; leave the name empty for a
+    # public client.
+    clientSecret:
+      name: ""
+      key: client-secret
+    # The ConfigMap key that holds the CA certificates of the server, in PEM;
+    # leave the name empty to trust the image's CA bundle.
+    caConfigMap:
+      name: ""
+      key: ca.crt
+    insecureSkipVerify: false
+
+load:
+  # Test users in the whole run, shared out among the generators.
+  users: 2000
+  # The first hotUsers users send to one group each at hotRatePerMinute, on
+  # top of the steps; the others are picked at random for every request.
+  hotUsers: 0
+  hotRatePerMinute: 60
+  # Shares of READ (GET .../items/<id>), LIST (GET .../items), and SEARCH
+  # (POST .../search) among the requests.
+  mix:
+    read: 60
+    list: 30
+    search: 10
+  # The load steps: each holds rate requests per second, summed over the
+  # generators, for seconds.
+  steps:
+    - rate: 10
+      seconds: 3600
+  # The start of each step left out of its statistics.
+  warmupSeconds: 30
+  # Every generator starts its steps this long after the chart is rendered,
+  # so the steps of all generators line up. Give the pods time to start, to
+  # log the users in, and to see the route; a generator ready later starts
+  # 15 seconds after it is ready, and its steps lag the others'.
+  startDelaySeconds: 120
+  # Pods of the generator Job. Each takes an equal share of the rate and its
+  # own slice of the users.
+  generators: 1
+  # Threads of one generator. A thread holds one keep-alive connection; give
+  # more than the rate of one generator times the response time in seconds,
+  # or the generator falls behind its schedule and the check fails the step.
+  threads: 200
+  hotThreads: 4
+  # Check every window of every user and group against the policy. Off for a
+  # capacity run with a multiplier, where no limit fires.
+  checkLimits: true
+  # Expect the rate limit service to decide every request. false is for the
+  # baseline run with the rate limit off (runtime.enabledPercent: 0 in the
+  # ratelimit-service chart): the generator then waits for the route alone
+  # and checks neither decisions nor limits.
+  requireDecisions: true
+  # More flags of loadkit verify, such as
+  # -max-error-ratio 0.001 -min-rate-ratio 0.95 -max-p99 50ms.
+  verifyArgs: ""
+  # How long a generator keeps its results after the run for kubectl cp.
+  holdSeconds: 3600
+  # JMeter's heap.
+  heap: -Xms1g -Xmx1g -XX:MaxMetaspaceSize=256m
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1536Mi
+    limits:
+      cpu: "2"
+      memory: 1536Mi
+  # Space for the results of one generator; a sample takes about 250 bytes.
+  resultsSizeLimit: 4Gi
+  # Keep the generators out of the mesh: a generator stands for clients
+  # outside the cluster, and a capture would add the node's ztunnel to every
+  # request.
+  podLabels:
+    istio.io/dataplane-mode: none
+    sidecar.istio.io/inject: "false"
+
+metrics:
+  # Sample, every intervalSeconds of the run, the gateway's statistics of its
+  # calls to the rate limit service and the service's statistics of its
+  # checks, for the table of those calls in summary.md. The first generator
+  # samples, and its summary carries the table. The gateway keeps these
+  # statistics only when its proxy configuration asks for them; see
+  # docs/load-testing.md. The chart creates a headless Service for the
+  # sampler in the gateway's namespace and one in the release namespace;
+  # false creates neither.
+  enabled: true
+  intervalSeconds: 5
+  # Fail a step whose samples hold no call of the gateway or no check of the
+  # service, the way a run that has to prove the statistics does.
+  required: false
+  # The port of Envoy's own statistics on the gateway pods.
+  gatewayPort: 15090
+  # The gateway's Envoy cluster of the rate limit service; empty is
+  # outbound|9000||ratelimit.<release namespace>.svc.cluster.local, the
+  # Service of the ratelimit-service chart. tests/load/gateway-stats.yaml
+  # keeps the statistics of that cluster; another one needs its own patch.
+  rlsCluster: ""
+  # The labels of the rate limit service pods and the port of their metrics.
+  servicePodLabels:
+    name: ratelimit-service
+  servicePort: 8080

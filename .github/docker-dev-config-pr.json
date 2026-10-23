@@ -9,6 +9,11 @@
             "name": "qubership-ratelimit-service",
             "file": "./service/Dockerfile",
             "context": "."
+        },
+        {
+            "name": "qubership-ratelimit-loadtest",
+            "file": "./tests/load/Dockerfile",
+            "context": "."
         }
     ],
     "platforms": "linux/amd64"

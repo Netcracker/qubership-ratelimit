@@ -21,3 +21,8 @@
 # image copies its own.
 !operator/application.yaml
 !service/application.yaml
+
+# The load test image copies its JMeter plan, the plan's properties and
+# Groovy script, and the script that drives a generator.
+!tests/load/jmeter/**
+!tests/load/run.sh
