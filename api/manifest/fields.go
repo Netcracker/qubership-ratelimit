@@ -11,7 +11,9 @@ import (
 // FieldPaths lists the JSON paths of every field a type can carry, sorted:
 // nested structs by dot, slice and array elements as [], map values as {}.
 // Pointers and interfaces are looked through; a type met again on the way
-// down is cut with "..." rather than followed, so a recursive type ends.
+// down is cut with "..." rather than followed, so a recursive type ends. A
+// field tagged manifest:"-" is left out: it is an authoring form the operator
+// resolves before it writes a payload, so no payload carries it.
 //
 // It is what the payload's golden is made of. The bump check on the manifest
 // cannot see a field added to the spec: the manifest golden does not move,
@@ -54,7 +56,7 @@ func walk(t reflect.Type, prefix string, seen map[reflect.Type]bool, paths *[]st
 				continue
 			}
 			name, inline := jsonName(f)
-			if name == "-" {
+			if name == "-" || f.Tag.Get("manifest") == "-" {
 				continue
 			}
 			if inline {

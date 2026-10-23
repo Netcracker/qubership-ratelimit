@@ -35,7 +35,10 @@ import (
 // FormatVersion is the version the operator writes. Increment it with any
 // change of what Encode or EncodePayload produce, a field added to the spec
 // included, and write the goldens of the new version (see manifest_test.go);
-// the decoder then reads this version and the previous one.
+// the decoder then reads this version and the previous one. A field of the
+// spec tagged manifest:"-" is the one exception: the operator resolves it
+// before it writes a payload, so it never reaches a service and does not
+// move the version.
 //
 // The reader's side of that promise: a field removed from the format, or
 // renamed, stays in the struct under its old JSON name for one more version,

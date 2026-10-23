@@ -445,6 +445,32 @@ func TestDecode_isSilentOnAnObjectThisSchemaFullyDefines(t *testing.T) {
 	assert.Empty(t, skew, "Decode skew")
 }
 
+// TestDecode_keepsAListWrittenEmptyApartFromOneLeftOut pins the mechanism the
+// override rule of presets rests on: the stored object reaches the resolver
+// with counters: [] as an empty list and an absent counters as nil, so the
+// two can mean a value and an omission.
+func TestDecode_keepsAListWrittenEmptyApartFromOneLeftOut(t *testing.T) {
+	stored := unstructuredPolicy(t, policyObject(), map[string]any{
+		"limits": []any{map[string]any{
+			"name": "api",
+			"rules": []any{
+				map[string]any{"name": "written", "counters": []any{}},
+				map[string]any{"name": "left-out"},
+			},
+		}},
+	})
+
+	decoded, skew, err := Decode(stored)
+
+	require.NoError(t, err, "Decode(counters: [] in rule written, no counters in rule left-out)")
+	assert.Empty(t, skew, "Decode skew")
+	require.Len(t, decoded.Spec.Limits, 1, "decoded Spec.Limits")
+	rules := decoded.Spec.Limits[0].Rules
+	require.Len(t, rules, 2, "decoded rules of block api")
+	assert.Equal(t, []string{}, rules[0].Counters, "decoded Counters of rule written, stored as []")
+	assert.Nil(t, rules[1].Counters, "decoded Counters of rule left-out, stored without the field")
+}
+
 // TestCompile_anUnknownFieldKeepsTheLastGoodGenerationServing is the whole
 // point of the strict decode: the decoded spec compiles perfectly well, and
 // enforcing it anyway would enforce something nobody wrote. A spec this build

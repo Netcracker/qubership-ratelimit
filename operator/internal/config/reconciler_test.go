@@ -47,6 +47,13 @@ var _ = Describe("the configuration writer", func() {
 		return v1.LimitBlock{Name: name, Rules: []v1.Rule{{
 			Name: "total", Rates: []v1.Rate{{Requests: 10, PeriodSeconds: 60}}}}}
 	}
+	// resolvedOneRule is oneRule as the writer saves it in a payload: the
+	// resolver fills in the mode, the behavior, and the algorithm.
+	resolvedOneRule := func(name string) v1.LimitBlock {
+		return v1.LimitBlock{Name: name, Mode: v1.BlockModeAll, Rules: []v1.Rule{{
+			Name: "total", Behavior: v1.RuleBehaviorEnforce,
+			Rates: []v1.Rate{{Requests: 10, PeriodSeconds: 60, Algorithm: v1.AlgorithmGCRA}}}}}
+	}
 	// wide is a block payload large enough to measure against a small limit:
 	// many blocks on disjoint paths with names that compress poorly, under
 	// the 128-bucket budget.
@@ -136,7 +143,8 @@ var _ = Describe("the configuration writer", func() {
 		hash, err := manifest.DecodePayload(configMap.BinaryData["gateway.one.json.gz"], &spec)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(hash).To(Equal(m.Domains["gateway.one"].Hash), "the hash of the payload against the manifest's")
-		Expect(spec).To(Equal(object.Spec), "the payload of gateway.one")
+		Expect(spec).To(Equal(v1.RateLimitPolicySpec{Domain: "gateway.one", Limits: []v1.LimitBlock{resolvedOneRule("a")}}),
+			"the payload of gateway.one")
 	})
 
 	It("writes every domain of the namespace", func() {
@@ -191,7 +199,8 @@ var _ = Describe("the configuration writer", func() {
 		Expect(configMap).To(gstruct.PointTo(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
 			"Data": HaveKeyWithValue(contract.ManifestKey, WithTransform(manifestOf,
 				HaveField("Domains", HaveKeyWithValue("gateway.size", HaveField("Generation", int64(1)))))),
-			"BinaryData": HaveKeyWithValue("gateway.size.json.gz", WithTransform(payloadOf, Equal(small.Spec))),
+			"BinaryData": HaveKeyWithValue("gateway.size.json.gz", WithTransform(payloadOf, Equal(
+				v1.RateLimitPolicySpec{Domain: "gateway.size", Limits: []v1.LimitBlock{resolvedOneRule("a")}}))),
 		})), "ratelimit-config after generation 2 of gateway.size did not fit")
 	})
 
@@ -244,7 +253,8 @@ var _ = Describe("the configuration writer", func() {
 
 		Expect(err).NotTo(HaveOccurred())
 		Expect(bundles).To(Equal(map[string]policy.Bundle{
-			"gateway.read": {UID: string(object.UID), GoodGeneration: object.Generation, GoodSpec: object.Spec},
+			"gateway.read": {UID: string(object.UID), GoodGeneration: object.Generation, GoodSpec: v1.RateLimitPolicySpec{
+				Domain: "gateway.read", Limits: []v1.LimitBlock{resolvedOneRule("a")}}},
 		}))
 	})
 })
