@@ -1,8 +1,11 @@
 package identity
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"slices"
 	"strings"
 
@@ -27,10 +30,12 @@ const (
 	// resource_access.<client>.roles); a payload past the bound is undecodable.
 	MaxPayloadDepth = 8
 
-	// MaxPayloadSeparators bounds the commas and colons of the payload, about
-	// two for each claim and one for each array item. A realistic token has a
-	// few dozen; a heavy one, 150 realm roles, ten clients of eight roles, and
-	// thirty flat claims, has 312. A payload past the bound is undecodable.
+	// MaxPayloadSeparators bounds the commas, colons, opening brackets, and
+	// string escapes of the payload: about two for each claim, one for each
+	// array item, one for each object or array, and one for each backslash
+	// inside a string. A realistic token has a few dozen; a heavy one, 150
+	// realm roles, ten clients of eight roles, and thirty flat claims, has
+	// 336. A payload past the bound is undecodable.
 	MaxPayloadSeparators = 512
 )
 
@@ -195,20 +200,34 @@ func payload(token string) (map[string]any, bool) {
 	if !withinShape(raw) {
 		return nil, false
 	}
+	// Numbers stay json.Number strings. Extraction reads strings only, and a
+	// float64 conversion of a literal the token chose can cost hundreds of
+	// realistic tokens, which the shape bound does not see.
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	var claims map[string]any
-	if json.Unmarshal(raw, &claims) != nil {
+	if decoder.Decode(&claims) != nil {
+		return nil, false
+	}
+	// Decode stops after the first value; anything but trailing space after
+	// it is a malformed payload, as json.Unmarshal reports it.
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return nil, false
 	}
 	return claims, true
 }
 
 // withinShape reports whether the payload nests no deeper than
-// MaxPayloadDepth and holds no more than MaxPayloadSeparators separators. The
-// token is unsigned input, and MaxTokenBytes bounds its size but not the work
-// json.Unmarshal does on it: a deeply nested or densely packed payload of the
-// same size costs many times a realistic one, and no cache helps when every
-// token is new. The scan is one linear pass over the bytes, far cheaper than
-// the decode it guards; it skips strings, so their content counts for nothing.
+// MaxPayloadDepth and holds no more than MaxPayloadSeparators commas, colons,
+// opening brackets, and string escapes. The token is unsigned input, and
+// MaxTokenBytes bounds its size but not the work decoding it takes: a payload
+// of the same size that nests deeply, packs many short values, holds many
+// empty objects and arrays, or fills its strings with escapes costs many
+// times a realistic one, and no cache helps when every token is new. An
+// opening bracket counts because each object or array the decode builds costs
+// about what a value does, and an escape because the decode unescapes the
+// whole string it sits in. The scan is one linear pass over the bytes, far
+// cheaper than the decode it guards; inside a string only an escape counts.
 func withinShape(raw []byte) bool {
 	depth, separators := 0, 0
 	inString, escaped := false, false
@@ -219,6 +238,10 @@ func withinShape(raw []byte) bool {
 				escaped = false
 			case b == '\\':
 				escaped = true
+				separators++
+				if separators > MaxPayloadSeparators {
+					return false
+				}
 			case b == '"':
 				inString = false
 			}
@@ -229,7 +252,8 @@ func withinShape(raw []byte) bool {
 			inString = true
 		case '{', '[':
 			depth++
-			if depth > MaxPayloadDepth {
+			separators++
+			if depth > MaxPayloadDepth || separators > MaxPayloadSeparators {
 				return false
 			}
 		case '}', ']':

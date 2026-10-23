@@ -121,14 +121,46 @@ func NewVerifier(ctx context.Context, cfg Config) (tokenverifier.Verifier, error
 	if err != nil {
 		return nil, fmt.Errorf("fetch the key set at %s: %w", jwksURI, err)
 	}
+	// The header and the claims are decoded before the signature is checked,
+	// and a float64 conversion of a number literal the caller chose can cost
+	// seventy ordinary tokens. The claims decode their numbers as json.Number,
+	// and the time claims alone are converted, one literal each. golang-jwt
+	// decodes the header with float64 conversion whatever the options, so
+	// boundedHeader refuses, before decoding it, a header longer than any an
+	// API server signs.
 	parser := jwt.NewParser(
+		jwt.WithJSONNumber(),
 		jwt.WithValidMethods(signingMethods),
 		jwt.WithExpirationRequired(),
 		jwt.WithLeeway(leeway),
 		jwt.WithIssuer(issuer),
 		jwt.WithAudience(cfg.Audience),
 	)
-	return tokenverifier.NewVerifier(parser, heldKeys{keySource: keyFunc}, tokenverifier.ValidateIssuedAt)
+	verifier, err := tokenverifier.NewVerifier(parser, heldKeys{keySource: keyFunc}, tokenverifier.ValidateIssuedAt)
+	if err != nil {
+		return nil, err
+	}
+	return boundedHeader{Verifier: verifier}, nil
+}
+
+// maxHeaderSegment is the longest header segment a caller's token may carry,
+// in bytes of base64url. An API server signs a ServiceAccount token under the
+// header {"alg":"RS256","kid":"<43 characters>"}, under 100 bytes encoded.
+const maxHeaderSegment = 256
+
+// boundedHeader is a verifier that refuses a token whose header segment is
+// longer than maxHeaderSegment with jwt.ErrTokenMalformed, before the wrapped
+// verifier decodes the header, and passes every other token to it.
+type boundedHeader struct {
+	tokenverifier.Verifier
+}
+
+// Verify implements [tokenverifier.Verifier].
+func (b boundedHeader) Verify(ctx context.Context, raw string) (*jwt.Token, error) {
+	if header, _, _ := strings.Cut(raw, "."); len(header) > maxHeaderSegment {
+		return nil, fmt.Errorf("%w: the header segment is longer than %d bytes", jwt.ErrTokenMalformed, maxHeaderSegment)
+	}
+	return b.Verifier.Verify(ctx, raw)
 }
 
 // heldKeys is the key function the verifier looks keys up through. A token

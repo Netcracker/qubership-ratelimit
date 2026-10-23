@@ -124,6 +124,8 @@ func TestExtract_skipsEveryPlannedKeyOfAnUndecodableToken(t *testing.T) {
 			token(t, map[string]any{"sub": "alice", "pad": strings.Repeat("x", MaxTokenBytes)})},
 		{"a well-formed token one byte past MaxTokenBytes",
 			tokenOfLength(t, map[string]any{"sub": "alice"}, MaxTokenBytes+1)},
+		{"a payload followed by a second value", rawPayloadToken(`{"sub":"alice"}{"sub":"bob"}`)},
+		{"a payload followed by garbage", rawPayloadToken(`{"sub":"alice"} x`)},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			keys, skips := Extract(plan(t), c.token)
@@ -139,6 +141,37 @@ func TestExtract_skipsEveryPlannedKeyOfAnUndecodableToken(t *testing.T) {
 				t.Errorf("Extract(plan, %.32q) skips = %v, want %v", c.token, got, want)
 			}
 		})
+	}
+}
+
+// rawPayloadToken is a token whose payload segment encodes payload as given,
+// for a payload json.Marshal would not produce.
+func rawPayloadToken(payload string) string {
+	return "h." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+}
+
+// A payload followed by white space alone decodes, as json.Unmarshal reads it.
+func TestExtract_readsAPayloadFollowedByWhiteSpace(t *testing.T) {
+	keys, skips := Extract(plan(t), rawPayloadToken("{\"sub\":\"alice\"} \n"))
+	if !slices.Equal(keys["sub"], []string{"alice"}) || len(skips) != 0 {
+		t.Errorf("Extract(plan, payload and white space) = %v, %v; want sub alice and no skips", keys, skips)
+	}
+}
+
+// The payload keeps its numbers as json.Number. Extraction reads strings
+// only, and converting a number to float64 costs what its literal makes it
+// cost: a literal on a rounding halfway point takes the slow path of the
+// conversion, and the shape bounds do not count digits.
+func TestPayload_keepsNumbersAsJSONNumbers(t *testing.T) {
+	claims, ok := payload(rawPayloadToken(`{"sub":"alice","n":[1.5,2],"exp":4102444800}`))
+	if !ok {
+		t.Fatal("payload of a token with numeric claims is undecodable")
+	}
+	if got, want := claims["n"], []any{json.Number("1.5"), json.Number("2")}; !reflect.DeepEqual(got, want) {
+		t.Errorf(`claim "n" = %#v, want %#v`, got, want)
+	}
+	if got, want := claims["exp"], json.Number("4102444800"); got != want {
+		t.Errorf(`claim "exp" = %#v, want %#v`, got, want)
 	}
 }
 
@@ -276,20 +309,23 @@ func nested(depth int) any {
 	return v
 }
 
-// wide builds a payload that holds exactly separators separators, at least
-// four. Each claim holds a colon, a comma stands between each two claims, and
-// the pair array adds a comma for each item past its first: one for an even
-// count and two for an odd one.
+// wide builds a payload that holds exactly separators of what
+// MaxPayloadSeparators counts, at least six. The payload object and the pair
+// array open two brackets, each claim holds a colon, a comma stands between
+// each two claims, and the pair array adds a comma for each item past its
+// first: one for an even count and two for an odd one.
 func wide(separators int) map[string]any {
-	claims := map[string]any{"sub": "alice", "pair": slices.Repeat([]int{1}, 2+separators%2)}
-	for i := range separators/2 - 2 {
+	punctuation := separators - 2
+	claims := map[string]any{"sub": "alice", "pair": slices.Repeat([]int{1}, 2+punctuation%2)}
+	for i := range punctuation/2 - 2 {
 		claims[fmt.Sprintf("c%04d", i)] = 1
 	}
 	return claims
 }
 
 // A payload within the shape bounds decodes. The payload object itself is the
-// first level of nesting, and structure inside a string counts for nothing.
+// first level of nesting, and structure inside a string counts for nothing
+// when nothing in it is escaped.
 func TestExtract_decodesAPayloadWithinTheShapeBounds(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -297,7 +333,7 @@ func TestExtract_decodesAPayloadWithinTheShapeBounds(t *testing.T) {
 	}{
 		{"nesting at MaxPayloadDepth", map[string]any{"sub": "alice", "deep": nested(MaxPayloadDepth - 1)}},
 		{"separators at MaxPayloadSeparators", wide(MaxPayloadSeparators)},
-		{"key syntax inside a string", map[string]any{"sub": "alice", "note": strings.Repeat(`{[,:]}"\`, 400)}},
+		{"key syntax inside a string", map[string]any{"sub": "alice", "note": strings.Repeat(`{[,:]}`, 400)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			keys, skips := Extract(plan(t), token(t, c.claims))
@@ -321,6 +357,12 @@ func TestExtract_refusesAPayloadPastAShapeBound(t *testing.T) {
 		{"nesting one level past MaxPayloadDepth", map[string]any{"sub": "alice", "deep": nested(MaxPayloadDepth)}},
 		{"separators one past MaxPayloadSeparators", wide(MaxPayloadSeparators + 1)},
 		{"separators past MaxPayloadSeparators", wide(MaxPayloadSeparators + 2)},
+		// 502 commas and colons, within the bound counting them alone, and
+		// six brackets in each element.
+		{"empty objects and arrays past MaxPayloadSeparators",
+			map[string]any{"sub": "alice", "a": slices.Repeat([]any{nestedEmpty(MaxPayloadDepth - 2)}, 500)}},
+		// Three colons and two commas, and an escape for each quote.
+		{"string escapes past MaxPayloadSeparators", map[string]any{"sub": "alice", "s": strings.Repeat(`"`, 600)}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			keys, skips := Extract(plan(t), token(t, c.claims))

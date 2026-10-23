@@ -3,6 +3,7 @@ package m2m
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -78,4 +79,56 @@ func TestNewVerifier_refusesATokenSignedWithNone(t *testing.T) {
 	_, err = verifier.Verify(ctx, unsigned)
 
 	assert.ErrorIs(t, err, jwt.ErrTokenSignatureInvalid)
+}
+
+// A verified token keeps its numeric claims as json.Number, and its time
+// claims are read from that form. The claims are decoded before the signature
+// is checked, so the caller chooses every literal the decode converts.
+func TestNewVerifier_decodesTheClaimsNumbersAsJSONNumbers(t *testing.T) {
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+
+	token, err := verifier.Verify(ctx, c.token(t, c.key, "cluster", jwt.MapClaims{"n": json.Number("1.5")}))
+
+	require.NoError(t, err, "Verify of a token with a numeric claim")
+	claims, ok := token.Claims.(jwt.MapClaims)
+	require.True(t, ok, "the claims of a verified token are %T", token.Claims)
+	assert.IsType(t, json.Number(""), claims["n"], `claim "n"`)
+	assert.IsType(t, json.Number(""), claims["exp"], `claim "exp"`)
+}
+
+// A token whose header segment is longer than maxHeaderSegment is refused as
+// malformed before its header is decoded, although the cluster signed it; one
+// at the bound is verified. golang-jwt converts the number literals of a
+// header to float64 whatever its options, and the header is the caller's
+// choice until the signature is checked.
+func TestNewVerifier_refusesAHeaderSegmentPastItsBound(t *testing.T) {
+	c := newCluster(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	verifier, err := NewVerifier(ctx, Config{Audience: audience, Token: c.podToken})
+	require.NoError(t, err)
+
+	atBound, pastBound := "", ""
+	for pad := 0; pastBound == ""; pad++ {
+		token := c.signedWithHeader(t, jwt.SigningMethodRS256, c.key,
+			map[string]any{"kid": "cluster", "x": strings.Repeat("p", pad)}, nil)
+		header, _, _ := strings.Cut(token, ".")
+		switch {
+		case len(header) == maxHeaderSegment:
+			atBound = token
+		case len(header) > maxHeaderSegment:
+			pastBound = token
+		}
+	}
+	require.NotEmpty(t, atBound, "no padding gives a header segment of exactly %d bytes", maxHeaderSegment)
+
+	_, err = verifier.Verify(ctx, atBound)
+	require.NoError(t, err, "Verify of a token whose header segment is %d bytes", maxHeaderSegment)
+	_, err = verifier.Verify(ctx, pastBound)
+	assert.ErrorIs(t, err, jwt.ErrTokenMalformed, "Verify of a token whose header segment is past %d bytes",
+		maxHeaderSegment)
 }

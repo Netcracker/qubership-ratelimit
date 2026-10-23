@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -75,6 +76,13 @@ func (c *cluster) token(t *testing.T, key *rsa.PrivateKey, kid string, override 
 func (c *cluster) signed(t *testing.T, method jwt.SigningMethod, key any, kid string,
 	override jwt.MapClaims) string {
 	t.Helper()
+	return c.signedWithHeader(t, method, key, map[string]any{"kid": kid}, override)
+}
+
+// signedWithHeader is signed with header's fields added to the header.
+func (c *cluster) signedWithHeader(t *testing.T, method jwt.SigningMethod, key any, header map[string]any,
+	override jwt.MapClaims) string {
+	t.Helper()
 	now := time.Now()
 	claims := jwt.MapClaims{
 		"iss": c.server.URL, "aud": []string{audience}, "sub": "system:serviceaccount:biz:ui-backend",
@@ -89,7 +97,7 @@ func (c *cluster) signed(t *testing.T, method jwt.SigningMethod, key any, kid st
 		claims[name] = value
 	}
 	token := jwt.NewWithClaims(method, claims)
-	token.Header["kid"] = kid
+	maps.Copy(token.Header, header)
 	signed, err := token.SignedString(key)
 	require.NoError(t, err)
 	return signed
